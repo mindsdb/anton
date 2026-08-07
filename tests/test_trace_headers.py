@@ -63,3 +63,37 @@ def test_tags_are_sanitized():
 
 def test_no_trace_context_returns_none():
     assert _provider()._build_trace_headers() is None
+
+
+def test_anton_version_is_always_reported():
+    """ENG-1279: every trace must carry the build that produced it.
+
+    The router lifts `anton_version` onto the Langfuse trace's native
+    `version` field, which is what a metrics query can group by — so this
+    key is what makes a release's effect measurable.
+    """
+    from anton import __version__
+
+    headers = _headers_for(TraceContext(harness="anton"))
+    meta = json.loads(headers["Langfuse-Metadata"])
+    assert meta["anton_version"] == __version__
+
+
+def test_anton_version_reported_even_with_no_other_metadata():
+    # A turn with no session/turn/harness identity still identifies its build:
+    # otherwise standalone anton (CLI, hub instance) would be unattributable.
+    headers = _headers_for(TraceContext())
+    assert headers is not None
+    assert "anton_version" in json.loads(headers["Langfuse-Metadata"])
+
+
+def test_caller_cannot_spoof_anton_version():
+    # Only anton knows which anton is running; a host reporting a stale
+    # value (version skew between cowork-server and its anton pin) must lose.
+    from anton import __version__
+
+    headers = _headers_for(
+        TraceContext(harness="anton", metadata={"anton_version": "1.0.0-spoof"})
+    )
+    meta = json.loads(headers["Langfuse-Metadata"])
+    assert meta["anton_version"] == __version__

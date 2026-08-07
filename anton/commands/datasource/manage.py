@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 def handle_list_data_sources(console: "Console", vault: DataVault | None = None) -> None:
     """Print all saved Local Vault connections in a table with status."""
     from rich.table import Table
+    from anton.utils.datasources import _connection_identity
 
     vault = vault or LocalDataVault()
     registry = DatasourceRegistry()
@@ -28,15 +29,25 @@ def handle_list_data_sources(console: "Console", vault: DataVault | None = None)
         return
 
     table = Table(title="Local Vault — Saved Connections", show_lines=False)
-    table.add_column("Name", style="bold")
+    table.add_column("Label", style="bold")
+    table.add_column("Slug")
     table.add_column("Source")
+    table.add_column("Identity")
     table.add_column("Status")
 
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"
         engine_def = registry.get(c["engine"])
         source = engine_def.display_name if engine_def else c["engine"]
-        fields = vault.load(c["engine"], c["name"]) or {}
+        if hasattr(vault, "read_record"):
+            record = vault.read_record(c["engine"], c["name"]) or {}
+            fields = record.get("fields", {}) or {}
+            secure_keys = record.get("secure_keys")
+        else:
+            fields = vault.load(c["engine"], c["name"]) or {}
+            secure_keys = None
+        label = str(fields.get("_user_label", "")).strip() or str(fields.get("_label", "")).strip()
+        identity = _connection_identity(fields, secure_keys) or ""
 
         if engine_def and engine_def.auth_method != "choice":
             required = [f.name for f in engine_def.fields if f.required]
@@ -47,7 +58,7 @@ def handle_list_data_sources(console: "Console", vault: DataVault | None = None)
         else:
             status = "[green]saved[/]"
 
-        table.add_row(slug, source, status)
+        table.add_row(label, slug, source, identity, status)
 
     console.print(table)
     console.print()
@@ -69,8 +80,11 @@ async def handle_remove_data_source(console: "Console", slug: str, vault: DataVa
         for i, c in enumerate(connections, 1):
             conn_slug = f"{c['engine']}-{c['name']}"
             engine_def = registry.get(c["engine"])
-            label = engine_def.display_name if engine_def else c["engine"]
-            console.print(f"          [bold]{i:>2}.[/bold] {conn_slug} [dim]({label})[/]")
+            source_label = engine_def.display_name if engine_def else c["engine"]
+            fields = vault.load(c["engine"], c["name"]) or {}
+            user_label = str(fields.get("_user_label", "")).strip() or str(fields.get("_label", "")).strip()
+            prefix = f"{user_label} — " if user_label else ""
+            console.print(f"          [bold]{i:>2}.[/bold] {prefix}{conn_slug} [dim]({source_label})[/]")
         console.print()
         choices = [str(i) for i in range(1, len(connections) + 1)]
         pick = await prompt_or_cancel("(anton) Enter a number", choices=choices)

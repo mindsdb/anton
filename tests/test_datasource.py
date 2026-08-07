@@ -646,6 +646,31 @@ class TestHandleConnectDatasource:
         session._scratchpads.get_or_create.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_partial_save_sets_default_label_without_prompting(
+        self, registry, vault_dir, make_session
+    ):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "skip"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "postgresql"
+        # exactly 2 responses were consumed — proves no Label prompt fired
+
+    @pytest.mark.asyncio
     async def test_successful_connection_saves_and_injects_history(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):
@@ -665,6 +690,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -686,6 +712,7 @@ class TestHandleConnectDatasource:
         assert saved is not None
         assert saved["host"] == "db.example.com"
         assert saved["password"] == "s3cr3t"
+        assert saved["_user_label"] == "postgresql"
         assert result._history
         last = result._history[-1]
         assert last["role"] == "assistant"
@@ -759,8 +786,8 @@ class TestHandleConnectDatasource:
 
         # Only the engine selection prompt should fire. After that, the
         # collector is already complete and the flow proceeds directly
-        # to the connection test.
-        responses = iter(["PostgreSQL"])
+        # to the connection test, then the Label prompt (trailing "" = accept default).
+        responses = iter(["PostgreSQL", ""])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -832,10 +859,9 @@ class TestHandleConnectDatasource:
             "user: alice\n"
             "password: s3cr3t"
         )
-        # Only two user inputs needed: the engine pick, then the paste
-        # at the first credential prompt. The collector becomes complete
-        # immediately after extraction, so no further prompts are issued.
-        responses = iter(["PostgreSQL", pasted])
+        # Engine pick, then the paste at the first credential prompt, then
+        # the Label prompt (trailing "" = accept default) after the test.
+        responses = iter(["PostgreSQL", pasted, ""])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -901,6 +927,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1044,6 +1071,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1074,7 +1102,7 @@ class TestHandleConnectDatasource:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["HubSpot", "1", "pat-na1-abc123"])
+        responses = iter(["HubSpot", "1", "pat-na1-abc123", ""])  # trailing "" = Label prompt
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -1128,6 +1156,7 @@ class TestHandleConnectDatasource:
                 "PostgreSQL",
                 "host=db.example.com port=5432 database=prod_db user=alice",
                 "s3cr3t",  # only password remains → single-field prompt
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1259,6 +1288,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1320,6 +1350,7 @@ class TestHandleConnectDatasource:
                 "PostgreSQL",
                 "help",
                 "host=db.example.com port=5432 database=prod_db user=alice password=s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1365,8 +1396,8 @@ class TestHandleConnectDatasource:
 
         # Pre-fill everything except password → the while-loop hits the
         # single-field branch for 'password'. First response is 'help',
-        # second is the actual password.
-        responses = iter(["PostgreSQL", "help", "s3cr3t"])
+        # second is the actual password, then the Label prompt.
+        responses = iter(["PostgreSQL", "help", "s3cr3t", ""])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -1428,6 +1459,7 @@ class TestHandleConnectDatasource:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1487,6 +1519,7 @@ class TestHandleConnectDatasource:
                 "PostgreSQL",
                 "host=db.example.com port=5432 database=prod_db user=alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1553,6 +1586,246 @@ class TestHandleConnectDatasource:
         assert saved.get("port") == "5432"
         assert "database" not in saved
         session._scratchpads.get_or_create.assert_not_called()
+
+
+class TestUserLabelOnNewConnection:
+    @pytest.mark.asyncio
+    async def test_default_label_accepted_on_enter(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter([
+            "PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", "",
+        ])  # trailing "" = Enter on the Label prompt, accepts the default
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "postgresql"
+
+    @pytest.mark.asyncio
+    async def test_custom_label_deduplicated(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save("postgresql", "existing", {"host": "x", "_user_label": "prod-db"})
+        responses = iter([
+            "PostgreSQL", "db.example.com", "5432", "other_db", "alice", "s3cr3t", "prod-db",
+        ])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        conns = [c for c in vault.list_connections() if c["name"] != "existing"]
+        assert len(conns) == 1
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "prod-db 2"
+
+    @pytest.mark.asyncio
+    async def test_esc_on_label_prompt_cancels_whole_flow(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t"])
+
+        async def _side_effect(*a, **kw):
+            try:
+                return next(responses)
+            except StopIteration:
+                return None  # simulates Esc on the Label prompt
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=AsyncMock(side_effect=_side_effect)),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        assert vault.list_connections() == []
+
+
+class TestReconnectPreservesBookkeepingFields:
+    @pytest.mark.asyncio
+    async def test_user_label_survives_reconnect(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save(
+            "postgresql", "existing",
+            {"host": "db.example.com", "port": "5432", "database": "prod_db",
+             "user": "alice", "password": "old", "_user_label": "prod-db"},
+        )
+        # find_matching_connection recognizes this as the same connection via name_from=database
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "new-pass"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        fields = vault.load("postgresql", "existing")
+        assert fields["_user_label"] == "prod-db"
+        assert fields["password"] == "new-pass"
+
+
+class TestConnectionMessagesIncludeLabel:
+    @pytest.mark.asyncio
+    async def test_save_message_includes_label(self, registry, vault_dir, make_session):
+        session = make_session()
+        # A real Console rendering to an in-memory buffer, not a MagicMock —
+        # so the assertion checks what a user actually sees (rich markup like
+        # `[bold]` stripped/rendered), not the raw f-string containing literal
+        # `[bold]...[/bold]` tags, which would never match a plain substring
+        # check.
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=120)
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", "prod-db"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        printed = buffer.getvalue()
+        assert 'Saved as "prod-db"' in printed
+        assert "postgresql-" in printed
+
+    @pytest.mark.asyncio
+    async def test_needs_list_explains_label_field(self, registry, vault_dir, make_session):
+        session = make_session()
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=120)
+        vault = LocalDataVault(vault_dir=vault_dir)
+        responses = iter(["PostgreSQL", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        printed = buffer.getvalue()
+        assert "needs:" in printed
+        assert 'label — a name to identify this connection later, e.g. "prod-db" (optional, defaults to the engine name)' in printed
+
+
+class TestEditPromptsForLabelAfterTest:
+    @pytest.mark.asyncio
+    async def test_edit_sets_new_label(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save(
+            "postgresql", "existing",
+            {"host": "db.example.com", "port": "5432", "database": "prod_db",
+             "user": "alice", "password": "s3cr3t"},
+        )
+        # `/edit` prompts for EVERY field in `active_fields`, not just
+        # required ones (`connect.py:189`, `for f in active_fields:` — no
+        # `required` filter). The test fixture's `postgresql` engine has SIX
+        # fields (host, port, database, user, password, schema — `schema` is
+        # `required: false`), so six responses are consumed before the Label
+        # prompt is even reached — not five. This is genuinely different from
+        # `/connect` (Task 5's tests), which prompts sequentially only for
+        # *required* fields and stops as soon as `collector.is_complete`.
+        responses = iter([
+            "db.example.com", "5432", "prod_db", "alice", "s3cr3t", "",  # schema: keep empty
+            "prod-db",  # the new Label
+        ])
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            # `/edit` collects per-field values through prompt_field_value()
+            # in helpers.py, which calls the prompt_or_cancel bound *in that
+            # module* — patching only connect.py's reference leaves
+            # helpers.py reading real stdin and the test hangs. Patch all
+            # three modules that import it, matching the existing pattern in
+            # this file.
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(
+                console, session._scratchpads, session, datasource_name="postgresql-existing"
+            )
+
+        fields = vault.load("postgresql", "existing")
+        assert fields["_user_label"] == "prod-db"
+
+    @pytest.mark.asyncio
+    async def test_edit_keeping_label_does_not_bump_suffix(self, registry, vault_dir, make_session):
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save(
+            "postgresql", "existing",
+            {"host": "db.example.com", "port": "5432", "database": "prod_db",
+             "user": "alice", "password": "s3cr3t", "_user_label": "prod-db"},
+        )
+        # "" on the Label prompt = keep the current value. The mock replaces
+        # prompt_or_cancel entirely, so its production "empty input returns
+        # default" behavior does NOT apply here — the implementation itself
+        # must fall back to `current_label` on an empty/None response, or
+        # this "" would be saved as the label verbatim. Six responses for the
+        # six `active_fields`, then "" for Label.
+        responses = iter(["db.example.com", "5432", "prod_db", "alice", "s3cr3t", "", ""])
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.connect.run_connection_test", new=AsyncMock(return_value=True)),
+        ):
+            await handle_connect_datasource(
+                console, session._scratchpads, session, datasource_name="postgresql-existing"
+            )
+
+        fields = vault.load("postgresql", "existing")
+        assert fields["_user_label"] == "prod-db"  # not "prod-db 2", and not ""
 
 
 class TestCredentialScrubbing:
@@ -1624,6 +1897,7 @@ class TestCredentialScrubbing:
                 "mydb",
                 "alice",
                 secret_pw,
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -1787,8 +2061,12 @@ class TestActiveDatasourceScoping:
 
         ctx = build_datasource_context(vault)
 
-        assert "postgres-prod_db" in ctx
-        assert "(postgres)" in ctx
+        # New per-connection block format: slug leads (backticked), engine
+        # display name is its own line rather than a parenthetical next to
+        # the slug. "postgres" is a registered engine (display_name
+        # "PostgreSQL" in the real registry this test doesn't mock).
+        assert "`postgres-prod_db`" in ctx
+        assert "Engine: PostgreSQL" in ctx
 
     def test_multi_source_context_shows_both_connections(self, vault_dir):
         """Both connections are visible in the context with their namespaced vars."""
@@ -1844,7 +2122,10 @@ class TestHandleListDataSources:
         )
 
         buf = io.StringIO()
-        rich_console = Console(file=buf, highlight=False, markup=False)
+        # Widened: the table now has 5 columns (Label, Slug, Source,
+        # Identity, Status), not 3 — the default width truncates Slug/Status
+        # with an ellipsis otherwise.
+        rich_console = Console(file=buf, highlight=False, markup=False, width=120)
 
         with patch("anton.commands.datasource.manage.DatasourceRegistry", return_value=registry):
             handle_list_data_sources(rich_console, vault=vault)
@@ -1860,13 +2141,58 @@ class TestHandleListDataSources:
         vault.save("postgresql", "partial", {"host": "db.example.com"})
 
         buf = io.StringIO()
-        rich_console = Console(file=buf, highlight=False, markup=False)
+        rich_console = Console(file=buf, highlight=False, markup=False, width=120)
 
         with patch("anton.commands.datasource.manage.DatasourceRegistry", return_value=registry):
             handle_list_data_sources(rich_console, vault=vault)
 
         output = buf.getvalue()
         assert "incomplete" in output.lower()
+
+
+class TestListShowsLabelAndIdentity:
+    def test_list_table_has_label_slug_identity_columns(self, vault_dir):
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save(
+            "postgresql", "a1b2c3",
+            {"host": "db.example.com", "database": "prod_db", "_user_label": "prod-db"},
+        )
+        console = Console(file=io.StringIO(), width=120)
+        handle_list_data_sources(console, vault)
+        output = console.file.getvalue()
+        assert "Label" in output
+        assert "Slug" in output
+        assert "Identity" in output
+        assert "prod-db" in output
+        assert "postgresql-a1b2c3" in output
+        assert "db.example.com/prod_db" in output
+
+
+class TestRemovePickerShowsLabel:
+    @pytest.mark.asyncio
+    async def test_picker_shows_label_when_present(self, registry, vault_dir):
+        vault = LocalDataVault(vault_dir=vault_dir)
+        vault.save("postgresql", "a1b2c3", {"host": "x", "_user_label": "prod-db"})
+        # Real Console over an in-memory buffer, not MagicMock — robust
+        # against markup ever being added between the label and the slug.
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=120)
+        # Two prompts fire in sequence: "Enter a number" (pick connection #1),
+        # then the "Remove '...'?" confirm ("n" = decline, so nothing is
+        # deleted — only the picker's rendered list matters for this test).
+        responses = iter(["1", "n"])
+
+        with (
+            patch("anton.commands.datasource.manage.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.manage.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_remove_data_source(console, "", vault)
+
+        printed = buffer.getvalue()
+        assert "prod-db — postgresql-a1b2c3" in printed
 
 
 class TestHandleTestDatasource:
@@ -2151,6 +2477,7 @@ class TestEnvActivationCollisionFree:
                 "prod_db",
                 "alice",
                 "s3cr3t",
+                "",  # Label prompt: accept the default
             ]
         )
 
@@ -3329,7 +3656,10 @@ class TestCustomDatasourceRequiredFieldsPolicy:
         conns = vault.list_connections()
         assert len(conns) == 1, "Custom datasource must be saved even with empty credentials"
         saved = vault.load(conns[0]["engine"], conns[0]["name"])
-        assert saved == {}, "Empty credentials dict should be saved"
+        # No credential fields were saved — only the bookkeeping `_user_label`,
+        # silently defaulted to the engine id (every connection gets one now,
+        # including this custom/ad-hoc path — no special-casing).
+        assert saved == {"_user_label": "weirdapi"}, "Only the default label should be saved"
         assert result is session
 
 
@@ -4164,3 +4494,68 @@ class TestPromptCopyConsistency:
         assert "[y/n]" not in label
         assert "[reconnect/cancel]" not in label
         assert "(y/n" in label or _PROMPT_RECONNECT_CANCEL in label
+
+
+class TestToolConnectResultParsing:
+    """The connect_new_datasource tool must report the saved label correctly.
+
+    After the interactive flow returns, the tool wrapper diffs the vault
+    to find the connection that was just added, then loads it back to
+    read `_user_label`. It must carry (engine, name) through as a pair:
+    joining them into an "engine-name" slug and splitting on the first
+    dash misattributes the parts whenever the engine name contains a
+    dash (custom engines are free-form, e.g. "optima-api").
+
+    LocalDataVault happens to mask this — it resolves a record by the
+    concatenated path `sanitize(engine)-sanitize(name)`, which is
+    unchanged by a misplaced split — so this test uses a vault that
+    keys on (engine, name) separately, as the DataVault protocol allows.
+    """
+
+    class _KeyedVault:
+        """Minimal DataVault keying records on the (engine, name) tuple."""
+
+        def __init__(self):
+            self._records: dict[tuple[str, str], dict[str, str]] = {}
+
+        def save(self, engine, name, credentials, *, secure_keys=None):
+            self._records[(engine, name)] = dict(credentials)
+
+        def load(self, engine, name):
+            return self._records.get((engine, name))
+
+        def list_connections(self):
+            return [
+                {"engine": e, "name": n, "created_at": ""}
+                for e, n in self._records
+            ]
+
+    @pytest.mark.asyncio
+    async def test_hyphenated_engine_reports_saved_label(self, make_session):
+        from anton import tools as anton_tools
+
+        session = make_session()
+        session._console = MagicMock()
+        vault = self._KeyedVault()
+        session._data_vault = vault
+
+        async def _fake_flow(*args, **kwargs):
+            vault.save(
+                "optima-api",
+                "a12345",
+                {"token": "s3cr3t", "_user_label": "Optima 1"},
+            )
+
+        with (
+            patch("anton.analytics.send_event", new=MagicMock()),
+            patch(
+                "anton.commands.datasource.handle_connect_datasource",
+                new=AsyncMock(side_effect=_fake_flow),
+            ),
+        ):
+            result = await anton_tools.handle_connect_datasource(
+                session, {"engine": "optima-api"}
+            )
+
+        assert "optima-api-a12345" in result
+        assert 'label "Optima 1"' in result

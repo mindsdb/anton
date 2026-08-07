@@ -21,10 +21,12 @@ shipped dead. If the SDK's behavior ever changes, these tests notice;
 hand-built fixtures cannot.
 """
 
+import anthropic
 import httpx
 import openai
 import pytest
 
+from anton.core.llm.anthropic import _raise_for_status_error as _raise_anthropic
 from anton.core.llm.openai import _raise_for_status_error
 from anton.core.llm.provider import (
     EndpointConfigurationError,
@@ -32,18 +34,21 @@ from anton.core.llm.provider import (
     TokenLimitExceeded,
     TransientProviderError,
     classify_transient,
+    wallet_denial_code,
 )
 
 
-def _sdk_error(status_code, json_body=None, text_body=None):
+def _sdk_error(status_code, json_body=None, text_body=None, headers=None):
     """Real `openai.APIStatusError`, built by the pinned SDK from a raw HTTP
     response — exactly what production call sites catch and hand to the
     mapper. This is the load-bearing difference from the original suite."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if text_body is not None:
-            return httpx.Response(status_code, text=text_body)
-        return httpx.Response(status_code, json=json_body if json_body is not None else {})
+            return httpx.Response(status_code, text=text_body, headers=headers)
+        return httpx.Response(
+            status_code, json=json_body if json_body is not None else {}, headers=headers
+        )
 
     client = openai.OpenAI(
         base_url="http://gateway.test/v1",
@@ -381,3 +386,213 @@ def test_404_model_message_without_terminator_is_normalized():
         _raise_for_status_error(exc, "foo")
     assert "available. Switch models" in str(err.value)
     assert "available Switch" not in str(err.value)
+
+
+# ── the M3 wallet taxonomy (ENG-1169) ─────────────────────────────────
+
+def _gateway_402(code="wallet_empty", headers=None):
+    """The M3 gateway's out-of-credits 402, byte-shaped like
+    `minds/inference/errors.py:wallet_empty` (OpenAI lanes)."""
+    return _sdk_error(402, json_body={"error": {
+        "message": "Your wallet has no balance to cover the model 'sonnet'.",
+        "type": "invalid_request_error",
+        "param": None,
+        "code": code,
+    }}, headers=headers)
+
+
+def test_gateway_402_wallet_empty_maps_to_token_limit():
+    # The live shape: body code AND the X-MindsHub-Reason header. Before
+    # ENG-1169 this fell to the generic "temporarily unavailable" copy, got
+    # auto-retried, and the out-of-credits card never rendered.
+    exc = _gateway_402(headers={
+        "X-MindsHub-Reason": "wallet_empty",
+        "X-MindsHub-Recovery-Url": "/billing",
+    })
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_for_status_error(exc, "sonnet")
+    msg = str(err.value)
+    assert "402" in msg and "credit" in msg.lower()
+    assert "temporarily unavailable" not in msg
+    assert "billing" in msg
+
+
+def test_gateway_402_body_code_alone_maps_to_token_limit():
+    # No headers (a proxy stripped them) — the body code is enough.
+    exc = _gateway_402()
+    with pytest.raises(TokenLimitExceeded):
+        _raise_for_status_error(exc, "sonnet")
+
+
+def test_gateway_402_header_alone_maps_to_token_limit():
+    # Code-less body (the anthropic-dialect lane strips it) but the
+    # X-MindsHub-Reason header survives — header is the fallback discriminator.
+    exc = _sdk_error(
+        402,
+        json_body={"error": {"message": "Your wallet has no balance.",
+                             "type": "invalid_request_error"}},
+        headers={"X-MindsHub-Reason": "wallet_empty"},
+    )
+    with pytest.raises(TokenLimitExceeded):
+        _raise_for_status_error(exc, "sonnet")
+
+
+def test_byok_402_stays_generic():
+    # A non-gateway 402 (e.g. OpenRouter's insufficient-credits dialect)
+    # carries no wallet code — it must NOT get the MindsHub credits card/CTA;
+    # the remedy is the user's own provider billing. Mirrors cowork-server's
+    # test_byok_402_stays_generic.
+    exc = _sdk_error(402, json_body={"error": {
+        "message": "Insufficient credits. Add more at openrouter.ai.",
+        "code": 402,
+    }})
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert "402" in str(err.value)
+
+
+def test_gateway_429_allowance_exhausted_maps_to_token_limit():
+    # The M3 allowance 429 carries a structured code but NO FastAPI `detail`,
+    # so the legacy 429→TokenLimitExceeded branch misses it; before ENG-1169
+    # it was misclassified as a retryable rate limit and surfaced as
+    # "provider overloaded" after burning the backoff budget.
+    exc = _sdk_error(429, json_body={"error": {
+        "message": "Your included token allowance for 'sonnet' is exhausted.",
+        "type": "rate_limit_error",
+        "param": None,
+        "code": "included_allowance_exhausted",
+    }}, headers={"X-MindsHub-Reason": "included_allowance_exhausted"})
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert "allowance" in str(err.value)
+
+
+def test_gateway_velocity_429_stays_transient():
+    # The gate's velocity 429 (`rate_limited`, ENG-878 TPM/RPM) means "slow
+    # down and retry" — it must stay transient, never the credits card.
+    exc = _sdk_error(429, json_body={"error": {
+        "message": "Rate limit exceeded for model 'sonnet'. Please slow down and retry.",
+        "type": "rate_limit_error",
+        "param": None,
+        "code": "rate_limited",
+    }}, headers={"X-MindsHub-Reason": "rate_limited", "Retry-After": "15"})
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.code == "rate_limited"
+
+
+def test_wallet_denial_code_reads_both_dialects():
+    # The mid-stream guard reads the bare-APIError body directly: SDK-unwrapped
+    # (top-level code) AND wire-envelope (nested) shapes must both resolve.
+    assert wallet_denial_code({"code": "wallet_empty"}) == "wallet_empty"
+    assert (
+        wallet_denial_code({"error": {"code": "included_allowance_exhausted"}})
+        == "included_allowance_exhausted"
+    )
+    assert wallet_denial_code({"error": {"code": "rate_limited"}}) is None
+    assert wallet_denial_code({"code": 402}) is None
+    assert wallet_denial_code(None) is None
+    assert wallet_denial_code("<html>402</html>") is None
+
+
+# ── the anthropic twin (ENG-1169) ─────────────────────────────────────
+
+def _anthropic_sdk_error(status_code, json_body=None, headers=None):
+    """Real `anthropic.APIStatusError` from the pinned SDK — the anthropic
+    twin of `_sdk_error`. The anthropic SDK does NOT unwrap the error
+    envelope (unlike openai's), so `exc.body` is the wire shape."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code, json=json_body if json_body is not None else {}, headers=headers
+        )
+
+    client = anthropic.Anthropic(
+        base_url="http://gateway.test",
+        api_key="test-key",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        client.messages.create(
+            model="claude-sonnet", max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    except anthropic.APIStatusError as exc:
+        return exc
+    raise AssertionError(f"anthropic SDK did not raise for HTTP {status_code}")
+
+
+def test_anthropic_402_wallet_code_maps_to_token_limit():
+    # Wire-envelope code (the anthropic SDK stores the envelope unmodified).
+    exc = _anthropic_sdk_error(402, json_body={"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "Your wallet has no balance to cover the model 'claude'.",
+        "code": "wallet_empty",
+    }})
+    with pytest.raises(TokenLimitExceeded):
+        _raise_anthropic(exc, model="claude-sonnet")
+
+
+def test_anthropic_402_header_alone_maps_to_token_limit():
+    # Today's live gateway anthropic lane strips the body code — if the
+    # header survives (proxy/fixed gateway), it must still map.
+    exc = _anthropic_sdk_error(402, json_body={"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "Your wallet has no balance to cover the model 'claude'.",
+    }}, headers={"X-MindsHub-Reason": "wallet_empty"})
+    with pytest.raises(TokenLimitExceeded):
+        _raise_anthropic(exc, model="claude-sonnet")
+
+
+def test_anthropic_byok_402_stays_generic():
+    # No wallet code, no reason header → generic, never the credits card.
+    exc = _anthropic_sdk_error(402, json_body={"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "Your credit balance is too low to access the Anthropic API.",
+    }})
+    with pytest.raises(ConnectionError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+
+
+def test_anthropic_404_not_found_error_maps_to_model_unavailable():
+    # ENG-1139: a bare Anthropic 404 for an unknown model must become a
+    # ModelUnavailableError with the provider's own reason folded in once,
+    # not the generic "temporarily unavailable, try again" ConnectionError
+    # (which then got double-wrapped by session.py's fallback prose).
+    exc = _anthropic_sdk_error(404, json_body={"type": "error", "error": {
+        "type": "not_found_error",
+        "message": "model: nonexistent-model-xyz",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_anthropic(exc, model="nonexistent-model-xyz")
+    assert err.value.code == "model_not_found"
+    assert str(err.value).count("nonexistent-model-xyz") == 2  # template + provider detail, not 3+
+    assert "temporarily unavailable" not in str(err.value)
+    assert "Switch models in Settings" in str(err.value)
+
+
+def test_429_wallet_code_never_transient():
+    # Defense for direct classify_transient callers (the mid-stream paths):
+    # the M3 allowance 429 has no `detail`, so without the code-exact guard
+    # it would classify as a retryable plain rate-limit — same precedent as
+    # the insufficient_quota guard above (ENG-1169 self-review).
+    body = {"message": "allowance exhausted", "type": "rate_limit_error",
+            "code": "included_allowance_exhausted"}
+    assert classify_transient(429, body, provider="gw", model="sonnet") is None
+
+
+def test_unhashable_code_never_crashes_the_classifier():
+    # A hostile/buggy OpenAI-compatible endpoint sending a NON-STRING `code`
+    # (e.g. a list) must fall through to the generic mapping — frozenset
+    # membership hashes the value, so without the isinstance guard this
+    # raised TypeError from inside the error classifier (ENG-1169 review).
+    assert wallet_denial_code({"code": ["wallet_empty"]}) is None
+    assert wallet_denial_code({"error": {"code": {"c": "wallet_empty"}}}) is None
+    exc = _sdk_error(402, json_body={"error": {"message": "denied", "code": ["wallet_empty"]}})
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert classify_transient(429, {"code": ["wallet_empty"]}) is not None  # plain-429 path intact

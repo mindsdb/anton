@@ -11,14 +11,16 @@ to proceed.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from tests.conftest import make_mock_llm
 
-from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
@@ -192,6 +194,592 @@ async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(worksp
             "exhausted budgets must fail toward the diagnosis, not a silent COMPLETE"
         )
         assert call_count == 3
+    finally:
+        await session.close()
+
+
+def _assistant_texts(session) -> list[str]:
+    return [
+        m["content"] for m in session.history
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+    ]
+
+
+async def test_stuck_diagnosis_is_persisted_as_streamed(workspace):
+    """ENG-1155: the STUCK path streams a model-generated diagnosis but never
+    captures it, so the post-loop fallback re-appends the *stale
+    pre-verification* reply. History — and therefore the model's memory of what
+    it just told the user — ends up out of sync on exactly the turn where the
+    user is being asked to make a decision.
+
+    #276 fixed this for the verifier-failure path; STUCK never got the same
+    treatment.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="STUCK", reason="missing credentials")
+    )
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            # Pre-verification reply. The user never sees this as the turn's
+            # final word — the diagnosis below is what actually gets streamed.
+            return _FakeAsyncIter([
+                StreamComplete(response=_text_response("STALE_PRE_VERIFICATION_REPLY"))
+            ])
+        # The STUCK diagnosis — this is what the user reads.
+        return _FakeAsyncIter([
+            StreamComplete(
+                response=_text_response(
+                    "DIAGNOSIS: I couldn't reach the database — no credentials are "
+                    "configured. Add DB_URL and I'll retry."
+                )
+            )
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        async for _ in session.turn_stream("query my database"):
+            pass
+
+        assert call_count == 3, "the STUCK path must generate a diagnosis"
+        texts = _assistant_texts(session)
+        assert any("DIAGNOSIS:" in t for t in texts), (
+            "the diagnosis the user actually read is missing from history"
+        )
+        # The turn's last assistant word in history must be what was streamed,
+        # not the reply the verifier rejected.
+        assert "DIAGNOSIS:" in texts[-1], (
+            f"history ends on the stale reply, not the diagnosis: {texts[-1]!r}"
+        )
+        assert sum("STALE_PRE_VERIFICATION_REPLY" in t for t in texts) <= 1, (
+            "the stale reply was appended twice (2831 + the post-loop fallback)"
+        )
+    finally:
+        await session.close()
+
+
+async def test_budget_exhausted_diagnosis_is_persisted_as_streamed(workspace):
+    """ENG-1155, same desync on the budget-exhausted path. `_max_continuations
+    = 0` makes the very first verification hit the exhausted branch, which
+    fires before any verdict call.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=AssertionError("no verdict call on the exhausted path")
+    )
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamComplete(response=_text_response("STALE_PRE_VERIFICATION_REPLY"))
+            ])
+        return _FakeAsyncIter([
+            StreamComplete(
+                response=_text_response(
+                    "DIAGNOSIS: I tried three times and the export step keeps "
+                    "failing. Here's what you can do next."
+                )
+            )
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session._max_continuations = 0
+    try:
+        async for _ in session.turn_stream("export my data"):
+            pass
+
+        assert call_count == 3, "the budget-exhausted path must generate a diagnosis"
+        texts = _assistant_texts(session)
+        assert any("DIAGNOSIS:" in t for t in texts), (
+            "the diagnosis the user actually read is missing from history"
+        )
+        assert "DIAGNOSIS:" in texts[-1], (
+            f"history ends on the stale reply, not the diagnosis: {texts[-1]!r}"
+        )
+        assert sum("STALE_PRE_VERIFICATION_REPLY" in t for t in texts) <= 1, (
+            "the stale reply was appended twice (2831 + the post-loop fallback)"
+        )
+    finally:
+        await session.close()
+
+
+def _make_session(workspace, mock_llm) -> ChatSession:
+    return ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+
+def _tool_then_text_plan(diagnosis: str = "DIAGNOSIS: internal check failed."):
+    """plan_stream factory replaying one tool round, a reply, then a diagnosis —
+    reset per turn so the same session can run several turns."""
+    state = {"n": 0}
+
+    def plan(**kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if state["n"] == 2:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("REPLY"))])
+        return _FakeAsyncIter([StreamComplete(response=_text_response(diagnosis))])
+
+    return plan, state
+
+
+async def test_deterministic_hard_failure_latches_after_one_diagnosis(workspace, caplog):
+    """ENG-1155: kimi-K3 rejects the forced `tool_choice` with a 400 on EVERY
+    verdict call (ENG-1095), so the ENG-1079 diagnosis path would fire on every
+    multi-step turn — a full-history planning call plus a "checking in" message
+    each time. The session must latch instead: one diagnosis, then skip.
+    """
+    import logging
+
+    mock_llm = make_mock_llm()
+    verdict_calls = 0
+
+    async def always_400(_schema, *, system, messages, max_tokens):
+        nonlocal verdict_calls
+        verdict_calls += 1
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_400)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        with caplog.at_level(logging.INFO):
+            for turn in range(4):
+                plan, state = _tool_then_text_plan()
+                mock_llm.plan_stream = plan
+                async for _ in session.turn_stream(f"do step {turn}"):
+                    pass
+                # A third plan_stream call on a turn == the diagnosis fired.
+                if state["n"] >= 3:
+                    diagnoses += 1
+
+        assert diagnoses == 1, (
+            f"expected exactly one diagnosis per session, got {diagnoses}"
+        )
+        # Turns 1 and 2 call the verifier (the 2nd establishes the pattern);
+        # turns 3 and 4 must not pay for it at all.
+        assert verdict_calls == 2, (
+            f"latched session kept calling the verifier ({verdict_calls} calls)"
+        )
+        assert session._verifier_latched is True
+        # Anchor on a substring unique to the ANNOUNCEMENT line. The previous
+        # assertion matched "latched after N consecutive hard failures", which
+        # the per-turn *skip* log also contained — so it passed on turns 3-4
+        # without ever guarding the announcement it was written for
+        # (review: pnewsam on #299).
+        announcements = [
+            r for r in caplog.records
+            if "skipping further verification this session" in r.message
+        ]
+        assert len(announcements) == 1, (
+            f"the latch must announce itself exactly once, got {len(announcements)}"
+        )
+        assert "no successful verdict between them" in announcements[0].message, (
+            f"announcement must state the real reset semantics: {announcements[0].message!r}"
+        )
+        skips = [r for r in caplog.records
+                 if "completion-verifier skipped — latched" in r.message]
+        assert len(skips) == 2, (
+            f"expected one skip log per skipped verification, got {len(skips)}"
+        )
+    finally:
+        await session.close()
+
+
+async def test_truncation_does_not_latch(workspace):
+    """A blown budget is one model being verbose on one transcript — a tail
+    sample, not a capability problem. Only hard failures latch (ENG-1155);
+    truncation keeps its ENG-1081 retry ladder and its honest diagnosis.
+    """
+    from anton.core.llm.provider import StructuredOutputError
+
+    mock_llm = make_mock_llm()
+
+    async def always_truncated(_schema, *, system, messages, max_tokens):
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_truncated)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        for turn in range(3):
+            plan, state = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"do step {turn}"):
+                pass
+            if state["n"] >= 3:
+                diagnoses += 1
+
+        assert session._verifier_latched is False, "truncation must not latch"
+        assert diagnoses == 3, (
+            f"every truncated turn still gets its honest diagnosis, got {diagnoses}"
+        )
+    finally:
+        await session.close()
+
+
+async def test_successful_verdict_clears_the_latch_counter(workspace):
+    """One hard failure then a working verdict is a transient blip — the counter
+    must reset, or two unrelated failures an hour apart would latch the session.
+    """
+    mock_llm = make_mock_llm()
+    outcomes = [
+        RuntimeError("400 once"),
+        _VerifierVerdict(status="COMPLETE", reason="done"),
+        RuntimeError("400 again"),
+    ]
+
+    async def scripted(_schema, *, system, messages, max_tokens):
+        item = outcomes.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=scripted)
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(3):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"do step {turn}"):
+                pass
+
+        # fail, succeed, fail → never two in a row.
+        assert session._verifier_latched is False
+        assert session._verifier_hard_failures == 1
+    finally:
+        await session.close()
+
+
+async def test_max_tool_rounds_diagnosis_is_persisted_as_streamed(workspace):
+    """The tool-round circuit breaker is a FOURTH hand-back path with the same
+    desync — not named in ENG-1155, and the highest-traffic of the four (the
+    25-round cap fires on real sessions far more often than STUCK does).
+
+    It appends the reply, injects a SYSTEM pause, streams a diagnosis, and never
+    captures it — so the post-loop fallback re-appends the reply.
+    """
+    mock_llm = make_mock_llm()
+    # Verifier is never reached on this path (_max_rounds_hit skips verification).
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=AssertionError("no verdict call on the max-rounds path")
+    )
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            # Keep calling tools until the cap trips.
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response(
+                    "STALE_PRE_VERIFICATION_REPLY", "exec", "main", "print(1)"))
+            ])
+        return _FakeAsyncIter([
+            StreamComplete(response=_text_response(
+                "DIAGNOSIS: I've used my step budget. Here's where I got to."
+            ))
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session._max_tool_rounds = 1
+    try:
+        async for _ in session.turn_stream("do lots of steps"):
+            pass
+
+        texts = _assistant_texts(session)
+        assert any("DIAGNOSIS:" in t for t in texts), (
+            "the cap diagnosis the user read is missing from history"
+        )
+        assert "DIAGNOSIS:" in texts[-1], (
+            f"history ends on the stale reply, not the diagnosis: {texts[-1]!r}"
+        )
+        assert sum("STALE_PRE_VERIFICATION_REPLY" in t for t in texts) <= 1, (
+            "the stale reply was appended twice"
+        )
+    finally:
+        await session.close()
+
+
+async def test_text_only_continuation_answer_is_not_dropped(workspace):
+    """Self-review catch. `_reply_persisted` must be per-iteration, not per-turn.
+
+    INCOMPLETE → the continuation finishes the answer with no tool calls →
+    `tool_round` stays 0 → the loop breaks at the verify_min_tool_rounds gate
+    BEFORE appending the new reply. A turn-scoped flag would still be True from
+    the first iteration, so the post-loop fallback would skip, and the answer the
+    user just read would vanish from history. That is the same defect ENG-1155
+    fixes, introduced on the continuation path.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [_VerifierVerdict(status="INCOMPLETE", reason="not done yet")]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("FIRST_DRAFT"))])
+        # Continuation needs no tools — it just finishes writing.
+        return _FakeAsyncIter([
+            StreamComplete(response=_text_response("FINAL_ANSWER_USER_READ"))
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        async for _ in session.turn_stream("write me a summary"):
+            pass
+
+        texts = _assistant_texts(session)
+        assert any("FINAL_ANSWER_USER_READ" in t for t in texts), (
+            "the continuation's answer — what the user actually read — is missing "
+            f"from history; assistant turns held: {texts}"
+        )
+        assert "FINAL_ANSWER_USER_READ" in texts[-1]
+    finally:
+        await session.close()
+
+
+async def test_latched_verifier_reprobes_and_can_recover(workspace):
+    """Self-review catch. A latched session makes no verdict calls, so "reset on a
+    successful verdict" is unreachable and the latch outlives its cause — the user
+    switches off the broken model and verification stays dead for the session.
+
+    After `_VERIFIER_LATCH_REPROBE_TURNS` skips it must spend one call; if that
+    succeeds, the latch clears.
+    """
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+    # Two hard failures to latch, then every later call succeeds (the user has
+    # switched to a model whose forced tool_choice works).
+    async def scripted(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("400 tool_choice not supported")
+        return _VerifierVerdict(status="COMPLETE", reason="done")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=scripted)
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"step {turn}"):
+                pass
+        assert session._verifier_latched is True, "two hard failures must latch"
+        assert calls["n"] == 2
+
+        # Run exactly enough turns to consume the skip budget and re-probe.
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"more {turn}"):
+                pass
+
+        assert calls["n"] == 3, (
+            f"expected exactly one re-probe call after {_VERIFIER_LATCH_REPROBE_TURNS} "
+            f"skips, verifier was called {calls['n']}x total"
+        )
+        assert session._verifier_latched is False, (
+            "a successful re-probe must clear the latch"
+        )
+        assert session._verifier_hard_failures == 0
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("exc_factory, label", [
+    (lambda: __import__("anton.core.llm.provider", fromlist=["x"]).TransientProviderError(
+        "provider returned an empty 200"), "typed"),
+    # Review finding (pnewsam on #299): an UNTYPED transient reaching the generic
+    # handler used to count as "hard". A timeout is not a statement about whether
+    # the model can produce a verdict.
+    (lambda: asyncio.TimeoutError("read timed out"), "asyncio-timeout"),
+    (lambda: ConnectionResetError("peer reset the connection"), "connection-reset"),
+    (lambda: httpx.ConnectError("failed to establish a connection"), "httpx-connect"),
+])
+async def test_transient_provider_errors_never_latch(workspace, exc_factory, label):
+    """No transient failure may latch — typed or untyped. The latch is for a model
+    that *cannot* produce a verdict (kimi-K3's forced-tool_choice 400, ENG-1095) —
+    a capability claim. A dropped connection or a timeout asserts the opposite:
+    retryable, and typed ones are already retried upstream (ENG-673). Counting
+    them would let two provider blips disable verification for a whole re-probe
+    window.
+
+    Matters more once #297 (ENG-847) lands, which converts empty 200s into
+    `TransientProviderError` on the same providers the verdict call uses.
+    """
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def always_transient(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        raise exc_factory()
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_transient)
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(4):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"step {turn}"):
+                pass
+
+        assert session._verifier_latched is False, (
+            "transient provider errors must never latch the session"
+        )
+        assert session._verifier_hard_failures == 0
+        # Verification keeps being attempted every turn, rather than being
+        # switched off after two blips.
+        assert calls["n"] == 4, (
+            f"verifier should still be called every turn, got {calls['n']}"
+        )
+    finally:
+        await session.close()
+
+
+async def test_failed_reprobe_stays_latched_without_rediagnosis(workspace, caplog):
+    """The other half of the re-probe contract: when the cause is still there,
+    the re-probe fails, the session stays latched, and — critically — no second
+    diagnosis fires (one per session, ENG-1155). The next skip cycle then starts
+    over, so the steady-state cost of a permanently broken verifier is one
+    verdict call per `_VERIFIER_LATCH_REPROBE_TURNS` turns.
+    """
+    import logging
+
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def always_hard(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_hard)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        with caplog.at_level(logging.INFO):
+            # 2 latching turns, then two full skip-and-reprobe cycles.
+            for turn in range(2 + 2 * _VERIFIER_LATCH_REPROBE_TURNS):
+                plan, state = _tool_then_text_plan()
+                mock_llm.plan_stream = plan
+                async for _ in session.turn_stream(f"step {turn}"):
+                    pass
+                if state["n"] >= 3:
+                    diagnoses += 1
+
+        assert session._verifier_latched is True, "failed re-probe must stay latched"
+        assert diagnoses == 1, (
+            f"failed re-probes must not re-diagnose, got {diagnoses}"
+        )
+        # 2 latching calls + 1 failed re-probe per cycle.
+        assert calls["n"] == 4, (
+            f"expected 2 latching + 2 re-probe calls, got {calls['n']}"
+        )
+        reprobe_failures = [
+            r for r in caplog.records
+            if "re-probe failed — staying latched" in r.message
+        ]
+        assert len(reprobe_failures) == 2, (
+            "a failed re-probe must log its own line, not re-announce the latch"
+        )
+    finally:
+        await session.close()
+
+
+async def test_latched_truncating_reprobe_diagnoses_and_stays_latched(workspace):
+    """A latched session whose re-probe TRUNCATES (the user switched from a
+    hard-failing model to a persistently-verbose one) falls through to the
+    honest diagnosis and leaves the latch set — truncation never counts toward
+    or against the latch, so only a successful verdict clears it. Pins the
+    deliberate interaction between the latch and "every truncated turn keeps
+    its honest diagnosis" (see the re-probe comment in session.py).
+    """
+    from anton.core.llm.provider import StructuredOutputError
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def hard_then_truncated(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("400 tool_choice not supported")
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=hard_then_truncated)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        for turn in range(2 + _VERIFIER_LATCH_REPROBE_TURNS):
+            plan, state = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"step {turn}"):
+                pass
+            if state["n"] >= 3:
+                diagnoses += 1
+
+        assert session._verifier_latched is True, (
+            "a truncating re-probe must not clear the latch"
+        )
+        assert diagnoses == 2, (
+            f"expected the latch-time diagnosis plus one on the truncating "
+            f"re-probe, got {diagnoses}"
+        )
     finally:
         await session.close()
 
