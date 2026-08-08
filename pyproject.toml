@@ -62,4 +62,4 @@ markers = [
 ]
 
  [tool.hatch.build.targets.wheel]
-    packages = ["anton"]
+    packages = ["anton", "anton_state"]

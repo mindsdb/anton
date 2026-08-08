@@ -39,7 +39,28 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
 
 # Filenames inside an artifact folder that are housekeeping — never bundled.
-_FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.json"}
+# The .anton_state.db* entries are defensive: _zip_fullstack is allowlist-based
+# so root files are not bundled anyway, but this guards against future changes
+# (and covers the WAL side-files, where -wal holds the freshest data).
+# Local snapshot of the last-published state key schema (for the client-side
+# schema-change warning). Never bundled.
+_STATE_SNAPSHOT = ".state_manifest.published.json"
+_FULLSTACK_EXCLUDED = {
+    "metadata.json",
+    "README.md",
+    "backend.log",
+    ".published.json",
+    ".anton_state.db",
+    ".anton_state.db-wal",
+    ".anton_state.db-shm",
+    _STATE_SNAPSHOT,
+}
+
+
+class StatePublishBlocked(Exception):
+    """Publish aborted: a previously published state collection disappeared from
+    the new schema, which would orphan its stored data. Tooling-level error
+    (not an anton_state runtime error) — surfaced to the publish caller."""
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
@@ -233,7 +254,97 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
                     continue
                 _write_scrubbed(zf, f, arc_name)
                 included.append(arc_name)
+
+        manifest = artifact_dir / "state_manifest.json"
+        if manifest.is_file():
+            _write_scrubbed(zf, manifest, "state_manifest.json")
+            included.append("state_manifest.json")
+
+        included.extend(_vendor_anton_state(zf))
     return buf.getvalue(), included
+
+
+def _read_state_manifest(artifact_dir: Path) -> dict | None:
+    """Parse state_manifest.json from the artifact dir, or None if absent.
+
+    Included in the publish payload so the provisioning pipeline (subplan #4)
+    can read the schema without unzipping the bundle.
+    """
+    path = artifact_dir / "state_manifest.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _state_key_shape(manifest: dict) -> tuple:
+    """Normalised key schema (pk/sk name+type) for compatibility comparison."""
+    def attr(a):
+        return (a["name"], a.get("type", "S")) if a else None
+    return (attr(manifest.get("pk")), attr(manifest.get("sk")))
+
+
+def _warn_state_schema_change(artifact_dir: Path, manifest: dict) -> str | None:
+    """Warn (non-blocking) if the key schema changed vs the last publish — on a
+    shared table that orphans old data (no per-artifact key schema for AWS to
+    reject). Read-only: does NOT write the snapshot (see _save_state_snapshot)."""
+    snap = artifact_dir / _STATE_SNAPSHOT
+    if not snap.is_file():
+        return None
+    try:
+        prev = json.loads(snap.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if _state_key_shape(prev) == _state_key_shape(manifest):
+        return None
+    warning = (
+        "WARNING: state key schema changed since the last publish — existing "
+        "stored data will become UNREACHABLE (its keys are encoded under the old "
+        "schema). Migrations are out of scope in v1."
+    )
+    print(warning)
+    return warning
+
+
+def _save_state_snapshot(artifact_dir: Path, manifest: dict) -> None:
+    """Record the just-published key schema for the next publish's comparison.
+    Called ONLY after a successful /upload, so a failed publish doesn't hide the
+    next real change."""
+    (artifact_dir / _STATE_SNAPSHOT).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def _blocked_collection_drops(artifact_dir: Path, manifest: dict) -> set[str]:
+    """Collections present in the last published manifest but missing from the new
+    one — their stored data (keyed by artifact_id in the shared table) would be
+    orphaned. Empty when there is no snapshot (first publish) or nothing was
+    removed (adding a collection is safe)."""
+    snap = artifact_dir / _STATE_SNAPSHOT
+    if not snap.is_file():
+        return set()
+    try:
+        prev = json.loads(snap.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return set()
+    return set(prev.get("collections", [])) - set(manifest.get("collections", []))
+
+
+def _vendor_anton_state(zf: zipfile.ZipFile) -> list[str]:
+    """Copy the `anton_state` package into the bundle under `anton_state/`.
+
+    The published artifact imports `anton_state` from its own directory (the
+    runner puts the artifact dir on sys.path), so the SDK travels with the
+    bundle — version-locked, offline, no index needed.
+    """
+    import anton_state
+
+    pkg_dir = Path(anton_state.__file__).resolve().parent
+    added: list[str] = []
+    for f in sorted(pkg_dir.rglob("*.py")):
+        if "__pycache__" in f.parts:
+            continue
+        arc_name = f"anton_state/{f.relative_to(pkg_dir).as_posix()}"
+        _write_scrubbed(zf, f, arc_name)
+        added.append(arc_name)
+    return added
 
 
 def _collect_datasource_secrets(
@@ -314,6 +425,7 @@ def publish(
         raise FileNotFoundError(f"Path not found: {file_path}")
 
     payload_dict: dict = {}
+    state_manifest = None
 
     artifact = _load_artifact_metadata(file_path) if file_path.is_dir() else None
     if artifact is not None and artifact.type in FULLSTACK_ARTIFACT_TYPES:
@@ -323,6 +435,18 @@ def publish(
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
         payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
+        state_manifest = _read_state_manifest(file_path)
+        if state_manifest is not None:
+            _warn_state_schema_change(file_path, state_manifest)  # before upload
+            dropped = _blocked_collection_drops(file_path, state_manifest)
+            if dropped:
+                raise StatePublishBlocked(
+                    f"Collections {sorted(dropped)} exist in the published version "
+                    f"but are missing from the new schema — their stored data would "
+                    f"be orphaned. Unpublish the artifact and publish again with the "
+                    f"new schema (the old data is not migrated)."
+                )
+            payload_dict["state_manifest"] = state_manifest
         if missing:
             payload_dict["missing_datasources"] = missing
     else:
@@ -346,6 +470,10 @@ def publish(
 
     url = f"{publish_url.rstrip('/')}/upload"
     raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    # Upload succeeded (minds_request raises on failure): record the published
+    # key schema so the next publish can warn on an incompatible change.
+    if state_manifest is not None:
+        _save_state_snapshot(file_path, state_manifest)
     return json.loads(raw)
 
 
