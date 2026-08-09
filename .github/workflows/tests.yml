@@ -42,5 +42,10 @@ jobs:
     with:
       env-name: "CI"
       status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
+      # This workflow covers main AND staging from one notify job, so the scoping
+      # has to be decided per run rather than per file: a staging failure is only
+      # release-blocking once the freeze window is open, while a main failure
+      # always is. Hardcoding `true` here would mute main too.
+      freeze-scoped: ${{ github.ref_name == 'staging' }}
       runs-on: ubuntu-latest
     secrets: inherit

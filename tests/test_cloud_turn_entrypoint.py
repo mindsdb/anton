@@ -1,0 +1,145 @@
+"""Entrypoint wire contract: request parsing + streaming event emission.
+
+Offline: a fake session (scripted stream events) replaces ChatSession, so no LLM
+key or scratchpad is needed. Mirrors the controller/cowork contract:
+`delta` -> ... -> `turn_completed` | `turn_failed`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+
+from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.__main__ import stream_turn
+from anton.core.llm.provider import (
+    StreamTaskProgress,
+    StreamTextDelta,
+    StreamToolResult,
+    StreamToolUseStart,
+)
+
+
+# ── contract parsing ─────────────────────────────────────────────────────────
+
+def test_from_json_parses_full_request():
+    req = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "c", "input": "hi",
+        "workspace_path": "/workspace", "model": "m",
+        "history": [{"role": "user", "content": "prev"}],
+    }))
+    assert req.conversation_id == "c"
+    assert req.input == "hi"
+    assert req.history == [{"role": "user", "content": "prev"}]
+
+
+def test_from_json_history_defaults_empty():
+    req = TurnRequestV1.from_json('{"protocol_version":1,"conversation_id":"c","input":"hi"}')
+    assert req.history == []
+    assert req.workspace_path is None and req.model is None
+
+
+def test_from_json_passes_through_llm_block():
+    """The per-turn MindsHub credential block survives the wire round-trip."""
+    req = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "c", "input": "hi",
+        "llm": {"provider": "minds-cloud", "api_key": "mdb_turnkey",
+                "base_url": "https://api.mindshub.ai/v1"},
+    }))
+    assert req.llm == {
+        "provider": "minds-cloud", "api_key": "mdb_turnkey",
+        "base_url": "https://api.mindshub.ai/v1",
+    }
+
+
+def test_from_json_llm_defaults_none():
+    req = TurnRequestV1.from_json('{"protocol_version":1,"conversation_id":"c","input":"hi"}')
+    assert req.llm is None
+
+
+# ── streaming event emission ─────────────────────────────────────────────────
+
+class _FakeSession:
+    def __init__(self, deltas=(), raise_on_stream=None):
+        self._deltas = list(deltas)
+        self._raise = raise_on_stream
+        self.closed = False
+
+    async def turn_stream(self, user_input, **kwargs):
+        if self._raise:
+            raise self._raise
+        for d in self._deltas:
+            yield StreamTextDelta(text=d)
+
+    def close(self):
+        self.closed = True
+
+
+def _drive(session, req_json='{"protocol_version":1,"conversation_id":"c","input":"hi"}'):
+    events = []
+    asyncio.run(stream_turn(req_json, events.append, session_builder=lambda r: session))
+    return events
+
+
+def test_emits_deltas_then_completed():
+    session = _FakeSession(deltas=["he", "llo"])
+    events = _drive(session)
+    assert events == [
+        {"kind": "delta", "text": "he"},
+        {"kind": "delta", "text": "llo"},
+        {"kind": "turn_completed"},
+    ]
+    assert session.closed is True  # session closed on success
+
+
+def test_text_only_no_deltas_still_completes():
+    events = _drive(_FakeSession(deltas=[]))
+    assert events == [{"kind": "turn_completed"}]
+
+
+def test_action_events_are_logged(caplog):
+    """Discrete turn actions (tool calls, progress, results) are narrated to the
+    logs so the pod's activity is observable in the controller; text deltas are
+    NOT logged (they are emitted, not narrated)."""
+    class _S:
+        closed = False
+
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamToolUseStart(id="t1", name="scratchpad")
+            yield StreamTaskProgress(phase="scratchpad_start", message="running cell")
+            yield StreamToolResult(name="scratchpad", content="x" * 20, action="exec", id="t1")
+            yield StreamTextDelta(text="hi")
+
+        def close(self):
+            self.closed = True
+
+    with caplog.at_level(logging.INFO):
+        events = _drive(_S())
+
+    assert {"kind": "delta", "text": "hi"} in events
+    assert {"kind": "turn_completed"} in events
+    assert "tool call: scratchpad" in caplog.text
+    assert "progress [scratchpad_start]: running cell" in caplog.text
+    assert "tool result: scratchpad action=exec (20 chars)" in caplog.text
+    assert "cloud turn completed" in caplog.text
+    # the answer text is emitted, never narrated into the logs
+    assert "hi" not in caplog.text
+
+
+def test_turn_failure_is_terminal_and_scrubbed():
+    session = _FakeSession(raise_on_stream=RuntimeError("boom sk-ant-" + "A" * 80))
+    events = _drive(session)
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    assert "boom" in events[0]["error"]
+    assert "sk-ant-" + "A" * 80 not in events[0]["error"]  # credential scrubbed
+    assert session.closed is True  # closed even on failure
+
+
+def test_bad_request_is_a_single_turn_failed():
+    events = []
+    asyncio.run(stream_turn("{not valid json", events.append))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    assert events[0]["error"]  # non-empty, scrubbed

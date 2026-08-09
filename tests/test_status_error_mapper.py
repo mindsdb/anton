@@ -557,6 +557,23 @@ def test_anthropic_byok_402_stays_generic():
     assert not isinstance(err.value, TokenLimitExceeded)
 
 
+def test_anthropic_404_not_found_error_maps_to_model_unavailable():
+    # ENG-1139: a bare Anthropic 404 for an unknown model must become a
+    # ModelUnavailableError with the provider's own reason folded in once,
+    # not the generic "temporarily unavailable, try again" ConnectionError
+    # (which then got double-wrapped by session.py's fallback prose).
+    exc = _anthropic_sdk_error(404, json_body={"type": "error", "error": {
+        "type": "not_found_error",
+        "message": "model: nonexistent-model-xyz",
+    }})
+    with pytest.raises(ModelUnavailableError) as err:
+        _raise_anthropic(exc, model="nonexistent-model-xyz")
+    assert err.value.code == "model_not_found"
+    assert str(err.value).count("nonexistent-model-xyz") == 2  # template + provider detail, not 3+
+    assert "temporarily unavailable" not in str(err.value)
+    assert "Switch models in Settings" in str(err.value)
+
+
 def test_429_wallet_code_never_transient():
     # Defense for direct classify_transient callers (the mid-stream paths):
     # the M3 allowance 429 has no `detail`, so without the code-exact guard

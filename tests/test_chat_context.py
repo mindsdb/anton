@@ -10,6 +10,7 @@ from tests.conftest import make_mock_llm
 import pytest
 
 from anton.chat import ChatSession, _handle_connect
+from anton.minds_client import LLMTestResult, MindsModels
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.minds_client import describe_minds_connection_error
@@ -291,7 +292,7 @@ class TestRuntimeContext:
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
-        assert "WAIT for the reply" in system_prompt
+        assert "never ask in text and act in the same turn" in system_prompt
 
 
 class TestMindsSetupRecovery:
@@ -349,7 +350,13 @@ class TestMindsSetupRecovery:
             return [{"name": "warehouse", "datasources": []}]
 
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
-        monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            "anton.chat.resolve_and_probe",
+            lambda *args, **kwargs: (
+                MindsModels("sonnet", "haiku", "haiku"),
+                LLMTestResult(ok=True),
+            ),
+        )
         rebuilt = object()
         monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
 
@@ -383,6 +390,67 @@ class TestMindsSetupRecovery:
         assert "Recovery options:" in printed
         assert "certificate issue" not in printed
 
+    async def test_connect_adopts_a_rate_limited_minds_endpoint(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A 429 proves the endpoint is THERE — it answered and throttled the
+        probe. Treating it as unavailable dropped a throttled-but-valid MindsHub
+        endpoint and fell through to the BYOK prompt (#317 review); the earlier
+        truthy ``"rate_limited"`` string had adopted it.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        prompts = iter(["https://api.mindshub.ai", "", "1"])
+
+        async def fake_prompt(*args, **kwargs):
+            return next(prompts)
+
+        monkeypatch.setattr("anton.chat.prompt_or_cancel", fake_prompt)
+        monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", fake_prompt)
+        monkeypatch.setattr(
+            "anton.chat.list_minds",
+            lambda *a, **k: [{"name": "warehouse", "datasources": []}],
+        )
+        monkeypatch.setattr(
+            "anton.chat.resolve_and_probe",
+            lambda *a, **k: (
+                MindsModels("sonnet", "haiku", "haiku"),
+                LLMTestResult(
+                    ok=False,
+                    rate_limited=True,
+                    error="Rate limit exceeded",
+                    http_status=429,
+                ),
+            ),
+        )
+        monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: object())
+
+        workspace_base = tmp_path / "workspace"
+        workspace_base.mkdir()
+        workspace = Workspace(workspace_base)
+        workspace.initialize()
+        settings = AntonSettings(minds_api_key="minds-key", _env_file=None)
+
+        await _handle_connect(
+            MagicMock(),
+            settings,
+            workspace,
+            state={},
+            self_awareness=None,
+            cortex=None,
+            session=object(),
+        )
+
+        # The throttled endpoint is adopted, with the catalogue-resolved models.
+        assert settings.planning_provider == "openai-compatible"
+        assert settings.coding_provider == "openai-compatible"
+        assert settings.planning_model == "sonnet"
+        assert settings.coding_model == "haiku"
+
     async def test_connect_can_retry_without_ssl_verification_after_timeout(
         self,
         tmp_path,
@@ -409,7 +477,13 @@ class TestMindsSetupRecovery:
             return [{"name": "warehouse", "datasources": []}]
 
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
-        monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            "anton.chat.resolve_and_probe",
+            lambda *args, **kwargs: (
+                MindsModels("sonnet", "haiku", "haiku"),
+                LLMTestResult(ok=True),
+            ),
+        )
         rebuilt = object()
         monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
 

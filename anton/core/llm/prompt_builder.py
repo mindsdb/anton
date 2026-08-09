@@ -138,6 +138,7 @@ class ChatSystemPromptBuilder:
         self_awareness_context: str = "",
         datasource_context: str = "",
         skill_store: "SkillStore | None" = None,
+        workspace_context: str = "",
     ) -> str:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
@@ -199,6 +200,10 @@ class ChatSystemPromptBuilder:
         )
         if memory_context:
             prompt += memory_context
+        # Workspace discovery (ENG-578) is volatile too — pads and files
+        # change between turns, so it must never sit in the cached prefix.
+        if workspace_context:
+            prompt += workspace_context
 
         return prompt
 
