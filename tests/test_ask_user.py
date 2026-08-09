@@ -73,8 +73,11 @@ def test_path_request_ignores_choice_rules():
     assert validate_request(AskRequest(prompt="", kind="path")) is False
 
 
-def test_budget_constant_is_three():
-    assert MAX_QUESTIONS_PER_TURN == 3
+def test_budget_constant_is_eight():
+    """Raised from 3 to 8 to give generate_prd's phase 2 (brief confirm +
+    revise cycles) room without starving the main agent's own questions in
+    the same turn — see prd-design.md, "Лимиты и обработка ошибок"."""
+    assert MAX_QUESTIONS_PER_TURN == 8
 
 
 # ─── TurnEmitter + session wiring ───────────────────────────────────────
