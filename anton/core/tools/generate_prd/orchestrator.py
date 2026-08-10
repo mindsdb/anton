@@ -157,6 +157,11 @@ async def show_and_confirm(state: PrdState) -> str:
         # case than cancelling — so it resolves to "accept" instead of the
         # `AskRequest` default of "cancelled".
         default_value="accept",
+        # The brief itself ends with its own "continue, or changes?"
+        # sentence (see _DRAFT_BRIEF_INSTRUCTION) — a numbered "1. Accept /
+        # 2. Cancel" list underneath, plus the elicitor's own descriptive
+        # caption, would just repeat what the sentence already said.
+        compact=True,
     )
     answer = await sub_tools.ask_via_elicit(state.session, request)
 

@@ -83,14 +83,23 @@ class CLIElicitor:
         substitutes it for a blank Enter and shows it in the prompt's
         suffix, so a blank Enter and typing the value by hand arrive here
         as the same string and need no separate handling.
+
+        ``request.compact`` drops the descriptive caption in favour of a
+        bare input point — ``prompt_or_cancel`` still shows the default in
+        its own suffix (e.g. ``(accept):``), so the hint survives even with
+        no label text; pairs with ``StreamDisplay.show_question`` skipping
+        the numbered list for the same request.
         """
         from anton.utils.prompt import prompt_or_cancel
 
-        label = (
-            "Send the numbers (comma-separated) or type your own answer"
-            if request.select == "many"
-            else "Send the answer number or type your own"
-        )
+        if request.compact:
+            label = ""
+        else:
+            label = (
+                "Send the numbers (comma-separated) or type your own answer"
+                if request.select == "many"
+                else "Send the answer number or type your own"
+            )
         raw = await prompt_or_cancel(label, default=request.default_value)
         if raw is None or not raw.strip():
             return AskAnswer(status="cancelled")

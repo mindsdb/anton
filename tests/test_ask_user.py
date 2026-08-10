@@ -757,6 +757,17 @@ async def test_cli_choice_resolves_a_typed_value_directly_not_just_by_number(cli
     assert answer == AskAnswer(status="answered", values=("pg",))
 
 
+async def test_cli_choice_compact_drops_the_descriptive_caption(cli_elicitor, monkeypatch):
+    """`compact` pairs with `show_question` skipping the option list — the
+    remaining input point should be bare, not the usual "Send the answer
+    number..." caption. `prompt_or_cancel`'s own default-value suffix
+    (e.g. "(accept):") still carries the hint."""
+    mock = AsyncMock(return_value="accept")
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", mock)
+    await cli_elicitor.ask("q1", _choice(default_value="pg", compact=True))
+    assert mock.call_args.args[0] == ""
+
+
 # ─── CLI elicitor — _ask_path (browse mode) ─────────────────────────────
 
 
@@ -990,6 +1001,28 @@ def test_show_question_escapes_rich_markup_in_model_controlled_text():
     assert "Which [bold]one[/] to use?" in text
     assert "[dim]fast[/]" in text
     assert "mysql [/]" in text
+
+
+def test_show_question_compact_skips_the_option_list():
+    """A prompt that already spells out the choice in prose (e.g. a PRD
+    brief ending in its own "continue, or changes?" sentence) should not
+    also get a numbered list repeating it underneath."""
+    from rich.console import Console
+
+    from anton.chat_ui import StreamDisplay
+
+    console = Console(record=True, width=100)
+    StreamDisplay(console).show_question(
+        AskRequest(
+            prompt="Continue, or any changes?",
+            options=(AskOption(value="accept", label="Accept"), AskOption(value="cancel", label="Cancel")),
+            compact=True,
+        )
+    )
+    text = console.export_text()
+    assert "Continue, or any changes?" in text
+    assert "Accept" not in text
+    assert "1." not in text
 
 
 # ─── goal mode: without_ask_user ────────────────────────────────────────

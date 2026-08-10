@@ -83,6 +83,14 @@ class AskRequest:
     # (`ask_user`'s own JSON schema has no way to set this — the LLM never
     # picks a default on the human's behalf).
     default_value: str = ""
+    # When `prompt` already explains the choice in prose (e.g. a PRD brief
+    # ending in its own "continue, or changes?" sentence), the numbered
+    # option list and the elicitor's descriptive input caption are pure
+    # repetition — this asks renderers to skip both and show a minimal
+    # input point instead. Off by default: most `ask_user`/`select_path`
+    # questions genuinely need the list (e.g. "which database?"), so this
+    # is opt-in per request, not a global rendering change.
+    compact: bool = False
     # kind="path"
     path_mode: str = "pick"  # "pick" | "browse"
     path_kind: str = "any"  # "file" | "folder" | "any"

@@ -361,8 +361,15 @@ class StreamDisplay:
         plausible label like "[recommended] postgres" would otherwise be
         rendered as a Rich tag and swallowed, while one containing "[/]" would
         raise MarkupError out of here and kill the turn mid-dispatch.
+
+        `request.compact` skips the option list and the "Pick one or more"
+        hint entirely — for a prompt that already spells out the choice in
+        prose (e.g. a PRD brief ending in its own "continue, or changes?"
+        sentence), repeating it as a numbered list under the text is noise.
         """
         self._console.print(f"\n[bold]{escape(request.prompt)}[/]")
+        if request.compact:
+            return
         for index, option in enumerate(request.options, start=1):
             icon = "📁" if option.kind == "folder" else "📄" if option.kind == "file" else ""
             prefix = f"{icon} " if icon else ""

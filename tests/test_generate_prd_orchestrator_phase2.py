@@ -268,3 +268,20 @@ async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):
     outcome = await orchestrator.show_and_confirm(state)
     assert outcome == "accepted"
     assert seen_requests[0].default_value == "accept"
+
+
+async def test_show_and_confirm_requests_compact_rendering(monkeypatch):
+    """The brief already ends with its own "continue, or changes?" line
+    (see _DRAFT_BRIEF_INSTRUCTION) — the numbered Accept/Cancel list and
+    the elicitor's descriptive caption would just repeat it."""
+    seen_requests = []
+
+    async def fake_elicit(session, request):
+        seen_requests.append(request)
+        return AskAnswer(status="answered", values=("accept",))
+
+    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_elicit)
+    state = _state(Path("/tmp/x"))
+    state.brief_markdown = "## Goal\n..."
+    await orchestrator.show_and_confirm(state)
+    assert seen_requests[0].compact is True
