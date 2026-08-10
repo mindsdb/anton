@@ -9,7 +9,9 @@ Safety posture (all internal — nothing here is on the wire):
 
 * Trusted pod-side workspace mount, never taken from the request.
 * No dotenv loading (``AntonSettings(_env_file=None)``, shared into Workspace).
-* Personal memory / connectors / data-vault / disk history OFF.
+* Connectors / data-vault / disk history OFF.
+* Memory never persists pod-side: cowork sends the tenant's slots per turn, and
+  writes are reported back for cowork to apply (see :func:`_build_cortex`).
 * Only reviewed, headless-safe tools are exposed (scratchpad + artifacts).
 """
 
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,8 +44,90 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         "list_artifacts",
         "open_artifact",
         "update_artifact",
+        # Safe to list only because a cortex is always built — core registers
+        # `memorize` with one, and an allowlist name matching no tool is fatal.
+        "memorize",
     }
 )
+
+#: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land
+#: as files. Not the workspace — its PVC outlives the turn and cells can read it.
+_MEMORY_DIR = Path(tempfile.gettempdir()) / "anton-cloud-memory"
+
+#: Wire slot name -> the filename Hippocampus reads. Unknown slots are ignored.
+_MEMORY_SLOT_FILES = {"profile": "profile.md", "rules": "rules.md", "lessons": "lessons.md"}
+
+
+def _write_memory_slots(dest: Path, slots: dict | None) -> None:
+    """Write `slots` into `dest`, clearing any this turn didn't send — the dir is
+    reused across turns, so a server-side deletion must not linger."""
+    dest.mkdir(parents=True, exist_ok=True)
+    values = slots if isinstance(slots, dict) else {}
+    for slot, filename in _MEMORY_SLOT_FILES.items():
+        path = dest / filename
+        text = values.get(slot)
+        if isinstance(text, str) and text.strip():
+            path.write_text(text, encoding="utf-8")
+        elif path.exists():
+            path.unlink()
+
+
+def _cloud_cortex_class():
+    """Cortex that records writes for the entrypoint to emit instead of storing
+    them. cowork applies them under its own scope; nothing persists pod-side."""
+    from anton.core.memory.cortex import Cortex
+
+    class _CloudCortex(Cortex):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.pending_memory: list[dict] = []
+
+        async def encode(self, engrams: list) -> list[str]:
+            # Normalize only — cowork validates, being the trust boundary.
+            accepted = [
+                {"text": e.text, "kind": e.kind, "scope": e.scope or "global",
+                 "topic": e.topic or "", "confidence": e.confidence or "medium",
+                 "source": e.source or "llm"}
+                for e in engrams
+                if isinstance(e.text, str) and e.text.strip()
+            ]
+            self.pending_memory.extend(accepted)
+            return [f"Encoded {e['kind']}: {e['text']}" for e in accepted]
+
+    return _CloudCortex
+
+
+def _build_cortex(memory: dict | None, llm_client):
+    """Cortex over cowork's memory. Built even for an empty store, or an org could
+    never record its first memory — core only registers `memorize` with a cortex."""
+    from anton.core.memory.hippocampus import Hippocampus
+
+    memory = memory if isinstance(memory, dict) else {}
+
+    global_dir = _MEMORY_DIR / "global"
+    project_dir = _MEMORY_DIR / "project"
+    _write_memory_slots(global_dir, memory.get("global"))
+    _write_memory_slots(project_dir, memory.get("project"))
+    # Not "off", or `memorize` refuses to encode; the automatic passes that mode
+    # also unlocks are disabled via `background_memory`.
+    return _cloud_cortex_class()(
+        global_hc=Hippocampus(global_dir),
+        project_hc=Hippocampus(project_dir),
+        mode="autopilot",
+        llm_client=llm_client,
+    )
+
+
+def drain_pending_memory(session) -> list[dict]:
+    """Engrams this turn asked to remember. Clears as it reads, so a second call
+    can't duplicate them."""
+    cortex = getattr(session, "_cortex", None)
+    pending = getattr(cortex, "pending_memory", None)
+    if not pending:
+        return []
+    drained = list(pending)
+    pending.clear()
+    return drained
 
 
 def resolve_trusted_workspace_path() -> Path:
@@ -117,6 +202,8 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
 
     llm_client = LLMClient.from_settings(settings)
 
+    cortex = _build_cortex(request.memory, llm_client)
+
     config = ChatSessionConfig(
         llm_client=llm_client,
         settings=settings,
@@ -126,13 +213,14 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
-        cortex=None,                        # personal memory OFF
+        cortex=cortex,                      # org memory; writes are reported, not stored
         episodic=None,
         self_awareness=None,
         data_vault=None,                    # connectors OFF
         history_store=None,                 # disk history OFF (DB authoritative)
         tools=[],                           # no host connector/publish tools
-        tool_allowlist=CLOUD_TOOL_ALLOWLIST,          # only reviewed tools survive the build
+        tool_allowlist=CLOUD_TOOL_ALLOWLIST,  # only reviewed tools survive the build
+        background_memory=False,            # one turn per pod: no end-of-turn LLM passes
         runtime_factory=local_scratchpad_runtime_factory,
         web_search_enabled=False,
         web_fetch_enabled=False,

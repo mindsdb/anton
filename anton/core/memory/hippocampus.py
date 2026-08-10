@@ -28,6 +28,20 @@ from typing import Literal
 
 from anton.core.memory.base import Engram
 
+def _entry_text(text: str) -> str:
+    """Make `text` safe to store as one entry line, changing nothing else.
+
+    Every slot file is line-per-entry with an optional trailing ``<!-- meta -->``,
+    so raw text can forge structure: a newline starts a second entry (and could
+    land it under a different ``## kind`` heading, turning a lesson into a rule),
+    and a comment delimiter escapes or swallows the metadata. Only those two
+    hazards are touched — runs of spaces and tabs inside a line are the user's
+    formatting and survive. Idempotent, so ingest and serialization can both
+    apply it.
+    """
+    text = str(text).replace("<!--", "<!-").replace("-->", "->")
+    return " ".join(line.strip() for line in text.splitlines()).strip()
+
 
 def _extract_metadata(text: str) -> tuple[str, dict]:
     """Find and remove the trailing metadata comment from an entry line.
@@ -196,7 +210,8 @@ class Hippocampus:
         ]
 
         for fact in entries:
-            if isinstance(fact, str) and fact not in existing_entries:
+            fact = _entry_text(fact) if isinstance(fact, str) else fact
+            if isinstance(fact, str) and fact and fact not in existing_entries:
                 # Check if this updates an existing fact (same key prefix)
                 key = fact.split(":")[0].strip().lower() if ":" in fact else ""
                 if key:
@@ -214,7 +229,7 @@ class Hippocampus:
 
     def save_identities(self, entries: list[Engram]) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        content = "# Profile\n" + "\n".join(f"- {e.text}" for e in entries) + "\n"
+        content = "# Profile\n" + "\n".join(f"- {_entry_text(e.text)}" for e in entries) + "\n"
         self._encode_with_lock(self._profile_path, content, mode="write")
 
     def clear_identity(self) -> None:
@@ -473,7 +488,7 @@ class Hippocampus:
             for e in entries:
                 ts = e.updated_at.strftime("%Y-%m-%d") if e.updated_at else time.strftime("%Y-%m-%d")
                 meta = f"<!-- confidence:{e.confidence} source:{e.source} ts:{ts} -->"
-                lines.append(f"- {e.text} {meta}\n")
+                lines.append(f"- {_entry_text(e.text)} {meta}\n")
 
         self._encode_with_lock(self._rules_path, "".join(lines), mode="write")
 
@@ -494,8 +509,10 @@ class Hippocampus:
 
         rules = self.get_rules()
 
+        # Sanitize at ingest too, not just on write: the dedupe below compares
+        # against text parsed back off disk, which is already sanitized.
         new_rule = Engram(
-            text=text,
+            text=_entry_text(text),
             updated_at=dt.datetime.now(),
             confidence=confidence,
             kind=kind,
@@ -520,7 +537,14 @@ class Hippocampus:
         """Append a semantic fact to lessons.md, tagged with optional topic metadata."""
         self._dir.mkdir(parents=True, exist_ok=True)
 
+        # Sanitize before the dedupe check below, which compares against text
+        # parsed back off disk.
+        text = _entry_text(text)
+        if not text:
+            return
         ts = time.strftime("%Y-%m-%d")
+        # Same slugifier recall_topic() uses, so a tagged lesson stays findable.
+        topic = self._sanitize_slug(topic) if topic else ""
         topic_tag = f" topic:{topic}" if topic else ""
         entry = f"- {text} <!--{topic_tag} ts:{ts} -->\n"
 

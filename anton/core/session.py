@@ -627,6 +627,11 @@ class ChatSessionConfig:
     # set. Applied on every ``_build_tools`` call so a lazy rebuild can't leak a
     # non-allowlisted tool.
     tool_allowlist: frozenset[str] | None = None
+    # Automatic end-of-turn memory passes (cerebellum/ACC lessons, identity
+    # extraction, vacuum, scratchpad consolidation). Hosts running one turn per
+    # process (the cloud pod) turn this off: several spend an LLM call on writes
+    # that land after the turn's storage is gone. `memorize` is unaffected.
+    background_memory: bool = True
 
 
 class ChatSession:
@@ -682,6 +687,8 @@ class ChatSession:
         self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
         self._act_first = config.act_first
+        self._background_memory = config.background_memory
+        self._memory_writes: set[asyncio.Task] = set()
         self._started_at = config.started_at
         self._extra_tools = config.tools
         self._tool_allowlist = config.tool_allowlist
@@ -2223,6 +2230,30 @@ class ChatSession:
             })
         return len(lessons)
 
+    def _track_memory_write(self, task: asyncio.Task) -> None:
+        """Register fire-and-forget memory encoding so a host that tears down at
+        end of turn can await it instead of guessing at a settling delay."""
+        self._memory_writes.add(task)
+        task.add_done_callback(self._memory_writes.discard)
+
+    async def settle_memory_writes(self) -> None:
+        """Await memory encoding still in flight. No-op when none is pending.
+
+        The cloud pod runs one turn and exits, so a `memorize` on the final round
+        would otherwise die before its task ran.
+        """
+        if self._memory_writes:
+            await asyncio.gather(*tuple(self._memory_writes), return_exceptions=True)
+
+    @property
+    def _background_memory_active(self) -> bool:
+        """Whether automatic end-of-turn memory passes may run."""
+        return (
+            getattr(self, "_background_memory", True)
+            and self._cortex is not None
+            and self._cortex.mode != "off"
+        )
+
     def _schedule_acc_flush(self) -> None:
         """Drain the ACC's turn buffer into Engrams and clear it.
 
@@ -2240,7 +2271,9 @@ class ChatSession:
         if acc is None:
             return
         cortex = getattr(self, "_cortex", None)
-        if cortex is None or getattr(cortex, "mode", "") == "off":
+        # getattr: these schedulers are also driven on duck-typed session stubs.
+        if (cortex is None or getattr(cortex, "mode", "") == "off"
+                or not getattr(self, "_background_memory", True)):
             acc.clear()
             return
 
@@ -2293,6 +2326,9 @@ class ChatSession:
         """
         cb = getattr(self, "_cerebellum", None)
         if cb is None:
+            return
+        if not getattr(self, "_background_memory", True):
+            cb.reset()
             return
         if cb.buffered_count == 0:
             return
@@ -2434,7 +2470,7 @@ class ChatSession:
                 self._append_history(
                     {"role": "assistant", "content": decision.text}
                 )
-                if self._cortex is not None and self._cortex.mode != "off":
+                if self._background_memory_active:
                     self._cortex.maybe_vacuum()
                 self._schedule_cerebellum_flush()
                 self._schedule_acc_flush()
@@ -2596,7 +2632,7 @@ class ChatSession:
         self._append_history({"role": "assistant", "content": reply})
 
         # Periodic memory vacuum (Systems Consolidation)
-        if self._cortex is not None and self._cortex.mode != "off":
+        if self._background_memory_active:
             self._cortex.maybe_vacuum()
 
         # Cerebellar consolidation — fire-and-forget so the user gets
@@ -3040,7 +3076,7 @@ class ChatSession:
         # Identity extraction (Default Mode Network — every 5 turns)
         self._turn_count += 1
         self._persist_history()
-        if self._cortex is not None and self._cortex.mode != "off":
+        if self._background_memory_active:
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
                 if self._episodic:
                     user_messages =[
@@ -4089,7 +4125,7 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": reply})
 
         # Consolidation: replay scratchpad sessions to extract lessons
-        if self._cortex is not None and self._cortex.mode != "off":
+        if self._background_memory_active:
             self._maybe_consolidate_scratchpads()
 
     def _maybe_consolidate_scratchpads(self) -> None:
