@@ -332,6 +332,23 @@ class TestRuleRetrievalObservability:
     of all LLM calls before any of this existed.
     """
 
+    @pytest.fixture(autouse=True)
+    def _stub_the_analytics_emit(self, captured_events):
+        """Route the emit through the capture for EVERY test in this class.
+
+        Autouse rather than per-test opt-in, so a test added here without asking
+        for `captured_events` still cannot reach the real `_emit_rule_retrieval`.
+
+        This is defence in depth, NOT a live-leak fix: `tests/conftest.py`
+        already disables analytics for the whole suite, precisely because the
+        default `analytics_url` is the real collector and turn-cost tests began
+        reaching that sink. So an unguarded test here does real work (builds
+        `AntonSettings`, calls `send_event`) but sends nothing. Keeping the stub
+        local means hermeticity does not depend on that global staying in place.
+        Caught in review by @pnewsam.
+        """
+        return captured_events
+
     async def _run(self, cortex, llm, rules):
         cortex._llm = llm
         return await cortex._retrieve_relevant_rules(rules, "please do the august campaign")
