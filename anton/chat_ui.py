@@ -33,6 +33,9 @@ class _ToolActivity:
     work_elapsed: float = 0.0  # actual execution seconds (filled on done)
     reasoning_elapsed: float = 0.0  # LLM thinking seconds after this step
     done_line_printed: bool = False  # whether the combined ✔ line was printed
+    ok: bool | None = None  # tool's verdict on tool_done — None/True render as
+    # success (unclassified legacy tools default to looking fine, matching
+    # today's behavior); only an explicit False prints the failure line.
 
 
 # Witty one-liners for non-scratchpad tool display. One is picked at
@@ -426,7 +429,8 @@ class StreamDisplay:
                 return
 
     def update_progress(
-        self, phase: str, message: str, eta: float | None = None
+        self, phase: str, message: str, eta: float | None = None,
+        *, ok: bool | None = None,
     ) -> None:
         """Update progress — manages spinner and activity lines."""
         if not self._active:
@@ -489,6 +493,17 @@ class StreamDisplay:
             self._update_spinner()
             return
 
+        if phase == "tool_progress":
+            # A streaming tool handler (ToolRegistry.dispatch_tool_stream)
+            # yielded a ToolProgress marker. Print it as a permanent line —
+            # falling through to the generic phase handler below would only
+            # update the transient spinner footer (Live(transient=True)),
+            # which disappears the moment the spinner stops.
+            self._stop_spinner()
+            self._console.print(Text(f"  {message}", style="anton.muted"))
+            self._start_spinner()
+            return
+
         if phase == "tool_done":
             # Stash work elapsed — combined line printed on reasoning_done.
             elapsed = eta if eta else 0
@@ -496,6 +511,7 @@ class StreamDisplay:
                 if act.name == message and act.printed and not act.done:
                     act.done = True
                     act.work_elapsed = elapsed
+                    act.ok = ok
                     break
             return
 
@@ -608,12 +624,20 @@ class StreamDisplay:
     ) -> None:
         """Print a single combined completion line for a finished activity.
 
-        Format: ``  ✔ (Worked: 1.9s, Reasoned: 7.1s)``
+        Format: ``  ✔ (Worked: 1.9s, Reasoned: 7.1s)`` on success, or the
+        ``✘`` variant in red when the tool's own verdict (``act.ok``) is
+        explicitly ``False`` — a raised handler exception or a declared
+        ``ToolOutcome(ok=False)`` (ENG-1276). ``None`` (unclassified/legacy
+        tools) and ``True`` both render as the success line, matching
+        today's behavior for anything that hasn't declared a verdict.
         If reasoning_elapsed is 0 (e.g. last tool in the turn with no
         follow-up reasoning), only the work time is shown.
         """
         line = Text()
-        line.append("  \u2714 ", style="green")
+        if act.ok is False:
+            line.append("  \u2718 ", style="red")
+        else:
+            line.append("  \u2714 ", style="green")
         work_str = self._fmt_elapsed(work_elapsed)
 
         from anton.config.settings import AntonSettings
