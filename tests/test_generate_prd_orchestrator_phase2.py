@@ -241,3 +241,30 @@ def test_write_prd_instruction_also_forbids_process_meta_commentary():
     just as exposed to the redo-framing leak as the brief."""
     lowered = orchestrator._WRITE_PRD_INSTRUCTION.lower()
     assert "redo" in lowered or "regeneration" in lowered
+
+
+def test_draft_brief_instruction_asks_for_a_closing_continue_line():
+    """Live-testing feedback (ENG-969): the brief used to end abruptly on
+    "1. Accept / 2. Cancel" with no framing sentence. The model must add a
+    closing line, in-language, that explains a bare Enter continues."""
+    lowered = orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "closing line" in lowered
+    assert "press enter" in lowered
+
+
+async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):
+    """A bare Enter (no selection, no free text) must resolve to "accept",
+    not the channel's own default of "cancelled" — accepting the brief as
+    drafted is the overwhelmingly common case."""
+    seen_requests = []
+
+    async def fake_elicit(session, request):
+        seen_requests.append(request)
+        return AskAnswer(status="answered", values=(request.default_value,))
+
+    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_elicit)
+    state = _state(Path("/tmp/x"))
+    state.brief_markdown = "## Goal\n..."
+    outcome = await orchestrator.show_and_confirm(state)
+    assert outcome == "accepted"
+    assert seen_requests[0].default_value == "accept"

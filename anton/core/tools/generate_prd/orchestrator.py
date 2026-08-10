@@ -53,9 +53,15 @@ _DRAFT_BRIEF_INSTRUCTION = (
     "syntax, hex colors, exact pixel/unit sizes, or library/framework "
     "names; that level of detail belongs only in the full PRD, after "
     "acceptance.\n\n"
+    "End with one short closing line asking the user to continue or say "
+    "what to change — in the same language as the rest of your reply — "
+    "and make clear that just pressing Enter means \"continue\" (e.g. "
+    "\"Continue, or any changes? (press Enter to continue)\"). Do not "
+    "invent your own accept/cancel option labels; the actual choices are "
+    "handled separately, this line is only framing.\n\n"
     "Keep every section brief — this is a summary shown before the user "
-    "confirms, not the final document. Reply with the lead-in sentence "
-    "plus the brief, no other text."
+    "confirms, not the final document. Reply with the lead-in sentence, "
+    "the brief, and the closing line — no other text."
 )
 
 _WRITE_PRD_INSTRUCTION = (
@@ -147,6 +153,10 @@ async def show_and_confirm(state: PrdState) -> str:
             AskOption(value="cancel", label="Cancel"),
         ),
         allow_custom=True,
+        # A bare Enter means "looks good, continue" — the far more common
+        # case than cancelling — so it resolves to "accept" instead of the
+        # `AskRequest` default of "cancelled".
+        default_value="accept",
     )
     answer = await sub_tools.ask_via_elicit(state.session, request)
 

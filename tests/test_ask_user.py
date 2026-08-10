@@ -46,6 +46,10 @@ def test_valid_choice_passes():
     assert validate_request(_choice(select="many")) is True
 
 
+def test_default_value_matching_an_option_passes():
+    assert validate_request(_choice(default_value="pg")) is True
+
+
 @pytest.mark.parametrize(
     "request_",
     [
@@ -57,10 +61,12 @@ def test_valid_choice_passes():
         _choice(options=(AskOption(value="pg", label="a"), AskOption(value="pg", label="b"))),
         _choice(options=(AskOption(value="", label="a"), AskOption(value="b", label="b"))),
         _choice(select="several"),
+        _choice(default_value="nope"),
     ],
     ids=[
         "empty-prompt", "blank-prompt", "no-options", "one-option",
         "eleven-options", "duplicate-values", "empty-value", "bad-select",
+        "default-not-an-option",
     ],
 )
 def test_invalid_choice_rejected(request_):
@@ -720,6 +726,35 @@ async def test_cli_choice_escape_and_empty_input_are_cancelled(cli_elicitor, mon
             "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value=value)
         )
         assert (await cli_elicitor.ask("q1", _choice())).status == "cancelled"
+
+
+async def test_cli_choice_forwards_the_default_value_to_prompt_or_cancel(cli_elicitor, monkeypatch):
+    """`prompt_or_cancel` already substitutes its own `default` kwarg for a
+    blank Enter and shows it in the prompt's suffix — `_ask_choice` only
+    has to forward the default option's `value`, not reimplement blank-input
+    handling itself."""
+    mock = AsyncMock(return_value="pg")
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", mock)
+    await cli_elicitor.ask("q1", _choice(default_value="pg"))
+    assert mock.call_args.kwargs["default"] == "pg"
+
+
+async def test_cli_choice_without_a_default_passes_an_empty_default(cli_elicitor, monkeypatch):
+    mock = AsyncMock(return_value="1")
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", mock)
+    await cli_elicitor.ask("q1", _choice())
+    assert mock.call_args.kwargs["default"] == ""
+
+
+async def test_cli_choice_resolves_a_typed_value_directly_not_just_by_number(cli_elicitor, monkeypatch):
+    """Covers both a user typing an option's value by hand and
+    `prompt_or_cancel`'s own blank-Enter default substitution — from
+    `_ask_choice`'s side, both arrive as the same string."""
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="pg")
+    )
+    answer = await cli_elicitor.ask("q1", _choice(default_value="pg"))
+    assert answer == AskAnswer(status="answered", values=("pg",))
 
 
 # ─── CLI elicitor — _ask_path (browse mode) ─────────────────────────────

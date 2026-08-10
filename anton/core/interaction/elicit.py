@@ -76,6 +76,13 @@ class AskRequest:
     options: tuple[AskOption, ...] = ()
     select: str = "one"  # "one" | "many"
     allow_custom: bool = True
+    # The value of one of `options`, chosen when the user presses Enter
+    # with no input instead of picking. Empty string (default) means "no
+    # default" — a blank answer is `cancelled`, as it always was. Only
+    # meaningful for orchestrator code that builds `AskRequest` directly
+    # (`ask_user`'s own JSON schema has no way to set this — the LLM never
+    # picks a default on the human's behalf).
+    default_value: str = ""
     # kind="path"
     path_mode: str = "pick"  # "pick" | "browse"
     path_kind: str = "any"  # "file" | "folder" | "any"
@@ -135,6 +142,8 @@ def validate_request(request: AskRequest) -> bool:
         return False
     values = [option.value for option in request.options]
     if any(not value for value in values):
+        return False
+    if request.default_value and request.default_value not in values:
         return False
     return len(set(values)) == len(values)
 

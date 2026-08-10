@@ -72,10 +72,17 @@ class CLIElicitor:
     async def _ask_choice(self, request: AskRequest) -> AskAnswer:
         """Read the reply. The options were already printed by StreamDisplay.
 
-        Input is a comma-separated list of offered numbers, or anything else,
-        which is taken as the user's own wording. With ``select="one"`` a list
-        keeps only the first number — deliberately, so a stray "2,1" answers
-        with 2 rather than erroring or silently answering with both.
+        Input is a comma-separated list of offered numbers, the value of an
+        option typed directly, or anything else, which is taken as the
+        user's own wording. With ``select="one"`` a list keeps only the
+        first number — deliberately, so a stray "2,1" answers with 2 rather
+        than erroring or silently answering with both.
+
+        ``request.default_value`` (an option's ``value``) is forwarded as
+        ``prompt_or_cancel``'s own ``default`` — that function already
+        substitutes it for a blank Enter and shows it in the prompt's
+        suffix, so a blank Enter and typing the value by hand arrive here
+        as the same string and need no separate handling.
         """
         from anton.utils.prompt import prompt_or_cancel
 
@@ -84,10 +91,14 @@ class CLIElicitor:
             if request.select == "many"
             else "Send the answer number or type your own"
         )
-        raw = await prompt_or_cancel(label)
+        raw = await prompt_or_cancel(label, default=request.default_value)
         if raw is None or not raw.strip():
             return AskAnswer(status="cancelled")
         raw = raw.strip()
+
+        values = {option.value for option in request.options}
+        if raw in values:
+            return AskAnswer(status="answered", values=(raw,))
 
         numbers = {str(i): option for i, option in enumerate(request.options, start=1)}
         tokens = [t.strip() for t in raw.split(",") if t.strip()]
@@ -96,8 +107,9 @@ class CLIElicitor:
             if request.select == "one":
                 picked = picked[:1]
             return AskAnswer(status="answered", values=picked)
-        # Anything that is not a clean list of offered numbers is the user
-        # answering in their own words.
+        # Anything that is not a clean list of offered numbers, and not one
+        # of the option values typed directly, is the user answering in
+        # their own words.
         return AskAnswer(status="answered", text=raw)
 
     # ── path — this class renders as well ────────────────────────────
