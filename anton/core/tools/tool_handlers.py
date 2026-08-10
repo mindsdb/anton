@@ -88,7 +88,8 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
     store = _artifact_store(session)
     if store is None:
         return SideEffectResult.failed(
-            "Artifact store unavailable (no workspace bound to this session)."
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
         )
 
     name = (tc_input.get("name") or "").strip()
@@ -96,15 +97,18 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
     artifact_type = (tc_input.get("type") or "").strip()
     primary = tc_input.get("primary")
     if not name:
-        return SideEffectResult.failed("Error: `name` is required.")
+        return SideEffectResult.failed("Error: `name` is required.", reason="missing_name")
     if not description:
-        return SideEffectResult.failed("Error: `description` is required.")
+        return SideEffectResult.failed(
+            "Error: `description` is required.", reason="missing_description"
+        )
 
     from anton.core.artifacts.models import ARTIFACT_TYPES
 
     if artifact_type not in ARTIFACT_TYPES:
         return SideEffectResult.failed(
-            f"Error: `type` must be one of {ARTIFACT_TYPES}. Got: {artifact_type!r}."
+            f"Error: `type` must be one of {ARTIFACT_TYPES}. Got: {artifact_type!r}.",
+            reason="invalid_type",
         )
 
     artifact = store.create(  # type: ignore[arg-type]
@@ -126,7 +130,7 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
         committed_at=now_iso(),
         details={
             "slug": artifact.slug,
-            "path": folder,
+            "path": str(folder),
             "name": artifact.name,
             "type": artifact.type,
             "primary": artifact.primary,
@@ -146,12 +150,13 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     store = _artifact_store(session)
     if store is None:
         return SideEffectResult.failed(
-            "Artifact store unavailable (no workspace bound to this session)."
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
         )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return SideEffectResult.failed("Error: `slug` is required.")
+        return SideEffectResult.failed("Error: `slug` is required.", reason="missing_slug")
 
     kwargs: dict = {}
     if "primary" in tc_input:
@@ -160,7 +165,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         try:
             kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
         except (TypeError, ValueError):
-            return SideEffectResult.failed("Error: `port` must be a number.")
+            return SideEffectResult.failed("Error: `port` must be a number.", reason="invalid_port")
 
     if "datasources" in tc_input:
         from anton.core.artifacts.models import DatasourceRef
@@ -169,7 +174,8 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         raw_list = tc_input.get("datasources") or []
         if not isinstance(raw_list, list):
             return SideEffectResult.failed(
-                "Error: `datasources` must be a list of slug strings."
+                "Error: `datasources` must be a list of slug strings.",
+                reason="invalid_datasources",
             )
 
         vault = session._data_vault or LocalDataVault()
@@ -181,7 +187,8 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         for item in raw_list:
             if not isinstance(item, str):
                 return SideEffectResult.failed(
-                    "Error: each entry in `datasources` must be a slug string."
+                    "Error: each entry in `datasources` must be a slug string.",
+                    reason="invalid_datasources",
                 )
             ref_slug = item.strip()
             if not ref_slug:
@@ -195,13 +202,16 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             return SideEffectResult.failed(
                 f"Error: unknown datasource slug(s): {', '.join(unknown)}. "
                 f"Each slug must match an existing vault connection "
-                f"(format: `<engine>-<name>`)."
+                f"(format: `<engine>-<name>`).",
+                reason="unknown_datasource",
             )
         kwargs["datasources"] = refs
 
     artifact = store.update(slug, **kwargs)
     if artifact is None:
-        return SideEffectResult.failed(f"Error: no artifact found for slug `{slug}`.")
+        return SideEffectResult.failed(
+            f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+        )
     datasources = [d.slug for d in artifact.datasources]
     return SideEffectResult(
         success=True,
@@ -240,15 +250,18 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     store = _artifact_store(session)
     if store is None:
         return SideEffectResult.failed(
-            "Artifact store unavailable (no workspace bound to this session)."
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
         )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return SideEffectResult.failed("Error: `slug` is required.")
+        return SideEffectResult.failed("Error: `slug` is required.", reason="missing_slug")
     artifact = store.open(slug)
     if artifact is None:
-        return SideEffectResult.failed(f"Error: no artifact found for slug `{slug}`.")
+        return SideEffectResult.failed(
+            f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+        )
 
     rel_path = (tc_input.get("path") or "backend.py").strip()
     extra_args = tc_input.get("extra_args") or []
@@ -256,7 +269,9 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     try:
         health_timeout = float(tc_input.get("health_timeout", 10))
     except (TypeError, ValueError):
-        return SideEffectResult.failed("Error: `health_timeout` must be a number.")
+        return SideEffectResult.failed(
+            "Error: `health_timeout` must be a number.", reason="invalid_health_timeout"
+        )
 
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:
@@ -276,7 +291,7 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     # The launcher rolls back on failure (kills the process, never tracks it),
     # so a string result means nothing committed.
     if isinstance(result, str):
-        return SideEffectResult.failed(result)
+        return SideEffectResult.failed(result, reason="launch_failed")
 
     store.update(slug, port=result["port"])
     url = result.get("url", "")

@@ -64,8 +64,11 @@ class SideEffectResult:
             "content_hash": self.content_hash,
             "details": self.details,
         }
+        # `details` is a free-form per-tool dict; `default=str` keeps a stray
+        # non-JSON value (Path, datetime) from crashing the whole tool — which
+        # dispatch would otherwise surface as a spurious failure.
         return ToolOutcome(
-            content=json.dumps(payload, indent=2),
+            content=json.dumps(payload, indent=2, default=str),
             ok=self.success,
             reason=reason,
         )

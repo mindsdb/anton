@@ -68,20 +68,38 @@ def test_environmental_failure_is_explicit_ok_false():
     assert outcome.ok is False
 
 
+class _WS:
+    def __init__(self, d):
+        self.artifacts_dir = d
+
+
+class _Sess:
+    def __init__(self, d):
+        self._workspace = _WS(d)
+        self._data_vault = None
+
+
 def test_validation_failure_is_explicit_ok_false(tmp_path):
-    class _WS:
-        def __init__(self, d):
-            self.artifacts_dir = d
-
-    class _Sess:
-        def __init__(self, d):
-            self._workspace = _WS(d)
-
     # Missing `name` is a validation rejection — also an explicit failure now.
     outcome = asyncio.run(
         handle_create_artifact(_Sess(tmp_path), {"description": "y", "type": "html-app"})
     )
     assert outcome.ok is False
+
+
+def test_create_artifact_success_serializes(tmp_path):
+    # Success path must serialize cleanly — `details.path` is a Path, and
+    # to_outcome() JSON-encodes the payload; an unserialized Path would crash
+    # the tool and dispatch would report a spurious failure.
+    outcome = asyncio.run(
+        handle_create_artifact(
+            _Sess(tmp_path), {"name": "My Art", "description": "y", "type": "html-app"}
+        )
+    )
+    assert outcome.ok is True
+    payload = json.loads(outcome.content)
+    assert isinstance(payload["details"]["path"], str)
+    assert payload["resource_id"] == payload["details"]["slug"]
 
 
 if __name__ == "__main__":
