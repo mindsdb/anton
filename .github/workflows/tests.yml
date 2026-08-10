@@ -21,11 +21,16 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Check uv.lock matches pyproject.toml
+        # Snyk scans the lockfile, so a lockfile behind pyproject.toml means
+        # Snyk is reporting on dependencies we no longer install.
+        run: uv lock --check
+
       - name: Run unit tests
-        run: uv run --extra dev pytest tests/ -v --ignore=tests/e2e
+        run: uv run --group dev pytest tests/ -v --ignore=tests/e2e
 
       - name: Run E2E tests (stub)
-        run: uv run --extra dev pytest tests/e2e/ -v
+        run: uv run --group dev pytest tests/e2e/ -v
 
   notify:
     # Alert the eng channel if CI fails on a direct push to main/staging. PR runs
