@@ -1048,7 +1048,6 @@ def test_the_ask_user_carve_out_reaches_the_prompt_only_when_the_tool_is_there()
     def _build(tool_defs):
         return ChatSystemPromptBuilder().build(
             conversation_started="2026-07-31T12:00:00+00:00",
-            current_datetime="2026-07-31T12:00:00+00:00",
             system_prompt_context=SystemPromptContext(runtime_context="test"),
             proactive_dashboards=False,
             output_dir="",
