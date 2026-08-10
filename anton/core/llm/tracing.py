@@ -85,4 +85,13 @@ def tagged_trace(*tags: str):
     try:
         yield
     finally:
-        _trace_ctx.reset(token)
+        try:
+            _trace_ctx.reset(token)
+        except ValueError:
+            # Cross-context teardown: when an abandoned async generator is
+            # finalized, the cleanup can run in a COPIED context, where resetting
+            # a token created elsewhere raises. `ChatSession.turn_stream` already
+            # carries this exact guard (#309 review), where an unguarded reset
+            # aborted a `finally` and dropped the whole turn's books. The copy
+            # dies with the context, so there is nothing to restore.
+            pass

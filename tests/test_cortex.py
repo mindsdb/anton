@@ -424,6 +424,61 @@ class TestRuleRetrievalObservability:
 
         assert get_trace_context() is None
 
+    async def test_a_user_abort_is_not_reported_as_a_filter_failure(self, cortex, captured_events):
+        """`CancelledError` is a BaseException, so `except Exception` misses it —
+        but the `finally` still fires. Without a distinct branch every user
+        pressing STOP (or an abandoned SSE stream) was counted as `error`,
+        inflating the failure rate in the one metric this instrumentation exists
+        to produce. Found by adversarial self-review, reproduced before fixing."""
+        import asyncio
+
+        class _Hanging:
+            async def code(self, **kwargs):
+                await asyncio.sleep(30)
+
+        cortex._llm = _Hanging()
+        task = asyncio.create_task(
+            cortex._retrieve_relevant_rules(_when_engrams(12), "do the august campaign")
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert _one_event(captured_events)["outcome"] == "cancelled", (
+            "a cancelled turn must be distinguishable from a filter that failed"
+        )
+
+    async def test_the_tag_reaches_the_actual_langfuse_header(self, cortex):
+        """Done-when #1 is about a TRACE, so asserting the ContextVar is not enough.
+
+        The tag has to survive `_build_trace_headers` and its sanitiser (which
+        drops commas and control chars) to reach the wire. Without this, an
+        allowlist or a rename in that builder would break the ticket's
+        requirement with every other test still green.
+        """
+        from anton.core.llm.openai import OpenAIProvider
+        from anton.core.llm.tracing import (
+            TraceContext,
+            reset_trace_context,
+            set_trace_context,
+            tagged_trace,
+        )
+
+        provider = OpenAIProvider(api_key="x", base_url="https://api.mindshub.ai/v1")
+        token = set_trace_context(TraceContext(session_id="c", turn_id=1, harness="anton"))
+        try:
+            with tagged_trace("rule-retrieval"):
+                tagged = (provider._build_trace_headers() or {}).get("Langfuse-Tags", "")
+            after = (provider._build_trace_headers() or {}).get("Langfuse-Tags", "")
+        finally:
+            reset_trace_context(token)
+
+        assert "rule-retrieval" in tagged.split(","), tagged
+        assert "rule-retrieval" not in after.split(","), (
+            "the tag must not outlive the call it annotates"
+        )
+
     async def test_no_rule_text_or_user_message_reaches_analytics(self, cortex, captured_events):
         """The ticket's security note: shape only — counts, sizes, enums."""
         rules = _when_engrams(12)

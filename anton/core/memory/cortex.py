@@ -19,6 +19,7 @@ like how the PFC coordinates retrieval from multiple brain memory systems.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -383,6 +384,17 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                     outcome, kept = "filtered", len(filtered_when)
             else:
                 outcome, filtered_when = "kept_all_empty", when_engrams
+        except asyncio.CancelledError:
+            # A user pressing STOP, or an abandoned SSE stream, cancels the turn
+            # mid-call. `CancelledError` is a BaseException, so `except Exception`
+            # below does NOT catch it — but the `finally` still fires, and without
+            # this branch every user abort was reported as `error`, inflating the
+            # filter-failure rate in the one metric this instrumentation exists to
+            # produce. Reported distinctly and re-raised: cancellation is not ours
+            # to swallow. (`kept_rules` is meaningless here — no decision was
+            # reached — which is why consumers must key on `outcome` first.)
+            outcome = "cancelled"
+            raise
         except Exception:
             filtered_when = when_engrams
             outcome = "error"
