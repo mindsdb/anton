@@ -37,6 +37,8 @@ async def run_connection_test(
 
         vault.clear_ds_env()
         for key, value in credentials.items():
+            if key.startswith("_"):
+                continue
             os.environ[f"DS_{key.upper()}"] = value
         register_secret_vars(engine_def)  # flat mode, for scrubbing during test
 

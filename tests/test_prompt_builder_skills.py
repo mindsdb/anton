@@ -39,7 +39,6 @@ def populated_store(tmp_path: Path) -> SkillStore:
 def _build_prompt(builder: ChatSystemPromptBuilder, **overrides) -> str:
     defaults = dict(
         conversation_started="2026-04-10T12:00:00+00:00",
-        current_datetime="2026-04-10T12:00:00+00:00",
         system_prompt_context=SystemPromptContext(runtime_context="test runtime"),
         proactive_dashboards=False,
         output_dir="",
@@ -141,3 +140,12 @@ class TestProceduralMemorySection:
         builder = ChatSystemPromptBuilder()
         prompt = _build_prompt(builder, skill_store=s)
         assert "Procedural memory" not in prompt
+
+
+def test_system_prompt_has_no_volatile_clock():
+    """ENG-1092: the live clock must stay OUT of the cached system prefix; the
+    model reads "now" from each message's bracketed timestamp instead."""
+    builder = ChatSystemPromptBuilder()
+    prompt = _build_prompt(builder)
+    assert "Current date and time" not in prompt
+    assert "prefixed with the time they were sent" in prompt

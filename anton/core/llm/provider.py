@@ -3,7 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from anton.core.interaction.elicit import AskAnswer, AskRequest
 
 
 @dataclass
@@ -93,18 +96,33 @@ class StreamComplete:
 class StreamTaskProgress:
     """Progress event from agent task execution (planning, building, executing).
 
-    `id` carries the originating tool_use id when this progress event
-    is a scratchpad phase marker (e.g. `scratchpad_start` /
-    `scratchpad_done`). The frontend correlates the event to the
-    specific step it advances; without it, multi-cell turns where the
-    LLM queued several tool calls before execution would patch the
-    wrong step (always the last one in the array).
+    `id` carries the originating tool_use id when this progress event is a
+    scratchpad phase marker (e.g. `scratchpad_start` / `scratchpad_done`), a
+    generic streaming tool's `tool_progress` marker, or that same tool's
+    closing `tool_done` marker (see `ToolRegistry.dispatch_tool_stream`,
+    `anton/core/tools/registry.py`). The frontend correlates the event to the
+    specific step it advances; without it, multi-cell turns where the LLM
+    queued several tool calls before execution would patch the wrong step
+    (always the last one in the array).
+
+    `ok` carries the tool's success/failure verdict on a `tool_done` marker
+    for a generic tool — same tri-state as `ToolOutcome.ok` (`anton/core/
+    tools/registry.py`): `None` when the handler hasn't declared a verdict
+    (legacy/unclassified), `True`/`False` otherwise. A handler exception
+    always forces `False` regardless of what it would have otherwise been.
+    Without this, every consumer that renders `tool_done` as "done" (CLI
+    activity line, cowork's step UI) has no way to tell a failed tool call
+    from a successful one — the CLI printed a green checkmark for a tool
+    that raised, because `tool_done` firing was the only signal it had, and
+    it always fires now (ENG-763's own reliability fix made this reachable —
+    see PR #304 review). Unset (`None`) on every other phase.
     """
 
     phase: str
     message: str
     eta_seconds: float | None = None
     id: str | None = None
+    ok: bool | None = None
 
 
 @dataclass
@@ -132,6 +150,33 @@ class StreamContextCompacted:
 
 
 @dataclass
+class StreamAskUser:
+    """A question the user must answer before the turn can continue.
+
+    ``id`` is the question id the host echoes back with the answer, and an
+    opaque correlation/dedup key as far as the host is concerned: a minted
+    uuid, prefixed by origin (``ask:``, ``path:``). It is deliberately NOT the
+    originating ``tool_use.id``, which a tool handler cannot see —
+    ``dispatch_tool`` passes only the tool name and input.
+    """
+
+    id: str
+    request: AskRequest
+
+
+@dataclass
+class StreamAskUserAnswered:
+    """Retires a previously published question.
+
+    Emitted so a client replaying the buffer from the start does not show
+    live buttons on a question that was already answered.
+    """
+
+    id: str
+    answer: AskAnswer
+
+
+@dataclass
 class StreamReasoningDelta:
     """A chunk of the model's own extended-thinking/reasoning text.
 
@@ -155,6 +200,8 @@ StreamEvent = (
     | StreamTaskProgress
     | StreamToolResult
     | StreamContextCompacted
+    | StreamAskUser
+    | StreamAskUserAnswered
     | StreamReasoningDelta
 )
 
@@ -574,6 +621,70 @@ class ModelUnavailableError(ConnectionError):
         super().__init__(message)
         self.code = code
         self.model = model
+
+
+def classify_404(
+    model: str,
+    *,
+    message: str | None,
+    code: str | None = None,
+    status: str | None = None,
+    error_type: str | None = None,
+) -> "ModelUnavailableError | EndpointConfigurationError":
+    """Classify a bare 404 as model-not-found vs. endpoint-misconfiguration.
+
+    Shared by the OpenAI-compatible and Anthropic status-error mappers
+    (ENG-1139) so the heuristic — and the exact non-duplicated wording —
+    can't drift between them. A bare 404 does NOT by itself mean the model
+    is missing: a wrong base URL, a missing ``/v1``, a reverse-proxy route,
+    or an unsupported API path all 404 too, and there "switch models" is
+    the wrong remedy (ENG-1145). Only treat it as model-not-found when the
+    structured body actually points at the model: OpenAI's
+    ``code="model_not_found"``, Anthropic's ``error.type="not_found_error"``,
+    or a model-oriented message (Gemini's ``status="NOT_FOUND"`` with
+    "models/<id> is not found / no longer available"). Everything else is
+    surfaced as an endpoint/configuration failure carrying the provider's
+    own words.
+    """
+    msg_l = message.lower() if isinstance(message, str) else ""
+    status_str = (status or "").upper()
+    model_specific = (
+        code == "model_not_found"
+        or error_type == "not_found_error"
+        or (
+            "model" in msg_l
+            and (
+                status_str == "NOT_FOUND"
+                or "not found" in msg_l
+                or "not available" in msg_l
+                or "no longer available" in msg_l
+                or "does not exist" in msg_l
+            )
+        )
+    )
+    # Provider message as a leading-space fragment with a normalized
+    # terminator, so the appended copy reads cleanly whether or not the
+    # provider punctuated its own message (Gemini's ends in a period; a raw
+    # proxy/FastAPI detail may not).
+    clean = message.strip() if isinstance(message, str) else ""
+    if clean and clean[-1] not in ".!?":
+        clean += "."
+    suffix = f" {clean}" if clean else ""
+    if model_specific:
+        reason = f":{suffix}" if suffix else "."
+        return ModelUnavailableError(
+            f"The model '{model}' isn't available{reason} Switch models in Settings.",
+            code="model_not_found", model=model,
+        )
+    # Not model-specific → almost always a misrouted/misconfigured endpoint
+    # (bad base URL, missing /v1, proxy route). Permanent for this request,
+    # but the remedy is the endpoint config, not the model — a distinct type
+    # so the CLI defaults it to `setup` (fix provider/endpoint), not `retry`,
+    # and never to "switch models" (ENG-1145 review).
+    return EndpointConfigurationError(
+        f"The model endpoint returned 404 — check the endpoint URL and model "
+        f"configuration.{suffix}"
+    )
 
 
 class EndpointConfigurationError(ConnectionError):

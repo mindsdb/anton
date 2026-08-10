@@ -4,8 +4,9 @@ import asyncio
 import httpx
 import random
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMResponse,
     ModelUnavailableError,
     ProviderOverloadedError,
@@ -61,9 +63,11 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
+    ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
@@ -76,7 +80,8 @@ from anton.core.tools.tool_defs import (
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
-from anton.core.interaction.selection import SelectionElicitor
+from anton.core.interaction.elicit import Elicitor
+from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     build_workspace_discovery_context,
     prepare_scratchpad_exec,
@@ -172,6 +177,27 @@ def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
         else b
         for b in user_input
     ]
+
+
+def _stamp_user_content(
+    user_input: str | list[dict], now: datetime
+) -> str | list[dict]:
+    """Prefix a user turn with its send time as ``[YYYY-MM-DD HH:MM]``.
+
+    The live clock lives here, on the message, instead of in the system prompt
+    — so the cache-stable prefix (system + tools + settled history) stays
+    byte-identical across turns. The format matches cowork-server's history
+    stamp (``anton_harness/harness.py``), so a message reads the same whether
+    it's this turn's live input or replayed from persisted history — the caller
+    MUST pass a UTC ``now`` to match that history stamp (built from the DB's
+    UTC ``created_at``); a local-time stamp would drift by the TZ offset.
+
+    Only string content is stamped; mixed image/file turns pass through
+    unchanged, mirroring cowork-server's behaviour.
+    """
+    if isinstance(user_input, str) and user_input:
+        return f"[{now.strftime('%Y-%m-%d %H:%M')}] {user_input}"
+    return user_input
 
 
 class _VerifierVerdict(BaseModel):
@@ -587,7 +613,12 @@ class ChatSessionConfig:
     # so resuming a conversation days later still reports the real "now".
     # None → fall back to today.
     started_at: datetime | None = None
-    selection_elicitor: SelectionElicitor | None = None
+    # Strategy for mid-turn questions (`ask_user`, `select_path`). Hosts
+    # inject a concrete elicitor — a GUI card in cowork-server, a terminal
+    # prompt on the CLI. None + a console falls back to the CLI elicitor;
+    # None + no console means questions are unavailable and the tools that
+    # need one are not registered.
+    elicitor: Elicitor | None = None
     # Cheap front-model routing (ENG-648). None (default) defers to the
     # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
     # explicit bool to override per session.
@@ -683,13 +714,26 @@ class ChatSession:
         # langfuse propagation in the provider layer).
         self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
-        self._escape_watcher: EscapeWatcher | None = None
+        self.escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
-        # Strategy for mid-turn file/folder disambiguation (the `select_path`
-        # tool). Hosts inject a concrete elicitor — a streaming GUI picker in
-        # cowork-server, a terminal picker on the CLI. None falls back to the
-        # console picker (CLI) or a graceful no-op (headless).
-        self.selection_elicitor: SelectionElicitor | None = config.selection_elicitor
+        # Resolved once, here, because tool registration reads
+        # `supported_kinds` and `answer_hint` off the instance.
+        # Host-injected first; a console-backed session (the real CLI,
+        # chat.py passes console=console) falls back to CLIElicitor so it
+        # always gets a working elicitor.
+        self.elicitor: Elicitor | None = config.elicitor
+        if self.elicitor is None and config.console is not None:
+            from anton.core.interaction.cli import CLIElicitor
+
+            self.elicitor = CLIElicitor(config.console)
+        # Out-of-band event path, attached for the duration of a
+        # `turn_stream` turn only. `turn()` leaves it None, which is what
+        # makes questions unavailable on the non-streaming path.
+        self.emitter = None
+        self.question_count = 0
+        # Seconds spent waiting on humans during the current tool dispatch,
+        # subtracted from the tool's reported elapsed time.
+        self.answer_wait_s = 0.0
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -1146,16 +1190,13 @@ class ChatSession:
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
-        # Two stamps, deliberately split for cache-stability AND correctness:
-        #  • conversation_started — the task's creation time (self._started_at),
-        #    a FIXED fact rendered in the cache-stable prefix; identical every
-        #    turn so it never busts the prefix cache.
-        #  • current_datetime — the real wall clock, rendered in the VOLATILE
-        #    tail (after the cached prefix) so it's always accurate even when a
-        #    conversation is resumed days/weeks later, without touching the cache.
+        # conversation_started — the task's creation time (self._started_at), a
+        # FIXED fact rendered in the cache-stable prefix; identical every turn so
+        # it never busts the prefix cache. The live "now" is NOT in the system
+        # prompt: it rides on each user message's bracketed timestamp (see
+        # turn_stream), keeping the whole prefix cacheable across turns.
         _started = self._started_at or _dt.datetime.now()
         _conversation_started = _started.strftime("%A, %B %d, %Y")
-        _current_datetime = _dt.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
@@ -1191,7 +1232,6 @@ class ChatSession:
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
             conversation_started=_conversation_started,
-            current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -1305,8 +1345,27 @@ class ChatSession:
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
         # Interactive file/folder disambiguation — always available; degrades
-        # to a plain-text prompt when no elicitor/console is present.
+        # to picker_unavailable (and still auto-resolves a single candidate)
+        # when no elicitor supports path questions.
         self.tool_registry.register_tool(SELECT_PATH_TOOL)
+
+        # Multiple-choice questions — only when some host can actually render
+        # them. Without this the model would ask into a void. The cowork kill
+        # switch works by withholding the elicitor, so it needs no case here.
+        if self.elicitor is not None and "choice" in self.elicitor.supported_kinds:
+            # Copy, don't mutate: ToolDefs are module-level singletons and the
+            # hint is per-host, so an in-place edit would leak across every
+            # session sharing this process.
+            self.tool_registry.register_tool(
+                replace(
+                    ASK_USER_TOOL,
+                    description=(
+                        ASK_USER_TOOL.description
+                        + "\n\n"
+                        + self.elicitor.answer_hint
+                    ),
+                )
+            )
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
@@ -1346,6 +1405,14 @@ class ChatSession:
         """Clean up scratchpads and other resources."""
         await self._reap_tracked_backends()
         await self._scratchpads.close_all()
+
+    async def emit(self, event) -> None:
+        """Push an out-of-band event to the host, if one is listening.
+
+        A no-op without an emitter, so callers never need to guard.
+        """
+        if self.emitter is not None:
+            await self.emitter.emit(event)
 
     async def _reap_tracked_backends(self) -> None:
         """Terminate every backend launched via launch_backend.
@@ -2336,7 +2403,11 @@ class ChatSession:
 
     async def turn(self, user_input: str | list[dict]) -> str:
         user_input = _scrub_user_input(user_input)
-        self._append_history({"role": "user", "content": user_input})
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
+        self._append_history({"role": "user", "content": stamped_input})
 
         # Open the turn's cost books (ENG-1288) — same contract as
         # turn_stream. This non-streaming path has no wrapping finally, so
@@ -2446,7 +2517,7 @@ class ChatSession:
             for tc in response.tool_calls:
                 try:
                     outcome = await self.tool_registry.dispatch_tool(
-                        self, tc.name, tc.input
+                        self, tc.name, tc.input, tool_call_id=tc.id,
                     )
                 except Exception as exc:
                     # A raise is a definitive failure verdict — no text
@@ -2538,7 +2609,128 @@ class ChatSession:
         self._emit_turn_cost()
         return reply
 
+    async def _dispatch_draining(self, tc):
+        """Run one tool while forwarding whatever it emits out of band.
+
+        Yields ``("event", ev)`` for each out-of-band event, then
+        ``("result", outcome)`` — the ``ToolOutcome`` ``dispatch_tool``
+        returns, so the caller reads ``.content`` and ``.ok`` off it rather
+        than receiving bare text. "Out of band" covers both an ``ask_user``
+        question (ENG-1276, #292) and a streaming tool's ``ToolProgress``
+        markers (ENG-763) — ``dispatch_tool`` relays the latter through
+        ``session.emitter`` too, since it has no other way to reach the
+        caller while running inside this method's background task; both
+        kinds arrive here as plain ``("event", ev)`` tuples, indistinguishable
+        by this method. Four details are load-bearing:
+
+        1. Cancelling BOTH futures in ``finally`` — ``asyncio.wait`` does NOT
+           cancel its futures when the awaiting coroutine is cancelled. Without
+           ``task.cancel()`` a Stop unwinds the turn while the tool keeps
+           waiting on a human for the full timeout, holding its answer channel
+           open; without ``getter.cancel()`` the pending ``emitter.get()``
+           stays registered in the queue's ``_getters`` and asyncio later logs
+           "Task was destroyed but it is pending!".
+        2. The tail drain — events queued immediately before the tool
+           returns (``StreamAskUserAnswered`` above all) would otherwise be
+           dropped, leaving a live card that can never be retired. It is
+           reachable because resolving ``asyncio.wait``'s waiter takes two
+           ``call_soon`` hops (``_on_completion`` -> ``waiter.set_result`` ->
+           our ``__wakeup``): an emit landing between those hops leaves the
+           item sitting in ``Queue._queue`` with the getter still pending, so
+           the loop breaks past it and only the tail drain recovers it. Pinned
+           by ``test_an_event_emitted_one_hop_late_is_recovered_by_the_tail_drain``
+           — that test is the reason to not delete this loop.
+        3. ``task.result()`` rather than a bare ``await`` — ``asyncio.wait``
+           never re-raises a completed task's exception, and the caller's
+           ``except Exception`` is what turns a tool failure into a tool
+           result for the model.
+        4. Callers must ``aclose()`` this generator: if the turn is
+           cancelled while we are suspended at a ``yield``, our ``finally``
+           only runs on finalization, which GC would otherwise defer.
+        """
+        task = asyncio.create_task(
+            self.tool_registry.dispatch_tool(
+                self, tc.name, tc.input, tool_call_id=tc.id,
+            )
+        )
+        # Bound before the try: the `finally` cancels it, and if the first
+        # `ensure_future` below raised, an unbound name there would turn the
+        # real cause into a NameError.
+        getter = None
+        try:
+            while True:
+                getter = asyncio.ensure_future(self.emitter.get())
+                done, _ = await asyncio.wait(
+                    {task, getter}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if getter in done:
+                    yield ("event", getter.result())
+                    continue
+                # Cancel here, not only in the `finally`: the yields below are
+                # suspension points, and a doomed-but-still-registered getter
+                # would be handed any event emitted while the host processes
+                # them. `gather` would then discard that event, and it would
+                # not even be left in the queue for a later drain to recover.
+                getter.cancel()
+                break
+            while not self.emitter.empty():
+                yield ("event", self.emitter.get_nowait())
+            yield ("result", task.result())
+        finally:
+            # Both futures, not just the dispatch: asyncio.wait cancels neither
+            # of its own (that is hazard 1's premise), so a Stop landing while
+            # we are parked in wait — a tool running without emitting, i.e. the
+            # common Stop — would leave a pending emitter.get() registered in
+            # the queue's _getters forever, and asyncio later logs
+            # "Task was destroyed but it is pending!".
+            task.cancel()
+            pending = [task]
+            if getter is not None:
+                getter.cancel()
+                pending.append(getter)
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def turn_stream(
+        self,
+        user_input: str | list[dict],
+        *,
+        turn_id: int | None = None,
+        trace_tags: list[str] | None = None,
+        trace_metadata: dict[str, str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Streaming turn. Owns the out-of-band emitter's lifetime.
+
+        The emitter exists only for the duration of one streaming turn, which
+        is what makes questions unavailable on the non-streaming `turn()`
+        path: nothing there would render them.
+        """
+        self.emitter = TurnEmitter()
+        self.question_count = 0
+        self.answer_wait_s = 0.0
+        # Bind the inner generator so we can close it explicitly. A bare
+        # `async for` would leave it suspended at its own `yield` when a host
+        # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
+        # torn down, and the inner `finally` — which owns the turn-cost
+        # terminal (`_emit_turn_cost`) — is left to the event loop's async
+        # generator finalization, i.e. deferred to a fresh task with a copied
+        # context, or to GC. `aclose()` on this wrapper must be a same-task
+        # close all the way down. Pinned by
+        # tests/test_turn_cost_terminals.py::test_abandoned_generator_still_emits_exactly_once.
+        # Same discipline as `_dispatch_draining`'s point 4.
+        inner = self._turn_stream_inner(
+            user_input,
+            turn_id=turn_id,
+            trace_tags=trace_tags,
+            trace_metadata=trace_metadata,
+        )
+        try:
+            async for event in inner:
+                yield event
+        finally:
+            await inner.aclose()
+            self.emitter = None
+
+    async def _turn_stream_inner(
         self,
         user_input: str | list[dict],
         *,
@@ -2562,7 +2754,11 @@ class ChatSession:
         """
         self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
-        self._append_history({"role": "user", "content": user_input})
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
+        self._append_history({"role": "user", "content": stamped_input})
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -2669,12 +2865,15 @@ class ChatSession:
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
-                    # Token/billing limits and model-gate 403s are
-                    # deterministic — the auto-retry below would just re-send
-                    # the same doomed request (and burn its budget) before
-                    # failing anyway. Don't retry; let the chat loop / server
-                    # map them to their cards.
-                    if isinstance(_agent_exc, (TokenLimitExceeded, ModelUnavailableError)):
+                    # Token/billing limits, model-gate 403s, and endpoint/model
+                    # 404s (ENG-1139) are deterministic — the auto-retry below
+                    # would just re-send the same doomed request (and burn its
+                    # budget) before failing anyway. Don't retry; let the chat
+                    # loop / server map them to their cards.
+                    if isinstance(
+                        _agent_exc,
+                        (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError),
+                    ):
                         raise
 
                     # ENG-673: a mid-stream transient failure that had NO prior
@@ -3257,49 +3456,134 @@ class ChatSession:
                                     )
                         elif (
                             tc.name == "connect_new_datasource"
-                            or tc.name == "select_path"
                             or (
                                 tc.name == "publish_or_preview"
                                 and tc.input.get("action") == "publish"
                             )
                         ):
-                            # Interactive tool — pause spinner AND escape watcher
+                            # Interactive tool — pause spinner AND escape
+                            # watcher. `select_path` is deliberately NOT here:
+                            # elicit() owns its own spinner and watcher
+                            # handling, and EscapeWatcher._paused is a boolean
+                            # flag rather than a counter, so a nested pause
+                            # would let the first resume() hand the terminal
+                            # back while this branch still believed it was
+                            # paused.
                             yield StreamTaskProgress(
                                 phase="interactive",
                                 message="",
                             )
-                            if self._escape_watcher:
-                                self._escape_watcher.pause()
+                            if self.escape_watcher:
+                                self.escape_watcher.pause()
                             try:
-                                _outcome = await self.tool_registry.dispatch_tool(
-                                    self, tc.name, tc.input
-                                )
+                                agen = self._dispatch_draining(tc)
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            _outcome = _payload
+                                finally:
+                                    await agen.aclose()
+                                # See the twin drain on the general branch
+                                # below.
+                                while not self.emitter.empty():
+                                    yield self.emitter.get_nowait()
                                 result_text = _outcome.content
                                 tool_ok = _outcome.ok
                             finally:
-                                if self._escape_watcher:
-                                    self._escape_watcher.resume()
+                                if self.escape_watcher:
+                                    self.escape_watcher.resume()
                             yield StreamTaskProgress(
                                 phase="analyzing",
                                 message="Analyzing results...",
                             )
                         else:
-                            # Non-scratchpad, non-interactive tool — track elapsed
+                            # Non-scratchpad, non-interactive tool — track elapsed.
+                            # dispatch_tool_stream() forwards ToolProgress markers
+                            # from a streaming handler as they arrive; a plain
+                            # (non-streaming) handler yields exactly one item (its
+                            # result), so this same loop works for both kinds.
                             yield StreamTaskProgress(
                                 phase="tool_start",
                                 message=tc.name,
                             )
-                            _outcome = await self.tool_registry.dispatch_tool(
-                                self, tc.name, tc.input
+                            # Runs through _dispatch_draining (ENG-1276/ask-user,
+                            # #292) so a generic tool can elicit() mid-call just
+                            # like the interactive branch above. ToolProgress
+                            # markers (ENG-763) are relayed by dispatch_tool
+                            # itself via session.emitter — _dispatch_draining
+                            # forwards them here as ordinary ("event", ev)
+                            # tuples, no different from an ask_user event.
+                            self.answer_wait_s = 0.0
+                            _tool_error: Exception | None = None
+                            agen = self._dispatch_draining(tc)
+                            try:
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            _outcome = _payload
+                                finally:
+                                    await agen.aclose()
+                                # Anything a tool queued after the helper handed us
+                                # the result — a background task outliving its tool
+                                # call — would otherwise sit in the queue until the
+                                # next tool's drain, or forever if this was the last
+                                # tool of the turn, leaving a published card that is
+                                # never retired. Not reachable by any tool today
+                                # (every ask_user emit happens inside elicit(),
+                                # before the handler returns, and a
+                                # generate_artifact sub-agent runs inside the drained
+                                # window too), so this is a guard for the next one.
+                                #
+                                # An ordinary in-loop yield, deliberately NOT in a
+                                # `finally`: you cannot yield from an async
+                                # generator's finally.
+                                while not self.emitter.empty():
+                                    yield self.emitter.get_nowait()
+                                result_text = _outcome.content
+                                tool_ok = _outcome.ok
+                            except Exception as exc:
+                                # Caught locally ONLY so the tool_done marker
+                                # below can still be yielded from ordinary
+                                # (non-unwinding) execution; re-raised right
+                                # after, so the outer handler a few lines below
+                                # still builds "Tool 'x' failed: ...".
+                                # GeneratorExit is a BaseException, not an
+                                # Exception, so cancellation via the consumer
+                                # closing this generator is NOT caught here —
+                                # it propagates straight through and the
+                                # generator closes without a tool_done, same as
+                                # any other stream abort. NOT a try/finally
+                                # with a yield inside: yielding while the
+                                # generator is being closed raises "async
+                                # generator ignored GeneratorExit".
+                                _tool_error = exc
+
+                            # Human thinking time is not the tool's runtime:
+                            # a 4-minute ask_user would otherwise show up in
+                            # the CLI report and in telemetry as a slow tool.
+                            _tool_elapsed = (
+                                _time.monotonic() - _tool_t0 - self.answer_wait_s
                             )
-                            result_text = _outcome.content
-                            tool_ok = _outcome.ok
-                            _tool_elapsed = _time.monotonic() - _tool_t0
+                            # A raised exception is a definitive failure verdict
+                            # regardless of tool_ok — without this, tool_done
+                            # firing (guaranteed even on error, by design) with
+                            # no verdict at all rendered as an unconditional
+                            # success in every consumer (PR #304 review): the
+                            # CLI printed a green checkmark for a tool that
+                            # just raised.
                             yield StreamTaskProgress(
                                 phase="tool_done",
                                 message=tc.name,
-                                eta_seconds=_tool_elapsed,
+                                eta_seconds=max(_tool_elapsed, 0.0),
+                                id=tc.id,
+                                ok=False if _tool_error is not None else tool_ok,
                             )
+                            if _tool_error is not None:
+                                raise _tool_error
                             if (
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"

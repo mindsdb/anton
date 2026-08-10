@@ -447,3 +447,65 @@ class TestNonInteractiveSave:
             await handle_connect_datasource(session, {"engine": "postgres"})
         interactive.assert_called_once()
         assert session._data_vault.list_connections() == []
+
+
+class TestConnectToolUserLabel:
+    @pytest.mark.asyncio
+    async def test_non_interactive_uses_passed_label(self, vault_dir):
+        session = _make_session(vault_dir)
+        with _patch_test_ok():
+            result = await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com", "database": "sales",
+                        "user": "admin", "password": "x",
+                    },
+                    "user_label": "prod-db",
+                },
+            )
+        vault = session._data_vault
+        conns = vault.list_connections()
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "prod-db"
+        assert "prod-db" in result
+
+    @pytest.mark.asyncio
+    async def test_non_interactive_defaults_when_no_label_passed(self, vault_dir):
+        session = _make_session(vault_dir)
+        with _patch_test_ok():
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com", "database": "sales",
+                        "user": "admin", "password": "x",
+                    },
+                },
+            )
+        vault = session._data_vault
+        conns = vault.list_connections()
+        fields = vault.load(conns[0]["engine"], conns[0]["name"])
+        assert fields["_user_label"] == "postgres"
+
+    @pytest.mark.asyncio
+    async def test_interactive_branch_prefills_label_and_reports_it(self, vault_dir):
+        """When the model passes user_label with no known_variables, the
+        interactive delegate receives it as prefill_label, and the tool's
+        success message reports whatever ended up saved."""
+        session = _make_session(vault_dir)
+
+        async def _side_effect(console, scratchpads, sess, **kwargs):
+            assert kwargs.get("prefill_label") == "prod-db"
+            sess._data_vault.save("postgres", "abc12345", {"host": "x", "_user_label": "prod-db"})
+            return sess
+
+        interactive = AsyncMock(side_effect=_side_effect)
+        with patch("anton.commands.datasource.handle_connect_datasource", new=interactive):
+            result = await handle_connect_datasource(
+                session, {"engine": "postgres", "user_label": "prod-db"}
+            )
+        interactive.assert_called_once()
+        assert "prod-db" in result
