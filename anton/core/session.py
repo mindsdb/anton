@@ -2876,6 +2876,16 @@ class ChatSession:
                     ):
                         raise
 
+                    # Same reasoning for a provider-auth 401 (anton's "Invalid
+                    # API key — …" copy from openai.py/anthropic.py, ENG-1310):
+                    # the credential is wrong, not the request, so retrying
+                    # can't succeed either. Narrow substring match mirrors
+                    # cowork-server's turn_errors.is_auth_error() — anything
+                    # else (a bare "temporarily unavailable" ConnectionError)
+                    # keeps going through the normal retry path below.
+                    if isinstance(_agent_exc, ConnectionError) and "invalid api key" in str(_agent_exc).lower():
+                        raise
+
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
                     # Back off and retry the SAME step within a per-turn budget —
