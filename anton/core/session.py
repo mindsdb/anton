@@ -1305,9 +1305,17 @@ class ChatSession:
         # Enforce the allowlist on every build (None = full desktop set).
         if self._tool_allowlist is not None:
             built = {t.name for t in self.tool_registry.get_tool_defs()}
-            # Fail loud on a name that matches no built tool (typo / unavailable
-            # here) rather than silently dropping it.
-            unknown = set(self._tool_allowlist) - built
+            # Deferred tools aren't registered until their skill unlocks them,
+            # so exempt their names here — otherwise an allowlist that
+            # (correctly) lists a deferred tool would raise before it unlocks.
+            # Once unlocked they enter `built` and the allowlist governs them
+            # normally below.
+            deferred = {
+                t.name for b in self._deferred_bundles.values() for t in b
+            }
+            # Fail loud on a name that matches no built or deferred tool (typo /
+            # unavailable here) rather than silently dropping it.
+            unknown = set(self._tool_allowlist) - built - deferred
             if unknown:
                 raise ValueError(
                     "tool_allowlist names not registered in this session: "
