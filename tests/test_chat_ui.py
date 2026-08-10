@@ -103,6 +103,27 @@ class TestStreamDisplay:
         live.stop.assert_called_once()
         assert display._live is None
 
+    @patch("anton.chat_ui.Live")
+    def test_reasoning_start_restarts_the_spinner_after_interactive_stopped_it(self, MockLive):
+        """Live-testing feedback (ENG-969, generate_prd): `phase="interactive"`
+        tears the Live context down (`_live = None`). A `reasoning_start`
+        that follows it directly — with no tool-result line printed in
+        between to implicitly restart the spinner, as generate_prd's phase 1
+        (after ask_user) and phase 2 (after show_and_confirm) both do — must
+        not silently no-op on a `None` Live."""
+        display, console = self._make_display()
+        display.start()
+
+        display.update_progress("interactive", "")
+        assert display._live is None
+
+        display.update_progress("reasoning_start", "Thinking...")
+
+        assert display._live is not None
+        # `MockLive(...)` returns the same mock instance every call, so this
+        # is `display.start()`'s initial `.start()` plus the restart's.
+        assert MockLive.return_value.start.call_count == 2
+
     def test_phase_labels_cover_all_phases(self):
         expected = {"memory_recall", "planning", "executing", "complete", "failed", "scratchpad"}
         assert expected == set(PHASE_LABELS.keys())

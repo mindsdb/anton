@@ -513,7 +513,16 @@ class StreamDisplay:
             self._line1_fun = random.choice(THINKING_MESSAGES)  # noqa: S311
             self._line2_status = random.choice(WORKING_FOOTER_MESSAGES)  # noqa: S311
             self._line3_peek = ""
-            self._update_spinner()
+            # `_update_spinner()` alone is a no-op once `phase="interactive"`
+            # has torn the Live context down (`_live = None`) — e.g. right
+            # after an `ask_user`/`elicit()` answer, with no tool-result line
+            # printed in between to implicitly restart it. Recreate it here
+            # so this phase always leaves a running spinner behind, not just
+            # when one happened to already be running.
+            if self._live is None:
+                self._start_spinner()
+            else:
+                self._update_spinner()
             return
 
         if phase == "reasoning_done":
