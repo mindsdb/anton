@@ -101,18 +101,57 @@ jobs:
         if: steps.mode.outputs.require_live == '1'
         run: |
           python3 - <<'PY'
-          import sys, xml.etree.ElementTree as ET
+          import os, sys, xml.etree.ElementTree as ET
+
+          # Three outcomes, not two. The point of this gate is that its result
+          # carries information, so "could not run" must not look like "passed"
+          # and must not look like "the rubric regressed" either.
+          #
+          #   executed > 0                  -> green. It ran.
+          #   0 executed, all out-of-money  -> green + loud warning. The CI key
+          #                                    hit 402/429. Nobody's PR caused
+          #                                    it and nobody can fix it from a
+          #                                    PR, so it must not block — but it
+          #                                    must not read as a pass either.
+          #   0 executed, any other reason  -> red. Misconfiguration.
+          MARKER = "GATEWAY_UNAVAILABLE"  # set in tests/test_verifier_verdict_live.py
+
           root = ET.parse("eval-junit.xml").getroot()
-          total = skipped = 0
-          for suite in root.iter("testsuite"):
-              total += int(suite.get("tests", 0))
-              skipped += int(suite.get("skipped", 0))
-          executed = total - skipped
-          print(f"collected={total} skipped={skipped} executed={executed}")
-          if executed == 0:
-              print(
-                  "::error::verdict-eval passed without executing a single case. "
-                  "A green gate that ran nothing is worse than no gate. See ENG-1334."
-              )
-              sys.exit(1)
+          total = executed = 0
+          skips: list[str] = []
+          for case in root.iter("testcase"):
+              total += 1
+              skip = case.find("skipped")
+              if skip is None:
+                  executed += 1
+              else:
+                  skips.append(skip.get("message") or "")
+
+          starved = [m for m in skips if MARKER in m]
+          print(f"collected={total} executed={executed} skipped={len(skips)} out_of_money={len(starved)}")
+
+          if executed:
+              sys.exit(0)
+
+          if starved and len(starved) == len(skips):
+              detail = starved[0][:300]
+              print(f"::warning::Verifier eval could NOT run — the CI key hit 402/429. {detail}")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+                  fh.write(
+                      "### ⚠️ Verifier eval did not run — CI key out of money\n\n"
+                      "Every case skipped on a gateway 402/429, so **the verifier "
+                      "rubric is unguarded on this PR.** This is not a failure of "
+                      "your change and not a rubric regression.\n\n"
+                      f"First reason reported:\n\n```\n{detail}\n```\n\n"
+                      "Top up or raise the limit on the key behind "
+                      "`MINDSHUB_API_KEY`, then re-run this job. Tracking: ENG-1334.\n"
+                  )
+              sys.exit(0)
+
+          print(
+              "::error::verdict-eval passed without executing a single case, and not "
+              "because the key ran out of money. A green gate that ran nothing is "
+              "worse than no gate. See ENG-1334."
+          )
+          sys.exit(1)
           PY

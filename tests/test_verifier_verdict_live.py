@@ -60,7 +60,7 @@ except Exception:
 
 from anton.config.settings import AntonSettings
 from anton.core.llm.client import LLMClient
-from anton.core.llm.provider import StructuredOutputError
+from anton.core.llm.provider import StructuredOutputError, TokenLimitExceeded
 from anton.core.session import (
     _VERIFIER_TOKEN_BUDGETS,
     _VerifierVerdict,
@@ -97,6 +97,12 @@ if _REQUIRE_LIVE and not _KEY:
 pytestmark = pytest.mark.skipif(
     not _KEY, reason="MINDSHUB_API_KEY not set — live verdict eval skipped"
 )
+
+# Marker the CI guard greps for in the junit report to tell "the key ran out of
+# money" apart from every other reason a case did not run. Keep it stable and
+# keep it in sync with .github/workflows/verifier-eval.yml — the string IS the
+# contract between this module and that guard.
+_GATEWAY_UNAVAILABLE = "GATEWAY_UNAVAILABLE"
 
 # One structural-tool_choice alias and one narrating alias — the two behaviour
 # populations ENG-1081 measured. Overridable for one-off runs against other
@@ -139,6 +145,9 @@ async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:
     first budget, retry once on truncation with the bigger one (ENG-1081).
     Anything else propagates — a hard failure here is a test failure, which is
     the point.
+
+    Except running out of money, which is not a test failure. See
+    ``_GATEWAY_UNAVAILABLE`` below.
     """
     system, messages = _build_verify_request(case.history, case.user_message)
     for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
@@ -150,6 +159,22 @@ async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:
             if exc.truncated and attempt + 1 < len(_VERIFIER_TOKEN_BUDGETS):
                 continue
             raise
+        except TokenLimitExceeded as exc:
+            # The CI key ran out of money or hit the rate limit. That says
+            # nothing about the rubric, so failing here would send whoever
+            # opened the PR hunting a verifier bug that does not exist — the
+            # same "red for an unrelated reason" this suite's gate exists to
+            # avoid (ENG-1334).
+            #
+            # anton maps BOTH of the shapes we care about to this one type
+            # (ENG-1169, mirrored in llm/openai.py and llm/anthropic.py):
+            #   402 + wallet_empty / included_allowance_exhausted
+            #   429 + a quota detail — which is the gateway's own 429 dialect
+            #
+            # Deliberately NOT catching ConnectionError, which anton also
+            # raises for a 401 invalid key. A wrong key is a misconfiguration
+            # somebody must fix, so it has to stay red.
+            pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
     raise AssertionError("unreachable: budget loop exhausted without raising")
 
 
