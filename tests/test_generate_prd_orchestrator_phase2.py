@@ -203,3 +203,41 @@ async def test_write_prd_does_not_touch_type_when_unchanged(tmp_path, monkeypatc
     await orchestrator.write_prd(state)
     assert calls == []
     assert store.open(artifact.slug).type == "html-app"
+
+
+def test_draft_brief_instruction_asks_for_a_lead_in_sentence():
+    """Live-testing feedback (ENG-969): the brief used to land on the user
+    with zero framing — just headers. The model must open with one
+    sentence explaining what follows, in the reply's own language."""
+    assert "lead-in" in orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "same language" in orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+
+
+def test_draft_brief_instruction_forbids_process_meta_commentary():
+    """Live-testing feedback: a redo of an existing artifact leaked
+    "recreating X, but going through the PRD step" into Goal — process
+    narration, not what the artifact is for."""
+    lowered = orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "redo" in lowered or "regeneration" in lowered
+    assert "generation tool" in lowered or "prd workflow" in lowered
+
+
+def test_draft_brief_instruction_forbids_technical_detail():
+    """Live-testing feedback: the brief is for a non-technical user and
+    must not carry CSS clamp() values, hex colors, or similar — that
+    belongs only in the full PRD after acceptance."""
+    assert "hex" in orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "css" in orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+
+
+def test_draft_brief_instruction_asks_data_model_to_skip_negatives():
+    """Live-testing feedback: the brief listed "no APIs, no fetch, no DB"
+    for a clock with no external data — negatives nobody asked about."""
+    assert "not used" in orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+
+
+def test_write_prd_instruction_also_forbids_process_meta_commentary():
+    """The full PRD is a continuation of the same conversation, so it is
+    just as exposed to the redo-framing leak as the brief."""
+    lowered = orchestrator._WRITE_PRD_INSTRUCTION.lower()
+    assert "redo" in lowered or "regeneration" in lowered
