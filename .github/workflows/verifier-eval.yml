@@ -64,10 +64,18 @@ jobs:
       - name: Decide whether live mode is required
         id: mode
         env:
+          # Fail CLOSED. `IS_FORK` is derived from a pull_request payload, so on
+          # any other event it compares an empty string and comes out "true" —
+          # which would set require_live=0 and silently restore the exact
+          # green-while-skipping bug this workflow exists to prevent. Only a
+          # positively-identified fork PR is allowed to skip; anything else
+          # (a workflow_dispatch added later, a schedule, an unknown event)
+          # requires live mode and fails loudly if it cannot run.
+          IS_PR: ${{ github.event_name == 'pull_request' }}
           IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -euo pipefail
-          if [ "$IS_FORK" = "true" ]; then
+          if [ "$IS_PR" = "true" ] && [ "$IS_FORK" = "true" ]; then
             echo "require_live=0" >> "$GITHUB_OUTPUT"
             {
               echo "### Verifier eval skipped — fork PR"
@@ -136,7 +144,11 @@ jobs:
           if starved and len(starved) == len(skips):
               detail = starved[0][:300]
               print(f"::warning::Verifier eval could NOT run — the CI key hit 402/429. {detail}")
-              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              # .get, not [], so a missing GITHUB_STEP_SUMMARY cannot KeyError
+              # inside the branch that handles "we could not run" — that would
+              # turn an honest warning into a red for a third unrelated reason.
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              with open(summary or os.devnull, "a") as fh:
                   fh.write(
                       "### ⚠️ Verifier eval did not run — CI key out of money\n\n"
                       "Every case skipped on a gateway 402/429, so **the verifier "

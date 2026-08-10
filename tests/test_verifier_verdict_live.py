@@ -43,6 +43,7 @@ Deselect with ``-k "not verdict_live"`` or unset the key to skip.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,11 +99,18 @@ pytestmark = pytest.mark.skipif(
     not _KEY, reason="MINDSHUB_API_KEY not set — live verdict eval skipped"
 )
 
-# Marker the CI guard greps for in the junit report to tell "the key ran out of
-# money" apart from every other reason a case did not run. Keep it stable and
-# keep it in sync with .github/workflows/verifier-eval.yml — the string IS the
-# contract between this module and that guard.
+# Marker the CI guard greps for in the junit report, to tell "the key ran out of
+# money" apart from every other reason a case did not run. The string is a
+# contract with .github/workflows/verifier-eval.yml; tests/test_verifier_eval_gate.py
+# asserts the two match, so drift fails the suite rather than relying on this
+# comment. If it ever did drift, it fails SAFE — an unrecognised marker falls to
+# the guard's red branch, never to a false green.
 _GATEWAY_UNAVAILABLE = "GATEWAY_UNAVAILABLE"
+
+# Pause before the single throttle retry. Long enough for a TPM window to
+# clear, short enough that a genuinely dead wallet does not stall the job for
+# long (one sleep per case, not per call). Overridable so tests can set it to 0.
+_THROTTLE_RETRY_SLEEP_S = float(os.environ.get("VERIFIER_EVAL_THROTTLE_RETRY_SLEEP_S", "20"))
 
 # One structural-tool_choice alias and one narrating alias — the two behaviour
 # populations ENG-1081 measured. Overridable for one-off runs against other
@@ -150,30 +158,49 @@ async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:
     ``_GATEWAY_UNAVAILABLE`` below.
     """
     system, messages = _build_verify_request(case.history, case.user_message)
-    for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
+    retried_after_throttle = False
+    attempt = 0
+    while attempt < len(_VERIFIER_TOKEN_BUDGETS):
+        budget = _VERIFIER_TOKEN_BUDGETS[attempt]
         try:
             return await llm.generate_object_code(
                 _VerifierVerdict, system=system, messages=messages, max_tokens=budget
             )
         except StructuredOutputError as exc:
             if exc.truncated and attempt + 1 < len(_VERIFIER_TOKEN_BUDGETS):
+                attempt += 1
                 continue
             raise
         except TokenLimitExceeded as exc:
-            # The CI key ran out of money or hit the rate limit. That says
-            # nothing about the rubric, so failing here would send whoever
-            # opened the PR hunting a verifier bug that does not exist — the
-            # same "red for an unrelated reason" this suite's gate exists to
-            # avoid (ENG-1334).
+            # TokenLimitExceeded conflates two situations that need OPPOSITE
+            # handling, and the type cannot tell them apart:
             #
-            # anton maps BOTH of the shapes we care about to this one type
-            # (ENG-1169, mirrored in llm/openai.py and llm/anthropic.py):
-            #   402 + wallet_empty / included_allowance_exhausted
-            #   429 + a quota detail — which is the gateway's own 429 dialect
+            #   a TPM velocity throttle  — transient, clears in seconds
+            #   a dead wallet / exhausted allowance — permanent for this run
             #
-            # Deliberately NOT catching ConnectionError, which anton also
-            # raises for a 401 invalid key. A wrong key is a misconfiguration
-            # somebody must fix, so it has to stay red.
+            # llm/openai.py maps ANY 429 carrying a string `detail` to this type
+            # (`if exc.status_code == 429 and isinstance(detail, str)`), and that
+            # branch sits BEFORE the wallet-code check — and the gateway's own
+            # 429 dialect is FastAPI-style `{"detail": ...}`. So a throttle
+            # arrives here indistinguishable from an empty wallet.
+            #
+            # Skipping immediately on the first one was wrong: the next case
+            # fires straight into the same throttle window, so the whole matrix
+            # skips and the job goes GREEN having executed nothing — the exact
+            # outcome ENG-1334 exists to make impossible, rebuilt by its own
+            # escape hatch. Caught in review on #328.
+            #
+            # Time is the discriminator, not the exception type. Retry once
+            # after a pause: a throttle clears and the eval runs for real; an
+            # empty wallet persists and the honest starved path fires.
+            #
+            # Deliberately NOT catching ConnectionError, which anton also raises
+            # for a 401 invalid key — a misconfiguration somebody must fix, so
+            # that has to stay red.
+            if not retried_after_throttle:
+                retried_after_throttle = True
+                await asyncio.sleep(_THROTTLE_RETRY_SLEEP_S)
+                continue  # same budget: this is a retry, not an escalation
             pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
     raise AssertionError("unreachable: budget loop exhausted without raising")
 
