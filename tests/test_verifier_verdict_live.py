@@ -14,9 +14,11 @@ real-world facts (ENG-381 lesson): the transcript is the input, the expected
 status is the label.
 
 Gating: requires ``MINDSHUB_API_KEY`` in the environment (or repo-root
-``.env``) — the whole module auto-skips without it, so the default CI unit run
-is unaffected. ``.github/workflows/verifier-eval.yml`` runs it on PRs that
-touch ``anton/core/session.py``.
+``.env``). Without it the module auto-skips, so the default CI unit run is
+unaffected — **unless** ``VERIFIER_EVAL_REQUIRE_LIVE=1``, which turns a missing
+key into a hard collection error. ``.github/workflows/verifier-eval.yml`` sets
+that for first-party PRs, so the gate can no longer report success without
+executing (ENG-1334). Fork PRs cannot receive the secret, so they still skip.
 
 Model matrix: one first-party alias (``haiku`` — enforces the forced
 ``tool_choice`` structurally) and one narrating alias (``mindshub_air`` —
@@ -67,6 +69,30 @@ from anton.core.session import (
 
 _KEY = os.environ.get("MINDSHUB_API_KEY")
 _BASE = os.environ.get("MINDSHUB_BASE_URL", "https://api.mindshub.ai")
+
+# Two different callers want opposite things from a missing key, and conflating
+# them is what let this suite report success while testing nothing (ENG-1334).
+#
+#   A developer running `pytest tests/` wants it to skip. They have no key, they
+#   are not testing the verifier, and failing their whole run would be rude.
+#
+#   CI wants it to FAIL. A gate that goes green when it cannot run is worse than
+#   no gate: the board looks guarded. Measured 2026-08-10 — eight consecutive
+#   green `verdict-eval` runs, 13-24s each, every one the skip path, while a real
+#   run takes ~4 minutes. Eight PRs merged past a check that asserted nothing.
+#
+# So the skip stays the default and CI opts out of it explicitly. Raising at
+# import time fails collection, which surfaces as a red job with this message
+# rather than a green one with a skip note nobody reads.
+_REQUIRE_LIVE = os.environ.get("VERIFIER_EVAL_REQUIRE_LIVE") == "1"
+
+if _REQUIRE_LIVE and not _KEY:
+    raise RuntimeError(
+        "VERIFIER_EVAL_REQUIRE_LIVE=1 but MINDSHUB_API_KEY is empty, so this "
+        "eval would skip every case and report success. Refusing to pass "
+        "without running. Either provide the key or stop requiring live mode. "
+        "See ENG-1334."
+    )
 
 pytestmark = pytest.mark.skipif(
     not _KEY, reason="MINDSHUB_API_KEY not set — live verdict eval skipped"
