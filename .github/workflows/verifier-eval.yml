@@ -46,4 +46,4 @@ jobs:
       - name: Run verdict-quality eval (auto-skips without key)
         env:
           MINDSHUB_API_KEY: ${{ secrets.MINDSHUB_API_KEY }}
-        run: uv run --extra dev pytest tests/test_verifier_verdict_live.py -v
+        run: uv run --group dev pytest tests/test_verifier_verdict_live.py -v
