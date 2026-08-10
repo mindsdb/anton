@@ -76,7 +76,7 @@ def test_path_request_ignores_choice_rules():
 def test_budget_constant_is_eight():
     """Raised from 3 to 8 to give generate_prd's phase 2 (brief confirm +
     revise cycles) room without starving the main agent's own questions in
-    the same turn — see prd-design.md, "Лимиты и обработка ошибок"."""
+    the same turn — see prd-design.md, "Limits and error handling"."""
     assert MAX_QUESTIONS_PER_TURN == 8
 
 

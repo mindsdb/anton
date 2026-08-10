@@ -36,7 +36,7 @@ _DRAFT_BRIEF_INSTRUCTION = (
     "first and only version:\n"
     "- Goal — 1-2 plain sentences: what the artifact is and what it does "
     "for the user.\n"
-    "- Тип артефакта — the artifact type, one short line.\n"
+    "- Artifact type — the artifact type, one short line.\n"
     "- Data model — one short line naming the data source(s) in plain "
     "language (e.g. \"the device's system clock\", \"your orders "
     "database\"). State only what IS used — do not list protocols, APIs, "
@@ -59,7 +59,7 @@ _WRITE_PRD_INSTRUCTION = (
     "detail. Describe only what the artifact IS and does — do NOT mention "
     "this generation tool, the PRD workflow, prior attempts, or that this "
     "is a redo/regeneration of something.\n\n"
-    "Goal, Тип артефакта (with justification for the choice), "
+    "Goal, Artifact type (with justification for the choice), "
     "Data model (sources, schema/fields, sample rows, PLUS connection code "
     "examples for anything fetched via scratchpad or web_fetch — cite the "
     "scratchpad name and cell), Functional requirements (omit for static "
@@ -139,8 +139,8 @@ async def show_and_confirm(state: PrdState) -> str:
         prompt=state.brief_markdown,
         kind="choice",
         options=(
-            AskOption(value="accept", label="Принять"),
-            AskOption(value="cancel", label="Отменить"),
+            AskOption(value="accept", label="Accept"),
+            AskOption(value="cancel", label="Cancel"),
         ),
         allow_custom=True,
     )

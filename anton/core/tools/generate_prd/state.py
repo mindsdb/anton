@@ -4,7 +4,7 @@ One `PrdState` instance lives for the whole tool call — both the gathering
 loop (phase 1, `engine.py`) and the brief/confirm/write sequence (phase 2,
 `orchestrator.py`) mutate the SAME instance and append to the SAME
 `messages` list, so phase 2 sees everything phase 1 did without a separate
-hand-off object (see prd-design.md, "Передача контекста между фазами").
+hand-off object (see prd-design.md, "Context handoff between phases").
 """
 
 from __future__ import annotations

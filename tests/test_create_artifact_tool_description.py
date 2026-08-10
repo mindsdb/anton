@@ -1,6 +1,6 @@
 """CREATE_ARTIFACT_TOOL's description drives the agent to call generate_prd
 before writing any code for a web artifact — without this text the new tool
-is never used (see prd-design.md, "Промпты и включение в основной флоу")."""
+is never used (see prd-design.md, "Prompts and wiring into the main flow")."""
 from __future__ import annotations
 
 from anton.core.tools.tool_defs import CREATE_ARTIFACT_TOOL
