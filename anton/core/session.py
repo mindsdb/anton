@@ -369,9 +369,11 @@ def _safe_error_detail(exc: BaseException) -> str:
 def _is_provider_auth_error(exc: BaseException) -> bool:
     """A provider-auth 401 — anton's "Invalid API key — …" copy from
     `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
-    request, so retrying can't succeed either. Narrow substring match
-    mirrors cowork-server's `turn_errors.is_auth_error()` — anything else (a
-    bare "temporarily unavailable" ConnectionError) is a different failure.
+    request, so retrying can't succeed either. The substring match mirrors
+    cowork-server's `turn_errors.is_auth_error()`; the `isinstance` check is
+    an anton-only narrowing on top of it (both 401 raise sites always type
+    it this way, so it's a no-op in practice) — anything else (a bare
+    "temporarily unavailable" ConnectionError) is a different failure.
 
     Shared by both `turn_stream` re-raise sites so the check can't drift
     between them (review feedback on ENG-1310).
