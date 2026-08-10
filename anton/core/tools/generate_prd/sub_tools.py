@@ -148,6 +148,23 @@ def tool_schemas(*, include_ask_user: bool) -> list[dict]:
     return schemas
 
 
+async def signal_thinking(session: "ChatSession") -> None:
+    """Restart the host's spinner before a direct LLM call.
+
+    Every direct `session._llm.plan/code/generate_object` call in phase 1
+    (engine.py) and phase 2 (orchestrator.py) happens outside the outer
+    agent loop's own tool-round machinery, so it never sees that loop's
+    `StreamTaskProgress(phase="reasoning_start")` emission. `elicit()`, in
+    turn, stops the spinner for interactive input
+    (`phase="interactive"`) and never restarts it. Without this call in
+    between, the gap between the user's answer and the next model reply
+    renders as a silent, spinner-less pause.
+    """
+    from anton.core.llm.provider import StreamTaskProgress
+
+    await session.emit(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
+
+
 async def ask_via_elicit(session: "ChatSession", request: "AskRequest") -> "AskAnswer":
     """Call `elicit()` directly, never raising, with the same telemetry
     `handle_ask_user` fires around its own call.

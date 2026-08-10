@@ -31,6 +31,7 @@ def _state(artifact_path: Path, **over) -> PrdState:
             _llm=SimpleNamespace(plan=AsyncMock()),
             question_count=0,
             elicitor=None,
+            emit=AsyncMock(),
             _workspace=SimpleNamespace(artifacts_dir=artifact_path.parent),
         ),
         slug="s",
@@ -54,6 +55,19 @@ async def test_draft_brief_sets_brief_markdown_and_appends_to_messages(tmp_path)
     await orchestrator.draft_brief(state)
     assert state.brief_markdown == "## Goal\nAn analog clock."
     assert state.messages[-1]["content"] == state.brief_markdown
+
+
+async def test_draft_brief_restarts_the_spinner_before_the_llm_call(tmp_path):
+    """Live-testing feedback (ENG-969): a direct `_llm.plan` call outside
+    the outer agent loop never gets that loop's own `reasoning_start`
+    signal, and `elicit()` (from the preceding `show_and_confirm`) stops
+    the spinner without restarting it — see `sub_tools.signal_thinking`."""
+    from anton.core.llm.provider import StreamTaskProgress
+
+    state = _state(tmp_path)
+    state.session._llm.plan = AsyncMock(return_value=_response("## Goal\n...\n"))
+    await orchestrator.draft_brief(state)
+    state.session.emit.assert_awaited_with(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
 
 
 async def test_draft_brief_raises_on_an_empty_reply(tmp_path):
@@ -139,6 +153,19 @@ async def test_classify_feedback_returns_the_model_verdict(monkeypatch):
     assert route == "back_to_gathering"
 
 
+async def test_classify_feedback_restarts_the_spinner_before_the_llm_call(monkeypatch):
+    from anton.core.llm.provider import StreamTaskProgress
+
+    state = _state(Path("/tmp/x"))
+
+    async def fake_generate_object(schema, *, system, messages):
+        return orchestrator.FeedbackVerdict(route="revise_brief", reasoning="")
+
+    state.session._llm.generate_object = fake_generate_object
+    await orchestrator.classify_feedback(state)
+    state.session.emit.assert_awaited_with(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
+
+
 async def test_classify_feedback_falls_back_to_revise_brief_on_an_unknown_route(monkeypatch):
     state = _state(Path("/tmp/x"))
 
@@ -158,6 +185,17 @@ async def test_write_prd_saves_the_file_and_returns_its_text(tmp_path):
     text = await orchestrator.write_prd(state)
     assert text == "## Goal\nFull PRD text."
     assert (artifact_dir / "prd.md").read_text(encoding="utf-8") == text
+
+
+async def test_write_prd_restarts_the_spinner_before_the_llm_call(tmp_path):
+    from anton.core.llm.provider import StreamTaskProgress
+
+    artifact_dir = tmp_path / "artifacts" / "s"
+    artifact_dir.mkdir(parents=True)
+    state = _state(artifact_dir)
+    state.session._llm.plan = AsyncMock(return_value=_response("## Goal\nFull PRD text.\n"))
+    await orchestrator.write_prd(state)
+    state.session.emit.assert_awaited_with(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
 
 
 async def test_write_prd_raises_on_an_empty_reply_instead_of_writing_an_empty_file(tmp_path):

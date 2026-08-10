@@ -32,7 +32,7 @@ def _make_state(tmp_path: Path, **over) -> PrdState:
     artifact = store.create(name="Clock", description="d", type="html-app")
     artifact_dir = store.folder_for(artifact.slug)
     base = dict(
-        session=SimpleNamespace(_llm=SimpleNamespace(), question_count=0, elicitor=None),
+        session=SimpleNamespace(_llm=SimpleNamespace(), question_count=0, elicitor=None, emit=AsyncMock()),
         slug=artifact.slug,
         artifact_path=artifact_dir,
         artifact_type="html-app",

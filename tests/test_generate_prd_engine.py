@@ -53,7 +53,7 @@ def _session_with_plan_sequence(*responses) -> SimpleNamespace:
         return next(it)
 
     llm = SimpleNamespace(plan=AsyncMock(side_effect=_next), code=AsyncMock(side_effect=_next))
-    return SimpleNamespace(_llm=llm, question_count=0, elicitor=None)
+    return SimpleNamespace(_llm=llm, question_count=0, elicitor=None, emit=AsyncMock())
 
 
 async def test_finish_gathering_sets_artifact_type_and_notes():
@@ -161,6 +161,26 @@ async def test_re_entry_appends_a_continue_message_instead_of_resetting_history(
     assert state.messages[0]["content"] == "## User request\n..."
     assert state.messages[1]["content"] == "brief text"
     assert "Continue gathering" in state.messages[2]["content"]
+
+
+async def test_each_round_restarts_the_spinner_before_the_llm_call():
+    """Live-testing feedback (ENG-969): `elicit()` stops the host spinner
+    for `ask_user` and never restarts it, so a round that follows one must
+    signal `reasoning_start` itself — otherwise the gap between the user's
+    answer and the model's next reply renders as a silent pause."""
+    from anton.core.llm.provider import StreamTaskProgress
+
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ok", "artifact_type": "html-app"})]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert session.emit.await_count >= 1
+    phases = {call.args[0].phase for call in session.emit.await_args_list}
+    assert phases == {"reasoning_start"}
+    assert all(
+        isinstance(call.args[0], StreamTaskProgress) for call in session.emit.await_args_list
+    )
 
 
 async def test_a_tool_call_with_a_parse_error_is_asked_to_retry_not_dispatched():

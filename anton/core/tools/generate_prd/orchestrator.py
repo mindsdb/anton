@@ -107,6 +107,7 @@ async def draft_brief(state: PrdState) -> None:
     this is NOT a fresh conversation, so the model sees everything phase 1
     found."""
     state.messages.append({"role": "user", "content": _DRAFT_BRIEF_INSTRUCTION})
+    await sub_tools.signal_thinking(state.session)
     response = await state.session._llm.plan(
         system=build_phase2_system_prompt(state),
         messages=state.messages,
@@ -199,6 +200,7 @@ async def classify_feedback(state: PrdState) -> str:
         "can the brief just be reworded/adjusted with what we already "
         "know (`revise_brief`)?"
     )
+    await sub_tools.signal_thinking(state.session)
     result = await state.session._llm.generate_object(
         FeedbackVerdict,
         system=system,
@@ -212,6 +214,7 @@ async def write_prd(state: PrdState) -> str:
     expand the brief into the full PRD, save it, and update the artifact's
     `type` in metadata.json if it changed. Returns the full PRD markdown."""
     state.messages.append({"role": "user", "content": _WRITE_PRD_INSTRUCTION})
+    await sub_tools.signal_thinking(state.session)
     response = await state.session._llm.plan(
         system=build_phase2_system_prompt(state),
         messages=state.messages,

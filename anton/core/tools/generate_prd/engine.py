@@ -57,6 +57,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
 
     for round_idx in range(MAX_ROUNDS):
         llm_call = state.session._llm.plan if round_idx == 0 else state.session._llm.code
+        await sub_tools.signal_thinking(state.session)
         response = await llm_call(system=system, messages=state.messages, tools=tools)
 
         if not response.tool_calls:
