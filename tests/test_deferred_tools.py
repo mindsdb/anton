@@ -1,14 +1,22 @@
-"""Deferred tools (`unlock_skill`) must coexist with a `tool_allowlist`.
+"""Deferred tools (`unlock_skill`) — the ENG-764 on-demand tool mechanism.
 
-Regression for ENG-764: a deferred tool listed in the allowlist used to make
-`_build_tools` raise, because the up-front "unknown name" check ran before the
-tool was ever registered.
+Covered here:
+- allowlist coexistence: a deferred tool listed in `tool_allowlist` must not
+  make `_build_tools` raise before it unlocks;
+- history replay: a prior `recall_skill` in loaded history re-unlocks its
+  bundle on the first build (survives a session/server restart);
+- same-turn visibility: a bundle unlocked by a `recall_skill` this round is in
+  the tools sent to the follow-up request in the same turn.
 """
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
+from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.memory.skills import Skill, SkillStore
 from anton.core.tools.tool_defs import ToolDef
 
 
@@ -55,6 +63,80 @@ def test_deferred_tool_left_out_of_allowlist_stays_filtered(make_session):
     _names(session)
     session._register_tool_bundle("test-skill")
     assert tool.name not in _names(session)
+
+
+def test_bundle_replays_from_prior_recall_in_history(make_session):
+    """A `recall_skill` already in the loaded history re-unlocks its bundle on
+    the first build — so sticky tools survive a session rebuild (server
+    restart) without waiting for the model to recall again."""
+    tool = _deferred_tool()
+    history = [
+        {"role": "user", "content": "connect my db"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tc_hist",
+                    "name": "recall_skill",
+                    # Replay keys off this raw label, so it must equal the
+                    # tool's `unlock_skill` (no skill load happens here).
+                    "input": {"label": "test-skill"},
+                }
+            ],
+        },
+    ]
+    session = make_session(tools=[tool], initial_history=history)
+    assert tool.name in _names(session)
+
+
+async def test_recalled_bundle_reaches_the_same_turn_followup(make_session, tmp_path):
+    """The rebuild after tool dispatch must hand the follow-up request the tool
+    that this round's `recall_skill` just unlocked — otherwise the model can't
+    use it until the next turn."""
+    label = "test-skill"
+    store = SkillStore(root=tmp_path / "skills")
+    store.save(
+        Skill(
+            label=label,
+            name="Test Skill",
+            description="unlocks the deferred tool",
+            declarative_md="1. Do the thing.",
+            created_at="2026-01-01T00:00:00+00:00",
+            provenance="host",
+        )
+    )
+
+    tool = _deferred_tool()
+    session = make_session(tools=[tool])
+    session._skill_store = store  # bypass settings wiring; mirrors test_skills_e2e
+    session._llm.plan = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content="recalling",
+                tool_calls=[
+                    ToolCall(id="tc1", name="recall_skill", input={"label": label})
+                ],
+                usage=Usage(input_tokens=10, output_tokens=20),
+                stop_reason="tool_use",
+            ),
+            LLMResponse(
+                content="done",
+                tool_calls=[],
+                usage=Usage(input_tokens=10, output_tokens=20),
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+
+    await session.turn("connect my db")
+
+    def _tool_names(call):
+        return {t["name"] for t in call.kwargs["tools"]}
+
+    calls = session._llm.plan.call_args_list
+    assert tool.name not in _tool_names(calls[0])  # deferred: hidden up front
+    assert tool.name in _tool_names(calls[-1])  # unlocked and visible same turn
 
 
 if __name__ == "__main__":  # allow a bare `python tests/test_deferred_tools.py`
