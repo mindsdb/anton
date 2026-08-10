@@ -8,6 +8,14 @@ on:
 permissions:
   contents: read
 
+# Shared with sync-main-to-staging.yml on purpose. Merging the release PR fires
+# both this workflow and that one (push to main), and both push `staging` as the
+# release-train App. One group serialises them; whichever runs second finds
+# staging already current and no-ops.
+concurrency:
+  group: sync-main-to-staging
+  cancel-in-progress: false
+
 jobs:
   unfreeze:
     if: >

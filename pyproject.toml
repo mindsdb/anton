@@ -33,12 +33,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+clipboard = [
+    "Pillow>=12.3.0",
+]
+
+[dependency-groups]
 dev = [
     "pytest>=9.0.0",
     "pytest-asyncio>=0.24",
-]
-clipboard = [
-    "Pillow>=12.3.0",
 ]
 
 [project.urls]
@@ -58,6 +60,7 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 markers = [
     "stub_only: test requires stub server (skipped when --live is passed)",
+    "slow: test spawns a real scratchpad venv/subprocess (seconds)",
 ]
 
  [tool.hatch.build.targets.wheel]

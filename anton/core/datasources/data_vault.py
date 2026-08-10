@@ -312,6 +312,10 @@ class LocalDataVault:
         flat=True: legacy flat vars, e.g. DS_HOST — use only during
         single-connection test_snippet execution.
 
+        `_`-prefixed fields (bookkeeping: `_user_label`, `_label`,
+        `_connector_id`, `_method`, `_picked_files`, ...) are never injected —
+        they aren't credentials and nothing reads them from an env var.
+
         Returns the {var: value} mapping, or None if connection not found.
         Use this when the env should reach only a specific subprocess (pass
         the result as an explicit `env`); use `inject_env` when the variables
@@ -323,10 +327,14 @@ class LocalDataVault:
         env: dict[str, str] = {}
         if flat:
             for key, value in fields.items():
+                if key.startswith("_"):
+                    continue
                 env[f"DS_{key.upper()}"] = value
         else:
             prefix = _slug_env_prefix(engine, name)
             for key, value in fields.items():
+                if key.startswith("_"):
+                    continue
                 env[f"{prefix}__{key.upper()}"] = value if isinstance(value, str) else str(value)
         return env
 

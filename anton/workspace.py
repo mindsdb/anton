@@ -27,14 +27,17 @@ Created: {date}
 class Workspace:
     """Manages the .anton/ workspace directory and its files."""
 
-    def __init__(self, base: Path) -> None:
+    def __init__(self, base: Path, settings: AntonSettings | None = None) -> None:
         self._base = base
         self._anton_dir = base / ".anton"
         self._anton_md = self._anton_dir / "anton.md"
         self._env_file = self._anton_dir / ".env"
         self._anton_md_last_read: datetime | None = None
 
-        settings = AntonSettings()
+        # Reuse a caller's settings so the cloud pod's dotenv-disabled
+        # AntonSettings isn't bypassed by a second one built here. Only
+        # `artifacts_dir` is read; None = desktop behaviour unchanged.
+        settings = settings or AntonSettings()
         self._artifacts_dir = self._anton_dir / settings.artifacts_dir
 
     @property

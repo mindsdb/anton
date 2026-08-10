@@ -118,13 +118,17 @@ def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: 
     conservative unknown-DS_* scrub — so harmless values like base_url
     surfaced as `[DS_..._BASE_URL]` markers in user-facing output (ENG-688).
     Classification: the record's stored ``secure_keys`` when present, else
-    the vault's canonical legacy secret-name heuristic.
+    the vault's canonical legacy secret-name heuristic. `_`-prefixed
+    bookkeeping fields are skipped entirely — they're never injected as env
+    vars (see `env_for()`), so registering them here would be dead weight.
     """
     record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
     fields = (record or {}).get("fields") or vault.load(engine, name) or {}
     secure_keys = (record or {}).get("secure_keys")
     prefix = _slug_env_prefix(engine, name)
     for field_name in fields:
+        if field_name.startswith("_"):
+            continue
         key = f"{prefix}__{field_name.upper()}"
         _DS_KNOWN_VARS.add(key)
         if is_secret_key(field_name, secure_keys):
@@ -186,6 +190,51 @@ def _parse_picked_files(raw: str | None) -> list[dict]:
     return [f for f in parsed if isinstance(f, dict) and f.get("id")]
 
 
+def _labels_by_connection(vault: "DataVault") -> dict[tuple[str, str], str]:
+    """Every connection's non-empty label, keyed by (engine, name).
+
+    Prefers `_user_label`; falls back to the legacy `_label` field so an
+    old connection's already-visible label still counts as "taken" when
+    computing a new one.
+    """
+    out: dict[tuple[str, str], str] = {}
+    for c in vault.list_connections():
+        fields = vault.load(c["engine"], c["name"]) or {}
+        label = (fields.get("_user_label") or fields.get("_label") or "").strip()
+        if label:
+            out[(c["engine"], c["name"])] = label
+    return out
+
+
+def ensure_unique_user_label(
+    vault: "DataVault", candidate: str, *, exclude: tuple[str, str] | None = None
+) -> str:
+    """Return `candidate`, or `candidate` with a numeric suffix if it's already
+    used by another connection anywhere in the vault (global uniqueness, not
+    scoped per engine).
+
+    `exclude=(engine, name)` removes that one connection's own label from the
+    collision set first — pass the connection being edited/re-saved so keeping
+    its label unchanged doesn't bump it to "label 2".
+    """
+    by_conn = _labels_by_connection(vault)
+    if exclude:
+        by_conn.pop(exclude, None)
+    existing = set(by_conn.values())
+    if candidate not in existing:
+        return candidate
+    n = 2
+    while f"{candidate} {n}" in existing:
+        n += 1
+    return f"{candidate} {n}"
+
+
+def default_user_label(vault: "DataVault", engine: str) -> str:
+    """Default label for a brand-new connection to `engine` — the engine id,
+    de-duplicated against every existing connection's label (any engine)."""
+    return ensure_unique_user_label(vault, engine)
+
+
 def build_datasource_context(vault: DataVault, active_only: str | None = None) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
 
@@ -203,6 +252,9 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         return ""
     lines = ["\n\n## Connected Data Sources"]
     lines.append(
+        "Each connection has a Slug (a stable machine identifier, e.g. "
+        "`postgres-7e8971c3`) and a Label (a human-readable name the user "
+        "gave it, e.g. \"prod-db\"; may be unset). "
         "Credentials are pre-injected as namespaced DS_<ENGINE_NAME>__<FIELD> "
         "environment variables. Use them directly in scratchpad code "
         "(e.g. DS_POSTGRES_PROD_DB__HOST). "
@@ -210,7 +262,7 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         "If you see `[DS_<NAME>]` patterns in scratchpad output, those are "
         "scrub-markers where a secret value was redacted before returning "
         "text to you — the actual value IS injected in the env var. Reference "
-        "it by name; never treat the bracket form as a literal credential "
+        "it by slug; never treat the bracket form as a literal credential "
         "or pass it back as a value to any tool.\n"
     )
     # Google Drive's drive.file OAuth scope only covers files the app created
@@ -219,6 +271,11 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
     # since a plain files.list()/files.search() call won't return them.
     google_drive_oauth_connected = False
     google_drive_picked_files: dict[str, list[dict]] = {}
+    # Hoisted out of the loop below: this function is rebuilt on every chat
+    # turn, and DatasourceRegistry() parses the full built-in + user
+    # datasources.md on every construction (no caching) — with N
+    # connections that was N full re-parses per turn before this change.
+    registry = DatasourceRegistry()
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"
         if active_only and slug != active_only:
@@ -233,20 +290,35 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
             fields = vault.load(c["engine"], c["name"]) or {}
             secure_keys = None
         prefix = _slug_env_prefix(c["engine"], c["name"])
-        # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`) —
-        # they're not credential env vars the agent should reference.
-        var_names = ", ".join(
+        # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`,
+        # `_user_label`) — they're not credential env vars the agent should
+        # reference.
+        var_names = [
             f"{prefix}__{k.upper()}" for k in fields if not k.startswith("_")
-        )
-        # Prefer a user/agent-assigned label ("Support"); otherwise the derived
-        # non-secret identity (email / host).
-        identity = str(fields.get("_label", "")).strip() or _connection_identity(
-            fields, secure_keys
-        )
-        head = f"`{slug}` ({c['engine']})"
-        if identity:
-            head += f" — {identity}"
-        lines.append(f"- {head} → {var_names}")
+        ]
+        user_label = str(fields.get("_user_label", "")).strip() or str(
+            fields.get("_label", "")
+        ).strip()
+
+        lines.append(f"\n### Slug: `{slug}` — Label: {user_label or '(none)'}")
+        engine_def = registry.get(c["engine"])
+        lines.append(f"Engine: {engine_def.display_name if engine_def else c['engine']}")
+        # Same non-secret allowlist `_connection_identity()` encodes
+        # (host/database/email, secure_keys-gated) — inlined here as
+        # independent lines instead of one collapsed string.
+        host = str(fields.get("host", "")).strip()
+        database = str(fields.get("database", "")).strip()
+        email = str(fields.get("email", "")).strip() or str(fields.get("account_email", "")).strip()
+        if host and "host" not in (secure_keys or []):
+            lines.append(f"Host: {host}")
+        if database and "database" not in (secure_keys or []):
+            lines.append(f"Database: {database}")
+        if email and "email" not in (secure_keys or []) and "account_email" not in (secure_keys or []):
+            lines.append(f"Account: {email}")
+        lines.append("Credential env vars:")
+        for var in var_names:
+            lines.append(f" - {var}")
+
         if c["engine"] == "google_drive":
             if fields.get("auth_type") == "oauth":
                 google_drive_oauth_connected = True
