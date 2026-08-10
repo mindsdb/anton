@@ -50,6 +50,10 @@ concurrency:
 jobs:
   verdict-eval:
     runs-on: ubuntu-latest
+    # A real run is ~90s. The retry budget bounds throttle sleeping to ~5min,
+    # so anything past this is hung rather than slow — and the GitHub default
+    # of 360 would hold a runner for six hours to find that out.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

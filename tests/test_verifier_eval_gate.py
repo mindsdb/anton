@@ -106,6 +106,16 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(ev, "_THROTTLE_RETRY_SLEEP_S", 0.0)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_retry_budget(monkeypatch):
+    """The throttle budget is session-scoped by design, so reset it per test.
+
+    Without this, whichever test runs first spends the budget and the rest
+    silently exercise the exhausted path — passing for the wrong reason.
+    """
+    monkeypatch.setattr(ev, "_throttle_retries_used", 0)
+
+
 @pytest.mark.asyncio
 async def test_a_persistent_429_becomes_a_marked_skip():
     llm = _AlwaysThrottled()
@@ -240,6 +250,54 @@ async def test_an_http_date_retry_after_falls_back_to_the_default(monkeypatch):
         await ev._verdict(llm, ev._CASES[0])
 
     assert slept == [7.0], f"expected the fallback pause, slept {slept}"
+
+
+@pytest.mark.asyncio
+async def test_a_sustained_throttle_stops_pausing_once_the_session_budget_is_spent(
+    monkeypatch,
+):
+    """The per-call retry alone let a sustained throttle sleep for ~37 minutes.
+
+    `_verdicts` calls `_verdict` 37 times per session (4 cases x 3 + STUCK x 6,
+    both models, plus the budget test), each previously entitled to its own
+    pause of up to `_THROTTLE_RETRY_CAP_S`. The job then still reported green
+    with zero cases executed — a slow wrong answer instead of a fast one.
+    """
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(ev.asyncio, "sleep", _record)
+    monkeypatch.setattr(ev, "_THROTTLE_RETRY_BUDGET", 2)
+    monkeypatch.setattr(ev, "_THROTTLE_RETRY_SLEEP_S", 1.0)
+
+    # Five independent cases all throttled: only the first two may pause.
+    for _ in range(5):
+        llm = _AlwaysDenied(
+            lambda: _denial("429 throttled", body={"code": "rate_limited"})
+        )
+        with pytest.raises(pytest.skip.Exception):
+            await ev._verdict(llm, ev._CASES[0])
+
+    assert len(slept) == 2, (
+        f"session budget is 2, so only 2 pauses should happen; slept {slept}"
+    )
+    assert ev._throttle_retries_used == 2
+
+
+def test_the_workflow_bounds_the_job_so_a_hang_cannot_hold_a_runner():
+    """Belt for the braces: even a bug in the budget cannot burn 6 hours.
+
+    GitHub's default job timeout is 360 minutes.
+    """
+    workflow = _WORKFLOW.read_text()
+    found = re.search(r"timeout-minutes:\s*(\d+)", workflow)
+
+    assert found, "verdict-eval has no timeout-minutes; the default is 360"
+    assert int(found.group(1)) <= 30, (
+        f"timeout-minutes={found.group(1)} is too loose for a ~90s job"
+    )
 
 
 def test_the_marker_matches_the_one_the_workflow_greps_for():

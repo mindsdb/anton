@@ -115,6 +115,23 @@ _THROTTLE_RETRY_SLEEP_S = float(os.environ.get("VERIFIER_EVAL_THROTTLE_RETRY_SLE
 # naps for ten minutes is indistinguishable from a hung one.
 _THROTTLE_RETRY_CAP_S = 60.0
 
+# Total throttle retries allowed across the whole session, not per call.
+#
+# The per-call retry alone was not enough: `_verdicts` invokes `_verdict` 18
+# times per model (4 cases x 3 runs + STUCK x 6), so 37 calls per session, each
+# entitled to its own pause. Under a SUSTAINED throttle that is 12 minutes at
+# the default and 37 at the cap — and it still ends green with zero cases
+# executed. The retry fixed the common case (a short window that clears) while
+# turning the pathological one from a fast wrong answer into a slow one.
+#
+# A session budget keeps the retry that does the work and bounds the rest: once
+# spent, later throttles skip immediately. Caught in review on #328.
+_THROTTLE_RETRY_BUDGET = int(os.environ.get("VERIFIER_EVAL_THROTTLE_RETRY_BUDGET", "5"))
+
+# Module-level on purpose: the budget is per pytest session, shared across every
+# case and both models, which is the scope the runaway lives at.
+_throttle_retries_used = 0
+
 # The gateway distinguishes its denials and says which is which
 # (mindshub_inference/minds/inference/errors.py):
 #
@@ -269,15 +286,24 @@ async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:
             # Deliberately NOT catching ConnectionError, which anton also raises
             # for a 401 invalid key — a misconfiguration somebody must fix, so
             # that has to stay red.
+            global _throttle_retries_used
+
             kind, retry_after = _gateway_denial(exc)
             if kind == "starved":
                 # An empty wallet or a spent allowance will not clear inside
                 # this run. Retrying just adds a pause before the same answer.
                 pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
-            if not retried_after_throttle:
-                # `throttled` (velocity) or `unknown` (be generous). One retry,
-                # same budget — a retry, not an ENG-1081 truncation escalation.
+            if (
+                not retried_after_throttle
+                and _throttle_retries_used < _THROTTLE_RETRY_BUDGET
+            ):
+                # `throttled` (velocity) or `unknown` (be generous). One retry
+                # per call, and only while the session budget lasts — otherwise
+                # a sustained throttle sleeps for half an hour and still reports
+                # nothing tested. Same token budget: a retry, not an ENG-1081
+                # truncation escalation.
                 retried_after_throttle = True
+                _throttle_retries_used += 1
                 await asyncio.sleep(_throttle_pause(retry_after))
                 continue
             pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
