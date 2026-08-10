@@ -366,6 +366,19 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+def _is_provider_auth_error(exc: BaseException) -> bool:
+    """A provider-auth 401 — anton's "Invalid API key — …" copy from
+    `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
+    request, so retrying can't succeed either. Narrow substring match
+    mirrors cowork-server's `turn_errors.is_auth_error()` — anything else (a
+    bare "temporarily unavailable" ConnectionError) is a different failure.
+
+    Shared by both `turn_stream` re-raise sites so the check can't drift
+    between them (review feedback on ENG-1310).
+    """
+    return isinstance(exc, ConnectionError) and "invalid api key" in str(exc).lower()
+
+
 # Shared closing instruction for every path that hands control back to the
 # user (STUCK, budget-exhausted, verifier-call failure): a plain self-
 # assessment of solvability, not just a status dump. Without this, a
@@ -2876,14 +2889,9 @@ class ChatSession:
                     ):
                         raise
 
-                    # Same reasoning for a provider-auth 401 (anton's "Invalid
-                    # API key — …" copy from openai.py/anthropic.py, ENG-1310):
-                    # the credential is wrong, not the request, so retrying
-                    # can't succeed either. Narrow substring match mirrors
-                    # cowork-server's turn_errors.is_auth_error() — anything
-                    # else (a bare "temporarily unavailable" ConnectionError)
-                    # keeps going through the normal retry path below.
-                    if isinstance(_agent_exc, ConnectionError) and "invalid api key" in str(_agent_exc).lower():
+                    # Same reasoning applies to a provider-auth 401 (ENG-1310)
+                    # — see _is_provider_auth_error.
+                    if _is_provider_auth_error(_agent_exc):
                         raise
 
                     # ENG-673: a mid-stream transient failure that had NO prior
@@ -3000,24 +3008,27 @@ class ChatSession:
                                     assistant_text_parts.append(event.text)
                                 yield event
                         except Exception as e:
-                            if isinstance(e, (TokenLimitExceeded, ModelUnavailableError)):
+                            if isinstance(e, (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError)):
                                 # Curated provider failures must FAIL the turn, not
                                 # get wrapped into assistant prose: the server maps
                                 # them to actionable error cards (token_limit /
-                                # model-unavailable), which can only fire when the
-                                # exception propagates. Wrapping them as text is
-                                # how "Server returned 403" ended up mid-chat with
-                                # "please rephrase your request" advice.
+                                # model-unavailable / endpoint-config), which can
+                                # only fire when the exception propagates. Wrapping
+                                # them as text is how "Server returned 403" ended
+                                # up mid-chat with "please rephrase your request"
+                                # advice. EndpointConfigurationError added here to
+                                # match the immediate re-raise site above — this
+                                # wrap-up call had been the one place it still fell
+                                # through (review feedback on ENG-1310).
                                 raise
-                            if isinstance(e, ConnectionError) and "invalid api key" in str(e).lower():
-                                # Same reasoning for a provider-auth 401 (anton's
-                                # "Invalid API key — …" copy from openai.py /
-                                # anthropic.py): cowork-server's
+                            if _is_provider_auth_error(e):
+                                # Same reasoning for a provider-auth 401 — see
+                                # _is_provider_auth_error. cowork-server's
                                 # turn_errors.is_auth_error() matches this exact
                                 # text and renders the "Reconnect MindsHub" /
-                                # BYOK-key action card — but only if the
-                                # exception propagates instead of being
-                                # flattened into chat text here (ENG-1310).
+                                # BYOK-key action card, but only if the exception
+                                # propagates instead of being flattened into chat
+                                # text here (ENG-1310).
                                 raise
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)

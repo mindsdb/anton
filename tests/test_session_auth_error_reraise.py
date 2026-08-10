@@ -28,7 +28,8 @@ import pytest
 
 from tests.conftest import make_mock_llm
 
-from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.llm.provider import EndpointConfigurationError
+from anton.core.session import ChatSession, ChatSessionConfig, _is_provider_auth_error
 
 _AUTH_ERROR_MESSAGE = "Invalid API key — check your OpenAI API key configuration."
 
@@ -116,6 +117,34 @@ async def test_auth_failure_on_the_final_wrapup_call_still_reraises(workspace):
 
     # 3 retry attempts (max_auto_retries=2) on the unrelated RuntimeError,
     # then the final direct wrap-up call hits the auth error.
+    assert script.calls == 4
+
+
+def test_is_provider_auth_error_matches_only_the_invalid_key_copy():
+    """The predicate both re-raise sites share — pinned directly so the two
+    call sites can't drift from each other (review feedback on ENG-1310)."""
+    assert _is_provider_auth_error(ConnectionError(_AUTH_ERROR_MESSAGE))
+    assert _is_provider_auth_error(ConnectionError("INVALID API KEY — case insensitive"))
+    assert not _is_provider_auth_error(ConnectionError("temporarily unavailable"))
+    assert not _is_provider_auth_error(RuntimeError(_AUTH_ERROR_MESSAGE))
+
+
+async def test_endpoint_configuration_error_on_the_final_wrapup_call_still_reraises(workspace):
+    """The wrap-up call's except block must treat EndpointConfigurationError
+    (ENG-1139 — also deterministic, also must default to 'setup' not
+    'retry') the same way the immediate re-raise site already does, instead
+    of flattening it into chat text (review feedback on ENG-1310)."""
+    mock_llm = make_mock_llm()
+    script = _ScriptedExceptionPlanStream(
+        [RuntimeError("boom"), RuntimeError("boom"), RuntimeError("boom"),
+         EndpointConfigurationError("The model endpoint returned 404.")]
+    )
+    mock_llm.plan_stream = script
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with pytest.raises(EndpointConfigurationError):
+        await _run_turn(session)
+
     assert script.calls == 4
 
 
