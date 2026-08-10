@@ -4,11 +4,7 @@ import asyncio
 import json
 
 from anton.core.tools.registry import ToolOutcome
-from anton.core.tools.side_effect import (
-    SideEffectResult,
-    hash_content,
-    now_iso,
-)
+from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.tools.tool_handlers import handle_create_artifact
 
 REQUIRED_FIELDS = {
@@ -18,6 +14,7 @@ REQUIRED_FIELDS = {
     "idempotency_key",
     "committed_at",
     "content_hash",
+    "details",
 }
 
 
@@ -30,6 +27,7 @@ def test_success_outcome_carries_every_required_field():
         idempotency_key="rep-1",
         committed_at=now_iso(),
         content_hash="md5:abc",
+        details={"port": 8080},
     )
     outcome = res.to_outcome()
     assert isinstance(outcome, ToolOutcome)
@@ -40,6 +38,8 @@ def test_success_outcome_carries_every_required_field():
     assert payload["success"] is True
     assert payload["external_url"] == "https://4nton.ai/view/x"
     assert payload["committed_at"] is not None
+    # Tool-specific fields ride the machine-readable `details` channel.
+    assert payload["details"] == {"port": 8080}
 
 
 def test_failed_marks_no_commit():
@@ -84,16 +84,7 @@ def test_validation_failure_is_explicit_ok_false(tmp_path):
     assert outcome.ok is False
 
 
-def test_hash_content_is_deterministic_and_prefixed():
-    a = hash_content("hello")
-    b = hash_content(b"hello")
-    assert a == b
-    assert a.startswith("sha256:")
-    assert hash_content("hello") != hash_content("world")
-
-
 if __name__ == "__main__":
     test_success_outcome_carries_every_required_field()
     test_failed_marks_no_commit()
-    test_hash_content_is_deterministic_and_prefixed()
     print("ok")

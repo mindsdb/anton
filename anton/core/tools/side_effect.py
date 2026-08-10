@@ -27,7 +27,6 @@ from `success`, so the ENG-1276 error streak keys on the explicit verdict.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,17 +37,6 @@ from anton.core.tools.registry import ToolOutcome
 def now_iso() -> str:
     """Current instant as an ISO-8601 UTC string (the `committed_at` basis)."""
     return datetime.now(timezone.utc).isoformat()
-
-
-def hash_content(data: str | bytes) -> str:
-    """Deterministic `content_hash` for committed content.
-
-    Returns a `sha256:<hex>` string. Accepts text or bytes so callers can hash
-    either a rendered artifact's bytes or an already-computed digest source.
-    """
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 @dataclass
