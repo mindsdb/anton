@@ -240,3 +240,213 @@ class TestMaybeUpdateIdentity:
         await cortex.maybe_update_identity("Hi, I'm Jorge")
         assert (g / "profile.md").exists()
         assert "Name: Jorge" in (g / "profile.md").read_text()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENG-1390 — the hidden LLM call in prompt assembly
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _when_engrams(n: int, filler: int = 500) -> list[Engram]:
+    """Enough conditional rules to clear every gate.
+
+    Four must all hold before the call happens: a user message + an attached LLM,
+    formatted rules over `_RULES_BUDGET_CHARS` (6000), at least one `when` rule,
+    and a conditional block of at least 1000 chars. 12 x ~545 chars clears the
+    6000 budget; `filler=5` deliberately does not (see the short-circuit test).
+    """
+    return [
+        Engram(
+            text=f"When condition {i:03d} applies, do the thing {'x' * filler}",
+            kind="when",
+            scope="global",
+            confidence="high",
+        )
+        for i in range(n)
+    ]
+
+
+class _FakeLLM:
+    """Stands in for LLMClient.code, recording the trace tags it was called under."""
+
+    def __init__(self, content: str = "", raises: bool = False, stop_reason: str | None = None):
+        self._content = content
+        self._raises = raises
+        self._stop_reason = stop_reason
+        self.calls = 0
+        self.tags_seen: tuple[str, ...] = ()
+
+    async def code(self, **kwargs):
+        from anton.core.llm.provider import LLMResponse, Usage
+        from anton.core.llm.tracing import get_trace_context
+
+        self.calls += 1
+        ctx = get_trace_context()
+        self.tags_seen = ctx.tags if ctx else ()
+        if self._raises:
+            raise RuntimeError("provider exploded")
+        return LLMResponse(
+            content=self._content,
+            usage=Usage(input_tokens=4258, output_tokens=252),
+            stop_reason=self._stop_reason,
+        )
+
+
+@pytest.fixture()
+def captured_events(monkeypatch):
+    """Capture the analytics events the rule-retrieval path emits."""
+    events: list[dict] = []
+    import anton.core.memory.cortex as cortex_mod
+
+    # raising=False on purpose: on code without the instrumentation the hook does
+    # not exist, and we want these tests to FAIL with "no event was emitted"
+    # rather than ERROR on a missing attribute. An error says the fixture broke;
+    # a failure says the property under test is absent, which is the point.
+    monkeypatch.setattr(
+        cortex_mod, "_emit_rule_retrieval", lambda **shape: events.append(shape), raising=False
+    )
+    return events
+
+
+def _one_event(events: list[dict]) -> dict:
+    """The single rule-retrieval event, with a failure message worth reading.
+
+    Indexing `events[0]` directly fails as a bare IndexError, which tells a
+    future reader nothing about what broke.
+    """
+    assert len(events) == 1, (
+        f"expected exactly one rule_retrieval event, got {len(events)}: {events}. "
+        "Zero means the call is not reporting its outcome at all — which is the "
+        "defect ENG-1390 exists to close."
+    )
+    return events[0]
+
+
+class TestRuleRetrievalObservability:
+    """ENG-1390 — the call must be countable, and its outcomes distinguishable.
+
+    Before this, `filtered_when = when_engrams` was reached three different ways
+    (no exact match, empty response, exception) and all three were byte-identical
+    in their effect on the prompt — so a count of invocations could never
+    separate a working filter from a broken one. Measured in production at 1.77%
+    of all LLM calls before any of this existed.
+    """
+
+    async def _run(self, cortex, llm, rules):
+        cortex._llm = llm
+        return await cortex._retrieve_relevant_rules(rules, "please do the august campaign")
+
+    async def test_filtered_outcome_is_reported(self, cortex, captured_events):
+        rules = _when_engrams(12)
+        # Echo back exactly two rules, verbatim, as the prompt demands.
+        echo = "\n".join(f"- {rules[i].text}" for i in (0, 1))
+        llm = _FakeLLM(content=echo)
+        out = await self._run(cortex, llm, rules)
+
+        assert llm.calls == 1
+        assert len(out) == 2, "behaviour must be unchanged: only the echoed rules survive"
+        ev = _one_event(captured_events)
+        assert ev["outcome"] == "filtered"
+        assert ev["when_rules"] == 12 and ev["kept_rules"] == 2
+
+    async def test_dropped_all_is_its_own_outcome(self, cortex, captured_events):
+        """`NONE` discards every conditional rule — measured at 30% and absent
+        from the ticket's original three-outcome taxonomy."""
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _FakeLLM(content="NONE"), rules)
+        assert out == [], "no mandatory rules present, so nothing should remain"
+        ev = _one_event(captured_events)
+        assert ev["outcome"] == "dropped_all"
+        assert ev["kept_rules"] == 0
+
+    async def test_no_exact_match_is_distinguishable_from_keeping_everything(
+        self, cortex, captured_events
+    ):
+        """The silent fallback. The model answered, but nothing matched verbatim —
+        so every rule is kept, which is indistinguishable in the PROMPT from the
+        filter deciding all rules were relevant. Only the event separates them."""
+        rules = _when_engrams(12)
+        # Plausible model output that fails exact string equality.
+        llm = _FakeLLM(content="- When condition 001 applies, do the thing (reworded)")
+        out = await self._run(cortex, llm, rules)
+
+        assert len(out) == 12, "behaviour must be unchanged: everything is kept"
+        ev = _one_event(captured_events)
+        assert ev["outcome"] == "kept_all_no_match"
+        assert ev["kept_rules"] == 12
+
+    async def test_empty_response_is_distinguishable(self, cortex, captured_events):
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _FakeLLM(content="   "), rules)
+        assert len(out) == 12
+        assert _one_event(captured_events)["outcome"] == "kept_all_empty"
+
+    async def test_exception_is_reported_at_all(self, cortex, captured_events):
+        """The one outcome no trace could ever show: a failed call leaves no
+        observation to count, so retroactive measurement is blind to it."""
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _FakeLLM(raises=True), rules)
+        assert len(out) == 12, "the permissive fallback must still apply"
+        assert _one_event(captured_events)["outcome"] == "error"
+
+    async def test_truncation_is_reported_via_stop_reason(self, cortex, captured_events):
+        """A verbatim echo cut at the ceiling is accepted as 'the relevant rules',
+        so truncation masquerades as a successful filter — 8 of 9 truncated calls
+        in production were classified that way. `stop_reason` is what separates
+        them; output_tokens == max_tokens is a heuristic with false positives."""
+        rules = _when_engrams(12)
+        echo = "\n".join(f"- {rules[i].text}" for i in (0, 1))
+        llm = _FakeLLM(content=echo, stop_reason="max_tokens")
+        await self._run(cortex, llm, rules)
+        ev = _one_event(captured_events)
+        assert ev["outcome"] == "filtered"
+        assert ev["stop_reason"] == "max_tokens", "a truncated filter must be separable"
+
+    async def test_the_call_is_tagged_so_it_is_isolatable_in_a_trace(self, cortex):
+        """Done-when #1: distinguishable from every other `llm.code` call."""
+        from anton.core.llm.tracing import (
+            TraceContext,
+            reset_trace_context,
+            set_trace_context,
+        )
+
+        rules = _when_engrams(12)
+        llm = _FakeLLM(content="NONE")
+        token = set_trace_context(TraceContext(session_id="conv-1", turn_id=3, harness="anton"))
+        try:
+            await self._run(cortex, llm, rules)
+        finally:
+            reset_trace_context(token)
+
+        assert "rule-retrieval" in llm.tags_seen, llm.tags_seen
+        # …and the tag must not leak past the call it annotates.
+        from anton.core.llm.tracing import get_trace_context
+
+        assert get_trace_context() is None
+
+    async def test_no_rule_text_or_user_message_reaches_analytics(self, cortex, captured_events):
+        """The ticket's security note: shape only — counts, sizes, enums."""
+        rules = _when_engrams(12)
+        await self._run(cortex, _FakeLLM(content="NONE"), rules)
+        ev = _one_event(captured_events)
+        blob = repr(ev)
+        assert "august campaign" not in blob, "user message must never be sent"
+        assert "do the thing" not in blob, "rule text must never be sent"
+        assert set(ev) == {
+            "outcome",
+            "when_rules",
+            "kept_rules",
+            "rules_chars",
+            "stop_reason",
+            "input_tokens",
+            "output_tokens",
+            "duration_ms",
+        }
+
+    async def test_gates_still_short_circuit_without_an_llm_call(self, cortex, captured_events):
+        """Below the budget the call must not happen — and must not be reported."""
+        llm = _FakeLLM(content="NONE")
+        small = _when_engrams(1, filler=5)
+        out = await self._run(cortex, llm, small)
+        assert llm.calls == 0 and captured_events == []
+        assert out == small

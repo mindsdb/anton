@@ -20,11 +20,13 @@ like how the PFC coordinates retrieval from multiple brain memory systems.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from anton.core.llm.tracing import tagged_trace
 from anton.core.llm.structured import (
     generate_with_truncation_retry,
     no_preamble_instruction,
@@ -38,6 +40,58 @@ if TYPE_CHECKING:
     from anton.core.memory.episodes import EpisodicMemory
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rule-retrieval observability (ENG-1390)
+# ─────────────────────────────────────────────────────────────────────────────
+# `_retrieve_relevant_rules` makes an LLM call during PROMPT ASSEMBLY, through
+# the same `llm.code` entry point as the completion verifier and every other
+# coding call — so it was indistinguishable from them in a trace, and its
+# frequency was unknown. Measured retroactively before this shipped (ENG-1390):
+# 1.77% of all LLM calls, 4 users, median 4.3k input tokens, p90 latency 23.9s
+# added BEFORE the turn starts.
+#
+# Two sinks, because neither alone is sufficient:
+#   * the trace tag isolates the call in Langfuse, but only for MindsHub-routed
+#     traffic with a turn in flight;
+#   * the analytics event works for every user and every provider, and is the
+#     only way to observe the EXCEPTION outcome at all (a failed call leaves no
+#     observation to count).
+_RULE_RETRIEVAL_TAG = "rule-retrieval"
+_RULE_RETRIEVAL_MAX_TOKENS = 4096
+
+# Built once: `AntonSettings()` reads the environment, and while this call site
+# is rare it sits on the latency-critical prompt-assembly path.
+_analytics_settings = None
+
+
+def _emit_rule_retrieval(**shape) -> None:
+    """Report one rule-retrieval call's SHAPE to analytics.
+
+    Counts, sizes and enums ONLY — never rule text and never the user message,
+    both of which are user content (ENG-1390's security note, and the standing
+    rule for this sink: numbers, names and IDs only).
+
+    Every `extra` kwarg becomes a queryable PostHog property, so these parameter
+    names are a published schema — renaming one breaks whatever reads it.
+    Silent on failure: observability must never break prompt assembly.
+    """
+    global _analytics_settings
+    try:
+        if _analytics_settings is None:
+            from anton.config.settings import AntonSettings
+
+            _analytics_settings = AntonSettings()
+        from anton.analytics import send_event
+
+        send_event(
+            _analytics_settings,
+            "rule_retrieval",
+            **{key: str(value) for key, value in shape.items()},
+        )
+    except Exception:
+        logger.debug("rule_retrieval analytics event failed", exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,30 +336,75 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if len(when_text) < 1000:
             return engrams
 
+        # ENG-1390 instrumentation. Purely observational — every branch below
+        # produces exactly the value it produced before. What is new is that the
+        # branches are now DISTINGUISHABLE: `filtered_when = when_engrams` is
+        # reached three different ways (no exact match, empty response, exception)
+        # and all three are byte-identical in their effect on the prompt, so a
+        # count of invocations could never tell a working filter from a broken one.
+        # Measured shares before this shipped: 55.7% filtered, 30.2% dropped_all,
+        # 14.2% kept_all_no_match, plus an exception rate that was unobservable.
+        outcome = "error"
+        kept = len(when_engrams)
+        stop_reason = ""
+        usage = None
+        early: list[Engram] | None = None
+        started = time.monotonic()
         try:
-            response = await self._llm.code(
-                system=self._RULES_RETRIEVAL_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"User message: {user_message}\n\nRules:\n{when_text}",
-                    }
-                ],
-                max_tokens=4096,
-            )
+            # Isolate this call from every other `llm.code` caller in the trace.
+            with tagged_trace(_RULE_RETRIEVAL_TAG):
+                response = await self._llm.code(
+                    system=self._RULES_RETRIEVAL_PROMPT,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": f"User message: {user_message}\n\nRules:\n{when_text}",
+                        }
+                    ],
+                    max_tokens=_RULE_RETRIEVAL_MAX_TOKENS,
+                )
+            usage = getattr(response, "usage", None)
+            stop_reason = getattr(response, "stop_reason", None) or ""
             result = response.content.strip()
             if result.upper() == "NONE":
-                return mandatory
-            if result:
+                # A fourth outcome the ticket did not name: EVERY conditional rule
+                # is discarded. The opposite of the permissive fallback, and ~30%
+                # of calls.
+                outcome, kept, early = "dropped_all", 0, mandatory
+            elif result:
                 returned = {line.lstrip("- ").strip() for line in result.splitlines() if line.strip()}
                 filtered_when = [e for e in when_engrams if e.text in returned]
                 if not filtered_when:
-                    filtered_when = when_engrams
+                    # Exact string equality against the model's echo. Any rewrap,
+                    # added punctuation, or a response truncated at the ceiling
+                    # yields zero matches — and then we silently keep everything.
+                    outcome, filtered_when = "kept_all_no_match", when_engrams
+                else:
+                    outcome, kept = "filtered", len(filtered_when)
             else:
-                filtered_when = when_engrams
+                outcome, filtered_when = "kept_all_empty", when_engrams
         except Exception:
             filtered_when = when_engrams
+            outcome = "error"
+        finally:
+            _emit_rule_retrieval(
+                outcome=outcome,
+                when_rules=len(when_engrams),
+                kept_rules=kept,
+                rules_chars=len(when_text),
+                # `stop_reason`, not output_tokens == max_tokens: a truncated
+                # verbatim echo is silently accepted as "the relevant rules", so
+                # this is the difference between a real filter and one that just
+                # ran out of room. The provider reason is authoritative where the
+                # exact-cap heuristic gives false positives.
+                stop_reason=stop_reason,
+                input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
 
+        if early is not None:
+            return early
         return mandatory + filtered_when
 
     def get_scratchpad_context(self) -> str:
