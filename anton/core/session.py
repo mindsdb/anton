@@ -2989,16 +2989,26 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
-                        except (TokenLimitExceeded, ModelUnavailableError):
-                            # Curated provider failures must FAIL the turn, not
-                            # get wrapped into assistant prose: the server maps
-                            # them to actionable error cards (token_limit /
-                            # model-unavailable), which can only fire when the
-                            # exception propagates. Wrapping them as text is
-                            # how "Server returned 403" ended up mid-chat with
-                            # "please rephrase your request" advice.
-                            raise
                         except Exception as e:
+                            if isinstance(e, (TokenLimitExceeded, ModelUnavailableError)):
+                                # Curated provider failures must FAIL the turn, not
+                                # get wrapped into assistant prose: the server maps
+                                # them to actionable error cards (token_limit /
+                                # model-unavailable), which can only fire when the
+                                # exception propagates. Wrapping them as text is
+                                # how "Server returned 403" ended up mid-chat with
+                                # "please rephrase your request" advice.
+                                raise
+                            if isinstance(e, ConnectionError) and "invalid api key" in str(e).lower():
+                                # Same reasoning for a provider-auth 401 (anton's
+                                # "Invalid API key — …" copy from openai.py /
+                                # anthropic.py): cowork-server's
+                                # turn_errors.is_auth_error() matches this exact
+                                # text and renders the "Reconnect MindsHub" /
+                                # BYOK-key action card — but only if the
+                                # exception propagates instead of being
+                                # flattened into chat text here (ENG-1310).
+                                raise
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
