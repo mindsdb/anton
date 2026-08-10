@@ -16,6 +16,9 @@ retry would duplicate it.
 - `committed_at` — ISO-8601 UTC instant the side effect committed; `None` when
   nothing was committed (validation failure, pre-commit error).
 - `content_hash` — hash of the committed content, when the tool has content.
+- `details` — tool-specific machine-readable fields that don't fit the common
+  ones above (e.g. launch_backend's `port` / `pid` / `log_path`); `None` when
+  the tool has no extras.
 - `message` — the human-readable line kept for the model / desktop UI.
 
 It serialises to a JSON string inside a `ToolOutcome` and sets `ToolOutcome.ok`
@@ -59,6 +62,7 @@ class SideEffectResult:
     idempotency_key: str | None = None
     committed_at: str | None = None
     content_hash: str | None = None
+    details: dict | None = None
 
     def to_outcome(self, reason: str = "") -> ToolOutcome:
         """Render to a `ToolOutcome`: JSON payload as content, verdict as `ok`."""
@@ -70,6 +74,7 @@ class SideEffectResult:
             "idempotency_key": self.idempotency_key,
             "committed_at": self.committed_at,
             "content_hash": self.content_hash,
+            "details": self.details,
         }
         return ToolOutcome(
             content=json.dumps(payload, indent=2),

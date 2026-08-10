@@ -278,6 +278,12 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
         external_url=url or None,
         idempotency_key=slug,
         committed_at=now_iso(),
+        details={
+            "slug": slug,
+            "port": result.get("port"),
+            "pid": result.get("pid"),
+            "log_path": result.get("log_path"),
+        },
     ).to_outcome()
 
 
