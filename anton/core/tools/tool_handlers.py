@@ -124,6 +124,13 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
         committed_at=now_iso(),
+        details={
+            "slug": artifact.slug,
+            "path": folder,
+            "name": artifact.name,
+            "type": artifact.type,
+            "primary": artifact.primary,
+        },
     ).to_outcome()
 
 
@@ -206,6 +213,12 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
         committed_at=now_iso(),
+        details={
+            "slug": artifact.slug,
+            "primary": artifact.primary,
+            "port": artifact.port,
+            "datasources": datasources,
+        },
     ).to_outcome()
 
 
