@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Callable
 
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.spinner import Spinner
 from rich.text import Text
 
@@ -32,6 +33,9 @@ class _ToolActivity:
     work_elapsed: float = 0.0  # actual execution seconds (filled on done)
     reasoning_elapsed: float = 0.0  # LLM thinking seconds after this step
     done_line_printed: bool = False  # whether the combined ✔ line was printed
+    ok: bool | None = None  # tool's verdict on tool_done — None/True render as
+    # success (unclassified legacy tools default to looking fine, matching
+    # today's behavior); only an explicit False prints the failure line.
 
 
 # Witty one-liners for non-scratchpad tool display. One is picked at
@@ -189,6 +193,46 @@ PHASE_LABELS = {
 }
 
 
+class QuestionRenderTracker:
+    """Bridges a question's id from "printed" to "safe to read stdin".
+
+    `show_question()` runs on the turn-loop's own task, reached only after
+    an out-of-band event travels the tool-dispatch task -> emitter queue ->
+    drain generator -> turn_stream -> this loop. `CLIElicitor.ask()` runs on
+    the tool-dispatch task itself and has no visibility into when that chain
+    finishes. Without this, `ask()` can start `prompt_toolkit` — which
+    renders synchronously, before its own first await — while the question
+    is still sitting in the queue, unprinted; `prompt_toolkit` and the
+    eventual out-of-band print then race for the same terminal lines.
+
+    `mark_rendered()` is called once `show_question()` returns for a given
+    id; `wait_for_render()` is called from `ask()` for that same id. Whichever
+    runs first creates the `Event` for the other to find.
+    """
+
+    def __init__(self) -> None:
+        self._rendered: dict[str, asyncio.Event] = {}
+
+    def mark_rendered(self, question_id: str) -> None:
+        self._rendered.setdefault(question_id, asyncio.Event()).set()
+
+    async def wait_for_render(self, question_id: str, *, timeout: float = 1.0) -> None:
+        """Wait until `mark_rendered(question_id)` fires, or give up.
+
+        The timeout is a safety net, not the expected path: draining the
+        queue normally takes a handful of event-loop ticks, not seconds. If
+        it is ever hit, printing already fell behind for some other reason
+        and blocking `ask()` longer would only add to the wait.
+        """
+        event = self._rendered.setdefault(question_id, asyncio.Event())
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except TimeoutError:
+            pass
+        finally:
+            self._rendered.pop(question_id, None)
+
+
 class StreamDisplay:
     """Manages streaming LLM output with permanent prints and a tiny Live spinner.
 
@@ -296,6 +340,42 @@ class StreamDisplay:
         self._console.print(Markdown(content))
         self._start_spinner()
 
+    def stop_spinner_for_input(self) -> None:
+        """Stop the spinner synchronously, before something else takes raw terminal control.
+
+        `CLIElicitor` calls this right before it starts a `prompt_toolkit`
+        prompt: that prompt renders its own line synchronously, before the
+        out-of-band `StreamTaskProgress(phase="interactive")` that would
+        otherwise reach this spinner gets drained. If the spinner is still
+        running when `prompt_toolkit`'s first render lands, `_stop_spinner`'s
+        Live.stop() cursor-restore — still queued behind it — erases exactly
+        the line `prompt_toolkit` just drew.
+        """
+        self._stop_spinner()
+
+    def show_question(self, request) -> None:
+        """Print a numbered option list for a published ask_user question.
+
+        The spinner was already stopped by the preceding
+        StreamTaskProgress(phase="interactive"), so this writes to a quiet
+        console. The elicitor only reads the reply.
+
+        Prompt, label and detail are escaped: they are model-controlled, and a
+        plausible label like "[recommended] postgres" would otherwise be
+        rendered as a Rich tag and swallowed, while one containing "[/]" would
+        raise MarkupError out of here and kill the turn mid-dispatch.
+        """
+        self._console.print(f"\n[bold]{escape(request.prompt)}[/]")
+        for index, option in enumerate(request.options, start=1):
+            icon = "📁" if option.kind == "folder" else "📄" if option.kind == "file" else ""
+            prefix = f"{icon} " if icon else ""
+            detail = f"  [dim]{escape(option.detail)}[/]" if option.detail else ""
+            self._console.print(
+                f"  [bold]{index}[/]. {prefix}{escape(option.label)}{detail}"
+            )
+        if request.select == "many":
+            self._console.print("  [dim]Pick one or more.[/]")
+
     def show_tool_execution(self, task: str) -> None:
         """Backward-compatible wrapper — delegates to on_tool_use_start."""
         self.on_tool_use_start(f"_compat_{id(task)}", task)
@@ -349,7 +429,8 @@ class StreamDisplay:
                 return
 
     def update_progress(
-        self, phase: str, message: str, eta: float | None = None
+        self, phase: str, message: str, eta: float | None = None,
+        *, ok: bool | None = None,
     ) -> None:
         """Update progress — manages spinner and activity lines."""
         if not self._active:
@@ -412,6 +493,17 @@ class StreamDisplay:
             self._update_spinner()
             return
 
+        if phase == "tool_progress":
+            # A streaming tool handler (ToolRegistry.dispatch_tool_stream)
+            # yielded a ToolProgress marker. Print it as a permanent line —
+            # falling through to the generic phase handler below would only
+            # update the transient spinner footer (Live(transient=True)),
+            # which disappears the moment the spinner stops.
+            self._stop_spinner()
+            self._console.print(Text(f"  {message}", style="anton.muted"))
+            self._start_spinner()
+            return
+
         if phase == "tool_done":
             # Stash work elapsed — combined line printed on reasoning_done.
             elapsed = eta if eta else 0
@@ -419,6 +511,7 @@ class StreamDisplay:
                 if act.name == message and act.printed and not act.done:
                     act.done = True
                     act.work_elapsed = elapsed
+                    act.ok = ok
                     break
             return
 
@@ -531,12 +624,20 @@ class StreamDisplay:
     ) -> None:
         """Print a single combined completion line for a finished activity.
 
-        Format: ``  ✔ (Worked: 1.9s, Reasoned: 7.1s)``
+        Format: ``  ✔ (Worked: 1.9s, Reasoned: 7.1s)`` on success, or the
+        ``✘`` variant in red when the tool's own verdict (``act.ok``) is
+        explicitly ``False`` — a raised handler exception or a declared
+        ``ToolOutcome(ok=False)`` (ENG-1276). ``None`` (unclassified/legacy
+        tools) and ``True`` both render as the success line, matching
+        today's behavior for anything that hasn't declared a verdict.
         If reasoning_elapsed is 0 (e.g. last tool in the turn with no
         follow-up reasoning), only the work time is shown.
         """
         line = Text()
-        line.append("  \u2714 ", style="green")
+        if act.ok is False:
+            line.append("  \u2718 ", style="red")
+        else:
+            line.append("  \u2714 ", style="green")
         work_str = self._fmt_elapsed(work_elapsed)
 
         from anton.config.settings import AntonSettings
@@ -622,6 +723,31 @@ class EscapeWatcher:
         finally:
             fcntl.fcntl(fd, fcntl.F_SETFL, flags)
 
+    @staticmethod
+    def _read_available(fd: int, size: int) -> bytes:
+        """Read what is there right now; never block the event loop.
+
+        This read runs on the event loop's own thread while the `select()`
+        that found the fd readable ran in an executor, and stdin is shared
+        with prompt_toolkit's reader whenever an interactive prompt is up
+        (`loop.add_reader` on the same fd). If that reader takes the bytes in
+        between — which is exactly what happens to the CPR response an
+        `ask_user` prompt requests — a blocking `os.read` here freezes the
+        whole loop until the next keystroke, so every pending callback waits
+        on a keypress, including prompt_toolkit's own redraw that would draw
+        its bottom toolbar.
+        """
+        import fcntl
+
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            return os.read(fd, size)
+        except BlockingIOError:
+            return b""
+        finally:
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+
     async def _watch(self) -> None:
         if sys.platform == "win32":
             return
@@ -641,15 +767,18 @@ class EscapeWatcher:
                 ready = await loop.run_in_executor(
                     None, lambda: select.select([fd], [], [], 0.1)[0]
                 )
-                if not ready:
+                # Re-checked: `pause()` does not cancel a select() that is
+                # already in flight, so this can be reached up to its timeout
+                # after another reader took over stdin.
+                if not ready or self._paused:
                     continue
-                ch = os.read(fd, 1)
+                ch = self._read_available(fd, 1)
                 if ch == b"\x1b":
                     followup = await loop.run_in_executor(
                         None, lambda: select.select([fd], [], [], 0.05)[0]
                     )
                     if followup:
-                        os.read(fd, 32)
+                        self._read_available(fd, 32)
                         continue
                     if self._on_cancel is not None:
                         self._on_cancel()

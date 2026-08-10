@@ -510,6 +510,7 @@ def test_cerebellum_and_acc_do_not_fire_without_background_memory(tmp_path, monk
 
         session._schedule_acc_flush()
         assert session._acc.at_end_of_turn.called is background
+<<<<<<< HEAD
 
 
 # ── org skills (server-supplied, read-only) ──────────────────────────────────
@@ -693,3 +694,5 @@ def test_conflicting_paths_do_not_fail_the_turn(tmp_path, monkeypatch, skills_tm
     }}}
     _, cfg = _build(tmp_path, monkeypatch, skills=skills)
     assert (cfg.settings.skills_root / "ok-skill" / "SKILL.md").is_file()
+=======
+>>>>>>> staging

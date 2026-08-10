@@ -23,7 +23,7 @@ class ToolDef:
     name: str
     description: str
     input_schema: dict
-    handler: Callable  # async (session, tc_input) -> str
+    handler: Callable  # async (session, tc_input) -> str | list[dict]
     prompt: Optional[str] = None  # optional system-prompt fragment
 ```
 
@@ -32,12 +32,25 @@ internal. A handler is an async function taking the `ChatSession` and the
 tool-call input dict, returning a result string (or, for vision tools like
 `read_image`, a list of content blocks).
 
+A handler may instead be an **async generator** that yields zero or more
+`ToolProgress` markers (`anton/core/tools/progress.py`) followed by exactly
+one final `str`/`list[dict]` — the same thing a plain handler would return.
+Progress markers never reach the LLM; they exist only to print incremental
+lines to the console while the tool runs (see
+`tests/test_turn_stream_tool_progress.py` for a worked example of the
+protocol). A generator handler that never yields a non-`ToolProgress` item is
+a bug, not a valid "no result" — `dispatch_tool`/`dispatch_tool_stream` raise
+`RuntimeError` rather than silently returning `None`.
+
 ## `ToolRegistry`
 
-A thin list with three jobs: `register_tool` (skips duplicates by name),
-`dispatch_tool(session, tool_name, tc_input)` (find by name, await the
-handler), and `dump()` (the LLM-facing schemas — name, description,
-input_schema only).
+A thin list with four jobs: `register_tool` (skips duplicates by name),
+`dispatch_tool_stream(session, tool_name, tc_input)` (find by name, run the
+handler — forwarding `ToolProgress` markers as they arrive for a generator
+handler, or just its single result for a plain one), `dispatch_tool(...)`
+(drains `dispatch_tool_stream`, discarding any progress markers — used by
+callers that don't want per-step progress), and `dump()` (the LLM-facing
+schemas — name, description, input_schema only).
 
 ## The built-in tool set
 
@@ -91,8 +104,9 @@ sequenceDiagram
     L->>S: tool_use block (id, name, input)
     S->>A: observe("tool_call", name, args summary)
     S->>R: dispatch_tool(session, name, input)
-    R->>H: await handler(session, tc_input)
-    H->>S: result string
+    R->>H: call handler(session, tc_input)
+    Note over R,H: plain handler → await it, one result.<br/>generator handler → async for over it,<br/>forwarding ToolProgress markers, then the final result.
+    H->>S: result string (or list of blocks)
     S->>A: observe("tool_result", success, error)
     S->>S: append tool_result block to user message
     S->>L: next round (history + tool_results)

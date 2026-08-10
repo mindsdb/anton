@@ -1,0 +1,277 @@
+"""Session-level test for turn_stream()'s generic tool_progress phase.
+
+Reuses the harness proven in
+tests/test_chat_scratchpad.py::TestScratchpadStreaming::test_scratchpad_in_streaming_path
+(a real ChatSession driven by a scripted plan_stream, draining
+session.turn_stream(...)) — adapted for a generic, non-scratchpad streaming
+tool. The tool is registered directly via
+session.tool_registry.register_tool(...) rather than depending on a
+core-registered tool, so this test doesn't need any particular tool to exist
+in `_build_core_tools()`.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from tests.conftest import make_mock_llm
+
+from anton.core.llm.provider import (
+    LLMResponse,
+    StreamComplete,
+    StreamTaskProgress,
+    ToolCall,
+    Usage,
+)
+from anton.core.interaction.emitter import TurnEmitter
+from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.tools.progress import ToolProgress
+from anton.core.tools.registry import ToolOutcome
+from anton.core.tools.tool_defs import ToolDef
+
+
+class _FakeAsyncIter:
+    """Wraps items into an async iterator for mocking plan_stream."""
+
+    def __init__(self, items):
+        self._items = items
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._items:
+            raise StopAsyncIteration
+        return self._items.pop(0)
+
+
+def _text_response(text: str) -> LLMResponse:
+    return LLMResponse(
+        content=text,
+        tool_calls=[],
+        usage=Usage(input_tokens=10, output_tokens=20),
+        stop_reason="end_turn",
+    )
+
+
+def _tool_call_response(tool_name: str, tool_id: str = "tc_1") -> LLMResponse:
+    return LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id=tool_id, name=tool_name, input={})],
+        usage=Usage(input_tokens=10, output_tokens=20),
+        stop_reason="tool_use",
+    )
+
+
+async def _two_step_handler(_session, _input):
+    yield ToolProgress("step 1")
+    yield ToolProgress("step 2")
+    yield "final result"
+
+
+async def _raising_after_progress_handler(_session, _input):
+    yield ToolProgress("about to fail")
+    raise ValueError("boom")
+
+
+async def _no_result_handler(_session, _input):
+    yield ToolProgress("only progress")
+
+
+async def _declared_failure_handler(_session, _input):
+    # Returns its own ToolOutcome verdict (ENG-1276) instead of raising —
+    # a "soft" failure the handler classified itself, no exception involved.
+    yield ToolProgress("checking")
+    yield ToolOutcome(content="the tool declined to run", ok=False, reason="declined")
+
+
+def _make_session_with_tool(handler):
+    """A real ChatSession with one custom streaming tool registered.
+
+    Registering a tool BEFORE the first turn_stream() call makes
+    ChatSession._build_tools() skip _build_core_tools() (it only runs
+    `if not self.tool_registry`, i.e. when empty) — fine here since the
+    scripted plan_stream below never asks for any built-in tool by name.
+    """
+    base = Path(__file__).resolve().parents[1] / ".pytest-workspace"
+    base.mkdir(parents=True, exist_ok=True)
+    workspace = MagicMock(base=base)
+    mock_llm = make_mock_llm()
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session.tool_registry.register_tool(
+        ToolDef(
+            name="streaming_probe",
+            description="test-only streaming tool",
+            input_schema={"type": "object", "properties": {}},
+            handler=handler,
+        )
+    )
+    return session, mock_llm
+
+
+def _script_one_tool_call_then_text(mock_llm, tool_name: str, final_text: str):
+    """First plan_stream() call returns one tool_use round; second, final text."""
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([StreamComplete(response=_tool_call_response(tool_name))])
+        return _FakeAsyncIter([StreamComplete(response=_text_response(final_text))])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+
+def _tool_result_texts(session) -> list[str]:
+    return [
+        str(item.get("content"))
+        for msg in session.history
+        if isinstance(msg.get("content"), list)
+        for item in msg["content"]
+        if item.get("type") == "tool_result"
+    ]
+
+
+class TestTurnStreamToolProgress:
+    async def test_progress_events_arrive_in_order_with_the_tool_call_id(self):
+        session, mock_llm = _make_session_with_tool(_two_step_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            progress = [
+                e for e in events
+                if isinstance(e, StreamTaskProgress) and e.phase == "tool_progress"
+            ]
+            assert [e.message for e in progress] == ["step 1", "step 2"]
+            assert all(e.id == "tc_1" for e in progress)
+        finally:
+            await session.close()
+
+    async def test_progress_markers_never_reach_tool_result_history(self):
+        session, mock_llm = _make_session_with_tool(_two_step_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            async for _ in session.turn_stream("run the probe"):
+                pass
+            texts = _tool_result_texts(session)
+            assert any("final result" in t for t in texts)
+            assert not any("step 1" in t or "step 2" in t for t in texts)
+        finally:
+            await session.close()
+
+    async def test_exception_mid_stream_produces_clean_failed_result_not_a_crash(self):
+        session, mock_llm = _make_session_with_tool(_raising_after_progress_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            assert any(isinstance(e, StreamComplete) for e in events)
+            texts = _tool_result_texts(session)
+            assert any("failed" in t and "boom" in t for t in texts)
+        finally:
+            await session.close()
+
+    async def test_generator_with_no_result_produces_clean_failed_result_not_a_crash(self):
+        session, mock_llm = _make_session_with_tool(_no_result_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            assert any(isinstance(e, StreamComplete) for e in events)
+            texts = _tool_result_texts(session)
+            assert any("failed" in t and "produced no result" in t for t in texts)
+        finally:
+            await session.close()
+
+    async def test_tool_done_carries_the_tool_call_id(self):
+        session, mock_llm = _make_session_with_tool(_two_step_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            done = [
+                e for e in events
+                if isinstance(e, StreamTaskProgress) and e.phase == "tool_done"
+            ]
+            assert len(done) == 1
+            assert done[0].id == "tc_1"
+            # Handler returned a plain string — unclassified/legacy (ENG-1276),
+            # ToolOutcome.ok defaults to None. Must NOT be coerced to False;
+            # consumers render None as success, same as before this field
+            # existed (PR #304 review).
+            assert done[0].ok is None
+        finally:
+            await session.close()
+
+    async def test_tool_done_is_emitted_even_when_the_handler_raises_after_progress(self):
+        session, mock_llm = _make_session_with_tool(_raising_after_progress_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            done = [
+                e for e in events
+                if isinstance(e, StreamTaskProgress) and e.phase == "tool_done"
+            ]
+            assert len(done) == 1
+            assert done[0].id == "tc_1"
+            # A raised exception is always a definitive failure verdict,
+            # regardless of what the (never-returned) ToolOutcome would have
+            # been — this is the exact gap PR #304's review caught: tool_done
+            # firing unconditionally (by design) with no verdict rendered as
+            # an unconditional success in every consumer.
+            assert done[0].ok is False
+            # The failure itself must still reach conversation history — the
+            # done-marker must not swallow or replace the exception.
+            texts = _tool_result_texts(session)
+            assert any("failed" in t and "boom" in t for t in texts)
+        finally:
+            await session.close()
+
+    async def test_tool_done_carries_ok_false_for_a_declared_failure_without_an_exception(self):
+        session, mock_llm = _make_session_with_tool(_declared_failure_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        try:
+            events = [e async for e in session.turn_stream("run the probe")]
+            done = [
+                e for e in events
+                if isinstance(e, StreamTaskProgress) and e.phase == "tool_done"
+            ]
+            assert len(done) == 1
+            assert done[0].ok is False
+        finally:
+            await session.close()
+
+    async def test_closing_the_generator_mid_progress_does_not_raise(self):
+        # Regression guard: a `finally: yield ...` around the progress loop
+        # looks like a natural way to guarantee tool_done fires on every
+        # path, but `yield` while an async generator is unwinding a
+        # GeneratorExit raises "async generator ignored GeneratorExit".
+        # This is the exact path Esc-cancellation takes in the CLI
+        # (anton/chat.py stops reading turn_stream() while it's suspended
+        # on a tool_progress yield).
+        #
+        # Deliberately closes _stream_and_handle_tools() directly, NOT
+        # turn_stream(): turn_stream() drives it with a plain `async for`
+        # (no aclosing()), so closing turn_stream() only throws
+        # GeneratorExit into turn_stream()'s own yield — the inner
+        # generator (which owns the code under test) is merely abandoned,
+        # not closed, and a RuntimeError from a broken fix would surface
+        # later as an unhandled exception during event-loop shutdown,
+        # never inside this test. Closing the inner generator is the only
+        # way this guard can actually fail on a broken implementation.
+        session, mock_llm = _make_session_with_tool(_two_step_handler)
+        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
+        # tool_progress markers are relayed through session.emitter
+        # (ChatSession._dispatch_draining, ENG-1276) — normally set up by
+        # turn_stream() itself, which we're deliberately bypassing above.
+        session.emitter = TurnEmitter()
+        gen = session._stream_and_handle_tools("run the probe")
+        try:
+            saw_progress = False
+            async for event in gen:
+                if isinstance(event, StreamTaskProgress) and event.phase == "tool_progress":
+                    saw_progress = True
+                    break
+            assert saw_progress
+            await gen.aclose()  # must not raise RuntimeError
+        finally:
+            await session.close()
