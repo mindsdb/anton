@@ -52,15 +52,15 @@ The test suite uses pytest with `asyncio_mode = "auto"` (configured in
 `pyproject.toml`, under `[tool.pytest.ini_options]`). From a clone:
 
 ```bash
-pip install -e ".[dev]"     # installs pytest + pytest-asyncio
-pytest tests/
+uv sync --group dev     # installs pytest + pytest-asyncio
+uv run pytest tests/
 ```
 
 Useful subsets while developing:
 
 ```bash
-pytest tests/test_acc.py            # one module
-pytest -k cerebellum                # by keyword
+uv run pytest tests/test_acc.py     # one module
+uv run pytest -k cerebellum         # by keyword
 ```
 
 Some tests are marked `stub_only` (they require the stub server and are
