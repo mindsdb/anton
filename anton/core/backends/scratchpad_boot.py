@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -26,6 +27,11 @@ PERSIST_SESSION = os.environ.get("ANTON_SCRATCHPAD_PERSIST_SESSION", "false").lo
 # aiming writes at somewhere unwritable. The caller owns the path: `local.py` composes
 # a per-pad, per-conversation one under the workspace and creates the directory.
 SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "")
+
+# The agent's workspace root, set by `local.py` ONLY when a real workspace is bound
+# (ENG-1366). Used to resolve agent-authored modules while the snapshot is loaded —
+# see `_workspace_on_syspath`. Empty means "no workspace", and every use is inert.
+WORKSPACE_PATH = os.environ.get("ANTON_SCRATCHPAD_WORKSPACE_PATH", "")
 
 # Snapshot size ceiling. Persisting after every cell costs nothing while it always
 # fails; once it works, a namespace holding large frames would be rewritten on each
@@ -91,6 +97,103 @@ _UNPICKLABLE: dict = {}
 _session_notes: list[str] = []
 
 
+# Snapshot envelope (ENG-1366). The payload is a dict of name -> individually-pickled
+# bytes rather than one pickle of the whole namespace, so ONE value that cannot be
+# rebuilt no longer discards every other variable: a pickle stream is a sequential
+# program, and an exception part-way through it kills the remainder. The envelope holds
+# nothing but str/int/bytes, so opening it can never fail on something the agent made.
+_SNAPSHOT_MAGIC = "__anton_snapshot__"
+_SNAPSHOT_VERSION = 2
+_SNAPSHOT_VALUES = "values"
+
+
+def _resolved_workspace() -> str | None:
+    """The workspace root to make importable during a load, or None.
+
+    Host-supplied (`conversation.project.path` -> `local.py`), never model-influenced:
+    the pad NAME reaches the snapshot filename, but nothing the model chooses reaches
+    this path. Re-resolved and required to be a real directory here anyway, so a
+    malformed value is inert rather than trusted.
+    """
+    if not WORKSPACE_PATH:
+        return None
+    try:
+        path = os.path.realpath(WORKSPACE_PATH)
+    except OSError:
+        return None
+    return path if os.path.isdir(path) else None
+
+
+@contextlib.contextmanager
+def _workspace_on_syspath():
+    """Make agent-authored modules importable for the duration of a snapshot load.
+
+    Python puts the *script's* directory on `sys.path`, never the cwd — so a helper the
+    agent wrote into the workspace and imported on turn 1 (having added the path itself)
+    is unimportable in the fresh process that loads the snapshot. dill stores such
+    objects by reference to their defining module, so that import failure is what
+    discarded the whole namespace.
+
+    APPENDED, never inserted at the front: the workspace is the agent's own directory
+    and may contain files named after stdlib modules (`types.py`, `logging.py`). At the
+    front those would shadow the real ones for the rest of the process; at the back they
+    resolve only when nothing else claims the name. Verified both ways.
+
+    Scoped to the load and removed afterwards, so the agent's own cell imports resolve
+    exactly as they did before this change.
+    """
+    path = _resolved_workspace()
+    if path is None or path in sys.path:
+        yield
+        return
+    sys.path.append(path)
+    try:
+        yield
+    finally:
+        try:
+            sys.path.remove(path)
+        except ValueError:  # a cell rearranged sys.path mid-load
+            pass
+
+
+def _decode_values(blobs: dict) -> tuple[dict, dict]:
+    """Unpickle each value independently. Returns (namespace, {name: reason})."""
+    ns: dict = {}
+    dropped: dict = {}
+    for name, blob in blobs.items():
+        try:
+            ns[name] = dill.loads(blob)
+        except Exception as exc:
+            # Per-value, so an unresolvable reference costs one variable, not all of
+            # them. Most common cause: an object whose defining module is a .py file
+            # the agent wrote and has since renamed or deleted.
+            dropped[name] = f"{type(exc).__name__}: {exc}"
+    return ns, dropped
+
+
+# How many per-name failure reasons to spell out. Every dropped NAME is always listed
+# — the agent needs those to know what to rebuild — but the reasons are tracebacks-worth
+# of text and this note lands on `logs`, i.e. straight into the model's context on the
+# next turn. A namespace that drops fifty names would otherwise spend more context
+# explaining the loss than the loss cost.
+_MAX_DROP_REASONS = 5
+
+
+def _dropped_load_note(dropped: dict) -> str:
+    names = sorted(dropped)
+    shown = names[:_MAX_DROP_REASONS]
+    detail = "; ".join(f"{name} ({dropped[name]})" for name in shown)
+    if len(names) > len(shown):
+        detail += f"; … and {len(names) - len(shown)} more"
+    return (
+        "Scratchpad session restored, but these variables could not be rebuilt and are "
+        "now undefined: " + ", ".join(names) + ". Everything else was restored. This "
+        "usually means an object whose class or function lives in a .py file this "
+        "scratchpad wrote, which has since been renamed, moved or deleted — recreate "
+        "those objects rather than relying on them persisting. Details: " + detail
+    )
+
+
 def _load_namespace() -> tuple[dict, str | None]:
     if not PERSIST_SESSION:
         return {"__builtins__": __builtins__}, None
@@ -102,19 +205,31 @@ def _load_namespace() -> tuple[dict, str | None]:
             "process. Variables and imports are lost when this scratchpad restarts.",
         )
     try:
-        with open(SESSION_PATH, "rb") as f:
-            ns = dill.load(f)
-        if not isinstance(ns, dict):
-            raise TypeError("Session file did not contain a namespace dict")
+        # The workspace covers BOTH reads: the per-value decode below, and a legacy
+        # single-stream snapshot, which resolves its module references during
+        # `dill.load` itself.
+        with _workspace_on_syspath():
+            with open(SESSION_PATH, "rb") as f:
+                raw = dill.load(f)
+            if not isinstance(raw, dict):
+                raise TypeError("Session file did not contain a namespace dict")
+            if raw.get(_SNAPSHOT_MAGIC) == _SNAPSHOT_VERSION:
+                ns, dropped = _decode_values(raw.get(_SNAPSHOT_VALUES) or {})
+            else:
+                # A snapshot written before this format existed: one stream holding the
+                # real objects. Still readable, so a conversation in flight across the
+                # upgrade keeps its state instead of paying a cold turn. It is
+                # all-or-nothing by construction; the next dump rewrites it as v2.
+                ns, dropped = raw, {}
         ns.setdefault("__builtins__", __builtins__)
-        return ns, None
+        return ns, (_dropped_load_note(dropped) if dropped else None)
     except FileNotFoundError:
         # First cell of a brand-new pad — expected, not a problem.
         return {"__builtins__": __builtins__}, None
     except Exception:
-        # Includes unpickling failures from package-version skew between turns (e.g. a
-        # later cell installed a newer pandas). Degrading to a fresh namespace is the
-        # old behaviour; the difference is that now it is reported.
+        # Now reachable only for a torn/unreadable file or a legacy snapshot that still
+        # will not load. Degrading to a fresh namespace is the old behaviour; the
+        # difference is that now it is reported.
         return (
             {"__builtins__": __builtins__},
             "Failed to load scratchpad session; starting fresh.\n" + traceback.format_exc(),
@@ -163,10 +278,45 @@ def _snapshot_payload(ns: dict) -> dict:
     }
 
 
-def _write_snapshot(payload: dict, tmp_path: str) -> None:
-    """Serialise `payload` to `tmp_path`, aborting past the size cap."""
+def _encode_values(payload: dict) -> tuple[dict, list]:
+    """Pickle each value on its own. Returns (blobs, dropped names).
+
+    Isolating values at WRITE time is what lets the load be partial, and it also makes
+    an unpicklable value ordinary rather than exceptional: the old code discovered the
+    offender by re-walking the whole namespace after a failed bulk dump. Raises
+    `_TooBig` as soon as the accumulated size passes the cap, so an oversized namespace
+    stops costing a full serialise before being thrown away.
+    """
+    blobs: dict = {}
+    dropped: list = []
+    total = 0
+    for key, value in payload.items():
+        try:
+            blob = dill.dumps(value)
+        except Exception:
+            # Live resources — DB connections, sockets, generators. Remembered by id()
+            # so the retry is skipped next cell but a rebind to something picklable is
+            # not excluded forever.
+            _UNPICKLABLE[key] = id(value)
+            dropped.append(key)
+            continue
+        total += len(blob)
+        if total > SESSION_MAX_BYTES:
+            raise _TooBig()
+        blobs[key] = blob
+    return blobs, dropped
+
+
+def _write_snapshot(blobs: dict, tmp_path: str) -> None:
+    """Serialise the snapshot envelope to `tmp_path`, aborting past the size cap."""
+    envelope = {
+        _SNAPSHOT_MAGIC: _SNAPSHOT_VERSION,
+        _SNAPSHOT_VALUES: blobs,
+    }
     with open(tmp_path, "wb") as f:
-        dill.dump(payload, _CappedWriter(f, SESSION_MAX_BYTES))
+        # _CappedWriter still guards the envelope overhead on top of the value bytes
+        # already counted in `_encode_values`.
+        dill.dump(envelope, _CappedWriter(f, SESSION_MAX_BYTES))
 
 
 def _dump_namespace(ns: dict) -> str | None:
@@ -176,19 +326,23 @@ def _dump_namespace(ns: dict) -> str | None:
     # Include the pid: a pad can briefly overlap with its own replacement, and two
     # writers sharing one .tmp would corrupt each other's snapshot.
     tmp_path = f"{SESSION_PATH}.{os.getpid()}.tmp"
-    try:
-        # Write-then-replace. This process is killed abruptly at the end of a turn (and
-        # by the inactivity watchdog mid-cell), so writing straight to SESSION_PATH
-        # would eventually leave a torn pickle that the next process fails to load.
-        # os.replace is atomic within a filesystem.
-        _write_snapshot(payload, tmp_path)
-        os.replace(tmp_path, SESSION_PATH)
-        return None
-    except _TooBig:
+
+    def _discard_tmp() -> None:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+    try:
+        blobs, dropped = _encode_values(payload)
+        # Write-then-replace. This process is killed abruptly at the end of a turn (and
+        # by the inactivity watchdog mid-cell), so writing straight to SESSION_PATH
+        # would eventually leave a torn pickle that the next process fails to load.
+        # os.replace is atomic within a filesystem.
+        _write_snapshot(blobs, tmp_path)
+        os.replace(tmp_path, SESSION_PATH)
+    except _TooBig:
+        _discard_tmp()
         return (
             f"Scratchpad session NOT saved: the namespace exceeds the "
             f"{SESSION_MAX_BYTES:,}-byte snapshot cap. Variables will not survive a "
@@ -196,32 +350,9 @@ def _dump_namespace(ns: dict) -> str | None:
             "instead of holding them in memory."
         )
     except Exception:
-        first_failure = traceback.format_exc()
-        # Save what we can instead of losing everything to one bad object. Only reached
-        # the first time a given object fails; after that it is pre-excluded above.
-        dropped = []
-        for key in list(payload):
-            try:
-                dill.dumps(payload[key])
-            except Exception:
-                _UNPICKLABLE[key] = id(payload[key])
-                dropped.append(key)
-                payload.pop(key)
-        if not dropped:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            return "Failed to dump scratchpad session.\n" + first_failure
-        try:
-            _write_snapshot(payload, tmp_path)
-            os.replace(tmp_path, SESSION_PATH)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            return "Failed to dump scratchpad session.\n" + first_failure
+        _discard_tmp()
+        return "Failed to dump scratchpad session.\n" + traceback.format_exc()
+    if dropped:
         return (
             "Scratchpad session saved, but these variables could not be preserved and "
             "will be undefined if this scratchpad restarts: "
@@ -230,6 +361,7 @@ def _dump_namespace(ns: dict) -> str | None:
             "generators) cannot be saved — recreate them rather than relying on them "
             "persisting."
         )
+    return None
 
 
 # Persistent namespace across cells. Keep the load note — discarding it is how the

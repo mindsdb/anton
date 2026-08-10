@@ -1440,3 +1440,192 @@ class TestSessionPersistence:
             cell = await pad.execute("print(repr(sample))")
             await pad.close()
             assert cell.stdout.strip() == "[1, 2, 3]", cell.stdout
+
+
+_HELPER_MODULE_SRC = (
+    "class Campaign:\n"
+    "    def __init__(self, name):\n"
+    "        self.name = name\n"
+    "    def send(self):\n"
+    "        return 'sent ' + self.name\n"
+)
+
+
+def _write_and_import_helper(module: str = "campaign_engine") -> str:
+    """Cell source that authors a local module, imports it, and binds an instance.
+
+    This is the shape ENG-1124's dill probe never covered: its agent-defined functions
+    were declared *inside* the exec namespace (pickled by value, always fine), never in
+    a .py file the agent wrote. dill stores objects from a real module by REFERENCE to
+    that module, which is the whole bug.
+    """
+    return (
+        "import sys, os\n"
+        f"open({module + '.py'!r}, 'w').write({_HELPER_MODULE_SRC!r})\n"
+        # The agent adds cwd itself — Python never does. This works for the rest of
+        # THIS process and is gone by the time the next one loads the snapshot.
+        "sys.path.insert(0, os.getcwd())\n"
+        f"import {module}\n"
+        f"c = {module}.Campaign('august')\n"
+        "rates = 0.458\n"
+    )
+
+
+class TestAgentAuthoredModuleSnapshots:
+    """ENG-1366 — a namespace holding objects from an agent-written .py file.
+
+    Measured at 8% of cells for one production user, costing a cache-cold reload each
+    time. It never surfaced as an error because the agent absorbs the loss by re-reading
+    from disk, which is why it survived the fix that was meant to end it.
+    """
+
+    async def test_namespace_survives_an_agent_written_local_module(
+        self, tmp_path, monkeypatch
+    ):
+        """The reported bug: one agent-authored helper discarded the whole namespace."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        pad = make_scratchpad(
+            name="helpermod",
+            _venvs_base=venvs_base,
+            session_id="c",
+            workspace_path=workspace,
+        )
+        await pad.start()
+        cell = await pad.execute(_write_and_import_helper())
+        assert cell.error is None, cell.error
+        await pad.close()
+        assert (workspace / "campaign_engine.py").exists()
+
+        pad2 = make_scratchpad(
+            name="helpermod",
+            _venvs_base=venvs_base,
+            session_id="c",
+            workspace_path=workspace,
+        )
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(c.send(), rates)")
+            # Before the fix: `logs` carried "Failed to load scratchpad session" with
+            # ModuleNotFoundError, and BOTH names were gone — not just the helper.
+            assert "Failed to load scratchpad session" not in (cell.logs or "")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "sent august 0.458", cell.stdout
+        finally:
+            await pad2.cleanup()
+
+    async def test_an_unresolvable_value_drops_only_itself(self, tmp_path, monkeypatch):
+        """When a reference genuinely cannot be rebuilt, the rest must still load.
+
+        The helper file is deleted between turns, so no `sys.path` entry can save it.
+        This is the case the per-value snapshot format exists for: a pickle stream is a
+        sequential program, so a single unresolvable reference used to kill everything
+        after it too.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        pad = make_scratchpad(
+            name="goneaway",
+            _venvs_base=venvs_base,
+            session_id="c",
+            workspace_path=workspace,
+        )
+        await pad.start()
+        cell = await pad.execute(_write_and_import_helper())
+        assert cell.error is None, cell.error
+        await pad.close()
+        (workspace / "campaign_engine.py").unlink()
+
+        pad2 = make_scratchpad(
+            name="goneaway",
+            _venvs_base=venvs_base,
+            session_id="c",
+            workspace_path=workspace,
+        )
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(rates, 'c' in dir())")
+            assert cell.error is None, cell.error
+            # The unrelated variable survived; only the helper-backed one is gone.
+            assert cell.stdout.strip() == "0.458 False", cell.stdout
+            # …and the loss is NAMED, on `logs` and never on `error` (a snapshot
+            # problem must not feed the consecutive-error circuit breaker).
+            assert "could not be rebuilt" in (cell.logs or ""), cell.logs
+            assert "c" in (cell.logs or "")
+            assert cell.error is None
+        finally:
+            await pad2.cleanup()
+
+    async def test_the_workspace_is_not_left_on_syspath(self, tmp_path, monkeypatch):
+        """The import path is widened for the load only, not for the agent's cells.
+
+        Guards the load-scoped design against drifting into a process-wide one: the
+        workspace is the agent's own directory and may hold files named after stdlib
+        modules, so leaving it on `sys.path` would change import resolution for every
+        subsequent cell.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        pad = make_scratchpad(
+            name="scoped",
+            _venvs_base=venvs_base,
+            session_id="c",
+            workspace_path=workspace,
+        )
+        await pad.start()
+        assert (await pad.execute(_write_and_import_helper())).error is None
+        await pad.close()
+
+        pad2 = make_scratchpad(
+            name="scoped",
+            _venvs_base=venvs_base,
+            session_id="c",
+            workspace_path=workspace,
+        )
+        await pad2.start()
+        try:
+            cell = await pad2.execute(
+                "import sys, os\n"
+                "here = os.path.realpath(os.getcwd())\n"
+                "on_path = any(os.path.realpath(p) == here for p in sys.path)\n"
+                # Restored AND not left on the path — the pair is the point.
+                "print(c.send(), on_path)\n"
+            )
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "sent august False", cell.stdout
+        finally:
+            await pad2.cleanup()
+
+    async def test_a_snapshot_in_the_old_format_still_loads(self, tmp_path, monkeypatch):
+        """A conversation in flight across the upgrade keeps its state.
+
+        The pre-ENG-1366 snapshot is one stream holding real objects; the new one is an
+        envelope of individually-pickled values. The loader must read both, or the
+        release costs every open conversation a cold turn.
+        """
+        import dill
+
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        pad = make_scratchpad(
+            name="legacy", _venvs_base=tmp_path / "venvs", session_id="c"
+        )
+        snapshot = pad._session_snapshot_path(create=True)
+        assert snapshot is not None
+        snapshot.write_bytes(dill.dumps({"carried_over": [1, 2, 3]}))
+
+        await pad.start()
+        try:
+            cell = await pad.execute("print(carried_over)")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "[1, 2, 3]", cell.stdout
+        finally:
+            await pad.cleanup()

@@ -596,6 +596,27 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # persist, rather than silently pretending it does.
             env.pop("ANTON_SCRATCHPAD_SESSION_PATH", None)
 
+        # The workspace root, for resolving agent-authored modules when the snapshot
+        # is loaded (ENG-1366). Python puts the *script's* directory on `sys.path`,
+        # never the cwd, so a helper the agent wrote into the workspace and imported
+        # on turn 1 (via its own `sys.path.insert`) is unimportable in the fresh
+        # process that loads the snapshot — and dill stores those objects by
+        # reference to their defining module, so the import failure discarded the
+        # whole namespace.
+        #
+        # Set ONLY from the explicit workspace arg, never from `os.getcwd()`: with no
+        # workspace bound the cwd is whatever launched the parent server (cowork's own
+        # install directory), which must never go on the scratchpad's `sys.path`.
+        # Persistence is process-global (`ANTON_SCRATCHPAD_PERSIST_SESSION`), so the
+        # loader is reachable from contexts that never opted in — the credential probe
+        # among them — and this keeps it inert for all of them.
+        if self._explicit_workspace_path is not None:
+            env["ANTON_SCRATCHPAD_WORKSPACE_PATH"] = str(
+                Path(self._explicit_workspace_path).resolve()
+            )
+        else:
+            env.pop("ANTON_SCRATCHPAD_WORKSPACE_PATH", None)
+
         _anton_root = str(Path(__file__).resolve().parent.parent.parent.parent)
         python_path = env.get("PYTHONPATH", "")
         if _anton_root not in python_path:
