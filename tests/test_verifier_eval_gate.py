@@ -31,8 +31,40 @@ import tests.test_verifier_verdict_live as ev
 _WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/verifier-eval.yml"
 
 
+class _FakeResponse:
+    """Only `.headers`, because that is all `_gateway_denial` reads.
+
+    Deliberately NOT a real `openai.APIStatusError`: the OpenAI SDK unwraps
+    `exc.body` while Anthropic does not, so a hand-built SDK error asserts a
+    shape that never occurs on the wire and passes for the wrong reason.
+    """
+
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = headers
+
+
+class _FakeCause(Exception):
+    """The chained SDK error: `.body` and `.response.headers`, nothing more.
+
+    Derives from Exception because `__cause__` must — Python enforces that, and
+    a plain object raises TypeError on assignment.
+    """
+
+    def __init__(self, body=None, headers=None) -> None:
+        super().__init__("gateway denial")
+        self.body = body
+        self.response = _FakeResponse(headers or {})
+
+
+def _denial(message: str, *, body=None, headers=None) -> TokenLimitExceeded:
+    """A TokenLimitExceeded chained to a gateway denial, as anton raises it."""
+    exc = TokenLimitExceeded(message)
+    exc.__cause__ = _FakeCause(body=body, headers=headers)
+    return exc
+
+
 class _AlwaysThrottled:
-    """Every call 429s — a wallet that is genuinely empty for this run."""
+    """Every call 429s with no reason at all — the `unknown` path."""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -40,6 +72,18 @@ class _AlwaysThrottled:
     async def generate_object_code(self, *args, **kwargs):
         self.calls += 1
         raise TokenLimitExceeded("Server returned 429 — rate limit exceeded for key.")
+
+
+class _AlwaysDenied:
+    """Every call fails with a specific gateway denial."""
+
+    def __init__(self, exc_factory) -> None:
+        self.calls = 0
+        self._exc_factory = exc_factory
+
+    async def generate_object_code(self, *args, **kwargs):
+        self.calls += 1
+        raise self._exc_factory()
 
 
 class _ThrottledOnce:
@@ -91,6 +135,111 @@ async def test_a_transient_429_is_retried_and_the_eval_still_runs():
 
     assert result is sentinel
     assert llm.calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason,carrier",
+    [
+        ("wallet_empty", "body-code"),
+        ("wallet_empty", "header"),
+        ("included_allowance_exhausted", "body-code"),
+        ("included_allowance_exhausted", "header"),
+        ("included_allowance_exhausted", "envelope"),
+    ],
+)
+async def test_a_starved_key_skips_without_burning_the_retry(reason, carrier):
+    """wallet_empty / allowance_exhausted will not clear inside this run.
+
+    Retrying them just adds a pause before the identical answer, so the retry is
+    reserved for the one denial that is actually transient.
+    """
+    kwargs = {
+        "body-code": {"body": {"code": reason}},
+        "envelope": {"body": {"error": {"code": reason}}},
+        "header": {"headers": {"x-mindshub-reason": reason}},
+    }[carrier]
+    llm = _AlwaysDenied(lambda: _denial(f"Server returned — {reason}", **kwargs))
+
+    with pytest.raises(pytest.skip.Exception) as caught:
+        await ev._verdict(llm, ev._CASES[0])
+
+    assert ev._GATEWAY_UNAVAILABLE in str(caught.value)
+    assert llm.calls == 1, f"starved key should not be retried, got {llm.calls} calls"
+
+
+@pytest.mark.asyncio
+async def test_a_velocity_throttle_honours_retry_after(monkeypatch):
+    """`rate_limited` carries the server's own backoff — use it, don't guess."""
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(ev.asyncio, "sleep", _record)
+    sentinel = object()
+    calls = {"n": 0}
+
+    class _ThrottledThenOk:
+        async def generate_object_code(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _denial(
+                    "Server returned 429 — Rate limit exceeded. Please slow down.",
+                    body={"code": "rate_limited"},
+                    headers={"x-mindshub-reason": "rate_limited", "retry-after": "5"},
+                )
+            return sentinel
+
+    assert await ev._verdict(_ThrottledThenOk(), ev._CASES[0]) is sentinel
+    assert slept == [5.0], f"expected the 5s Retry-After hint, slept {slept}"
+
+
+@pytest.mark.asyncio
+async def test_an_absurd_retry_after_is_capped(monkeypatch):
+    """A job that naps for an hour is indistinguishable from a hung one."""
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(ev.asyncio, "sleep", _record)
+    llm = _AlwaysDenied(
+        lambda: _denial(
+            "429",
+            body={"code": "rate_limited"},
+            headers={"retry-after": "3600"},
+        )
+    )
+
+    with pytest.raises(pytest.skip.Exception):
+        await ev._verdict(llm, ev._CASES[0])
+
+    assert slept == [ev._THROTTLE_RETRY_CAP_S], f"expected the cap, slept {slept}"
+
+
+@pytest.mark.asyncio
+async def test_an_http_date_retry_after_falls_back_to_the_default(monkeypatch):
+    """Retry-After may be an HTTP-date; a bad parse must not mask the denial."""
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(ev.asyncio, "sleep", _record)
+    monkeypatch.setattr(ev, "_THROTTLE_RETRY_SLEEP_S", 7.0)
+    llm = _AlwaysDenied(
+        lambda: _denial(
+            "429",
+            body={"code": "rate_limited"},
+            headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"},
+        )
+    )
+
+    with pytest.raises(pytest.skip.Exception):
+        await ev._verdict(llm, ev._CASES[0])
+
+    assert slept == [7.0], f"expected the fallback pause, slept {slept}"
 
 
 def test_the_marker_matches_the_one_the_workflow_greps_for():

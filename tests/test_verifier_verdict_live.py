@@ -107,10 +107,83 @@ pytestmark = pytest.mark.skipif(
 # the guard's red branch, never to a false green.
 _GATEWAY_UNAVAILABLE = "GATEWAY_UNAVAILABLE"
 
-# Pause before the single throttle retry. Long enough for a TPM window to
-# clear, short enough that a genuinely dead wallet does not stall the job for
-# long (one sleep per case, not per call). Overridable so tests can set it to 0.
+# Fallback pause before the single throttle retry, used only when the gateway
+# gave no Retry-After. Overridable so tests can set it to 0.
 _THROTTLE_RETRY_SLEEP_S = float(os.environ.get("VERIFIER_EVAL_THROTTLE_RETRY_SLEEP_S", "20"))
+
+# Never sleep longer than this even if Retry-After asks for more — a job that
+# naps for ten minutes is indistinguishable from a hung one.
+_THROTTLE_RETRY_CAP_S = 60.0
+
+# The gateway distinguishes its denials and says which is which
+# (mindshub_inference/minds/inference/errors.py):
+#
+#   rate_limited                   429 + Retry-After          velocity; RETRY
+#   included_allowance_exhausted   429 + X-MindsHub-Reset-At   waits for reset
+#   wallet_empty                   402 + X-MindsHub-Recovery-Url  needs credit
+#
+# `rate_limited`'s own docstring: "the caller should slow down and retry after
+# retry_after seconds, NOT wait for an allowance reset or add credits."
+#
+# anton collapses all three into TokenLimitExceeded (llm/openai.py: the generic
+# 429-with-detail branch fires before the wallet-code check), so the distinction
+# has to be recovered from the chained SDK error. Worth recovering: retrying a
+# dead wallet wastes the pause, and not honouring Retry-After ignores the one
+# number the server volunteered.
+_STARVED_REASONS = frozenset({"wallet_empty", "included_allowance_exhausted"})
+_THROTTLED_REASON = "rate_limited"
+
+
+def _gateway_denial(exc: BaseException) -> tuple[str, float | None]:
+    """Classify a TokenLimitExceeded as ``starved`` / ``throttled`` / ``unknown``.
+
+    Reads the reason off ``exc.__cause__`` — the original SDK error, chained by
+    ``raise ... from exc``. Body unwrapping mirrors ``llm/openai.py`` exactly
+    (the SDK peels the ``error`` envelope, some proxies re-wrap it, Gemini sends
+    a single-element list), because a shape this module guessed at independently
+    would be a second place to get it wrong.
+
+    Everything is defensive: an unrecognised or unreachable reason returns
+    ``unknown``, whose caller retries once — the conservative direction, since
+    the alternative is skipping a case that would have run.
+    """
+    cause = exc.__cause__
+
+    raw_body = getattr(cause, "body", None)
+    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
+        raw_body = raw_body[0]
+    body = raw_body if isinstance(raw_body, dict) else {}
+    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+    code = body.get("code") or envelope.get("code") or ""
+
+    reason = ""
+    retry_after: float | None = None
+    headers = getattr(getattr(cause, "response", None), "headers", None)
+    if headers is not None:
+        try:
+            reason = headers.get("x-mindshub-reason") or ""
+            raw_hint = headers.get("retry-after")
+            # Retry-After may be an HTTP-date rather than seconds; only the
+            # numeric form is useful here, and a bad parse must not mask the
+            # denial we are trying to classify.
+            if raw_hint is not None and str(raw_hint).strip().isdigit():
+                retry_after = float(str(raw_hint).strip())
+        except Exception:
+            pass
+
+    for candidate in (code, reason):
+        if candidate in _STARVED_REASONS:
+            return "starved", None
+        if candidate == _THROTTLED_REASON:
+            return "throttled", retry_after
+    return "unknown", retry_after
+
+
+def _throttle_pause(retry_after: float | None) -> float:
+    """How long to wait before the one retry — the server's hint, capped."""
+    if retry_after is None:
+        return _THROTTLE_RETRY_SLEEP_S
+    return max(0.0, min(retry_after, _THROTTLE_RETRY_CAP_S))
 
 # One structural-tool_choice alias and one narrating alias — the two behaviour
 # populations ENG-1081 measured. Overridable for one-off runs against other
@@ -190,17 +263,23 @@ async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:
             # outcome ENG-1334 exists to make impossible, rebuilt by its own
             # escape hatch. Caught in review on #328.
             #
-            # Time is the discriminator, not the exception type. Retry once
-            # after a pause: a throttle clears and the eval runs for real; an
-            # empty wallet persists and the honest starved path fires.
+            # The gateway already tells us which of the three it was, so ask it
+            # rather than using elapsed time as a proxy (see _gateway_denial).
             #
             # Deliberately NOT catching ConnectionError, which anton also raises
             # for a 401 invalid key — a misconfiguration somebody must fix, so
             # that has to stay red.
+            kind, retry_after = _gateway_denial(exc)
+            if kind == "starved":
+                # An empty wallet or a spent allowance will not clear inside
+                # this run. Retrying just adds a pause before the same answer.
+                pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
             if not retried_after_throttle:
+                # `throttled` (velocity) or `unknown` (be generous). One retry,
+                # same budget — a retry, not an ENG-1081 truncation escalation.
                 retried_after_throttle = True
-                await asyncio.sleep(_THROTTLE_RETRY_SLEEP_S)
-                continue  # same budget: this is a retry, not an escalation
+                await asyncio.sleep(_throttle_pause(retry_after))
+                continue
             pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
     raise AssertionError("unreachable: budget loop exhausted without raising")
 
