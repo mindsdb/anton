@@ -446,38 +446,79 @@ def detect_reset_churn(events: Sequence[Event]) -> Lesson | None:
 
 
 def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
-    """>= N scratchpad cells were killed (timeout/cancel/OOM) in one turn.
+    """>= N scratchpad cells were killed in one turn — the lesson depends on WHY.
 
-    Fires when a single scratchpad is killed >= N times (a per-pad loop) OR
-    when >= N cells are killed across the turn regardless of name. The
-    name-agnostic count is deliberate: renaming the scratchpad between failed
-    attempts (`build_pres` → `write_html` → …) used to split the kill count
-    across buckets and hide the loop. A kill is a kill, and the right lesson
-    (make the next cell smaller) is the same either way.
+    A liveness kill (worker dead/wedged) must not teach "make the cell
+    smaller": that advice is what drove the ENG-578 per-item round-trip
+    pattern. Budget/cancel/OOM kills keep the too-heavy lesson; a mixed turn
+    resolves by majority with ties toward liveness (the cheaper lesson to be
+    wrong about); ambiguous kills (no reason, or a silent budget kill) count
+    toward neither. The name-agnostic count is deliberate: renaming the
+    scratchpad between failed attempts (`build_pres` → `write_html` → …)
+    used to split the kill count across buckets and hide the loop.
 
-    Reads `kind == "scratchpad_killed"`; looks at `detail.name`.
+    Reads `kind == "scratchpad_killed"`; looks at `detail.name` and
+    `detail.reason` (phrases are lockstepped with the local.py kill messages
+    and _select_resilience_nudge routing).
     """
     killed = [e for e in events if e.kind == "scratchpad_killed"]
-    by_name: defaultdict[str, int] = defaultdict(int)
-    for e in killed:
-        n = e.detail.get("name") or ""
-        if n:
-            by_name[n] += 1
-    per_name_max = max(by_name.values()) if by_name else 0
-    if per_name_max < _KILL_LOOP_THRESHOLD and len(killed) < _KILL_LOOP_THRESHOLD:
-        return None
-    return Lesson(
-        rule=(
-            "When a scratchpad cell is killed (timeout, cancel, OOM), the next "
-            "cell needs to be smaller — fewer rows, smaller batch, explicit "
-            "timeout, narrower scope — and stay on the SAME scratchpad. Two "
-            "kills in a turn (even across renamed scratchpads) mean the approach "
-            "is too heavy, not that the same cell needs another try."
-        ),
-        kind="when",
-        triggers=("scratchpad_killed",),
-        detector="detect_kill_loop",
-    )
+
+    def classify(e: Event) -> str:
+        # Phrases are lockstepped with the local.py kill messages and the
+        # nudge routing. A missing reason or a silent-budget kill ("without
+        # producing any output" — stuck vs silently heavy is unknowable) is
+        # AMBIGUOUS and counts toward neither lesson: this rule is written
+        # into durable memory, and no rule beats a wrong one.
+        r = (e.detail.get("reason") or "").lower()
+        if "liveness" in r or "inactivity" in r:
+            return "liveness"
+        if not r or "without producing any output" in r:
+            return "ambiguous"
+        return "heavy"
+
+    def crosses_threshold(group: list[Event]) -> bool:
+        by_name: defaultdict[str, int] = defaultdict(int)
+        for e in group:
+            n = e.detail.get("name") or ""
+            if n:
+                by_name[n] += 1
+        per_name_max = max(by_name.values()) if by_name else 0
+        return per_name_max >= _KILL_LOOP_THRESHOLD or len(group) >= _KILL_LOOP_THRESHOLD
+
+    liveness = [e for e in killed if classify(e) == "liveness"]
+    heavy = [e for e in killed if classify(e) == "heavy"]
+
+    # Majority wins; ties go to liveness. Being wrong toward "reset and
+    # retry" costs one retry; being wrong toward "smaller batches" costs the
+    # ENG-578 per-item round-trip pattern (~$30/session measured).
+    if len(liveness) >= len(heavy) and crosses_threshold(liveness):
+        return Lesson(
+            rule=(
+                "When a scratchpad cell is killed for a missing liveness signal "
+                "(worker dead or wedged), the fix is reset and retry the SAME "
+                "cell unchanged — do NOT shrink the batch or split the loop. "
+                "Pass estimated_execution_time_seconds; call progress() during "
+                "long phases. If the same code wedges twice, a native call is "
+                "likely hanging — give that call its own timeout."
+            ),
+            kind="when",
+            triggers=("scratchpad_killed",),
+            detector="detect_kill_loop",
+        )
+    if len(heavy) > len(liveness) and crosses_threshold(heavy):
+        return Lesson(
+            rule=(
+                "When a scratchpad cell is killed (timeout, cancel, OOM), the next "
+                "cell needs to be smaller — fewer rows, smaller batch, explicit "
+                "timeout, narrower scope — and stay on the SAME scratchpad. Two "
+                "kills in a turn (even across renamed scratchpads) mean the approach "
+                "is too heavy, not that the same cell needs another try."
+            ),
+            kind="when",
+            triggers=("scratchpad_killed",),
+            detector="detect_kill_loop",
+        )
+    return None
 
 
 def detect_severity_climb(events: Sequence[Event]) -> Lesson | None:

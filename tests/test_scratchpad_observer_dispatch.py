@@ -21,9 +21,21 @@ from anton.core.backends.base import Cell
 from anton.core.tools.tool_handlers import (
     _fire_post_execute,
     _fire_pre_execute,
-    handle_scratchpad,
+    handle_scratchpad as _handle_scratchpad,
 )
+from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.scratchpad import observe_scratchpad_cell
+
+
+async def handle_scratchpad(session, tc_input):
+    """Test shim: unwrap ToolOutcome so string assertions keep reading the text.
+
+    Handlers migrated to explicit outcomes (ENG-1276) return ToolOutcome; these
+    tests assert on the human-readable content. Outcome-field coverage lives in
+    test_tool_outcome_tracking.py.
+    """
+    result = await _handle_scratchpad(session, tc_input)
+    return result.content if isinstance(result, ToolOutcome) else result
 
 
 class _RecordingAccSession:

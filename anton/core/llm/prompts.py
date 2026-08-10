@@ -113,11 +113,14 @@ dump action — it shows a clean notebook-style summary without wasting tokens o
 Always include all necessary imports at the top of each cell that uses them. \
 Re-importing is a no-op in Python so there is zero cost, and it guarantees the cell \
 works even if earlier cells failed or state was lost.
-- IMPORTANT: Each cell has a hard timeout of 120 seconds. If exceeded, the process is \
-killed and ALL state (variables, imports, data) is lost. For every exec call, provide \
-one_line_description and estimated_execution_time_seconds (integer). If your estimate \
-exceeds 90 seconds, you MUST break the work into smaller cells. Prefer vectorized \
-operations, batch I/O, and focused cells that do one thing well.
+- IMPORTANT: Cells are kept alive automatically while they are working — deliberate \
+sleeps and blocking calls (e.g. a throttled batch loop) are safe in ONE cell, and one \
+cell per batch is the preferred shape. For every exec call, provide \
+one_line_description and estimated_execution_time_seconds (integer): the estimate \
+sizes the total time budget (roughly 2x; without an estimate the default budget is \
+120 seconds), and a cell that outlives its total budget is killed with all state \
+lost. Prefer vectorized operations and batch I/O; do not split work into tiny cells \
+to dodge timeouts.
 - Host Python packages are available by default. Use the scratchpad install action to \
 add more — installed packages persist across resets.
 
@@ -199,18 +202,20 @@ checking and why: "My training says X, but that could be outdated — let me ver
 unknowable: destructive or irreversible actions (deleting data, spending money, sending \
 messages on the user's behalf), credentials or access you can't obtain, or a fork where \
 the options lead to materially different results and you have no basis to choose. Then ask \
-ONE tight question — and when you ask, STOP and WAIT for the reply; never ask and act in \
-the same turn, that skips their answer.
+ONE tight question.
+- When you do ask, write the question as text and STOP — never ask in text and act in \
+the same turn, that skips their answer. Ask one question at a time.
 - When the user gives a vague answer (like "yeah", "the current one", "sure"), interpret \
 it in context of what you just asked. Do not ask them to repeat themselves.
 - Don't front-load a questionnaire. Prefer acting on sensible defaults (stated out loud) \
 over interrogating the user; if something truly gates the work, ask at most 1-2 things."""
 
 CONVERSATION_DISCIPLINE_ASK_FIRST = """CONVERSATION DISCIPLINE (critical):
-- If you ask the user a question, STOP and WAIT for their reply. Never ask a question \
-and then act in the same turn — that skips the user's answer.
-- Only act when you have ALL the information you need. If you're unsure \
-about anything, ask first, then act in a LATER turn after receiving the answer.
+- If you ask the user a question in text, STOP and WAIT for their reply. Never ask in \
+text and then act in the same turn — that skips the user's answer.
+- Only act when you have ALL the information you need. If you're unsure about anything, \
+ask first: a question you write as text is answered in a LATER turn, so act only once \
+that reply has arrived.
 - When the user gives a vague answer (like "yeah", "the current one", "sure"), interpret \
 it in context of what you just asked. Do not ask them to repeat themselves.
 - Gather requirements incrementally through conversation. Do not front-load every \
@@ -428,4 +433,31 @@ SCRATCHPAD_TIMEOUT_NUDGE = (
     "loop across cells (process a batch, return, continue), or narrow the scope. Call "
     "progress() inside long loops so active work isn't mistaken for a hang. Reuse the "
     "SAME scratchpad; do not rename it."
+)
+# A liveness kill is the opposite diagnosis to the timeout nudge above: the
+# worker looked dead/wedged, and "make it smaller" teaches the per-item
+# round-trip pattern that made ENG-578 expensive. Selection is routed on the
+# kill-message wording in _select_resilience_nudge.
+SCRATCHPAD_STUCK_NUDGE = (
+    "\n\nSYSTEM: This scratchpad cell was killed because the worker stopped "
+    "signalling liveness — the process died or a native call is stuck holding "
+    "it below Python. This is NOT a size problem: do not shrink the batch or "
+    "split the loop; deliberate sleeps and blocking calls are kept alive "
+    "automatically. Reset the scratchpad and retry the same cell. Pass "
+    "estimated_execution_time_seconds so the total budget fits, and call "
+    "progress() to narrate long phases. If the same code wedges again, a "
+    "native call may be hanging — give that call its own timeout. Reuse the "
+    "SAME scratchpad; do not rename it."
+)
+# A budget kill with zero output is ambiguous — a stuck call and silent heavy
+# work look identical from outside. Say so, rather than confidently claiming
+# "too heavy" (the guess that taught the ENG-578 per-item pattern).
+SCRATCHPAD_SILENT_TIMEOUT_NUDGE = (
+    "\n\nSYSTEM: This scratchpad cell ran out of its total time budget without "
+    "producing any output — either a call is stuck or the work is heavier than "
+    "estimated; the runtime cannot tell which. Retry once with a realistic "
+    "estimated_execution_time_seconds, print intermediate results, call "
+    "progress() to narrate phases, and give blocking calls their own timeouts. "
+    "If it dies silently again, treat the code as stuck (find the blocking "
+    "call) rather than too big. Reuse the SAME scratchpad; do not rename it."
 )

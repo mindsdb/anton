@@ -44,7 +44,12 @@ class CoreSettings(BaseSettings):
     cell_inactivity_timeout: int = 30  # Max silence between output lines (s)
     cell_inactivity_after_progress: int = 60  # Grace window after progress() call (s)
     cell_inactivity_max: int = 60  # Ceiling on the silence window even when a large estimate scales it up (s)
-    cell_total_max: int = 0  # Optional absolute ceiling on total cell runtime (s); 0 = off (let it scale)
+    # Absolute ceiling on total cell runtime (s); 0 = off. Non-zero since the
+    # liveness heartbeat (ENG-578): a userland deadlock or infinite loop beats
+    # like a working cell, so this is the only bound that ends it. 1h is
+    # generous enough for a throttled batch campaign (50 sends x 30s ≈ 25min)
+    # while capping how long an agent-supplied estimate can extend a hang.
+    cell_total_max: int = 3600
     cell_install_timeout: int = 120  # pip/uv install timeout (s)
     cell_keep_recent: int = 5  # Recent cells preserved during compaction
 

@@ -5,7 +5,7 @@ description: Compare the LLM providers Anton supports and how to set each one up
 
 # Pick a provider
 
-Anton works with any of five provider options. You choose one during
+Anton works with any of these provider options. You choose one during
 onboarding (the first time you run `anton`), and you can switch at any time
 with `/llm` in chat or by running `anton setup`. All keys are persisted to
 `~/.anton/.env`, so they carry across sessions and workspaces.
@@ -14,36 +14,33 @@ with `/llm` in chat or by running `anton setup`. All keys are persisted to
 
 | Option | Default model | Web search / fetch | Best for |
 | --- | --- | --- | --- |
-| Minds-Enterprise-Cloud (mdb.ai) — recommended | `_reason_` / `_code_` smart routing | Native passthrough, zero setup | Best overall experience |
-| Minds-Enterprise-Server | Smart routing on your server | Depends on server | Self-hosted deployments |
+| MindsHub — recommended | Resolved from the live catalogue (`sonnet` / `haiku` tier defaults) | Native passthrough, zero setup | Best overall experience |
 | Anthropic (bring your own key) | `claude-sonnet-4-6` | Native server tools | Anthropic accounts |
 | OpenAI (bring your own key) | `gpt-5.4` | Native via Responses API | OpenAI accounts |
 | Google Gemini (bring your own key) | `gemini-3-flash-preview` | Needs `anton setup-search` | Gemini accounts |
 | Custom OpenAI-compatible | You choose | Needs `anton setup-search` | Ollama, vLLM, Together, Groq, LM Studio, Azure, … |
 
-## Option 1 — Minds-Enterprise-Cloud (recommended)
+## Option 1 — MindsHub (recommended)
 
-[mdb.ai](https://mdb.ai) is the default and recommended choice. Anton uses
-two virtual models — `_reason_` for planning and `_code_` for coding — and
-Minds routes each request to the best underlying model:
+[MindsHub](https://mindshub.ai) is the default and recommended choice. During
+setup Anton resolves the planning and coding models from the server's live
+model catalogue — picking the models your key is actually entitled to use —
+and validates the connection with a real request against that configuration:
 
-- Smart model routing
+- Latest frontier models
 - Faster responses
 - Cost optimized
 - Secure data connectors
 - Native web search and fetch passthrough — no extra setup
 
-During onboarding, if you don't have an mdb.ai API key yet, Anton opens the
+During onboarding, if you don't have a MindsHub API key yet, Anton opens the
 signup page for you — it takes a few seconds.
 
-## Option 2 — Minds-Enterprise-Server (self-hosted)
+The MindsHub host itself is not prompted for. To point Anton at a non-default
+host (staging, self-hosted), set `ANTON_MINDS_URL` in your environment or in
+`~/.anton/.env` before running setup — setup honors it.
 
-The same Minds experience against your own server. Onboarding asks for your
-server URL and API key, tests the connection, and (with your explicit
-confirmation) can proceed without SSL verification for servers with
-self-signed certificates.
-
-## Option 3 — Bring your own key
+## Option 2 — Bring your own key
 
 Choosing "Bring your own key" presents four sub-options. In each case Anton
 validates the key with a quick probe call before saving it.
@@ -92,7 +89,7 @@ both on by default. How they execute depends on your provider:
 | --- | --- | --- | --- |
 | Anthropic BYOK | Anthropic native server tool | Anthropic native server tool | None — billed on your Anthropic key |
 | OpenAI BYOK | OpenAI Responses API native | covered by `web_search` | None — billed on your OpenAI key |
-| Minds-Enterprise-Cloud (mdb.ai) | mdb.ai passthrough | mdb.ai passthrough | None — billed on your Minds key |
+| MindsHub | MindsHub passthrough | MindsHub passthrough | None — billed on your MindsHub key |
 | Generic OpenAI-compatible (Together, Groq, Ollama, vLLM, …) | Exa.ai or Brave (you choose at setup) | stdlib HTTP GET (no key) | Run `anton setup-search` once |
 
 To opt out, set `ANTON_WEB_SEARCH_ENABLED=false` and/or
