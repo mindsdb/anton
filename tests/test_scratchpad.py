@@ -1556,8 +1556,17 @@ class TestAgentAuthoredModuleSnapshots:
             assert cell.stdout.strip() == "0.458 False", cell.stdout
             # …and the loss is NAMED, on `logs` and never on `error` (a snapshot
             # problem must not feed the consecutive-error circuit breaker).
-            assert "could not be rebuilt" in (cell.logs or ""), cell.logs
-            assert "c" in (cell.logs or "")
+            logs = cell.logs or ""
+            assert "could not be rebuilt" in logs, logs
+            # Match the rendered name list, not a bare "c" — the letter appears in
+            # the prose of the note itself, so a substring check would pass even if
+            # nothing were named at all.
+            named = logs.split("now undefined: ", 1)[1].split(".", 1)[0]
+            assert sorted(n.strip() for n in named.split(",")) == [
+                "c",
+                "campaign_engine",
+            ], named
+            assert "ModuleNotFoundError" in logs, logs
             assert cell.error is None
         finally:
             await pad2.cleanup()
@@ -1604,6 +1613,37 @@ class TestAgentAuthoredModuleSnapshots:
             assert cell.stdout.strip() == "sent august False", cell.stdout
         finally:
             await pad2.cleanup()
+
+    async def test_the_snapshot_is_not_a_bare_dict(self, tmp_path, monkeypatch):
+        """An anton predating this format must REPORT, not silently load junk.
+
+        The older loader accepts any dict in the session file as the namespace itself.
+        A dict envelope would therefore hand it `{'values': ..., '__anton_snapshot__':
+        2}` as the agent's variables — every real name gone, nothing said — which is
+        the exact silent no-op ENG-1124 exists to end, reachable by a rollback or an
+        older desktop build resuming the conversation. A non-dict trips that loader's
+        `isinstance(ns, dict)` guard so it starts fresh AND reports.
+
+        Verified against the real staging loader at review time; this pins it so the
+        envelope cannot drift back to a dict.
+        """
+        import dill
+
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        pad = make_scratchpad(
+            name="notadict", _venvs_base=tmp_path / "venvs", session_id="c"
+        )
+        await pad.start()
+        try:
+            assert (await pad.execute("kept = 1")).error is None
+            snapshot = pad._session_snapshot_path()
+            assert snapshot is not None and snapshot.exists()
+            written = dill.loads(snapshot.read_bytes())
+            assert not isinstance(written, dict), (
+                "a dict snapshot is silently mistaken for a namespace by older anton"
+            )
+        finally:
+            await pad.cleanup()
 
     async def test_a_snapshot_in_the_old_format_still_loads(self, tmp_path, monkeypatch):
         """A conversation in flight across the upgrade keeps its state.

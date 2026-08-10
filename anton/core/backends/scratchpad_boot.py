@@ -97,14 +97,22 @@ _UNPICKLABLE: dict = {}
 _session_notes: list[str] = []
 
 
-# Snapshot envelope (ENG-1366). The payload is a dict of name -> individually-pickled
-# bytes rather than one pickle of the whole namespace, so ONE value that cannot be
-# rebuilt no longer discards every other variable: a pickle stream is a sequential
-# program, and an exception part-way through it kills the remainder. The envelope holds
-# nothing but str/int/bytes, so opening it can never fail on something the agent made.
+# Snapshot envelope (ENG-1366). The payload is name -> individually-pickled bytes
+# rather than one pickle of the whole namespace, so ONE value that cannot be rebuilt no
+# longer discards every other variable: a pickle stream is a sequential program, and an
+# exception part-way through it kills the remainder. The envelope holds nothing but
+# str/int/bytes, so opening it can never fail on something the agent made.
+#
+# A TUPLE, deliberately not a dict. An anton predating this format loads the file and
+# accepts ANY dict as the namespace itself — so a dict envelope would hand it a
+# namespace containing `values` and `__anton_snapshot__` and nothing else, with the
+# agent's real variables silently gone and NOTHING reported. That is precisely the
+# silent no-op ENG-1124 was filed to end, and a rollback or an older desktop build
+# resuming the conversation is enough to reach it. A non-dict trips that older loader's
+# `isinstance(ns, dict)` guard instead, so it starts fresh AND says so. Verified against
+# the real staging loader, both ways.
 _SNAPSHOT_MAGIC = "__anton_snapshot__"
 _SNAPSHOT_VERSION = 2
-_SNAPSHOT_VALUES = "values"
 
 
 def _resolved_workspace() -> str | None:
@@ -211,10 +219,17 @@ def _load_namespace() -> tuple[dict, str | None]:
         with _workspace_on_syspath():
             with open(SESSION_PATH, "rb") as f:
                 raw = dill.load(f)
-            if not isinstance(raw, dict):
+            if isinstance(raw, tuple) and raw and raw[0] == _SNAPSHOT_MAGIC:
+                if len(raw) != 3 or raw[1] != _SNAPSHOT_VERSION:
+                    # A snapshot from a NEWER anton than this one. Refuse it rather
+                    # than guess at its shape; the except below reports and starts
+                    # fresh, which is the honest degradation.
+                    raise TypeError(
+                        f"Unsupported scratchpad snapshot version: {raw[1:2]}"
+                    )
+                ns, dropped = _decode_values(raw[2] or {})
+            elif not isinstance(raw, dict):
                 raise TypeError("Session file did not contain a namespace dict")
-            if raw.get(_SNAPSHOT_MAGIC) == _SNAPSHOT_VERSION:
-                ns, dropped = _decode_values(raw.get(_SNAPSHOT_VALUES) or {})
             else:
                 # A snapshot written before this format existed: one stream holding the
                 # real objects. Still readable, so a conversation in flight across the
@@ -309,10 +324,7 @@ def _encode_values(payload: dict) -> tuple[dict, list]:
 
 def _write_snapshot(blobs: dict, tmp_path: str) -> None:
     """Serialise the snapshot envelope to `tmp_path`, aborting past the size cap."""
-    envelope = {
-        _SNAPSHOT_MAGIC: _SNAPSHOT_VERSION,
-        _SNAPSHOT_VALUES: blobs,
-    }
+    envelope = (_SNAPSHOT_MAGIC, _SNAPSHOT_VERSION, blobs)
     with open(tmp_path, "wb") as f:
         # _CappedWriter still guards the envelope overhead on top of the value bytes
         # already counted in `_encode_values`.
