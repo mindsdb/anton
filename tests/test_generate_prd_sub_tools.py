@@ -30,6 +30,19 @@ def test_finish_gathering_schema_requires_summary_and_artifact_type():
     assert set(schema["input_schema"]["required"]) == {"summary", "artifact_type"}
 
 
+def test_finish_gathering_schema_constrains_artifact_type_to_the_closed_enum():
+    """Without this, the model is free to invent a type string that later
+    crashes write_prd's `ArtifactStore.update(type=...)` call — see
+    store.py's ValueError on anything outside ARTIFACT_TYPES."""
+    from anton.core.artifacts.models import ARTIFACT_TYPES
+
+    schema = next(
+        t for t in sub_tools.tool_schemas(include_ask_user=False)
+        if t["name"] == "finish_gathering"
+    )
+    assert schema["input_schema"]["properties"]["artifact_type"]["enum"] == list(ARTIFACT_TYPES)
+
+
 class _FakeElicitor:
     supported_kinds = ("choice",)
     answer_hint = "hint"

@@ -20,6 +20,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
+from anton.core.artifacts.models import ARTIFACT_TYPES
+
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.core.interaction.elicit import AskAnswer, AskRequest
@@ -79,6 +81,7 @@ FINISH_GATHERING_SCHEMA: dict = {
             },
             "artifact_type": {
                 "type": "string",
+                "enum": list(ARTIFACT_TYPES),
                 "description": "The confirmed artifact type.",
             },
             "notes": {

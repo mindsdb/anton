@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from anton.core.artifacts.models import ARTIFACT_TYPES
+
 from . import sub_tools
 from .prompts import (
     build_gathering_continue_message,
@@ -100,7 +102,17 @@ async def run_gathering_loop(state: "PrdState") -> None:
             inp = tc.input or {}
 
             if name == "finish_gathering":
-                state.final_artifact_type = str(inp.get("artifact_type") or state.artifact_type)
+                claimed_type = str(inp.get("artifact_type") or "")
+                # The schema's `enum` (see sub_tools.FINISH_GATHERING_SCHEMA)
+                # is a hint, not an enforced constraint — a model can still
+                # emit a type outside ARTIFACT_TYPES. Left unchecked, that
+                # string reaches `write_prd`'s `ArtifactStore.update(type=...)`
+                # unvalidated until much later, where it raises ValueError
+                # and crashes the whole generate_prd call instead of just
+                # falling back to the type that was already known-good.
+                state.final_artifact_type = (
+                    claimed_type if claimed_type in ARTIFACT_TYPES else state.artifact_type
+                )
                 state.gathering_notes = str(inp.get("notes") or inp.get("summary") or "")
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": "ok"})
                 finished = True

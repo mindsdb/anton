@@ -35,6 +35,18 @@ def test_gathering_system_prompt_carries_the_request_and_understanding():
     assert "finish_gathering" in prompt
 
 
+def test_gathering_system_prompt_lists_every_valid_artifact_type():
+    """Without an explicit closed list, the model can invent an artifact
+    type string that later crashes write_prd's `ArtifactStore.update`
+    (raises ValueError outside ARTIFACT_TYPES) — see also the schema's own
+    `enum` constraint in sub_tools.FINISH_GATHERING_SCHEMA."""
+    from anton.core.artifacts.models import ARTIFACT_TYPES
+
+    prompt = build_gathering_system_prompt(_state())
+    for artifact_type in ARTIFACT_TYPES:
+        assert artifact_type in prompt
+
+
 def test_gathering_system_prompt_carries_known_data_and_preferences():
     state = _state(known_data="scratchpad `btc`, cell 1: fetched from CoinGecko")
     prompt = build_gathering_system_prompt(state)

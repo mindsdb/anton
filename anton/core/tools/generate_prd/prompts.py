@@ -6,6 +6,8 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
+from anton.core.artifacts.models import ARTIFACT_TYPES
+
 from .state import PrdState
 
 
@@ -24,6 +26,7 @@ def _shared_preamble(state: PrdState) -> str:
 
 
 def build_gathering_system_prompt(state: PrdState) -> str:
+    types_list = ", ".join(f"`{t}`" for t in ARTIFACT_TYPES)
     return _shared_preamble(state) + (
         "\nYour job right now: make sure the artifact type is unambiguous, "
         "gather and verify any data needed (fetch samples via scratchpad, "
@@ -31,9 +34,10 @@ def build_gathering_system_prompt(state: PrdState) -> str:
         "questions ONLY when truly necessary — interactive questions are "
         "scarce this turn, so prefer working from what you already know.\n\n"
         "Call `finish_gathering` once you are confident about the artifact "
-        "type and have enough data (and samples, where relevant) to draft "
-        "a PRD. Put everything phase 2 needs — goal, data sources found, "
-        "sample rows, open assumptions, UI/UX hints — into its `notes`."
+        f"type — it MUST be exactly one of: {types_list} — and have enough "
+        "data (and samples, where relevant) to draft a PRD. Put everything "
+        "phase 2 needs — goal, data sources found, sample rows, open "
+        "assumptions, UI/UX hints — into its `notes`."
     )
 
 

@@ -80,6 +80,29 @@ async def test_no_tool_calls_leaves_final_artifact_type_empty():
     assert state.messages[-1] == {"role": "assistant", "content": "I think we're done."}
 
 
+async def test_finish_gathering_falls_back_to_the_registered_type_when_invented(monkeypatch):
+    """The schema's `enum` is a hint, not an enforced constraint — a model
+    can still emit a type outside ARTIFACT_TYPES. Left unvalidated here,
+    that string would only fail much later, inside write_prd's
+    `ArtifactStore.update(type=...)` (a ValueError that crashes the whole
+    generate_prd call) — see prd-design.md's live-testing feedback."""
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ready", "artifact_type": "interactive-dashboard"})]),
+    )
+    state = _state(session)  # artifact_type="html-app" — see _state's default
+    await engine.run_gathering_loop(state)
+    assert state.final_artifact_type == "html-app"
+
+
+async def test_finish_gathering_keeps_a_valid_type_that_differs_from_the_registered_one():
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ready", "artifact_type": "fullstack-stateless-app"})]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.final_artifact_type == "fullstack-stateless-app"
+
+
 async def test_scratchpad_call_is_dispatched_to_the_real_handler(monkeypatch):
     async def fake_handle_scratchpad(session, inp):
         assert inp == {"action": "view", "name": "s"}
