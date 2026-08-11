@@ -62,6 +62,20 @@ logger = logging.getLogger(__name__)
 _RULE_RETRIEVAL_TAG = "rule-retrieval"
 _RULE_RETRIEVAL_MAX_TOKENS = 4096
 
+# The analytics ACTION NAME, and the `anton_` prefix is load-bearing, not style.
+# The collector lambda relays an event only if its action starts with `anton_` or
+# `ds_connect` — a prefix rule, not a list — and drops everything else while still
+# returning HTTP 200, so the client cannot tell. Measured 2026-08-10:
+#
+#     action=rule_retrieval        -> posthogResult: false   (silently dropped)
+#     action=anton_rule_retrieval  -> posthogResult: true
+#
+# The unprefixed name is why this event produced nothing in project 355390 after
+# shipping. Any new action added here must carry the prefix, or it disappears.
+# (Separately, the lambda also allowlists property NAMES, so the properties below
+# still do not arrive until ENG-1355 lands — the prefix fixes one of two gates.)
+_RULE_RETRIEVAL_ACTION = "anton_rule_retrieval"
+
 # Built once: `AntonSettings()` reads the environment, and while this call site
 # is rare it sits on the latency-critical prompt-assembly path.
 _analytics_settings = None
@@ -88,11 +102,11 @@ def _emit_rule_retrieval(**shape) -> None:
 
         send_event(
             _analytics_settings,
-            "rule_retrieval",
+            _RULE_RETRIEVAL_ACTION,
             **{key: str(value) for key, value in shape.items()},
         )
     except Exception:
-        logger.debug("rule_retrieval analytics event failed", exc_info=True)
+        logger.debug("%s analytics event failed", _RULE_RETRIEVAL_ACTION, exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

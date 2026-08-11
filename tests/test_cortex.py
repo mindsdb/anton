@@ -522,3 +522,42 @@ class TestRuleRetrievalObservability:
         out = await self._run(cortex, llm, small)
         assert llm.calls == 0 and captured_events == []
         assert out == small
+
+class TestRuleRetrievalActionName:
+    """ENG-1390 — the analytics ACTION NAME, kept out of the class above on purpose.
+
+    `TestRuleRetrievalObservability` autouse-stubs `_emit_rule_retrieval`, which is
+    exactly what these tests must NOT have stubbed: they assert what reaches
+    `send_event`.
+    """
+
+    async def test_the_action_name_carries_the_prefix_the_collector_requires(self):
+        """The collector lambda relays only `anton_`/`ds_connect`-prefixed actions.
+
+        It drops anything else while still returning HTTP 200, and `send_event` is
+        fire-and-forget behind a bare `except`, so a wrong name is invisible from
+        the client — this event shipped as `rule_retrieval` and produced nothing.
+        Pinning the literal here because the constraint lives in a lambda whose
+        code is in no repo, so nothing else in this codebase can enforce it.
+        """
+        from anton.core.memory.cortex import _RULE_RETRIEVAL_ACTION
+
+        assert _RULE_RETRIEVAL_ACTION.startswith("anton_"), (
+            f"{_RULE_RETRIEVAL_ACTION!r} would be silently dropped by the collector"
+        )
+
+    async def test_the_emitted_action_is_the_prefixed_one(self, cortex, monkeypatch):
+        """End to end: the name that actually reaches `send_event`, not just the
+        constant. A refactor could reintroduce a literal and this would catch it."""
+        import anton.core.memory.cortex as cortex_mod
+
+        sent = {}
+        monkeypatch.setattr(cortex_mod, "_analytics_settings", object())
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **props: sent.update(action=action, props=props),
+        )
+        cortex_mod._emit_rule_retrieval(outcome="filtered", when_rules=3)
+
+        assert sent["action"] == "anton_rule_retrieval", sent
+        assert sent["props"]["outcome"] == "filtered"
