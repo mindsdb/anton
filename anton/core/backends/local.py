@@ -172,6 +172,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
     _MAX_VENV_RETRIES = 3
+    # ENG-1273: how many times in a row execute_streaming() will silently
+    # resume() a dead process before concluding resume() itself isn't the
+    # fix (most likely the snapshot it keeps reloading) and falling back to
+    # a full reset() instead of retrying resume() forever.
+    _MAX_CONSECUTIVE_AUTO_RESUMES = 2
 
     def __init__(
         self,
@@ -211,6 +216,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
+        # ENG-1273: recovery bookkeeping for a process that died on its own
+        # (watchdog kill, crash) — see resume() / _auto_resume(). Both are
+        # zeroed by reset(), manual or auto-fallback: whatever was wrong
+        # before, a reset is a clean slate either way.
+        self._consecutive_deaths: int = 0
+        self._pending_recovery_note: str | None = None
+        self._last_resume_error: str | None = None
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -659,18 +671,80 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "The Python venv has been deleted and will be recreated on next attempt."
             ) from exc
 
+    async def resume(self) -> None:
+        """Restart a dead process WITHOUT discarding its namespace snapshot.
+
+        Recovery from something the agent did not ask for — a watchdog kill, a
+        crash — so the last COMPLETED cell's state (dumped to disk after every
+        cell, ENG-1124) is exactly what should come back. `start()` below
+        already reloads the snapshot whenever ANTON_SCRATCHPAD_SESSION_PATH
+        points at one, so there is no separate load path to write here — the
+        only thing this adds over a bare restart is NOT calling
+        `_discard_session_snapshot()` first, which is what `reset()` does.
+
+        Called automatically by `execute_streaming()` when it finds the
+        process dead (see `_auto_resume`) — the agent never has to ask for
+        this explicitly.
+        """
+        await self._stop_process()
+        await self.start()
+
     async def reset(self) -> None:
-        """Kill the process, clear cells, and restart."""
+        """Kill the process, clear cells, and restart — discarding all state,
+        including the on-disk namespace snapshot.
+
+        Deliberately different from `resume()`: `reset` is the agent's
+        explicit "wipe everything" ask (or the auto-resume fallback below
+        giving up on resume()), so the snapshot has to go too. Since the
+        namespace is now snapshotted to disk (ENG-1124), leaving it in place
+        would mean `start()` below reloads it and `reset` silently stops
+        resetting anything. Also clears the auto-resume death counter —
+        whatever was wrong before, a reset is a clean slate either way.
+        """
         await self._stop_process()
         self.cells.clear()
-        # The tool contract for `reset` is "clearing all state (installed packages
-        # survive)". Since the namespace is now snapshotted to disk (ENG-1124), the
-        # snapshot has to go too — otherwise start() below reloads it and `reset`
-        # silently stops resetting anything.
         self._discard_session_snapshot()
+        self._consecutive_deaths = 0
         if not self._verify_venv_python():
             self._nuke_venv()
         await self.start()
+
+    async def _auto_resume(self) -> bool:
+        """Best-effort recovery from a dead scratchpad process (ENG-1273).
+
+        Called from the top of `execute_streaming()` when the process isn't
+        running. Tries `resume()` first, so the pad comes back with the
+        namespace as of the last completed cell intact. After
+        `_MAX_CONSECUTIVE_AUTO_RESUMES` deaths in a row with no successful
+        cell in between, `resume()` clearly isn't fixing whatever is wrong —
+        most likely the snapshot it keeps reloading — so this falls back to
+        a full `reset()` instead of retrying `resume()` forever.
+
+        Returns whether the process is running afterward. Never raises — a
+        `resume()`/`reset()` failure (e.g. the venv itself won't come up) is
+        reported via `_last_resume_error` and a False return, so the caller
+        can degrade to an error Cell instead of crashing the turn.
+        """
+        if self._consecutive_deaths >= self._MAX_CONSECUTIVE_AUTO_RESUMES:
+            try:
+                await self.reset()
+            except Exception as exc:
+                self._last_resume_error = str(exc)
+                return False
+            self._pending_recovery_note = (
+                f"Scratchpad kept dying after {self._MAX_CONSECUTIVE_AUTO_RESUMES} "
+                "resume attempts, so it was fully reset (all state cleared, "
+                "including the saved namespace) before running this cell."
+            )
+            return self._proc is not None and self._proc.returncode is None
+
+        self._consecutive_deaths += 1
+        try:
+            await self.resume()
+        except Exception as exc:
+            self._last_resume_error = str(exc)
+            return False
+        return self._proc is not None and self._proc.returncode is None
 
     async def close(self) -> None:
         """Kill the process and save requirements; preserve the venv."""
@@ -819,6 +893,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             estimated_time=estimated_time,
             logs=result_data.get("logs", ""),
         )
+        # ENG-1273: a successful cell resets the consecutive-death counter
+        # (whatever was wrong, it's fixed now).
+        if not cell.error:
+            self._consecutive_deaths = 0
         self.cells.append(cell)
         yield cell
 
