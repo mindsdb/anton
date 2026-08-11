@@ -179,17 +179,6 @@ class TestAutoResume:
         await pad._auto_resume()
         assert calls[-1] == "reset"
 
-    async def test_a_successful_cell_resets_the_death_counter(self):
-        pad = make_scratchpad(name="counter-reset")
-        await pad.start()
-        try:
-            pad._consecutive_deaths = 1  # simulate one prior death this streak
-            cell = await pad.execute("print('alive')")
-            assert cell.error is None
-            assert pad._consecutive_deaths == 0
-        finally:
-            await pad.close()
-
     async def test_manual_reset_also_clears_the_death_counter(self):
         pad = make_scratchpad(name="manual-reset-clears")
         await pad.start()

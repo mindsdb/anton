@@ -217,9 +217,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
         # ENG-1273: recovery bookkeeping for a process that died on its own
-        # (watchdog kill, crash) — see resume() / _auto_resume(). Both are
-        # zeroed by reset(), manual or auto-fallback: whatever was wrong
-        # before, a reset is a clean slate either way.
+        # (watchdog kill, crash) — see resume() / _auto_resume(). The death
+        # counter is zeroed by reset(): whatever was wrong before, a reset is
+        # a clean slate. The recovery note and error are preserved separately
+        # for Task 2 to consume and report to the UI.
         self._consecutive_deaths: int = 0
         self._pending_recovery_note: str | None = None
         self._last_resume_error: str | None = None
@@ -893,10 +894,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             estimated_time=estimated_time,
             logs=result_data.get("logs", ""),
         )
-        # ENG-1273: a successful cell resets the consecutive-death counter
-        # (whatever was wrong, it's fixed now).
-        if not cell.error:
-            self._consecutive_deaths = 0
         self.cells.append(cell)
         yield cell
 
