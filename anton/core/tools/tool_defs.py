@@ -558,6 +558,24 @@ SELECT_PATH_TOOL_PICK_ONLY = replace(
         "conversation; this host has no file browser, so do not ask them to "
         "navigate to it and do not ask them to type or paste a path."
     ),
+    # `replace()` copies input_schema by reference, so the schema must be
+    # overridden too — otherwise the model is told two different things by the
+    # two channels it reads: prose saying "there is no BROWSE mode" and a
+    # function-calling schema still offering `start_dir`, whose own description
+    # reads "BROWSE mode only". Dropping it is the point of the variant.
+    #
+    # Rebuilt rather than mutated, for the same reason the ToolDef itself is
+    # copied: `SELECT_PATH_TOOL.input_schema` is a module-level dict shared by
+    # every session in the process. The inner property dicts are shared but
+    # never written, so a one-level rebuild is enough.
+    input_schema={
+        **SELECT_PATH_TOOL.input_schema,
+        "properties": {
+            key: value
+            for key, value in SELECT_PATH_TOOL.input_schema["properties"].items()
+            if key != "start_dir"
+        },
+    },
 )
 
 

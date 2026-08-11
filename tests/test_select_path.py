@@ -389,12 +389,23 @@ def test_pathless_host_gets_the_pick_only_definition(make_session):
     # absence produced the fabrication.
     assert "attach" in tool.prompt.lower()
     assert "no file browser" in tool.prompt.lower()
+    # ...and the FUNCTION-CALLING SCHEMA must agree with the prose. `replace()`
+    # copies input_schema by reference, so without an explicit override the
+    # model reads "there is no BROWSE mode" in the description while the schema
+    # still offers `start_dir`, documented as "BROWSE mode only" (caught in
+    # review of #331 — the description-only assertions above missed it).
+    assert "start_dir" not in tool.input_schema["properties"]
+    # The parameters pick mode actually needs are still there.
+    for key in ("prompt", "candidates", "pattern", "base_dir"):
+        assert key in tool.input_schema["properties"]
 
 
 def test_host_with_a_path_elicitor_keeps_browse_mode(make_session):
     tool = _registered_select_path(make_session(elicitor=_FakeElicitor(None)))
     assert "BROWSE" in tool.description
     assert "Browse mode" in tool.prompt
+    # The browse-only parameter belongs here, and only here.
+    assert "start_dir" in tool.input_schema["properties"]
 
 
 def test_no_elicitor_at_all_gets_the_pick_only_definition(make_session):
@@ -425,3 +436,10 @@ def test_module_singletons_are_not_mutated(make_session):
     assert SELECT_PATH_TOOL.description == pristine_full
     assert SELECT_PATH_TOOL_PICK_ONLY.description == pristine_pick
     assert SELECT_PATH_TOOL is not SELECT_PATH_TOOL_PICK_ONLY
+    # input_schema is a module-level dict shared by every session in the
+    # process: the pick-only variant must rebuild it, never pop from it.
+    assert "start_dir" in SELECT_PATH_TOOL.input_schema["properties"]
+    assert (
+        SELECT_PATH_TOOL.input_schema["properties"]
+        is not SELECT_PATH_TOOL_PICK_ONLY.input_schema["properties"]
+    )

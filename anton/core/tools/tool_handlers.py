@@ -795,7 +795,11 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
 
     * **browse** — no ``candidates``/``pattern`` given: the location is unknown,
       so the user navigates a picker to locate it. Use this instead of asking
-      the user to type or paste a path.
+      the user to type or paste a path. **Host-gated:** only reachable where an
+      elicitor supports ``kind="path"``. Elsewhere — every cowork session today
+      — it returns ``picker_unavailable`` pointing at attachment, and the model
+      is not offered browse at all, because ``session.py`` registers
+      ``SELECT_PATH_TOOL_PICK_ONLY`` there (ENG-1357).
     * **pick** — ``candidates`` or ``pattern`` given: disambiguate concrete
       matches within the project. Auto-resolves a single match and reports
       "no matches" for none, so the picker appears only for a genuine (≥2)
