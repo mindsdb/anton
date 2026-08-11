@@ -13,7 +13,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 
@@ -459,8 +459,12 @@ SELECT_PATH_TOOL = ToolDef(
         "immediately with no prompt; zero matches tells you to refine.\n\n"
         'On selection the tool returns {"status":"resolved","path":"<absolute path>"} '
         "— use that path directly and keep going. Other statuses: 'cancelled' (user "
-        "dismissed), 'no_matches', 'invalid'. Never re-ask in plain text after a "
-        "resolved selection."
+        "dismissed), 'no_matches', 'invalid', and 'picker_unavailable' (this host "
+        "cannot render a picker). On 'picker_unavailable' follow the `message` in the "
+        "result: in PICK mode it carries the `candidates` it found, so ask which of "
+        "those the user meant; in BROWSE mode the file is somewhere you cannot reach, "
+        "so ask the user to attach it to the conversation. Never re-ask in plain text "
+        "after a resolved selection."
     ),
     # Injected into the system prompt: bias the model toward the picker over a
     # type-the-path request, which is the whole point of the tool.
@@ -508,6 +512,52 @@ SELECT_PATH_TOOL = ToolDef(
         "required": ["prompt"],
     },
     handler=handle_select_path,
+)
+
+
+# Variant registered when no elicitor on this host supports `kind="path"`
+# (cowork-server injects none, so this is every cowork session today).
+#
+# BROWSE mode is physically impossible there — handle_select_path returns
+# picker_unavailable before it ever reaches the elicitor — yet the full
+# definition above advertises browse as the right move for an unknown location
+# AND injects a system-prompt rule forbidding the alternatives. That
+# combination is what routed a user who said "I have my sales data" into a dead
+# end with no legitimate exit: picker can't render, asking for a path is
+# forbidden here and by the harness file-access policy, guessing is forbidden.
+# The model resolved it by inventing the data (ENG-1357).
+#
+# PICK mode still earns its place without an elicitor: exactly one match
+# auto-resolves with no user interaction, and ≥2 returns the candidate list so
+# the agent can ask in plain text — legitimate, because those paths are ones it
+# already found inside the project, not a path the user must type from memory.
+SELECT_PATH_TOOL_PICK_ONLY = replace(
+    SELECT_PATH_TOOL,
+    description=(
+        "Disambiguate between file/folder paths you have ALREADY located inside "
+        "the project. Pass an explicit `candidates` list, OR a glob `pattern` "
+        "(optionally under `base_dir`).\n\n"
+        "Exactly one match resolves immediately and you get the path back. Zero "
+        "matches tells you to refine. Two or more comes back as "
+        "'picker_unavailable' WITH the candidates it found — ask the user which "
+        "of those they meant.\n\n"
+        "This host cannot render an interactive file browser, so there is no "
+        "BROWSE mode: you cannot ask the user to navigate to a file whose "
+        "location you do not know. If the file is not in the project, ask the "
+        "user to attach it to the conversation.\n\n"
+        'Returns {"status":"resolved","path":"<absolute path>"} on success. '
+        "Other statuses: 'no_matches', 'invalid', 'picker_unavailable'. Never "
+        "re-ask in plain text after a resolved selection."
+    ),
+    prompt=(
+        "When the user refers to a file or folder without giving a path you can "
+        "confidently resolve, first look for it inside the project — then call "
+        "`select_path` with `candidates` or a `pattern` to have the user pick "
+        "between the matches. Do not guess which one they meant. If the file is "
+        "not in the project at all, ask the user to attach it to the "
+        "conversation; this host has no file browser, so do not ask them to "
+        "navigate to it and do not ask them to type or paste a path."
+    ),
 )
 
 

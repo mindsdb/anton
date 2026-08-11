@@ -77,6 +77,7 @@ from anton.core.tools.tool_defs import (
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
+    SELECT_PATH_TOOL_PICK_ONLY,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
@@ -1351,10 +1352,25 @@ class ChatSession:
 
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
-        # Interactive file/folder disambiguation — always available; degrades
-        # to picker_unavailable (and still auto-resolves a single candidate)
-        # when no elicitor supports path questions.
-        self.tool_registry.register_tool(SELECT_PATH_TOOL)
+        # Interactive file/folder disambiguation. Registered on every host, but
+        # in one of two shapes — because "degrades to picker_unavailable" is
+        # not a neutral degradation when the definition also injects a
+        # system-prompt rule telling the model to use the picker INSTEAD of the
+        # alternatives.
+        #
+        # Without a path elicitor, BROWSE mode cannot run at all, so a user who
+        # says "analyse my sales data" without attaching it left the model with
+        # no legitimate move: picker dead, asking for a path forbidden by the
+        # prompt AND by the host's file-access policy, guessing forbidden. It
+        # fabricated the data and reported a forecast from it (ENG-1357).
+        #
+        # PICK mode does still work here — one match auto-resolves, and ≥2
+        # comes back with the candidate list to ask about — so this is a
+        # narrowing, not a removal.
+        if self.elicitor is not None and "path" in self.elicitor.supported_kinds:
+            self.tool_registry.register_tool(SELECT_PATH_TOOL)
+        else:
+            self.tool_registry.register_tool(SELECT_PATH_TOOL_PICK_ONLY)
 
         # Multiple-choice questions — only when some host can actually render
         # them. Without this the model would ask into a void. The cowork kill

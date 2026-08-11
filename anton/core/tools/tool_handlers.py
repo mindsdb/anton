@@ -824,9 +824,19 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     # ── browse — locate an unspecified path ──────────────────────────────
     if not has_candidates and not has_pattern:
         if not can_pick:
+            # NOT "ask for the path in plain text" (ENG-1357). Browse means the
+            # file's location is unknown, so it is very likely outside the
+            # project — and every host that lands here forbids reading files
+            # that are neither in the project nor attached, so a typed path is
+            # unusable even when the user supplies it. Naming the one route
+            # that works matters: with no legitimate exit offered, the model
+            # fabricated the user's data instead of asking.
             return _status(
                 "picker_unavailable",
-                "An interactive picker is unavailable here; ask the user for the path in plain text.",
+                "This host cannot render a file browser. Ask the user to attach the "
+                "file to the conversation — that is how they grant you access to a "
+                "file outside the project. Do not ask them to type or paste a path, "
+                "and do not proceed with invented or example data in its place.",
             )
         request = AskRequest(
             prompt=prompt,
@@ -850,9 +860,23 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     # ── pick — disambiguate concrete candidates within the project ───────
     candidates = _collect_selection_candidates(tc_input, root, kind)
     if not candidates:
+        # The browse suggestion is only honest where browse can actually run —
+        # on a host without a path elicitor it leads straight to
+        # picker_unavailable, and "ask in plain text" is unusable for a file
+        # outside the project (ENG-1357).
         return _status(
             "no_matches",
-            "No match found. Refine the pattern, omit candidates/pattern to let the user browse, or ask in plain text.",
+            (
+                "No match found. Refine the pattern, omit candidates/pattern to let "
+                "the user browse, or ask in plain text."
+            )
+            if can_pick
+            else (
+                "No match found in the project. Refine the pattern, or — if the file "
+                "is not in the project at all — ask the user to attach it to the "
+                "conversation. This host has no file browser, and you cannot read a "
+                "path the user types."
+            ),
         )
     if len(candidates) == 1:
         return _status("resolved", auto_resolved=True, path=str(candidates[0]))
