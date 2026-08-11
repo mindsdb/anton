@@ -255,6 +255,24 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return None
         return path
 
+    def _snapshot_configured(self) -> bool:
+        """Whether this pad's namespace snapshot will actually be read or
+        written for THIS run — both conditions must hold: a session id
+        that resolves to a writable path (see `_session_snapshot_path`),
+        and persistence turned on for the child, read the same way
+        `scratchpad_boot.py` reads `ANTON_SCRATCHPAD_PERSIST_SESSION`.
+
+        Used to keep the kill message honest (ENG-1273): claiming a
+        restoration that cannot happen — e.g. bare CLI use with no session
+        id — is the same false contract this ticket exists to fix, just
+        pointed the other way.
+        """
+        if self._session_snapshot_path() is None:
+            return False
+        return os.environ.get(
+            "ANTON_SCRATCHPAD_PERSIST_SESSION", "false"
+        ).lower() in {"1", "true", "yes", "on"}
+
     def _discard_session_snapshot(self) -> None:
         """Delete this pad's namespace snapshot, if any. Best-effort."""
         path = self._session_snapshot_path()
@@ -716,10 +734,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         Called from the top of `execute_streaming()` when the process isn't
         running. Tries `resume()` first, so the pad comes back with the
         namespace as of the last completed cell intact. After
-        `_MAX_CONSECUTIVE_AUTO_RESUMES` deaths in a row with no successful
-        cell in between, `resume()` clearly isn't fixing whatever is wrong —
-        most likely the snapshot it keeps reloading — so this falls back to
-        a full `reset()` instead of retrying `resume()` forever.
+        `_MAX_CONSECUTIVE_AUTO_RESUMES` deaths in a row with `resume()`
+        itself never once producing a live process in between, `resume()`
+        clearly isn't fixing whatever is wrong, so this falls back to a
+        full `reset()` instead of retrying `resume()` forever.
+
+        The counter tracks resume() FAILING to come back alive, not cells
+        getting killed: a resume that succeeds — proven by the process
+        being alive right after — zeroes it immediately, even if the cell
+        that runs next gets killed for its own reasons (e.g. running over
+        its own time budget). Otherwise a batch of several legitimately
+        slow cells in a row would trip the fallback and wipe state for a
+        reason that has nothing to do with resume() failing (final-review
+        finding, ENG-1273).
 
         Returns whether the process is running afterward. Never raises — a
         `resume()`/`reset()` failure (e.g. the venv itself won't come up) is
@@ -732,12 +759,16 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             except Exception as exc:
                 self._last_resume_error = str(exc)
                 return False
+            if self._proc is None or self._proc.returncode is not None:
+                self._last_resume_error = "process not running after reset"
+                return False
+            self._consecutive_deaths = 0
             self._pending_recovery_note = (
                 f"Scratchpad kept dying after {self._MAX_CONSECUTIVE_AUTO_RESUMES} "
                 "resume attempts, so it was fully reset (all state cleared, "
                 "including the saved namespace) before running this cell."
             )
-            return self._proc is not None and self._proc.returncode is None
+            return True
 
         self._consecutive_deaths += 1
         try:
@@ -745,7 +776,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         except Exception as exc:
             self._last_resume_error = str(exc)
             return False
-        return self._proc is not None and self._proc.returncode is None
+        if self._proc is None or self._proc.returncode is not None:
+            self._last_resume_error = "process not running after resume"
+            return False
+        self._consecutive_deaths = 0
+        return True
 
     async def close(self) -> None:
         """Kill the process and save requirements; preserve the venv."""
@@ -846,13 +881,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 await asyncio.wait_for(self._proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
+            if self._snapshot_configured():
+                state_note = (
+                    "This cell's own progress is lost, but the scratchpad's "
+                    "namespace as of the last completed cell was already "
+                    "saved to disk — the next exec call restores it "
+                    "automatically, so you do not need to call reset for "
+                    "this. Use reset only if you want to deliberately wipe "
+                    "all state instead."
+                )
+            else:
+                state_note = (
+                    "This cell's state is lost, and this scratchpad has no "
+                    "session persistence configured, so nothing survives "
+                    "the restart. Use reset if you want a clean slate — "
+                    "either way the next exec call starts from an empty "
+                    "namespace."
+                )
             error_msg = (
-                f"{exc}. This cell's own progress is lost, but the "
-                "scratchpad's namespace as of the last completed cell was "
-                "already saved to disk — the next exec call restores it "
-                "automatically, so you do not need to call reset for this. "
-                "Use reset only if you want to deliberately wipe all state "
-                "instead.\n\n"
+                f"{exc}. {state_note}\n\n"
                 "If a database query was running, it may still be executing server-side.\n"
                 "To check and cancel: run SHOW PROCESSLIST (MySQL) or\n"
                 "SELECT * FROM information_schema.processlist WHERE status='running' "
@@ -870,8 +917,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "interval) — use it to determine which side effects "
                     "already happened."
                 )
-            if recovery_note:
-                error_msg = recovery_note + "\n\n" + error_msg
             cell = Cell(
                 code=code,
                 stdout=salvaged,
@@ -879,24 +924,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 error=error_msg,
                 description=description,
                 estimated_time=estimated_time,
+                logs=recovery_note or "",
             )
             self.cells.append(cell)
             yield cell
             return
         except Exception as exc:
-            error_msg = (
-                f"Scratchpad result could not be read: {exc}. "
-                "The scratchpad is still running — you can retry."
-            )
-            if recovery_note:
-                error_msg = recovery_note + "\n\n" + error_msg
             cell = Cell(
                 code=code,
                 stdout="",
                 stderr="",
-                error=error_msg,
+                error=(
+                    f"Scratchpad result could not be read: {exc}. "
+                    "The scratchpad is still running — you can retry."
+                ),
                 description=description,
                 estimated_time=estimated_time,
+                logs=recovery_note or "",
             )
             self.cells.append(cell)
             yield cell
@@ -926,7 +970,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         )
         self.cells.append(cell)
         # The process proved itself alive by completing this round trip —
-        # whatever earlier death streak led here (if any) is over.
+        # whatever earlier death streak led here (if any) is over. This is
+        # in addition to (not instead of) the reset inside _auto_resume()
+        # when a resume succeeds — that one covers a cell that gets killed
+        # right after a successful resume; this one covers the steady-state
+        # case where the pad was never dead to begin with.
         if self._proc is not None and self._proc.returncode is None:
             self._consecutive_deaths = 0
         yield cell

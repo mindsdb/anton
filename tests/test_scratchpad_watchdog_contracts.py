@@ -268,15 +268,19 @@ class TestKillMessages:
         finally:
             await pad.close()
 
-    async def test_kill_message_says_state_is_restored_not_lost(self, monkeypatch):
+    async def test_kill_message_says_state_is_restored_not_lost(self, tmp_path, monkeypatch):
         """ENG-1273: the old message ("state lost. Use reset to restart.")
         pointed the agent at the one recovery path that destroys the state
-        ENG-1124 saved. It must now say the state is being restored."""
+        ENG-1124 saved. With persistence actually configured, it must now
+        say the state is being restored."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
         monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
         monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
         monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
         monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
-        pad = make_pad()
+        pad = LocalScratchpadRuntime(
+            name="kill-msg-restored", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
         await pad.start()
         try:
             cell = await pad.execute("import time; time.sleep(30)")
@@ -291,6 +295,26 @@ class TestKillMessages:
             # Constraints) — this is a regression guard for THIS test file,
             # duplicating (deliberately) the check TestNudgeRouting already
             # makes on the routing function itself.
+            assert "timed out" in low
+        finally:
+            await pad.cleanup()
+
+    async def test_kill_message_is_honest_without_persistence_configured(self, monkeypatch):
+        """ENG-1273 final-review finding: without a session id (bare CLI /
+        this test's default pad — no snapshot is even possible), the kill
+        message must NOT promise a restoration that cannot happen."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = make_pad()  # no session_id -> no snapshot possible
+        await pad.start()
+        try:
+            cell = await pad.execute("import time; time.sleep(30)")
+            assert cell.error is not None
+            low = cell.error.lower()
+            assert "already saved to disk" not in low
+            assert "restores it automatically" not in low
             assert "timed out" in low
         finally:
             await pad.close()
@@ -373,6 +397,43 @@ class TestResumeAfterKill:
         finally:
             await pad.cleanup()
 
+    async def test_legitimate_consecutive_kills_do_not_wipe_state(self, tmp_path, monkeypatch):
+        """ENG-1273 final-review finding: resume() succeeding (proven by the
+        process accepting and running a cell) must not count toward the
+        death cap just because that cell itself later gets killed for
+        running long — only resume() FAILING to produce a working process
+        should count. Otherwise a batch of several genuinely slow cells in
+        a row would trip the fallback and wipe state for a reason unrelated
+        to resume() at all."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = LocalScratchpadRuntime(
+            name="legit-kills", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
+        await pad.start()
+        try:
+            cell1 = await pad.execute("precious = 'still here'\nprint('set')")
+            assert cell1.error is None, cell1.error
+
+            # Three cells in a row, each individually killed for running
+            # over budget — resume() succeeds each time (the process comes
+            # back and actually runs the next cell), so this must NOT trip
+            # the fallback-reset cap.
+            for _ in range(3):
+                cell = await pad.execute("import time; time.sleep(30)")
+                assert cell.error is not None
+                assert "timed out" in cell.error.lower()
+
+            cell_final = await pad.execute("print(precious)")
+            assert cell_final.error is None, cell_final.error
+            assert cell_final.stdout.strip() == "still here"
+            assert "fully reset" not in (cell_final.logs or "").lower()
+        finally:
+            await pad.cleanup()
+
 
 class TestNudgeRouting:
     """Pure string routing, no LLM: the post-kill nudge must name the right
@@ -446,7 +507,11 @@ class TestKillLoopLesson:
         assert lesson is not None
         low = lesson.rule.lower()
         assert "smaller" not in low
-        assert "reset" in low
+        # ENG-1273: a liveness kill auto-resumes now — the durable lesson
+        # must not tell the agent to reset (that destroys the state
+        # resume() would otherwise have kept).
+        assert "reset" not in low
+        assert "retry" in low
 
     def test_budget_kills_still_teach_smaller(self):
         events = [
