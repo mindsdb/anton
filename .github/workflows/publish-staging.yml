@@ -92,5 +92,12 @@ jobs:
     with:
       env-name: "staging prerelease"
       status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
+      # This publisher only ever runs on staging, so the alert is always
+      # freeze-scoped: reserve release-blocking escalation for the freeze
+      # window rather than paging the eng channel on every midweek failure.
+      # Preserves the policy the shared CI notify applied via
+      # `freeze-scoped: ${{ github.ref_name == 'staging' }}` before this
+      # pipeline took ownership of the alert.
+      freeze-scoped: true
       runs-on: ubuntu-latest
     secrets: inherit
