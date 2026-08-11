@@ -400,7 +400,6 @@ def main(
 
         _ensure_workspace(settings)
         first_run = False
-        desktop_first_run = False
         if not _has_api_key(settings):
             _onboard(settings)
             first_run = not settings.first_run_done
@@ -408,15 +407,11 @@ def main(
             from anton.channel.branding import render_banner
 
             render_banner(console)
-            # Desktop app: API key set by GUI but first_run_done never set
-            if not settings.first_run_done:
-                desktop_first_run = True
         run_chat(
             console,
             settings,
             resume=resume,
             first_run=first_run,
-            desktop_first_run=desktop_first_run,
         )
 
 
