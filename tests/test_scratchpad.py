@@ -202,6 +202,17 @@ class TestAutoResume:
         assert ok is False
         assert "venv is gone" in pad._last_resume_error
 
+    async def test_a_successful_cell_resets_the_death_counter(self):
+        pad = make_scratchpad(name="counter-reset")
+        await pad.start()
+        try:
+            pad._consecutive_deaths = 1  # simulate one prior death this streak
+            cell = await pad.execute("print('alive')")
+            assert cell.error is None
+            assert pad._consecutive_deaths == 0
+        finally:
+            await pad.close()
+
 
 class TestScratchpadEdgeCases:
     async def test_timeout_kills_process(self, monkeypatch):
@@ -229,16 +240,17 @@ class TestScratchpadEdgeCases:
         finally:
             await pad.close()
 
-    async def test_dead_process_detected(self):
-        """If process is dead, execute reports it."""
+    async def test_dead_process_auto_resumes(self):
+        """If the process dies, the NEXT exec call auto-resumes instead of
+        just reporting it dead (ENG-1273) — no explicit reset needed."""
         pad = make_scratchpad(name="test")
         await pad.start()
-        # Kill the process manually
+        # Kill the process manually, simulating a crash/watchdog kill.
         pad._proc.kill()
         await pad._proc.wait()
         cell = await pad.execute("print(1)")
-        assert cell.error is not None
-        assert "not running" in cell.error.lower()
+        assert cell.error is None, cell.error
+        assert cell.stdout.strip() == "1"
         await pad.close()
 
     async def test_stderr_captured(self):

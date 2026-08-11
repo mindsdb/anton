@@ -791,16 +791,33 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         estimated_seconds: int = 0,
     ):
         """Async generator: yields progress strings then a final Cell."""
+        recovery_note: str | None = None
         if self._proc is None or self._proc.returncode is not None:
-            yield Cell(
-                code=code,
-                stdout="",
-                stderr="",
-                error="Scratchpad process is not running. Use reset to restart.",
-                description=description,
-                estimated_time=estimated_time,
-            )
-            return
+            # ENG-1273: a dead process (watchdog kill, crash, or anything
+            # else) recovers automatically here rather than making the agent
+            # discover it and call reset — which used to be the only path,
+            # and which throws away the very state ENG-1124 started saving.
+            if not await self._auto_resume():
+                yield Cell(
+                    code=code,
+                    stdout="",
+                    stderr="",
+                    error=(
+                        "Scratchpad process is not running and could not be "
+                        "recovered automatically "
+                        f"({self._last_resume_error or 'unknown error'}). "
+                        "Use reset to restart with a clean state."
+                    ),
+                    description=description,
+                    estimated_time=estimated_time,
+                )
+                return
+            # Grabbed once and cleared immediately: whatever happens to THIS
+            # cell (succeeds, errors, or is killed again), the note must
+            # reach the agent exactly once, attached to this cell's result —
+            # never left dangling on a later, unrelated one.
+            recovery_note = self._pending_recovery_note
+            self._pending_recovery_note = None
 
         # Fresh salvage state per cell: _read_result accumulates the worker's
         # stdout chunks here so a kill/crash can still report partial output.
@@ -830,7 +847,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             except asyncio.TimeoutError:
                 pass
             error_msg = (
-                f"{exc}. Process killed — state lost. Use reset to restart.\n\n"
+                f"{exc}. This cell's own progress is lost, but the "
+                "scratchpad's namespace as of the last completed cell was "
+                "already saved to disk — the next exec call restores it "
+                "automatically, so you do not need to call reset for this. "
+                "Use reset only if you want to deliberately wipe all state "
+                "instead.\n\n"
                 "If a database query was running, it may still be executing server-side.\n"
                 "To check and cancel: run SHOW PROCESSLIST (MySQL) or\n"
                 "SELECT * FROM information_schema.processlist WHERE status='running' "
@@ -848,6 +870,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "interval) — use it to determine which side effects "
                     "already happened."
                 )
+            if recovery_note:
+                error_msg = recovery_note + "\n\n" + error_msg
             cell = Cell(
                 code=code,
                 stdout=salvaged,
@@ -860,14 +884,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             yield cell
             return
         except Exception as exc:
+            error_msg = (
+                f"Scratchpad result could not be read: {exc}. "
+                "The scratchpad is still running — you can retry."
+            )
+            if recovery_note:
+                error_msg = recovery_note + "\n\n" + error_msg
             cell = Cell(
                 code=code,
                 stdout="",
                 stderr="",
-                error=(
-                    f"Scratchpad result could not be read: {exc}. "
-                    "The scratchpad is still running — you can retry."
-                ),
+                error=error_msg,
                 description=description,
                 estimated_time=estimated_time,
             )
@@ -885,6 +912,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         for pkg in result_data.get("auto_installed") or []:
             self._installed_packages.add(pkg.lower())
 
+        logs = result_data.get("logs", "")
+        if recovery_note:
+            logs = f"{recovery_note}\n\n{logs}" if logs else recovery_note
         cell = Cell(
             code=code,
             stdout=result_data.get("stdout", ""),
@@ -892,9 +922,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             error=result_data.get("error"),
             description=description,
             estimated_time=estimated_time,
-            logs=result_data.get("logs", ""),
+            logs=logs,
         )
         self.cells.append(cell)
+        # The process proved itself alive by completing this round trip —
+        # whatever earlier death streak led here (if any) is over.
+        if self._proc is not None and self._proc.returncode is None:
+            self._consecutive_deaths = 0
         yield cell
 
     async def _read_result(

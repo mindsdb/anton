@@ -268,6 +268,111 @@ class TestKillMessages:
         finally:
             await pad.close()
 
+    async def test_kill_message_says_state_is_restored_not_lost(self, monkeypatch):
+        """ENG-1273: the old message ("state lost. Use reset to restart.")
+        pointed the agent at the one recovery path that destroys the state
+        ENG-1124 saved. It must now say the state is being restored."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute("import time; time.sleep(30)")
+            assert cell.error is not None
+            low = cell.error.lower()
+            assert "state lost" not in low
+            assert "restore" in low
+            # Still names reset, but as the deliberate-wipe option, not the
+            # only path back.
+            assert "reset" in low
+            # The routing-critical phrase must still be intact (Global
+            # Constraints) — this is a regression guard for THIS test file,
+            # duplicating (deliberately) the check TestNudgeRouting already
+            # makes on the routing function itself.
+            assert "timed out" in low
+        finally:
+            await pad.close()
+
+
+class TestResumeAfterKill:
+    """ENG-1273: a watchdog-killed cell must cost only itself, not the pad's
+    accumulated state — resume() (not reset) is the recovery path."""
+
+    async def test_watchdog_kill_auto_resumes_and_restores_last_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = LocalScratchpadRuntime(
+            name="eng1273", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
+        await pad.start()
+        try:
+            cell1 = await pad.execute("x = 42\nprint('set')")
+            assert cell1.error is None, cell1.error
+
+            # Cell 2: the watchdog kills it (silent, past both the
+            # inactivity and total budget).
+            cell2 = await pad.execute("import time; time.sleep(30)")
+            assert cell2.error is not None
+            assert "timed out" in cell2.error.lower()
+
+            # Cell 3: the pad is dead; execute() must auto-resume — reloading
+            # the namespace as of cell 1 — and run normally, with no
+            # explicit reset call in between.
+            cell3 = await pad.execute("print(x)")
+            assert cell3.error is None, cell3.error
+            assert cell3.stdout.strip() == "42"
+            # The counter proved itself and reset back to zero.
+            assert pad._consecutive_deaths == 0
+        finally:
+            await pad.cleanup()
+
+    async def test_repeated_kills_fall_back_to_reset_and_say_so(self, tmp_path, monkeypatch):
+        """A pad that dies on every resume (e.g. a corrupt reloaded snapshot)
+        must not loop — it falls back to a real reset and tells the agent."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        pad = LocalScratchpadRuntime(
+            name="looping", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
+        await pad.start()
+        try:
+            await pad.execute("kept = 'first turn'")
+
+            real_resume = pad.resume
+
+            async def _resume_then_die():
+                await real_resume()
+                pad._proc.kill()
+                await pad._proc.wait()
+
+            monkeypatch.setattr(pad, "resume", _resume_then_die)
+
+            # Kill the process to seed "dead" state, then let it die on
+            # every resume attempt for exactly `cap` calls — each of those
+            # uses up one of the allowed plain-resume attempts (the check in
+            # _auto_resume is `consecutive_deaths >= cap`, tested BEFORE
+            # incrementing, so it takes `cap` failed resumes to reach it).
+            pad._proc.kill()
+            await pad._proc.wait()
+            for _ in range(pad._MAX_CONSECUTIVE_AUTO_RESUMES):
+                cell = await pad.execute("print('should not run')")
+                assert cell.error is not None  # still dead going into the next call
+
+            # This call crosses the cap: falls back to a real reset() and
+            # actually runs, but 'kept' is gone and the agent is told why.
+            cell = await pad.execute("print('kept' in dir())")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "False"
+            assert "fully reset" in (cell.logs or "").lower()
+        finally:
+            await pad.cleanup()
+
 
 class TestNudgeRouting:
     """Pure string routing, no LLM: the post-kill nudge must name the right
