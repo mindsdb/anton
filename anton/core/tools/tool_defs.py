@@ -30,6 +30,10 @@ class ToolDef:
     prompt: Optional[str] = (
         None  # Optional prompt relevant to the tool to be injected into the system prompt.
     )
+    # If set, the tool is deferred: not registered up front, but
+    # unlocked when the model recalls the skill with this label. Lets hosts
+    # tag their own tools as on-demand without a separate config map.
+    unlock_skill: Optional[str] = None
 
 
 SCRATCHPAD_TOOL = ToolDef(
