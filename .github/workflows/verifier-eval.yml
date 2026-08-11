@@ -6,9 +6,25 @@ name: Verifier verdict eval
 # the eval itself) — a rubric edit that regresses a case should be caught by
 # the PR, not by a customer.
 #
-# Requires the MINDSHUB_API_KEY repo secret. When it is absent (forks, or
-# before an admin adds it), pytest skips every case and the job stays green —
-# the gate is the key's presence, not workflow logic.
+# Requires the MINDSHUB_API_KEY repo secret.
+#
+# That used to mean "no key -> every case skips -> job green", which made the
+# check worthless: measured 2026-08-10, eight consecutive green runs at 13-24s
+# each, all of them the skip path, against a real run of ~4 minutes. Eight PRs
+# merged past a gate that asserted nothing (ENG-1334).
+#
+# Now the job distinguishes the two reasons a key can be missing:
+#
+#   First-party PR, no key  -> HARD FAIL. Somebody has to add the secret; until
+#                              then this gate is not guarding the rubric and
+#                              should not claim to be.
+#   Fork PR                 -> skip, and say so in the summary. `pull_request`
+#                              deliberately withholds secrets from forks, so a
+#                              contributor cannot fix this and must not be
+#                              failed for it.
+#
+# The distinction is made here, not in pytest, because only the workflow knows
+# whether the run is from a fork.
 
 permissions:
   contents: read
@@ -34,6 +50,10 @@ concurrency:
 jobs:
   verdict-eval:
     runs-on: ubuntu-latest
+    # A real run is ~90s. The retry budget bounds throttle sleeping to ~5min,
+    # so anything past this is hung rather than slow — and the GitHub default
+    # of 360 would hold a runner for six hours to find that out.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +63,116 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Run verdict-quality eval (auto-skips without key)
+      # A fork PR structurally cannot receive the secret, so it is the one case
+      # where skipping is correct rather than a failure to guard anything.
+      - name: Decide whether live mode is required
+        id: mode
+        env:
+          # Fail CLOSED. `IS_FORK` is derived from a pull_request payload, so on
+          # any other event it compares an empty string and comes out "true" —
+          # which would set require_live=0 and silently restore the exact
+          # green-while-skipping bug this workflow exists to prevent. Only a
+          # positively-identified fork PR is allowed to skip; anything else
+          # (a workflow_dispatch added later, a schedule, an unknown event)
+          # requires live mode and fails loudly if it cannot run.
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_PR" = "true" ] && [ "$IS_FORK" = "true" ]; then
+            echo "require_live=0" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Verifier eval skipped — fork PR"
+              echo ""
+              echo "\`pull_request\` withholds repository secrets from forks, so this"
+              echo "eval cannot run here. **The verifier rubric is unguarded on this PR.**"
+              echo "A maintainer should confirm the eval passes on a first-party branch"
+              echo "before merging changes to the verifier."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "require_live=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run verdict-quality eval
         env:
           MINDSHUB_API_KEY: ${{ secrets.MINDSHUB_API_KEY }}
-        run: uv run --group dev pytest tests/test_verifier_verdict_live.py -v
+          # 1 on first-party PRs: a missing key becomes a collection error
+          # instead of a silent all-skip. See tests/test_verifier_verdict_live.py.
+          VERIFIER_EVAL_REQUIRE_LIVE: ${{ steps.mode.outputs.require_live }}
+        run: >-
+          uv run --group dev pytest tests/test_verifier_verdict_live.py -v
+          --junitxml=eval-junit.xml
+
+      # Belt and braces. The guard in the test module catches an absent key, but
+      # not every other way a run can execute zero cases — a stray `-k`, a
+      # fixture that skips at setup, some future condition nobody predicted. The
+      # invariant this gate needs is "cases actually ran", so assert it against
+      # the report rather than inferring it from an exit code. Runs only on
+      # success: a red pytest is already honest.
+      - name: Assert the eval actually executed
+        if: steps.mode.outputs.require_live == '1'
+        run: |
+          python3 - <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+
+          # Three outcomes, not two. The point of this gate is that its result
+          # carries information, so "could not run" must not look like "passed"
+          # and must not look like "the rubric regressed" either.
+          #
+          #   executed > 0                  -> green. It ran.
+          #   0 executed, all out-of-money  -> green + loud warning. The CI key
+          #                                    hit 402/429. Nobody's PR caused
+          #                                    it and nobody can fix it from a
+          #                                    PR, so it must not block — but it
+          #                                    must not read as a pass either.
+          #   0 executed, any other reason  -> red. Misconfiguration.
+          MARKER = "GATEWAY_UNAVAILABLE"  # set in tests/test_verifier_verdict_live.py
+
+          root = ET.parse("eval-junit.xml").getroot()
+          total = executed = 0
+          skips: list[str] = []
+          for case in root.iter("testcase"):
+              total += 1
+              skip = case.find("skipped")
+              if skip is None:
+                  executed += 1
+              else:
+                  skips.append(skip.get("message") or "")
+
+          starved = [m for m in skips if MARKER in m]
+          print(f"collected={total} executed={executed} skipped={len(skips)} out_of_money={len(starved)}")
+
+          if executed:
+              sys.exit(0)
+
+          if starved and len(starved) == len(skips):
+              detail = starved[0][:300]
+              print(f"::warning::Verifier eval could NOT run — the CI key hit 402/429. {detail}")
+              # .get, not [], so a missing GITHUB_STEP_SUMMARY cannot KeyError
+              # inside the branch that handles "we could not run" — that would
+              # turn an honest warning into a red for a third unrelated reason.
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              with open(summary or os.devnull, "a") as fh:
+                  fh.write(
+                      "### ⚠️ Verifier eval did not run — the CI key hit 402/429\n\n"
+                      "Every case skipped on a gateway denial, so **the verifier "
+                      "rubric is unguarded on this PR.** This is not a failure of "
+                      "your change and not a rubric regression.\n\n"
+                      f"First reason reported:\n\n```\n{detail}\n```\n\n"
+                      "Two different causes land here, so read the reason above "
+                      "before acting: an empty wallet or spent allowance "
+                      "(`wallet_empty` / `included_allowance_exhausted`) needs "
+                      "credit, while a velocity throttle (`rate_limited`) that "
+                      "outlived the retry budget needs a higher rate limit or a "
+                      "quieter moment — not money. Then re-run this job. "
+                      "Tracking: ENG-1334.\n"
+                  )
+              sys.exit(0)
+
+          print(
+              "::error::verdict-eval passed without executing a single case, and not "
+              "because of a gateway denial. A green gate that ran nothing is worse "
+              "than no gate. See ENG-1334."
+          )
+          sys.exit(1)
+          PY

@@ -450,7 +450,8 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
         except Exception:
             pass  # Best-effort; don't disrupt the conversation
 
-    asyncio.create_task(_encode_bg(session._cortex, engrams))
+    # Tracked so a host that tears down at end of turn can await it.
+    session._track_memory_write(asyncio.create_task(_encode_bg(session._cortex, engrams)))
 
     descriptions = [f"Encoded {e.kind}: {e.text}" for e in engrams]
     return "Memory updated: " + "; ".join(descriptions)
