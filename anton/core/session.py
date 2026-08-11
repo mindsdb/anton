@@ -3049,15 +3049,21 @@ class ChatSession:
                             if isinstance(e, (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError)):
                                 # Curated provider failures must FAIL the turn, not
                                 # get wrapped into assistant prose: the server maps
-                                # them to actionable error cards (token_limit /
-                                # model-unavailable / endpoint-config), which can
-                                # only fire when the exception propagates. Wrapping
-                                # them as text is how "Server returned 403" ended
-                                # up mid-chat with "please rephrase your request"
-                                # advice. EndpointConfigurationError added here to
-                                # match the immediate re-raise site above — this
-                                # wrap-up call had been the one place it still fell
-                                # through (review feedback on ENG-1310).
+                                # token_limit/model_unavailable to actionable cards,
+                                # which can only fire when the exception propagates.
+                                # Wrapping them as text is how "Server returned 403"
+                                # ended up mid-chat with "please rephrase your
+                                # request" advice. EndpointConfigurationError added
+                                # here to match the immediate re-raise site above —
+                                # this wrap-up call had been the one place it still
+                                # fell through (review feedback on ENG-1310). NOTE:
+                                # cowork-server has no dedicated card for
+                                # EndpointConfigurationError yet (grepped — zero
+                                # hits, friendly_turn_error falls through to the
+                                # generic message for it); re-raising it here still
+                                # stops the misleading "adjust your approach" prose,
+                                # it just doesn't get a *better* card until that
+                                # mapping exists server-side.
                                 raise
                             if _is_provider_auth_error(e):
                                 # Same reasoning for a provider-auth 401 — see
