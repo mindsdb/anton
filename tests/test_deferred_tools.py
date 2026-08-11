@@ -79,14 +79,51 @@ def test_bundle_replays_from_prior_recall_in_history(make_session):
                     "type": "tool_use",
                     "id": "tc_hist",
                     "name": "recall_skill",
-                    # Replay keys off this raw label, so it must equal the
-                    # tool's `unlock_skill` (no skill load happens here).
+                    # Canonical label: store.load returns None here (no skill
+                    # on disk), so replay falls back to this raw label, which
+                    # already equals the tool's `unlock_skill`.
                     "input": {"label": "test-skill"},
                 }
             ],
         },
     ]
     session = make_session(tools=[tool], initial_history=history)
+    assert tool.name in _names(session)
+
+
+def test_replay_resolves_non_canonical_label_via_store(make_session, tmp_path):
+    """Replay must resolve the raw historical label through the store to the
+    canonical skill label, exactly as the live recall paths do. A live
+    `recall_skill(label="test_skill")` (underscore) resolves to the `test-skill`
+    bundle; after a restart, replay must re-unlock the same bundle from that
+    underscore label — not miss because the raw string differs from the key."""
+    store = SkillStore(root=tmp_path / "skills")
+    store.save(
+        Skill(
+            label="test-skill",
+            name="Test Skill",
+            description="unlocks the deferred tool",
+            declarative_md="1. Do the thing.",
+            created_at="2026-01-01T00:00:00+00:00",
+            provenance="host",
+        )
+    )
+    tool = _deferred_tool()  # unlock_skill="test-skill"
+    history = [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tc_hist",
+                    "name": "recall_skill",
+                    "input": {"label": "test_skill"},  # underscore, non-canonical
+                }
+            ],
+        },
+    ]
+    session = make_session(tools=[tool], initial_history=history)
+    session._skill_store = store  # bypass settings wiring; mirrors same-turn test
     assert tool.name in _names(session)
 
 

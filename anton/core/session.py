@@ -1360,6 +1360,7 @@ class ChatSession:
         Lets sticky tools survive a session rebuild (e.g. server restart). If
         compaction evicted the call, the model re-recalls when next needed.
         """
+        store = self._skill_store
         for msg in self._history:
             content = msg.get("content") if isinstance(msg, dict) else None
             if not isinstance(content, list):
@@ -1370,9 +1371,18 @@ class ChatSession:
                     and block.get("type") == "tool_use"
                     and block.get("name") == "recall_skill"
                 ):
-                    label = (block.get("input") or {}).get("label")
-                    if isinstance(label, str):
-                        self._register_tool_bundle(label.strip())
+                    raw = (block.get("input") or {}).get("label")
+                    if not isinstance(raw, str):
+                        continue
+                    raw = raw.strip()
+                    # Resolve to the canonical label through the store, exactly
+                    # as the live recall paths do: history keeps the raw
+                    # as-typed label (e.g. `connect_datasource`), but bundle
+                    # keys are canonical skill labels (`connect-datasource`).
+                    # Fall back to the raw label so a missing store never
+                    # regresses an already-matching key.
+                    skill = store.load(raw) if store is not None else None
+                    self._register_tool_bundle(skill.label if skill else raw)
 
     def _build_core_tools(self) -> None:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
