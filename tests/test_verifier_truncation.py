@@ -11,7 +11,8 @@ Two behaviours are covered here:
 
 1. `_generate_object_with` reports *why* there was no tool call, distinguishing a
    blown budget (retryable) from a genuine failure — by token count, because the
-   MindsHub gateway reports `finish_reason: "stop"` at the cap (ENG-1082).
+   MindsHub gateway once reported `finish_reason: "stop"` at the cap (ENG-1082,
+   fixed 2026-08-03). The token check is kept as the provider-agnostic half.
 2. The verifier retries a truncated verdict once with a bigger budget, and does
    NOT spend a retry on a failure a bigger budget can't fix.
 """

@@ -3191,10 +3191,11 @@ class ChatSession:
         """Retry a response that burned its output budget without finishing.
 
         ``llm_response`` hit ``max_tokens`` before producing a tool call —
-        detected by token count (`looks_truncated`), NOT ``stop_reason``:
-        the MindsHub gateway reports a normal stop at the cap (ENG-1082),
-        which is what kept this recovery dead for every hosted user
-        (ENG-1042).
+        detected by token count (`looks_truncated`) rather than relying on
+        ``stop_reason``. The gateway *used to* report a normal stop at the cap
+        (ENG-1082), which is what kept this recovery dead for every hosted user
+        (ENG-1042); it was fixed 2026-08-03 and now reports ``"length"``. The
+        token gate stays: it is the half that cannot regress upstream.
 
         The retry always CHANGES the call — an identical re-issue dies
         identically (measured: three unchanged retries 14 minutes apart,
@@ -3291,9 +3292,10 @@ class ChatSession:
         llm_response = response.response
 
         # Detect max_tokens truncation — the LLM was cut off mid-response.
-        # By token count, not stop_reason: the gateway reports a normal stop
-        # at the cap (ENG-1082), which made a stop_reason gate dead code for
-        # every MindsHub-routed user (ENG-1042).
+        # By token count rather than stop_reason alone: the gateway used to
+        # report a normal stop at the cap (ENG-1082, fixed 2026-08-03), which
+        # made a stop_reason gate dead code for every MindsHub-routed user
+        # (ENG-1042). `looks_truncated` checks both.
         if not llm_response.tool_calls and looks_truncated(
             llm_response, self._turn_max_tokens()
         ):

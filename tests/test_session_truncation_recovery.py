@@ -3,9 +3,12 @@
 A completion can burn its entire ``max_tokens`` on internal reasoning (or
 narration) and return nothing — no text, no tool call, no error. The session
 has had a recovery for this since early on, but it gated on
-``stop_reason in ("max_tokens", "length")`` and the MindsHub gateway reports
-``finish_reason: "stop"`` at the cap (ENG-1082), so the recovery was dead code
-for every hosted user: 38 fully-silent generations across 12 users in one week.
+``stop_reason in ("max_tokens", "length")`` and the MindsHub gateway then
+reported ``finish_reason: "stop"`` at the cap (ENG-1082), so the recovery was
+dead code for every hosted user: 38 fully-silent generations across 12 users in
+one week. ENG-1082 was fixed 2026-08-03; the token-count gate below is kept
+because it cannot regress upstream, and the e2e stub still emulates the old
+dishonest ``"stop"`` deliberately.
 
 What must hold now:
 
