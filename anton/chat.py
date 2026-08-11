@@ -1918,7 +1918,8 @@ async def _chat_loop(
                             question_render_tracker.mark_rendered(event.id)
                         elif isinstance(event, StreamTaskProgress):
                             display.update_progress(
-                                event.phase, event.message, event.eta_seconds
+                                event.phase, event.message, event.eta_seconds,
+                                ok=event.ok,
                             )
                         elif isinstance(event, StreamContextCompacted):
                             display.show_context_compacted(event.message)

@@ -96,18 +96,33 @@ class StreamComplete:
 class StreamTaskProgress:
     """Progress event from agent task execution (planning, building, executing).
 
-    `id` carries the originating tool_use id when this progress event
-    is a scratchpad phase marker (e.g. `scratchpad_start` /
-    `scratchpad_done`). The frontend correlates the event to the
-    specific step it advances; without it, multi-cell turns where the
-    LLM queued several tool calls before execution would patch the
-    wrong step (always the last one in the array).
+    `id` carries the originating tool_use id when this progress event is a
+    scratchpad phase marker (e.g. `scratchpad_start` / `scratchpad_done`), a
+    generic streaming tool's `tool_progress` marker, or that same tool's
+    closing `tool_done` marker (see `ToolRegistry.dispatch_tool_stream`,
+    `anton/core/tools/registry.py`). The frontend correlates the event to the
+    specific step it advances; without it, multi-cell turns where the LLM
+    queued several tool calls before execution would patch the wrong step
+    (always the last one in the array).
+
+    `ok` carries the tool's success/failure verdict on a `tool_done` marker
+    for a generic tool — same tri-state as `ToolOutcome.ok` (`anton/core/
+    tools/registry.py`): `None` when the handler hasn't declared a verdict
+    (legacy/unclassified), `True`/`False` otherwise. A handler exception
+    always forces `False` regardless of what it would have otherwise been.
+    Without this, every consumer that renders `tool_done` as "done" (CLI
+    activity line, cowork's step UI) has no way to tell a failed tool call
+    from a successful one — the CLI printed a green checkmark for a tool
+    that raised, because `tool_done` firing was the only signal it had, and
+    it always fires now (ENG-763's own reliability fix made this reachable —
+    see PR #304 review). Unset (`None`) on every other phase.
     """
 
     phase: str
     message: str
     eta_seconds: float | None = None
     id: str | None = None
+    ok: bool | None = None
 
 
 @dataclass

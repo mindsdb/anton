@@ -151,7 +151,10 @@ async def run_goal_loop(
                         elif isinstance(event, StreamToolUseEnd):
                             display.on_tool_use_end(event.id)
                         elif isinstance(event, StreamTaskProgress):
-                            display.update_progress(event.phase, event.message, event.eta_seconds)
+                            display.update_progress(
+                                event.phase, event.message, event.eta_seconds,
+                                ok=event.ok,
+                            )
                         elif isinstance(event, StreamContextCompacted):
                             display.show_context_compacted(event.message)
 

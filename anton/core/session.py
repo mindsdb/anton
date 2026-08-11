@@ -4,8 +4,9 @@ import asyncio
 import httpx
 import random
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -62,6 +63,7 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
@@ -176,6 +178,27 @@ def _scrub_user_input(user_input: str | list[dict]) -> str | list[dict]:
         else b
         for b in user_input
     ]
+
+
+def _stamp_user_content(
+    user_input: str | list[dict], now: datetime
+) -> str | list[dict]:
+    """Prefix a user turn with its send time as ``[YYYY-MM-DD HH:MM]``.
+
+    The live clock lives here, on the message, instead of in the system prompt
+    — so the cache-stable prefix (system + tools + settled history) stays
+    byte-identical across turns. The format matches cowork-server's history
+    stamp (``anton_harness/harness.py``), so a message reads the same whether
+    it's this turn's live input or replayed from persisted history — the caller
+    MUST pass a UTC ``now`` to match that history stamp (built from the DB's
+    UTC ``created_at``); a local-time stamp would drift by the TZ offset.
+
+    Only string content is stamped; mixed image/file turns pass through
+    unchanged, mirroring cowork-server's behaviour.
+    """
+    if isinstance(user_input, str) and user_input:
+        return f"[{now.strftime('%Y-%m-%d %H:%M')}] {user_input}"
+    return user_input
 
 
 class _VerifierVerdict(BaseModel):
@@ -605,6 +628,11 @@ class ChatSessionConfig:
     # set. Applied on every ``_build_tools`` call so a lazy rebuild can't leak a
     # non-allowlisted tool.
     tool_allowlist: frozenset[str] | None = None
+    # Automatic end-of-turn memory passes (cerebellum/ACC lessons, identity
+    # extraction, vacuum, scratchpad consolidation). Hosts running one turn per
+    # process (the cloud pod) turn this off: several spend an LLM call on writes
+    # that land after the turn's storage is gone. `memorize` is unaffected.
+    background_memory: bool = True
 
 
 class ChatSession:
@@ -660,6 +688,8 @@ class ChatSession:
         self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
         self._act_first = config.act_first
+        self._background_memory = config.background_memory
+        self._memory_writes: set[asyncio.Task] = set()
         self._started_at = config.started_at
         self._extra_tools = config.tools
         self._tool_allowlist = config.tool_allowlist
@@ -1168,16 +1198,13 @@ class ChatSession:
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
-        # Two stamps, deliberately split for cache-stability AND correctness:
-        #  • conversation_started — the task's creation time (self._started_at),
-        #    a FIXED fact rendered in the cache-stable prefix; identical every
-        #    turn so it never busts the prefix cache.
-        #  • current_datetime — the real wall clock, rendered in the VOLATILE
-        #    tail (after the cached prefix) so it's always accurate even when a
-        #    conversation is resumed days/weeks later, without touching the cache.
+        # conversation_started — the task's creation time (self._started_at), a
+        # FIXED fact rendered in the cache-stable prefix; identical every turn so
+        # it never busts the prefix cache. The live "now" is NOT in the system
+        # prompt: it rides on each user message's bracketed timestamp (see
+        # turn_stream), keeping the whole prefix cacheable across turns.
         _started = self._started_at or _dt.datetime.now()
         _conversation_started = _started.strftime("%A, %B %d, %Y")
-        _current_datetime = _dt.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
@@ -1213,7 +1240,6 @@ class ChatSession:
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
             conversation_started=_conversation_started,
-            current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -2206,6 +2232,30 @@ class ChatSession:
             })
         return len(lessons)
 
+    def _track_memory_write(self, task: asyncio.Task) -> None:
+        """Register fire-and-forget memory encoding so a host that tears down at
+        end of turn can await it instead of guessing at a settling delay."""
+        self._memory_writes.add(task)
+        task.add_done_callback(self._memory_writes.discard)
+
+    async def settle_memory_writes(self) -> None:
+        """Await memory encoding still in flight. No-op when none is pending.
+
+        The cloud pod runs one turn and exits, so a `memorize` on the final round
+        would otherwise die before its task ran.
+        """
+        if self._memory_writes:
+            await asyncio.gather(*tuple(self._memory_writes), return_exceptions=True)
+
+    @property
+    def _background_memory_active(self) -> bool:
+        """Whether automatic end-of-turn memory passes may run."""
+        return (
+            getattr(self, "_background_memory", True)
+            and self._cortex is not None
+            and self._cortex.mode != "off"
+        )
+
     def _schedule_acc_flush(self) -> None:
         """Drain the ACC's turn buffer into Engrams and clear it.
 
@@ -2223,7 +2273,9 @@ class ChatSession:
         if acc is None:
             return
         cortex = getattr(self, "_cortex", None)
-        if cortex is None or getattr(cortex, "mode", "") == "off":
+        # getattr: these schedulers are also driven on duck-typed session stubs.
+        if (cortex is None or getattr(cortex, "mode", "") == "off"
+                or not getattr(self, "_background_memory", True)):
             acc.clear()
             return
 
@@ -2276,6 +2328,9 @@ class ChatSession:
         """
         cb = getattr(self, "_cerebellum", None)
         if cb is None:
+            return
+        if not getattr(self, "_background_memory", True):
+            cb.reset()
             return
         if cb.buffered_count == 0:
             return
@@ -2386,7 +2441,11 @@ class ChatSession:
 
     async def turn(self, user_input: str | list[dict]) -> str:
         user_input = _scrub_user_input(user_input)
-        self._append_history({"role": "user", "content": user_input})
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
+        self._append_history({"role": "user", "content": stamped_input})
 
         # Open the turn's cost books (ENG-1288) — same contract as
         # turn_stream. This non-streaming path has no wrapping finally, so
@@ -2413,7 +2472,7 @@ class ChatSession:
                 self._append_history(
                     {"role": "assistant", "content": decision.text}
                 )
-                if self._cortex is not None and self._cortex.mode != "off":
+                if self._background_memory_active:
                     self._cortex.maybe_vacuum()
                 self._schedule_cerebellum_flush()
                 self._schedule_acc_flush()
@@ -2496,7 +2555,7 @@ class ChatSession:
             for tc in response.tool_calls:
                 try:
                     outcome = await self.tool_registry.dispatch_tool(
-                        self, tc.name, tc.input
+                        self, tc.name, tc.input, tool_call_id=tc.id,
                     )
                 except Exception as exc:
                     # A raise is a definitive failure verdict — no text
@@ -2575,7 +2634,7 @@ class ChatSession:
         self._append_history({"role": "assistant", "content": reply})
 
         # Periodic memory vacuum (Systems Consolidation)
-        if self._cortex is not None and self._cortex.mode != "off":
+        if self._background_memory_active:
             self._cortex.maybe_vacuum()
 
         # Cerebellar consolidation — fire-and-forget so the user gets
@@ -2594,7 +2653,13 @@ class ChatSession:
         Yields ``("event", ev)`` for each out-of-band event, then
         ``("result", outcome)`` — the ``ToolOutcome`` ``dispatch_tool``
         returns, so the caller reads ``.content`` and ``.ok`` off it rather
-        than receiving bare text. Four details are load-bearing:
+        than receiving bare text. "Out of band" covers both an ``ask_user``
+        question (ENG-1276, #292) and a streaming tool's ``ToolProgress``
+        markers (ENG-763) — ``dispatch_tool`` relays the latter through
+        ``session.emitter`` too, since it has no other way to reach the
+        caller while running inside this method's background task; both
+        kinds arrive here as plain ``("event", ev)`` tuples, indistinguishable
+        by this method. Four details are load-bearing:
 
         1. Cancelling BOTH futures in ``finally`` — ``asyncio.wait`` does NOT
            cancel its futures when the awaiting coroutine is cancelled. Without
@@ -2622,7 +2687,9 @@ class ChatSession:
            only runs on finalization, which GC would otherwise defer.
         """
         task = asyncio.create_task(
-            self.tool_registry.dispatch_tool(self, tc.name, tc.input)
+            self.tool_registry.dispatch_tool(
+                self, tc.name, tc.input, tool_call_id=tc.id,
+            )
         )
         # Bound before the try: the `finally` cancels it, and if the first
         # `ensure_future` below raised, an unbound name there would turn the
@@ -2725,7 +2792,11 @@ class ChatSession:
         """
         self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
-        self._append_history({"role": "user", "content": user_input})
+        # Stamp the inbound user turn here, not in _append_history: tool_result
+        # and synthetic user-role messages also flow through append and must
+        # NOT be stamped.
+        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
+        self._append_history({"role": "user", "content": stamped_input})
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -3007,7 +3078,7 @@ class ChatSession:
         # Identity extraction (Default Mode Network — every 5 turns)
         self._turn_count += 1
         self._persist_history()
-        if self._cortex is not None and self._cortex.mode != "off":
+        if self._background_memory_active:
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
                 if self._episodic:
                     user_messages =[
@@ -3466,50 +3537,91 @@ class ChatSession:
                                 message="Analyzing results...",
                             )
                         else:
-                            # Non-scratchpad, non-interactive tool — track elapsed
+                            # Non-scratchpad, non-interactive tool — track elapsed.
+                            # dispatch_tool_stream() forwards ToolProgress markers
+                            # from a streaming handler as they arrive; a plain
+                            # (non-streaming) handler yields exactly one item (its
+                            # result), so this same loop works for both kinds.
                             yield StreamTaskProgress(
                                 phase="tool_start",
                                 message=tc.name,
                             )
+                            # Runs through _dispatch_draining (ENG-1276/ask-user,
+                            # #292) so a generic tool can elicit() mid-call just
+                            # like the interactive branch above. ToolProgress
+                            # markers (ENG-763) are relayed by dispatch_tool
+                            # itself via session.emitter — _dispatch_draining
+                            # forwards them here as ordinary ("event", ev)
+                            # tuples, no different from an ask_user event.
                             self.answer_wait_s = 0.0
+                            _tool_error: Exception | None = None
                             agen = self._dispatch_draining(tc)
                             try:
-                                async for _kind, _payload in agen:
-                                    if _kind == "event":
-                                        yield _payload
-                                    else:
-                                        _outcome = _payload
-                            finally:
-                                await agen.aclose()
-                            # Anything a tool queued after the helper handed us
-                            # the result — a background task outliving its tool
-                            # call — would otherwise sit in the queue until the
-                            # next tool's drain, or forever if this was the last
-                            # tool of the turn, leaving a published card that is
-                            # never retired. Not reachable by any tool today
-                            # (every ask_user emit happens inside elicit(),
-                            # before the handler returns, and a
-                            # generate_artifact sub-agent runs inside the drained
-                            # window too), so this is a guard for the next one.
-                            #
-                            # An ordinary in-loop yield, deliberately NOT in a
-                            # `finally`: you cannot yield from an async
-                            # generator's finally.
-                            while not self.emitter.empty():
-                                yield self.emitter.get_nowait()
-                            result_text = _outcome.content
-                            tool_ok = _outcome.ok
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            _outcome = _payload
+                                finally:
+                                    await agen.aclose()
+                                # Anything a tool queued after the helper handed us
+                                # the result — a background task outliving its tool
+                                # call — would otherwise sit in the queue until the
+                                # next tool's drain, or forever if this was the last
+                                # tool of the turn, leaving a published card that is
+                                # never retired. Not reachable by any tool today
+                                # (every ask_user emit happens inside elicit(),
+                                # before the handler returns, and a
+                                # generate_artifact sub-agent runs inside the drained
+                                # window too), so this is a guard for the next one.
+                                #
+                                # An ordinary in-loop yield, deliberately NOT in a
+                                # `finally`: you cannot yield from an async
+                                # generator's finally.
+                                while not self.emitter.empty():
+                                    yield self.emitter.get_nowait()
+                                result_text = _outcome.content
+                                tool_ok = _outcome.ok
+                            except Exception as exc:
+                                # Caught locally ONLY so the tool_done marker
+                                # below can still be yielded from ordinary
+                                # (non-unwinding) execution; re-raised right
+                                # after, so the outer handler a few lines below
+                                # still builds "Tool 'x' failed: ...".
+                                # GeneratorExit is a BaseException, not an
+                                # Exception, so cancellation via the consumer
+                                # closing this generator is NOT caught here —
+                                # it propagates straight through and the
+                                # generator closes without a tool_done, same as
+                                # any other stream abort. NOT a try/finally
+                                # with a yield inside: yielding while the
+                                # generator is being closed raises "async
+                                # generator ignored GeneratorExit".
+                                _tool_error = exc
+
                             # Human thinking time is not the tool's runtime:
                             # a 4-minute ask_user would otherwise show up in
                             # the CLI report and in telemetry as a slow tool.
                             _tool_elapsed = (
                                 _time.monotonic() - _tool_t0 - self.answer_wait_s
                             )
+                            # A raised exception is a definitive failure verdict
+                            # regardless of tool_ok — without this, tool_done
+                            # firing (guaranteed even on error, by design) with
+                            # no verdict at all rendered as an unconditional
+                            # success in every consumer (PR #304 review): the
+                            # CLI printed a green checkmark for a tool that
+                            # just raised.
                             yield StreamTaskProgress(
                                 phase="tool_done",
                                 message=tc.name,
                                 eta_seconds=max(_tool_elapsed, 0.0),
+                                id=tc.id,
+                                ok=False if _tool_error is not None else tool_ok,
                             )
+                            if _tool_error is not None:
+                                raise _tool_error
                             if (
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"
@@ -4015,7 +4127,7 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": reply})
 
         # Consolidation: replay scratchpad sessions to extract lessons
-        if self._cortex is not None and self._cortex.mode != "off":
+        if self._background_memory_active:
             self._maybe_consolidate_scratchpads()
 
     def _maybe_consolidate_scratchpads(self) -> None:

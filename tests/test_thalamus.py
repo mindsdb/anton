@@ -7,6 +7,7 @@ with skill preload, fail-open fallback, and the off-by-default flag).
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -223,10 +224,14 @@ class TestSessionThalamus:
         reply = await session.turn("what is 2+2?")
         assert reply == "Four."
         llm.plan.assert_not_called()
-        assert session.history == [
-            {"role": "user", "content": "what is 2+2?"},
-            {"role": "assistant", "content": "Four."},
-        ]
+        user_msg, assistant_msg = session.history
+        # User turn carries its send-time stamp (ENG-1092); assert the format
+        # rather than a live timestamp.
+        assert user_msg["role"] == "user"
+        assert re.fullmatch(
+            r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] what is 2\+2\?", user_msg["content"]
+        )
+        assert assistant_msg == {"role": "assistant", "content": "Four."}
 
     async def test_direct_answer_streaming(self):
         llm = make_mock_llm()
