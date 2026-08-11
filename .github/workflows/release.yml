@@ -62,6 +62,11 @@ jobs:
           python-version: "3.12"
 
       - name: Build package
+        env:
+          # A re-run or re-dispatch on an already-tagged head leaves two CalVer
+          # tags on one commit and `git describe` resolves the older one; build
+          # exactly the version the release job minted.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.auto-release.outputs.version }}
         run: uv build
 
       - name: Publish to PyPI

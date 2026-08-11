@@ -12,10 +12,13 @@ name: Staging pre-release and publish to PyPI
 # filename. Register publish-staging.yml as a trusted publisher (environment
 # `pypi`) at the anton-agent PyPI project's publishing settings.
 #
-# Anton has nothing to self-pin (it does not depend on itself), so — unlike
-# cowork-server's staging publisher — this builds from a clean checkout of the
-# tag and needs no version-pretend override: hatch-vcs derives the exact rc
-# version straight from the tag, identical to the stable path in release.yml.
+# Anton has nothing to self-pin (it does not depend on itself) — unlike
+# cowork-server's staging publisher — so this builds from a clean checkout of
+# the tag. It still pins the build to the version the release job just minted
+# (SETUPTOOLS_SCM_PRETEND_VERSION on the build step): a re-run or re-dispatch on
+# an already-tagged head leaves two rc tags on one commit, and hatch-vcs would
+# otherwise resolve the older one via `git describe` and build a duplicate PyPI
+# rejects. release.yml pins the same way for the same reason.
 #
 # No workflow-level `permissions:` block: only the release job needs
 # `contents: write`; every other job declares its own, so the repo default
@@ -70,6 +73,11 @@ jobs:
           python-version: "3.12"
 
       - name: Build package
+        env:
+          # A re-run or re-dispatch on an already-tagged head leaves two CalVer
+          # tags on one commit and `git describe` resolves the older one; build
+          # exactly the version the release job minted.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.release.outputs.version }}
         run: uv build
 
       - name: Publish to PyPI
