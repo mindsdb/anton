@@ -300,6 +300,68 @@ def test_the_workflow_bounds_the_job_so_a_hang_cannot_hold_a_runner():
     )
 
 
+def test_single_valued_cases_still_demand_that_exact_verdict():
+    """The acceptable-set change must not have loosened the other four cases.
+
+    Four of the five fixtures exist because the *wrong label is the bug* — a
+    recovered error judged INCOMPLETE force-continues (ENG-1134), a genuine
+    question judged INCOMPLETE makes the agent answer itself (ENG-716), an
+    environment wall judged INCOMPLETE walks into the wall (ENG-836). Those
+    must stay single-valued.
+    """
+    by_name = {c.name: c for c in ev._CASES}
+
+    single = {
+        "recovered_tool_error": "COMPLETE",
+        "genuine_question": "WAITING",
+        "environment_wall": "STUCK",
+        "stopped_partway": "INCOMPLETE",
+    }
+    for name, verdict in single.items():
+        assert by_name[name].acceptable == (verdict,), (
+            f"{name} must accept only {verdict}; the alternative label IS the "
+            f"incident it guards against"
+        )
+
+
+def test_only_the_hallucinated_success_case_accepts_two_verdicts():
+    """One deliberate exception, and it must not spread quietly.
+
+    ENG-1134's safeguard is "never accept a hallucinated success as done", which
+    both INCOMPLETE and STUCK satisfy. COMPLETE and WAITING must never be
+    acceptable there — those are the failure.
+    """
+    multi = [c for c in ev._CASES if len(c.acceptable) > 1]
+
+    assert [c.name for c in multi] == ["implied_success_data_never_arrived"], (
+        f"exactly one case may accept multiple verdicts; found "
+        f"{[c.name for c in multi]}"
+    )
+    acceptable = set(multi[0].acceptable)
+    assert acceptable == {"INCOMPLETE", "STUCK"}
+    assert not acceptable & {"COMPLETE", "WAITING"}, (
+        "accepting COMPLETE or WAITING here would delete the ENG-1134 safeguard"
+    )
+
+
+def test_the_recovered_case_asks_one_unambiguous_question():
+    """The fixture's user_message and its history turn must not drift apart.
+
+    The verifier reads the transcript, so a stale copy in `history` would keep
+    feeding it the ambiguous phrasing that made this case flake.
+    """
+    case = {c.name: c for c in ev._CASES}["recovered_tool_error"]
+    first_user_turn = case.history[0]
+
+    assert first_user_turn["role"] == "user"
+    assert first_user_turn["content"] == case.user_message, (
+        "history[0] must repeat user_message verbatim; they have drifted"
+    )
+    # The ambiguity was "before Tesla's IPO" trailing a single comparison
+    # clause, where it could bind either one figure or both.
+    assert "compared to Tesla before" not in case.user_message
+
+
 def test_the_marker_matches_the_one_the_workflow_greps_for():
     """The string is a contract across two files; comments are not enforcement.
 
