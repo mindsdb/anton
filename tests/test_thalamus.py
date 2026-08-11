@@ -7,6 +7,7 @@ with skill preload, fail-open fallback, and the off-by-default flag).
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -182,6 +183,29 @@ def _mock_skill_store():
     return store
 
 
+def _multi_skill_store(n: int):
+    """A store with n distinct skills: skill-0 … skill-(n-1).
+
+    `_mock_skill_store` knows only one skill, and the injection cap is only
+    visible with more than three labels.
+    """
+    skills = {
+        f"skill-{i}": SimpleNamespace(
+            label=f"skill-{i}",
+            name=f"Skill {i}",
+            description=f"desc {i}",
+            declarative_md=f"BODY {i}",
+        )
+        for i in range(n)
+    }
+    store = MagicMock()
+    store.list_summaries.return_value = [
+        {"label": k, "description": v.description} for k, v in skills.items()
+    ]
+    store.load.side_effect = lambda label: skills.get(label)
+    return store
+
+
 class TestSessionThalamus:
     async def test_thalamus_off_by_default(self):
         llm = make_mock_llm()
@@ -200,10 +224,14 @@ class TestSessionThalamus:
         reply = await session.turn("what is 2+2?")
         assert reply == "Four."
         llm.plan.assert_not_called()
-        assert session.history == [
-            {"role": "user", "content": "what is 2+2?"},
-            {"role": "assistant", "content": "Four."},
-        ]
+        user_msg, assistant_msg = session.history
+        # User turn carries its send-time stamp (ENG-1092); assert the format
+        # rather than a live timestamp.
+        assert user_msg["role"] == "user"
+        assert re.fullmatch(
+            r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] what is 2\+2\?", user_msg["content"]
+        )
+        assert assistant_msg == {"role": "assistant", "content": "Four."}
 
     async def test_direct_answer_streaming(self):
         llm = make_mock_llm()
@@ -319,6 +347,41 @@ class TestSessionThalamus:
         assert len(session.history) == 2  # tool_use + tool_result appended
         session._inject_recalled_skills(["csv-summary"])
         assert len(session.history) == 2  # second preload is a no-op
+
+    async def test_preload_caps_at_three_skills(self):
+        # The cap bounds how much "do it by hand" reaches the context in a
+        # single turn: five named labels must yield three injected bodies, or one
+        # turn could inject the whole skill catalog.
+        llm = make_mock_llm()
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session._skill_store = _multi_skill_store(5)
+
+        session._inject_recalled_skills([f"skill-{i}" for i in range(5)])
+
+        # One injection appends EXACTLY two history entries (assistant with
+        # tool_use + user with tool_result) regardless of how many skills — so the
+        # blocks are what must be counted.
+        assert len(session.history) == 2
+        tool_uses = [
+            b
+            for msg in session.history
+            if isinstance(msg.get("content"), list)
+            for b in msg["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_use"
+        ]
+        assert len(tool_uses) == 3
+        present = [i for i in range(5) if f"BODY {i}" in str(session.history)]
+        assert present == [0, 1, 2]
+
+    async def test_preload_dedupes_repeated_labels(self):
+        # The same label named three times must not inject the body three times.
+        llm = make_mock_llm()
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+        session._skill_store = _multi_skill_store(1)
+
+        session._inject_recalled_skills(["skill-0", "skill-0", "skill-0"])
+
+        assert str(session.history).count("BODY 0") == 1
 
     async def test_gate_usage_counted_on_delegate_streaming(self):
         # The gate hits every text turn; on delegate its usage must reach the

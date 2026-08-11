@@ -344,6 +344,85 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     )
 
 
+def _generation_failed(reason: str) -> str:
+    """Wrap an FSM failure so the outer agent reports it instead of DIY-ing.
+
+    Without this instruction the agent treats a pipeline failure as a cue to
+    build the artifact by hand (write_file/scratchpad fallback), silently
+    bypassing the whole verified pipeline. Input-validation errors are NOT
+    wrapped — those the agent should fix by correcting its call.
+    """
+    return (
+        "Error: artifact generation failed.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build or repair the artifact yourself — no "
+        "write_file / scratchpad fallback — and do not re-call "
+        "generate_artifact with the same input. Report this failure to the "
+        "user: state in plain language that artifact generation failed, quote "
+        "the reason above, and ask how they want to proceed."
+    )
+
+
+async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> str:
+    """Generate every file for an already-registered artifact via the FSM.
+
+    The handler loads artifact metadata to read its `type` (rejects types
+    outside {html-app, fullstack-stateless-app, fullstack-stateful-app}),
+    validates input shape (context required), and hands off to
+    `anton.core.tools.generate_artifact.generate`, which runs the deterministic
+    generation state machine and writes files into the artifact folder.
+    Pipeline failures come back wrapped by `_generation_failed` so the agent
+    surfaces them to the user instead of hand-building the artifact.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        return "Error: `slug` is required."
+    artifact = store.open(slug)
+    if artifact is None:
+        return f"Error: no artifact found for slug `{slug}`."
+
+    supported = {"html-app", "fullstack-stateless-app", "fullstack-stateful-app"}
+    if artifact.type not in supported:
+        return (
+            "Error: generate_artifact only supports html-app / "
+            "fullstack-stateless-app / fullstack-stateful-app. "
+            f"Got: {artifact.type}."
+        )
+
+    context = tc_input.get("context")
+    if not isinstance(context, str) or not context.strip():
+        return "Error: `context` is required (markdown brief)."
+
+    folder = store.folder_for(slug)
+    from anton.core.tools.generate_artifact import generate
+
+    try:
+        result = await generate(
+            session=session,
+            artifact_type=artifact.type,
+            artifact_path=folder,
+            context=context,
+            slug=slug,
+            primary=artifact.primary,
+        )
+    except Exception as exc:  # last-resort: never escalate to the dispatcher
+        return _generation_failed(f"generator crashed: {exc}")
+
+    if isinstance(result, str):
+        return _generation_failed(result)
+
+    return json.dumps(
+        {"slug": slug, "path": str(folder), **result},
+        indent=2,
+    )
+
+
 async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
     """List every artifact in the workspace, newest first.
 
@@ -479,7 +558,8 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
         except Exception:
             pass  # Best-effort; don't disrupt the conversation
 
-    asyncio.create_task(_encode_bg(session._cortex, engrams))
+    # Tracked so a host that tears down at end of turn can await it.
+    session._track_memory_write(asyncio.create_task(_encode_bg(session._cortex, engrams)))
 
     descriptions = [f"Encoded {e.kind}: {e.text}" for e in engrams]
     return "Memory updated: " + "; ".join(descriptions)
