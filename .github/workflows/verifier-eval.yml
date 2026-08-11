@@ -154,20 +154,25 @@ jobs:
               summary = os.environ.get("GITHUB_STEP_SUMMARY")
               with open(summary or os.devnull, "a") as fh:
                   fh.write(
-                      "### ⚠️ Verifier eval did not run — CI key out of money\n\n"
-                      "Every case skipped on a gateway 402/429, so **the verifier "
+                      "### ⚠️ Verifier eval did not run — the CI key hit 402/429\n\n"
+                      "Every case skipped on a gateway denial, so **the verifier "
                       "rubric is unguarded on this PR.** This is not a failure of "
                       "your change and not a rubric regression.\n\n"
                       f"First reason reported:\n\n```\n{detail}\n```\n\n"
-                      "Top up or raise the limit on the key behind "
-                      "`MINDSHUB_API_KEY`, then re-run this job. Tracking: ENG-1334.\n"
+                      "Two different causes land here, so read the reason above "
+                      "before acting: an empty wallet or spent allowance "
+                      "(`wallet_empty` / `included_allowance_exhausted`) needs "
+                      "credit, while a velocity throttle (`rate_limited`) that "
+                      "outlived the retry budget needs a higher rate limit or a "
+                      "quieter moment — not money. Then re-run this job. "
+                      "Tracking: ENG-1334.\n"
                   )
               sys.exit(0)
 
           print(
               "::error::verdict-eval passed without executing a single case, and not "
-              "because the key ran out of money. A green gate that ran nothing is "
-              "worse than no gate. See ENG-1334."
+              "because of a gateway denial. A green gate that ran nothing is worse "
+              "than no gate. See ENG-1334."
           )
           sys.exit(1)
           PY
