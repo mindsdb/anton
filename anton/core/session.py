@@ -729,6 +729,14 @@ class ChatSession:
         # Host-injected first; a console-backed session (the real CLI,
         # chat.py passes console=console) falls back to CLIElicitor so it
         # always gets a working elicitor.
+        #
+        # Inject through `config.elicitor` — NEVER by setting
+        # `session.elicitor` after construction. Registration below picks the
+        # select_path variant from this value (full vs pick-only), so a late
+        # setter leaves the model told there is no file browser while browse
+        # would actually work at runtime: the capability exists and the agent
+        # never learns it. That failure is silent in both directions, which is
+        # what makes it worth a comment rather than a docstring.
         self.elicitor: Elicitor | None = config.elicitor
         if self.elicitor is None and config.console is not None:
             from anton.core.interaction.cli import CLIElicitor
