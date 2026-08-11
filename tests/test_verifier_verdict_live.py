@@ -378,6 +378,12 @@ class Case:
 # search errored, the model got the data elsewhere, the final answer is
 # correct and complete — and the pre-ENG-1134 rubric still forced a redundant
 # continuation because *an* errored tool result existed in the transcript.
+#
+# NOT verbatim from that incident: the user message was disambiguated (see the
+# comment on `user_message`), because the original phrasing let the verifier
+# fairly disagree about whether the answer was responsive, which flaked this
+# case ~1 run in 6. The tool-error-then-recovery mechanic this case exists to
+# guard is unchanged, and so is the assistant's answer.
 _RECOVERED = Case(
     name="recovered_tool_error",
     # Phrased as two explicit asks. The original single-clause wording — "how
