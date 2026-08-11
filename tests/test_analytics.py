@@ -103,3 +103,37 @@ def test_send_event_sends_when_not_ci(monkeypatch):
     assert params["action"] == "anton_query"
     assert params["llm_provider"] == "openai"
     assert "is_ci" not in params  # flag removed; CI events aren't sent at all
+
+
+def test_fire_sends_an_identifying_user_agent(monkeypatch):
+    """urllib's default ``Python-urllib/3.x`` agent is answered with 403 by the
+    bot rules on the mindshub.ai zone, and ``_fire`` throws its response away,
+    so an event blocked for looking like a script would vanish with no trace.
+    """
+    seen: list[object] = []
+
+    def _fake_urlopen(request, timeout=None):
+        seen.append(request)
+        return None
+
+    monkeypatch.setattr(analytics.urllib.request, "urlopen", _fake_urlopen)
+
+    analytics._fire("https://example.test/collect?action=anton_query")
+
+    assert len(seen) == 1
+    agent = seen[0].get_header("User-agent")
+    assert agent == analytics._USER_AGENT
+    assert "python-urllib" not in agent.lower()
+
+
+def test_default_collector_url_is_a_host_we_control():
+    """Guards the regression this replaced: the previous default was a raw
+    ``*.execute-api.amazonaws.com`` id in an account nobody could deploy to, so
+    the endpoint could not be changed without shipping a new release to every
+    install.
+    """
+    from anton.config.settings import AntonSettings
+
+    url = AntonSettings.model_fields["analytics_url"].default
+    assert url.startswith("https://collect.")
+    assert "execute-api" not in url

@@ -136,7 +136,9 @@ class AntonSettings(CoreSettings):
 
     # Analytics — anonymous usage events (set ANTON_ANALYTICS_ENABLED=false to opt out)
     analytics_enabled: bool = True
-    analytics_url: str = "https://x6nik28qi6.execute-api.us-east-2.amazonaws.com/default/zoomInfoCollector"
+    # A hostname we own rather than an API Gateway id, so the collector can move
+    # without a release to follow it. Override with ANTON_ANALYTICS_URL.
+    analytics_url: str = "https://collect.mindshub.ai/collect"
 
     # Minds datasource integration
     minds_enabled: bool = True  # use Minds server as LLM provider

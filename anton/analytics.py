@@ -8,16 +8,29 @@ an anonymous machine fingerprint, and whatever the caller passes as
 Where these events actually land
 ================================
 
-The collector lambda RELAYS into PostHog — verified 2026-08-06 against
-project 355390 ("Anton"), where anton's events appear tagged
-``source = mindsdb-zoominfo-lambda``.  Two consequences worth knowing before
-adding a caller:
+The collector relays into PostHog project 355390 ("Anton"), where these events
+appear tagged ``source = mindshub-analytics-collector``.  Rows written before
+2026-08-11 carry ``source = mindsdb-zoominfo-lambda`` instead: that was a
+different collector, in a different AWS account, and installs old enough to
+still hold the previous ``analytics_url`` keep reporting to it.  A query
+covering both needs to accept either value.
 
-* **Every ``extra`` kwarg becomes a queryable PostHog event property.**  Not
-  an allowlist — ``ds_connect_success`` carries its ``engine=postgres``
-  through, and ``turn_completed`` carries its full token breakdown.  So the
-  parameter names here ARE the analytics schema; renaming one silently breaks
-  whatever queries or dashboards read it.
+Consequences worth knowing before adding a caller:
+
+* **Every ``extra`` kwarg becomes a queryable PostHog event property**, apart
+  from a small denylist of credential- and address-shaped names, and any value
+  that looks like an email address.  ``ds_connect_success`` carries its
+  ``engine=postgres`` through and ``turn_completed`` carries its full token
+  breakdown, with no collector change needed for either.  So the parameter
+  names here ARE the analytics schema; renaming one silently breaks whatever
+  queries or dashboards read it.
+* **This was not true until 2026-08-11.**  The previous collector copied a
+  fixed list of five property names and relayed only actions starting with
+  a lowercase ``anton_`` or ``ds_connect_``, discarding everything else and
+  answering HTTP 200 regardless.  ``turn_completed`` and its 27 properties
+  therefore went nowhere at all from the day they shipped.  If a property
+  seems to be missing, check what the collector accepts before assuming the
+  caller is at fault.
 * **``distinct_id`` is the ``aid`` fingerprint, so these events are
   per-INSTALL, not per-user.**  They do not join to the Keycloak ``sub`` that
   the console, the desktop renderer's PostHog client, and the billing mirror
@@ -81,6 +94,14 @@ if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
 
 _TIMEOUT = 3  # seconds
+
+# Sent instead of urllib's default ``Python-urllib/3.x``, which Cloudflare's bot
+# protection answers with 403 on the mindshub.ai zone.  The collector host is
+# deliberately not proxied, so this is belt and braces rather than the only
+# guard, but ``_fire`` discards its response either way: anything that blocks
+# this request disappears without a trace, so it is worth not looking like a
+# script.
+_USER_AGENT = "anton-analytics/1.0"
 
 # Cached after first computation — the fingerprint never changes within
 # a process, so computing it once is sufficient.
@@ -194,6 +215,7 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
 def _fire(url: str) -> None:
     """Perform the actual HTTP GET.  Runs inside a daemon thread."""
     try:
-        urllib.request.urlopen(url, timeout=_TIMEOUT)
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+        urllib.request.urlopen(req, timeout=_TIMEOUT)
     except Exception:
         pass
