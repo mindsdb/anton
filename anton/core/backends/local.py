@@ -32,6 +32,13 @@ _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 # one would have.
 _SALVAGE_MAX = 10_000
 
+# The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
+# it's progressing, so a wedged cell stays silent — for as long as
+# cell_total_max — unless we say something. First notice no earlier than
+# this many seconds of silence, then no more often than this (ENG-1324).
+_QUIET_NOTICE_AFTER = 60.0
+_QUIET_NOTICE_EVERY = 60.0
+
 
 def _read_boot_script() -> str:
     """Read the boot script as UTF-8 explicitly.
@@ -841,6 +848,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         in_result = False
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
+        last_notice = 0.0
 
         # A budget kill with zero salvaged output is ambiguous: a stuck call
         # and silent heavy work look identical from outside, so the message
@@ -907,6 +915,21 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             if line.startswith(HEARTBEAT_MARKER):
                 # Liveness only: arrival already re-armed the readline timer.
+                # Do NOT extend current_inactivity here — a bare heartbeat is
+                # a machine signal, not evidence of progress; only an
+                # explicit progress() call earns that (ENG-1324). This
+                # branch only runs when the cell shipped no new output
+                # (otherwise STDOUT_CHUNK_MARKER fires instead), so a chatty
+                # cell never reaches it.
+                if (
+                    elapsed >= _QUIET_NOTICE_AFTER
+                    and elapsed - last_notice >= _QUIET_NOTICE_EVERY
+                ):
+                    last_notice = elapsed
+                    yield (
+                        f"still running — {elapsed / 60:.0f}m elapsed of "
+                        f"~{total_timeout / 60:.0f}m budget"
+                    )
                 continue
 
             if line.startswith(STDOUT_CHUNK_MARKER):
