@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -203,6 +203,69 @@ async def test_each_round_restarts_the_spinner_before_the_llm_call():
     assert phases == {"reasoning_start"}
     assert all(
         isinstance(call.args[0], StreamTaskProgress) for call in session.emit.await_args_list
+    )
+
+
+async def test_finish_gathering_logs_an_llm_call_and_a_done_node():
+    trace = MagicMock()
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ok", "artifact_type": "html-app"})]),
+    )
+    state = _state(session, trace_log=trace)
+    await engine.run_gathering_loop(state)
+    assert trace.llm_call.call_args.kwargs["node"] == "gathering"
+    trace.node.assert_called_once_with("gathering", "done", detail="finish_gathering: type=html-app")
+
+
+async def test_round_budget_exhausted_logs_a_fail_node(monkeypatch):
+    responses = [
+        _response(tool_calls=[_tc("scratchpad", {"action": "view", "name": "s"}, id=f"tc{i}")])
+        for i in range(engine.MAX_ROUNDS)
+    ]
+    monkeypatch.setattr(
+        "anton.core.tools.tool_handlers.handle_scratchpad",
+        AsyncMock(return_value="(empty)"),
+    )
+    trace = MagicMock()
+    session = _session_with_plan_sequence(*responses)
+    state = _state(session, trace_log=trace)
+    await engine.run_gathering_loop(state)
+    trace.node.assert_any_call("gathering", "fail", detail="MAX_ROUNDS exhausted without finish_gathering")
+
+
+async def test_ask_user_dispatch_logs_a_node_with_the_answer(monkeypatch):
+    from anton.core.interaction.elicit import AskAnswer
+
+    async def fake_elicit(session, question_id, request):
+        return AskAnswer(status="answered", values=("dark",))
+
+    monkeypatch.setattr("anton.core.interaction.elicit.elicit", fake_elicit)
+    trace = MagicMock()
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("ask_user", {"question": "Theme?", "options": [{"value": "dark"}, {"value": "light"}]})]),
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ok", "artifact_type": "html-app"})]),
+    )
+    state = _state(session, trace_log=trace)
+    await engine.run_gathering_loop(state)
+    trace.node.assert_any_call("ask_user", "answered", detail="Theme? -> dark")
+
+
+async def test_scratchpad_dispatch_logs_input_and_output(monkeypatch):
+    async def fake_handle_scratchpad(session, inp):
+        return "cell 1: ..."
+
+    monkeypatch.setattr(
+        "anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad
+    )
+    trace = MagicMock()
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("scratchpad", {"action": "view", "name": "s"})]),
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ok", "artifact_type": "html-app"})]),
+    )
+    state = _state(session, trace_log=trace)
+    await engine.run_gathering_loop(state)
+    trace.scratchpad.assert_called_once_with(
+        node="scratchpad", input={"action": "view", "name": "s"}, output="cell 1: ..."
     )
 
 

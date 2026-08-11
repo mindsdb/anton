@@ -32,6 +32,17 @@ async def generate(
     known_data: str,
     user_preferences: str,
 ) -> dict:
+    from .debug_trace import make_trace
+
+    trace = make_trace()
+    trace.run_start(
+        slug=slug,
+        artifact_type=artifact_type,
+        user_request=user_request,
+        agent_understanding=agent_understanding,
+        known_data=known_data,
+        user_preferences=user_preferences,
+    )
     state = PrdState(
         session=session,
         slug=slug,
@@ -41,8 +52,15 @@ async def generate(
         agent_understanding=agent_understanding,
         known_data=known_data,
         user_preferences=user_preferences,
+        trace_log=trace,
     )
-    return await run(state)
+    try:
+        result = await run(state)
+    except Exception as exc:
+        trace.run_result(ok=False, error=str(exc))
+        raise
+    trace.run_result(ok=True, result=result)
+    return result
 
 
 __all__ = ["generate", "PrdState"]

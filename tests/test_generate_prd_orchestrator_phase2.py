@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -70,6 +70,24 @@ async def test_draft_brief_restarts_the_spinner_before_the_llm_call(tmp_path):
     state.session.emit.assert_awaited_with(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
 
 
+async def test_draft_brief_logs_an_llm_call_and_a_done_node(tmp_path):
+    trace = MagicMock()
+    state = _state(tmp_path, trace_log=trace)
+    state.session._llm.plan = AsyncMock(return_value=_response("## Goal\nAn analog clock.\n"))
+    await orchestrator.draft_brief(state)
+    assert trace.llm_call.call_args.kwargs["node"] == "draft_brief"
+    trace.node.assert_called_once_with("draft_brief", "done", detail="## Goal\nAn analog clock.")
+
+
+async def test_draft_brief_logs_a_fail_node_before_raising(tmp_path):
+    trace = MagicMock()
+    state = _state(tmp_path, trace_log=trace)
+    state.session._llm.plan = AsyncMock(return_value=_response(""))
+    with pytest.raises(RuntimeError):
+        await orchestrator.draft_brief(state)
+    trace.node.assert_called_once_with("draft_brief", "fail", detail="model replied with no text")
+
+
 async def test_draft_brief_raises_on_an_empty_reply(tmp_path):
     """A model that calls a tool instead of replying with text (tools stay
     defined in this phase for the Anthropic API's sake, see `_phase2_tools`)
@@ -130,6 +148,18 @@ async def test_show_and_confirm_free_text_is_a_revision(monkeypatch):
     assert "make it dark mode" in state.qa_log_markdown()
 
 
+async def test_show_and_confirm_logs_a_node_per_outcome(monkeypatch):
+    async def fake_elicit(session, request):
+        return AskAnswer(status="answered", values=("accept",))
+
+    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_elicit)
+    trace = MagicMock()
+    state = _state(Path("/tmp/x"), trace_log=trace)
+    state.brief_markdown = "## Goal\n..."
+    await orchestrator.show_and_confirm(state)
+    trace.node.assert_called_once_with("show_and_confirm", "accepted", detail="user picked accept")
+
+
 @pytest.mark.parametrize("status", ["limit", "unavailable", "error"])
 async def test_show_and_confirm_budget_or_channel_failure_is_unconfirmed_not_cancelled(monkeypatch, status):
     async def fake_elicit(session, request):
@@ -166,6 +196,22 @@ async def test_classify_feedback_restarts_the_spinner_before_the_llm_call(monkey
     state.session.emit.assert_awaited_with(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
 
 
+async def test_classify_feedback_logs_an_llm_call_and_a_verdict(monkeypatch):
+    trace = MagicMock()
+    state = _state(Path("/tmp/x"), trace_log=trace)
+
+    async def fake_generate_object(schema, *, system, messages):
+        return orchestrator.FeedbackVerdict(route="back_to_gathering", reasoning="needs more data")
+
+    state.session._llm.generate_object = fake_generate_object
+    await orchestrator.classify_feedback(state)
+    assert trace.llm_call.call_args.kwargs["node"] == "classify_feedback"
+    trace.verdict.assert_called_once_with(
+        node="classify_feedback", schema="FeedbackVerdict",
+        value={"route": "back_to_gathering", "reasoning": "needs more data"},
+    )
+
+
 async def test_classify_feedback_falls_back_to_revise_brief_on_an_unknown_route(monkeypatch):
     state = _state(Path("/tmp/x"))
 
@@ -196,6 +242,28 @@ async def test_write_prd_restarts_the_spinner_before_the_llm_call(tmp_path):
     state.session._llm.plan = AsyncMock(return_value=_response("## Goal\nFull PRD text.\n"))
     await orchestrator.write_prd(state)
     state.session.emit.assert_awaited_with(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
+
+
+async def test_write_prd_logs_an_llm_call_and_a_done_node(tmp_path):
+    artifact_dir = tmp_path / "artifacts" / "s"
+    artifact_dir.mkdir(parents=True)
+    trace = MagicMock()
+    state = _state(artifact_dir, trace_log=trace)
+    state.session._llm.plan = AsyncMock(return_value=_response("## Goal\nFull PRD text.\n"))
+    await orchestrator.write_prd(state)
+    assert trace.llm_call.call_args.kwargs["node"] == "write_prd"
+    trace.node.assert_called_once_with("write_prd", "done", detail=str(artifact_dir / "prd.md"))
+
+
+async def test_write_prd_logs_a_fail_node_before_raising(tmp_path):
+    artifact_dir = tmp_path / "artifacts" / "s"
+    artifact_dir.mkdir(parents=True)
+    trace = MagicMock()
+    state = _state(artifact_dir, trace_log=trace)
+    state.session._llm.plan = AsyncMock(return_value=_response(""))
+    with pytest.raises(RuntimeError):
+        await orchestrator.write_prd(state)
+    trace.node.assert_called_once_with("write_prd", "fail", detail="model replied with no text")
 
 
 async def test_write_prd_raises_on_an_empty_reply_instead_of_writing_an_empty_file(tmp_path):

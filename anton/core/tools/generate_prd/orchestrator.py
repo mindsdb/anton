@@ -108,13 +108,19 @@ async def draft_brief(state: PrdState) -> None:
     found."""
     state.messages.append({"role": "user", "content": _DRAFT_BRIEF_INSTRUCTION})
     await sub_tools.signal_thinking(state.session)
+    system = build_phase2_system_prompt(state)
     response = await state.session._llm.plan(
-        system=build_phase2_system_prompt(state),
+        system=system,
         messages=state.messages,
         tools=_phase2_tools(),
     )
+    state.trace_log.llm_call(
+        node="draft_brief", method="plan", system=system,
+        messages=state.messages, response=response,
+    )
     brief = (response.content or "").strip()
     if not brief:
+        state.trace_log.node("draft_brief", "fail", detail="model replied with no text")
         # The model called a tool instead of replying with text (tools stay
         # defined in this call for the Anthropic API's sake — see
         # `_phase2_tools`), despite the system prompt's explicit
@@ -131,6 +137,7 @@ async def draft_brief(state: PrdState) -> None:
         )
     state.brief_markdown = brief
     state.messages.append({"role": "assistant", "content": state.brief_markdown})
+    state.trace_log.node("draft_brief", "done", detail=state.brief_markdown[:200])
 
 
 async def show_and_confirm(state: PrdState) -> str:
@@ -167,10 +174,12 @@ async def show_and_confirm(state: PrdState) -> str:
     answer = await sub_tools.ask_via_elicit(state.session, request)
 
     if answer.status in ("unavailable", "limit", "error"):
+        state.trace_log.node("show_and_confirm", "unconfirmed", detail=f"answer status: {answer.status}")
         return "unconfirmed"
 
     if answer.status in ("cancelled", "timeout"):
         state.record_qa("Show PRD brief for confirmation", f"user did not respond ({answer.status})")
+        state.trace_log.node("show_and_confirm", "cancelled", detail=f"answer status: {answer.status}")
         return "cancelled"
 
     # answered
@@ -179,11 +188,14 @@ async def show_and_confirm(state: PrdState) -> str:
         state.messages.append(
             {"role": "user", "content": f"User feedback on the brief: {answer.text}"}
         )
+        state.trace_log.node("show_and_confirm", "revise", detail=answer.text)
         return "revise"
     if "cancel" in answer.values:
         state.record_qa("Show PRD brief for confirmation", "cancel")
+        state.trace_log.node("show_and_confirm", "cancelled", detail="user picked cancel")
         return "cancelled"
     state.record_qa("Show PRD brief for confirmation", "accept")
+    state.trace_log.node("show_and_confirm", "accepted", detail="user picked accept")
     return "accepted"
 
 
@@ -201,11 +213,17 @@ async def classify_feedback(state: PrdState) -> str:
         "know (`revise_brief`)?"
     )
     await sub_tools.signal_thinking(state.session)
+    messages = state.messages + [{"role": "user", "content": instruction}]
     result = await state.session._llm.generate_object(
         FeedbackVerdict,
         system=system,
-        messages=state.messages + [{"role": "user", "content": instruction}],
+        messages=messages,
     )
+    state.trace_log.llm_call(
+        node="classify_feedback", method="generate_object", system=system,
+        messages=messages, value=result.model_dump(),
+    )
+    state.trace_log.verdict(node="classify_feedback", schema="FeedbackVerdict", value=result.model_dump())
     return result.route if result.route in ("revise_brief", "back_to_gathering") else "revise_brief"
 
 
@@ -215,13 +233,19 @@ async def write_prd(state: PrdState) -> str:
     `type` in metadata.json if it changed. Returns the full PRD markdown."""
     state.messages.append({"role": "user", "content": _WRITE_PRD_INSTRUCTION})
     await sub_tools.signal_thinking(state.session)
+    system = build_phase2_system_prompt(state)
     response = await state.session._llm.plan(
-        system=build_phase2_system_prompt(state),
+        system=system,
         messages=state.messages,
         tools=_phase2_tools(),
     )
+    state.trace_log.llm_call(
+        node="write_prd", method="plan", system=system,
+        messages=state.messages, response=response,
+    )
     full_prd = (response.content or "").strip()
     if not full_prd:
+        state.trace_log.node("write_prd", "fail", detail="model replied with no text")
         # Same failure shape as draft_brief's guard, and the same reason:
         # writing an empty prd.md and reporting `prd_written` would be a
         # silent lie about what happened. Raising here surfaces it as a
@@ -249,6 +273,7 @@ async def write_prd(state: PrdState) -> str:
         if store is not None:
             store.update(state.slug, type=final_type)
 
+    state.trace_log.node("write_prd", "done", detail=str(state.artifact_path / "prd.md"))
     return full_prd
 
 

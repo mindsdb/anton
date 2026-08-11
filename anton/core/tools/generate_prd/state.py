@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .debug_trace import NullTrace, PrdTrace  # noqa: F401  (PrdTrace re-exported for typing)
+
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
 
@@ -40,6 +42,7 @@ class PrdState:
     final_artifact_type: str = ""
     gathering_notes: str = ""
     brief_markdown: str = ""
+    trace_log: "PrdTrace | NullTrace" = field(default_factory=NullTrace)
 
     def record_qa(self, question: str, answer_summary: str) -> None:
         self.qa_log.append(f"- **Q:** {question}\n  **A:** {answer_summary}")

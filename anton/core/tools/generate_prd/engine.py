@@ -58,9 +58,14 @@ async def run_gathering_loop(state: "PrdState") -> None:
     questions_asked = 0
 
     for round_idx in range(MAX_ROUNDS):
+        method = "plan" if round_idx == 0 else "code"
         llm_call = state.session._llm.plan if round_idx == 0 else state.session._llm.code
         await sub_tools.signal_thinking(state.session)
         response = await llm_call(system=system, messages=state.messages, tools=tools)
+        state.trace_log.llm_call(
+            node="gathering", method=method, system=system,
+            messages=state.messages, response=response, round=round_idx,
+        )
 
         if not response.tool_calls:
             state.gathering_notes = (response.content or "").strip()
@@ -71,6 +76,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
             # kickoff alone.
             if state.gathering_notes:
                 state.messages.append({"role": "assistant", "content": state.gathering_notes})
+            state.trace_log.node("gathering", "done", detail=state.gathering_notes[:200])
             return
 
         assistant_blocks: list[dict] = []
@@ -133,6 +139,10 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 outcome = await sub_tools.dispatch_ask_user(state.session, inp)
                 questions_asked += 1
                 state.record_qa(outcome["question"], outcome["answer_summary"])
+                state.trace_log.node(
+                    "ask_user", outcome["status"],
+                    detail=f"{outcome['question']} -> {outcome['answer_summary']}",
+                )
                 result_blocks.append(
                     {"type": "tool_result", "tool_use_id": tc.id, "content": outcome["tool_result"]}
                 )
@@ -140,16 +150,19 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
                 content = await handle_scratchpad(state.session, inp)
+                state.trace_log.scratchpad(node="scratchpad", input=inp, output=content)
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
             elif name == "web_search":
                 from anton.core.tools.web_tools import handle_web_search_fallback
 
                 content = await handle_web_search_fallback(state.session, inp)
+                state.trace_log.scratchpad(node="web_search", input=inp, output=content)
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
             elif name == "web_fetch":
                 from anton.core.tools.web_tools import handle_web_fetch_fallback
 
                 content = await handle_web_fetch_fallback(state.session, inp)
+                state.trace_log.scratchpad(node="web_fetch", input=inp, output=content)
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
             else:
                 result_blocks.append(
@@ -162,7 +175,12 @@ async def run_gathering_loop(state: "PrdState") -> None:
 
         state.messages.append({"role": "user", "content": result_blocks})
         if finished:
+            state.trace_log.node(
+                "gathering", "done",
+                detail=f"finish_gathering: type={state.final_artifact_type}",
+            )
             return
 
     # MAX_ROUNDS exhausted without finish_gathering — best-effort; caller
     # checks state.final_artifact_type (still "") to detect this case.
+    state.trace_log.node("gathering", "fail", detail="MAX_ROUNDS exhausted without finish_gathering")
