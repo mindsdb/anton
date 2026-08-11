@@ -446,6 +446,21 @@ _NO_PROVIDER_MSG = (
 )
 
 
+def has_search_credential(settings: object) -> bool:
+    """Whether ``settings`` has a usable Exa/Brave key for the fallback handler.
+
+    Shared by the registration gate (``ChatSession.__init__`` skips
+    registering ``WEB_SEARCH_FALLBACK_TOOL`` when this is False, ENG-1359) and
+    the handler itself, so the two can't drift out of sync.
+    """
+    provider = (getattr(settings, "external_search_provider", None) or "").lower()
+    if provider == "exa":
+        return bool(getattr(settings, "exa_api_key", None))
+    if provider == "brave":
+        return bool(getattr(settings, "brave_api_key", None))
+    return False
+
+
 async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> str:
     query = (tc_input.get("query") or "").strip()
     if not query:
@@ -454,20 +469,13 @@ async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> 
     max_results = max(1, min(max_results, 20))
 
     settings = session._settings
+    if not has_search_credential(settings):
+        return _NO_PROVIDER_MSG
+
     provider = (getattr(settings, "external_search_provider", None) or "").lower()
-
     if provider == "exa":
-        key = getattr(settings, "exa_api_key", None)
-        if not key:
-            return _NO_PROVIDER_MSG
-        return await _search_exa(query, key, max_results)
-    if provider == "brave":
-        key = getattr(settings, "brave_api_key", None)
-        if not key:
-            return _NO_PROVIDER_MSG
-        return await _search_brave(query, key, max_results)
-
-    return _NO_PROVIDER_MSG
+        return await _search_exa(query, getattr(settings, "exa_api_key"), max_results)
+    return await _search_brave(query, getattr(settings, "brave_api_key"), max_results)
 
 
 async def handle_web_fetch_fallback(session: "ChatSession", tc_input: dict) -> str:

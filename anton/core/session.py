@@ -1389,9 +1389,18 @@ class ChatSession:
         # appear in the registry; the model uses the provider's server-side
         # web tools instead and Anton's dispatch loop never sees a ``tool_use``
         # for them. See ``anton/core/tools/web_tools.py`` for the handlers.
+        #
+        # ``web_search`` additionally needs a usable Exa/Brave credential — a
+        # model offered a tool that can only fail will call it anyway, so skip
+        # registration outright rather than let it dispatch to a guaranteed
+        # error (ENG-1359).
         if "web_search" in self._fallback_web_tools:
-            from anton.core.tools.web_tools import WEB_SEARCH_FALLBACK_TOOL
-            self.tool_registry.register_tool(WEB_SEARCH_FALLBACK_TOOL)
+            from anton.core.tools.web_tools import (
+                WEB_SEARCH_FALLBACK_TOOL,
+                has_search_credential,
+            )
+            if has_search_credential(self._settings):
+                self.tool_registry.register_tool(WEB_SEARCH_FALLBACK_TOOL)
         if "web_fetch" in self._fallback_web_tools:
             from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL
             self.tool_registry.register_tool(WEB_FETCH_FALLBACK_TOOL)
