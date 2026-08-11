@@ -3,6 +3,7 @@ from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
     handle_generate_artifact,
+    handle_generate_prd,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -173,11 +174,14 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "files — the tool returns the absolute folder path you should write "
         "into. Each artifact gets its own subfolder under `<workspace>/artifacts/`, "
         "with a `metadata.json` + `README.md` written automatically.\n\n"
-        "AFTER REGISTERING: for `html-app` and the two fullstack types, call "
-        "`generate_artifact(slug, context)` and let it write every file — that "
-        "is the normal path and it verifies its own output. For `document`, "
-        "`dataset`, `image` and `mixed` there is no generator: write the files "
-        "yourself into the returned path.\n\n"
+        "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
+        "or fullstack-stateful-app): call `generate_prd(slug, user_request, "
+        "agent_understanding, ...)` first to draft and confirm a PRD, then "
+        "call `generate_artifact(slug, context)` and let it write every "
+        "file using that PRD as the requirements source — that is the "
+        "normal path and it verifies its own output. For `document`, "
+        "`dataset`, `image` and `mixed` there is no PRD step and no "
+        "generator: write the files yourself into the returned path.\n\n"
         "If you do end up building one of the three generator-backed types BY "
         "HAND (editing an existing artifact, or `generate_artifact` failed and "
         "the user asked you to continue), the output contract lives in a skill: "
@@ -401,6 +405,76 @@ LAUNCH_BACKEND_TOOL = ToolDef(
 )
 
 
+GENERATE_PRD_TOOL = ToolDef(
+    name="generate_prd",
+    description=(
+        "Draft and get user confirmation on a PRD (Product Requirements "
+        "Document) for an already-registered web artifact (html-app, "
+        "fullstack-stateless-app, fullstack-stateful-app), BEFORE any code "
+        "is written. Runs a bounded internal process: determines the "
+        "artifact type, gathers/verifies any data needed (may call "
+        "scratchpad, web_search, web_fetch, and ask the user clarifying "
+        "questions internally), drafts a short brief, and shows it to the "
+        "user for accept/cancel/revise. On acceptance, writes the full "
+        "`prd.md` into the artifact folder.\n\n"
+        "Inputs:\n"
+        "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
+        "- `user_request`: the user's request, as close to their original "
+        "wording as possible.\n"
+        "- `agent_understanding`: how you understand the task, based on "
+        "the whole conversation so far.\n"
+        "- `known_data` (optional): anything already known about the data "
+        "needed — descriptions, or scratchpad references (pad name, cell) "
+        "if you already fetched something.\n"
+        "- `user_preferences` (optional): relevant known preferences "
+        "(style, preferred APIs, etc.).\n\n"
+        "Returns one of three shapes:\n"
+        '- `{"status": "prd_written", "prd_path", "artifact_type", '
+        '"brief_summary", "qa_log"}` — the user confirmed; proceed to '
+        "build the artifact using `prd_path` as the requirements source.\n"
+        '- `{"status": "prd_written_unconfirmed", ...}` — a draft was '
+        "written but NOT confirmed (the per-turn question budget ran "
+        "out); do NOT proceed to building the artifact, show "
+        "`brief_summary` and get explicit confirmation first.\n"
+        '- `{"status": "cancelled", "reason", "qa_log"}` — the user '
+        "declined; do NOT write a PRD yourself and do NOT proceed.\n\n"
+        "On a technical failure, do NOT build the PRD or the artifact "
+        "yourself — report the failure to the user."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Slug of an already-registered artifact.",
+            },
+            "user_request": {
+                "type": "string",
+                "description": "The user's request, as close to their original wording as possible.",
+            },
+            "agent_understanding": {
+                "type": "string",
+                "description": "How you understand the task, based on the whole conversation.",
+            },
+            "known_data": {
+                "type": "string",
+                "description": (
+                    "What's already known about needed data — descriptions "
+                    "or scratchpad references (pad name, cell)."
+                ),
+            },
+            "user_preferences": {
+                "type": "string",
+                "description": "Relevant known user preferences (style, preferred APIs, etc.).",
+            },
+        },
+        "required": ["slug", "user_request", "agent_understanding"],
+    },
+    handler=handle_generate_prd,
+)
+
+
+
 GENERATE_ARTIFACT_TOOL = ToolDef(
     name="generate_artifact",
     description=(
@@ -540,6 +614,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "port — you do NOT need to call `launch_backend` afterwards."
     ),
 )
+
 
 
 RECALL_TOOL = ToolDef(
