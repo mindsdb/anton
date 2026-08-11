@@ -516,6 +516,17 @@ class TestToolContractText:
         assert "inactivity timeout" not in desc
         assert "reset the timer" not in desc
 
+    def test_description_says_kill_recovery_is_automatic(self):
+        """ENG-1273: the agent should not have to guess that reset is now
+        optional after a kill — the tool contract says so directly."""
+        from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+
+        desc = SCRATCHPAD_TOOL.description.lower()
+        assert "restarts and restores everything else automatically" in desc
+        assert "you do not need to reset" in desc
+        # Must not regress the ENG-578 contract text this paragraph already carries.
+        assert "kept alive automatically" in desc
+
     def test_system_prompt_does_not_mandate_splitting_cells(self):
         # The system prompt was a fourth author of the wrong lesson: "hard
         # timeout of 120 seconds" + "you MUST break the work into smaller
