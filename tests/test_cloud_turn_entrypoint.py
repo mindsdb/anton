@@ -166,6 +166,20 @@ def test_from_json_memory_defaults_none():
     assert req.memory is None
 
 
+def test_from_json_passes_through_skills_block():
+    skills = {"csv-summary": {"files": {"SKILL.md": "---\nname: csv-summary\n---\nbody"}}}
+    req = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "c", "input": "hi",
+        "skills": skills,
+    }))
+    assert req.skills == skills
+
+
+def test_from_json_skills_defaults_none():
+    req = TurnRequestV1.from_json('{"protocol_version":1,"conversation_id":"c","input":"hi"}')
+    assert req.skills is None
+
+
 # ── memory write-back events ─────────────────────────────────────────────────
 
 class _MemorySession(_FakeSession):

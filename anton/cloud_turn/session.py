@@ -17,10 +17,11 @@ Safety posture (all internal — nothing here is on the wire):
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from anton.cloud_turn.contract import TurnRequestV1
@@ -47,6 +48,10 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # Safe to list only because a cortex is always built — core registers
         # `memorize` with one, and an allowlist name matching no tool is fatal.
         "memorize",
+        # Read-only over staged skills + builtins. The prompt mandates recalling
+        # some builtins, so stripping the tool would point the model at a
+        # missing tool. Only writes a stats counter in the discarded staging dir.
+        "recall_skill",
     }
 )
 
@@ -56,6 +61,73 @@ _MEMORY_DIR = Path(tempfile.gettempdir()) / "anton-cloud-memory"
 
 #: Wire slot name -> the filename Hippocampus reads. Unknown slots are ignored.
 _MEMORY_SLOT_FILES = {"profile": "profile.md", "rules": "rules.md", "lessons": "lessons.md"}
+
+#: Per-turn skills staging: a FRESH mkdtemp each turn (unlike _MEMORY_DIR).
+#: Skills carry no cross-turn state, and the unpredictable path stops prior-turn
+#: cell code planting a symlink or two turns wiping each other's tree. Still in
+#: pod tmp, never the workspace mount (PVC outlives the turn, cells can read it).
+_SKILLS_DIR_PREFIX = "anton-cloud-skills-"
+
+
+def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
+    """Resolve a wire-supplied relative path inside `skill_dir`, or None.
+
+    resolve() also rejects NUL/surrogate filename bytes — keep it."""
+    pure = PurePosixPath(rel)
+    if pure.is_absolute() or not pure.parts or ".." in pure.parts:
+        return None
+    candidate = skill_dir.joinpath(*pure.parts)
+    try:
+        candidate.resolve().relative_to(skill_dir.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _stage_skills(skills: dict | None) -> Path:
+    """Materialize the request's skills into a fresh per-turn dir for
+    SkillStore to read; returns that dir (the session's skills_root).
+
+    Wire data is untrusted (like memory): bad slugs and escaping paths are
+    dropped, no single bad entry fails the turn. Builtins resolve via SkillStore
+    regardless; a wire skill shadowing one is logged (the prompt mandates some).
+    """
+    from anton.core.memory import skills as skills_memory
+    from anton.core.tools.skill_format import validate_name
+
+    dest = Path(tempfile.mkdtemp(prefix=_SKILLS_DIR_PREFIX))
+
+    entries = skills if isinstance(skills, dict) else {}
+    for slug, entry in entries.items():
+        try:
+            validate_name(str(slug))
+        except ValueError:
+            logger.warning("skills: dropping invalid slug %r", slug)
+            continue
+        if (skills_memory._BUILTIN_SKILLS_ROOT / str(slug)).is_dir():
+            logger.warning("skills: %r overrides the packaged builtin skill", slug)
+        files = entry.get("files") if isinstance(entry, dict) else None
+        if not isinstance(files, dict):
+            continue
+        skill_dir = dest / str(slug)
+        for rel, text in files.items():
+            if not isinstance(rel, str) or not isinstance(text, str):
+                continue
+            path = _safe_skill_file(skill_dir, rel)
+            if path is None:
+                logger.warning("skills: dropping unsafe path %r in %r", rel, slug)
+                continue
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            except (OSError, ValueError):
+                # OSError: "a" staged as a file, then "a/b". ValueError: lone
+                # surrogates (valid JSON, unencodable UTF-8). Drop the file, not
+                # the turn; clean up the empty file write_text left behind.
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+                logger.warning("skills: could not stage %r in %r", rel, slug, exc_info=True)
+    return dest
 
 
 def _write_memory_slots(dest: Path, slots: dict | None) -> None:
@@ -67,7 +139,13 @@ def _write_memory_slots(dest: Path, slots: dict | None) -> None:
         path = dest / filename
         text = values.get(slot)
         if isinstance(text, str) and text.strip():
-            path.write_text(text, encoding="utf-8")
+            try:
+                path.write_text(text, encoding="utf-8")
+            except ValueError:
+                # Lone surrogates (valid JSON, unencodable UTF-8). Skip the
+                # slot, not the turn; clean up the empty file write_text left.
+                path.unlink(missing_ok=True)
+                logger.warning("memory: slot %r is not UTF-8-encodable; skipped", slot)
         elif path.exists():
             path.unlink()
 
@@ -192,8 +270,10 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
-    # Skills stay in the workspace, never the pod-shared ~/.anton.
-    settings.skills_root = base / ".anton" / "skills"
+    # Skills come from the request, staged outside the workspace (the PVC would
+    # persist — and cells could read — anything under it). Builtins resolve via
+    # SkillStore's package root regardless.
+    settings.skills_root = _stage_skills(request.skills)
 
     workspace = Workspace(base, settings=settings)
     workspace.initialize()
