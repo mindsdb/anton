@@ -576,8 +576,8 @@ class TestSessionWebToolResolution:
         assert "web_fetch" in names
 
     def test_fallback_web_search_not_registered_without_credential(self):
-        # ENG-1359: a model offered a tool that can only fail (no Exa/Brave
-        # key configured) will call it anyway — don't register it at all.
+        # A model offered a tool that can only fail (no Exa/Brave key
+        # configured) will call it anyway — don't register it at all.
         session = self._build_session(provider_native=set())
         tools = session._build_tools()
         names = {t["name"] for t in tools}

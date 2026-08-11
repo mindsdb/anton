@@ -1458,7 +1458,7 @@ class ChatSession:
         # ``web_search`` additionally needs a usable Exa/Brave credential — a
         # model offered a tool that can only fail will call it anyway, so skip
         # registration outright rather than let it dispatch to a guaranteed
-        # error (ENG-1359).
+        # error.
         if "web_search" in self._fallback_web_tools:
             from anton.core.tools.web_tools import (
                 WEB_SEARCH_FALLBACK_TOOL,
