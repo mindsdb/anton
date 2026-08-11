@@ -102,7 +102,7 @@ class Skill:
     description: str
     declarative_md: str
     created_at: str
-    provenance: str  # "manual" | "consolidator" | "builtin"
+    provenance: str  # "manual" | "consolidator" | "builtin" | "host"
     when_to_use: str = ""
     stage_1_present: bool = True
     stage_2_present: bool = False
@@ -434,14 +434,6 @@ class SkillStore:
             })
         out.sort(key=lambda s: s["label"])
         return out
-
-    def _builtin_dirs(self) -> list[Path]:
-        if not self.builtin_root.is_dir():
-            return []
-        return sorted(
-            d for d in self.builtin_root.iterdir()
-            if d.is_dir() and (d / "SKILL.md").is_file()
-        )
 
     def _readonly_dirs(self) -> list[Path]:
         """All read-only skill dirs (host roots + built-ins), deduped by name.
