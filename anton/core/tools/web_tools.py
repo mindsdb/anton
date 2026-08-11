@@ -440,8 +440,9 @@ async def _fetch_url(url: str, max_chars: int) -> str:
 
 
 _NO_PROVIDER_MSG = (
-    "No search provider configured for this LLM endpoint. "
-    "Run `anton setup search` to configure Exa.ai or Brave Search."
+    "No search provider configured for this LLM endpoint. Web search is "
+    "unavailable in this session; if you're running the anton CLI standalone, "
+    "run `anton setup search` to configure Exa.ai or Brave Search."
 )
 
 
