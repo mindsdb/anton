@@ -4,8 +4,9 @@ Matches what the controller sends (`scratchpad_controller.anton_turn.request_lin
 and what cowork-server consumes off the reply stream. Intentionally minimal and
 data-only: the entrypoint reads ONE newline-terminated JSON line on stdin.
 
-Events written back on stdout (JSONL) are the three the controller translates:
+Events written back on stdout (JSONL) are the four the controller translates:
   {"kind": "delta", "text": "..."}   - streamed assistant text, one per chunk
+  {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
 """
@@ -34,6 +35,13 @@ class TurnRequestV1:
     #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"}).
     #: MVP: always MindsHub (provider="minds-cloud"). None falls back to env settings.
     llm: dict | None = None
+    #: Optional memory cowork resolved for this tenant: {"global": {slot: text},
+    #: "project": {...}}, slot in profile|rules|lessons. Read-only in the pod.
+    memory: dict | None = None
+    #: Optional skills cowork resolved for this tenant + project:
+    #: {slug: {"files": {relpath: text}}}. Staged read-only in the pod; the pod
+    #: never writes skills back (agent-built skills are a desktop draft flow).
+    skills: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -46,4 +54,6 @@ class TurnRequestV1:
             model=d.get("model"),
             history=d.get("history") or [],
             llm=d.get("llm"),
+            memory=d.get("memory"),
+            skills=d.get("skills"),
         )
