@@ -470,6 +470,11 @@ def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
         # AMBIGUOUS and counts toward neither lesson: this rule is written
         # into durable memory, and no rule beats a wrong one.
         r = (e.detail.get("reason") or "").lower()
+        # Checked before "liveness": the mid-install kill wording contains
+        # both, and a kill during a package install says nothing about the
+        # cell's size or the worker's health (ENG-1275).
+        if "auto-install" in r:
+            return "ambiguous"
         if "liveness" in r or "inactivity" in r:
             return "liveness"
         if not r or "without producing any output" in r:
