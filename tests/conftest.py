@@ -75,6 +75,24 @@ def make_llm_response():
 
 
 @pytest.fixture(autouse=True)
+def _no_browser_windows(monkeypatch):
+    """No test may pop a real browser window.
+
+    Every /publish, /share and `anton setup` path ends in ``webbrowser.open``,
+    and a stubbed prompt is all it takes to reach one: three tests in
+    test_openai_setup.py answer ``Confirm.ask`` with a blanket ``False``, which
+    the first prompt in ``_setup_minds`` reads as "no, I don't have an API key"
+    and so opens the MindsHub signup page — three windows on every local run.
+    Same posture as the analytics kill above: the suite never touches the
+    desktop. Tests that assert on the call still patch it themselves.
+    """
+    import webbrowser
+
+    for name in ("open", "open_new", "open_new_tab"):
+        monkeypatch.setattr(webbrowser, name, lambda *a, **kw: True)
+
+
+@pytest.fixture(autouse=True)
 def _no_builtin_skills(tmp_path_factory, monkeypatch):
     """Point the built-in skills root at an empty dir for all tests.
 
