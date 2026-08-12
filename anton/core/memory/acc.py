@@ -88,6 +88,7 @@ inspired this module.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -235,6 +236,27 @@ _SEVERITY_CLIMB_LEN = 3
 _SEVERITY_CLIMB_PEAK = 5
 
 
+def _unwrap_envelope_message(text: str) -> str:
+    """Reduce a structured tool result to its human-readable message.
+
+    Side-effecting tools return a JSON envelope (ENG-696). JSON is almost
+    entirely quoted runs, and the signature pass below collapses every quoted
+    run ≤80 chars — so every envelope failure, whatever went wrong, normalises
+    to one identical signature and unrelated errors read as the same error
+    repeating. Signing the `message` keeps the discrimination the prose had.
+    Non-JSON text passes through untouched.
+    """
+    if not text.startswith("{"):
+        return text
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(payload, dict) and isinstance(payload.get("message"), str):
+        return payload["message"]
+    return text
+
+
 def _normalise_error_signature(text: str) -> str:
     """Collapse the variable parts of an error message into a stable
     signature so that "Refusing to save record for engine='gmail-1'"
@@ -242,7 +264,7 @@ def _normalise_error_signature(text: str) -> str:
     same string. Cheap regex pass — paths, integers, hex, quoted
     short tokens all become placeholders.
     """
-    s = text or ""
+    s = _unwrap_envelope_message(text or "")
     s = re.sub(r"0x[0-9a-fA-F]+", "0xN", s)
     s = re.sub(r"\b\d+\b", "N", s)
     s = re.sub(r"'[^']{1,80}'", "'X'", s)
