@@ -17,6 +17,8 @@ from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.wire import (
     CELL_DELIM,
     HEARTBEAT_MARKER,
+    INSTALL_END_MARKER,
+    INSTALL_START_MARKER,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
@@ -31,6 +33,12 @@ _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 # _MAX_OUTPUT so a killed cell can never report more stdout than a successful
 # one would have.
 _SALVAGE_MAX = 10_000
+
+# Extra headroom on top of cell_install_timeout while an in-cell auto-install
+# runs: the worker enforces the budget itself and reports a named install
+# error, so the parent's windows must outlast the worker's timer for that
+# error to win the race against a generic kill (ENG-1275).
+_INSTALL_GRACE = 30.0
 
 
 def _read_boot_script() -> str:
@@ -582,6 +590,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             env["ANTON_UV_PATH"] = uv
 
+        # The in-cell auto-installer (scratchpad_boot) runs pip/uv under this
+        # budget. Pass the resolved setting so the worker's timer and the
+        # parent's kill windows in _read_result run off one number — they
+        # used to be independent constants that drifted apart (ENG-1275).
+        env["ANTON_CELL_INSTALL_TIMEOUT"] = str(CoreSettings().cell_install_timeout)
+
         # Namespace snapshot path (ENG-1124). The boot script reads
         # ANTON_SCRATCHPAD_SESSION_PATH and nothing ever set it, so it fell back to a
         # hardcoded "/anton_scratchpad_session.pkl" — the filesystem root, which no
@@ -842,12 +856,30 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
 
+        # In-cell auto-install span (ENG-1275). While the worker's installer
+        # runs, both kill windows defer to the install budget — the same
+        # cell_install_timeout the worker was handed at spawn — plus a grace
+        # margin, so the worker's own named install error wins the race
+        # against a parent kill. The cell's budget resumes, install time
+        # excluded, when the end marker arrives.
+        install_budget = float(s.cell_install_timeout)
+        installing: str | None = None
+        install_started = 0.0
+        pre_install_total = total_timeout
+        pre_install_inactivity = current_inactivity
+
         # A budget kill with zero salvaged output is ambiguous: a stuck call
         # and silent heavy work look identical from outside, so the message
         # says so instead of implying "too heavy" (the confident wrong guess
         # that taught the ENG-578 per-item pattern). The phrase routes to its
         # own nudge — lockstep constraint, see the silence-kill raise below.
         def _total_timeout_message() -> str:
+            if installing:
+                return (
+                    f"Cell killed during auto-install of '{installing}' — the "
+                    f"install ran past its {install_budget:.0f}s budget and "
+                    "grace window without reporting a result"
+                )
             base = f"Cell timed out after {total_timeout:.0f}s total"
             if not self._salvage:
                 return base + (
@@ -873,13 +905,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 if elapsed_now >= total_timeout - 0.5:
                     raise asyncio.TimeoutError(_total_timeout_message()) from None
                 # Wording is load-bearing in THREE places (ENG-578 lockstep):
-                # _select_resilience_nudge routes on "liveness"/"timed out"/
-                # "without producing any output", the ACC kill-loop detector
-                # classifies on the same phrases, and observe_scratchpad_cell
-                # records only the FIRST 120 chars as the ACC reason — the
-                # routing keywords must stay inside that slice. Change all of
-                # them together.
-                #
+                # _select_resilience_nudge routes on "auto-install"/
+                # "liveness"/"timed out"/"without producing any output", the
+                # ACC kill-loop detector classifies on the same phrases, and
+                # observe_scratchpad_cell records only the FIRST 120 chars as
+                # the ACC reason — the routing keywords must stay inside that
+                # slice. Change all of them together.
+                if installing:
+                    raise asyncio.TimeoutError(
+                        f"Cell killed during auto-install of '{installing}' — "
+                        f"no liveness signal for {current_inactivity:.0f}s: "
+                        "the worker process died or the installer is wedged; "
+                        "the package is likely not installed"
+                    ) from None
                 # Only two things actually reach this timer now: a dead worker
                 # (EOF follows shortly) or one pinned below Python by a native
                 # call holding the GIL — a userland deadlock or spin keeps
@@ -899,7 +937,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 yield {
                     "stdout": "".join(self._salvage),
                     "stderr": "",
-                    "error": "Process exited unexpectedly.",
+                    "error": (
+                        f"Process exited unexpectedly while auto-installing "
+                        f"'{installing}'."
+                        if installing
+                        else "Process exited unexpectedly."
+                    ),
                 }
                 return
 
@@ -932,6 +975,32 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 )
                 message = line[len(PROGRESS_MARKER) :].strip()
                 yield message
+                continue
+
+            if line.startswith(INSTALL_START_MARKER):
+                # `elapsed` is stale by up to the readline wait — recompute,
+                # or the install loses that much of its budget.
+                now = _time.monotonic() - start
+                installing = line[len(INSTALL_START_MARKER) :].strip()
+                install_started = now
+                pre_install_total = total_timeout
+                pre_install_inactivity = current_inactivity
+                total_timeout = max(
+                    total_timeout, now + install_budget + _INSTALL_GRACE
+                )
+                current_inactivity = max(
+                    current_inactivity, install_budget + _INSTALL_GRACE
+                )
+                yield f"Installing {installing}..."
+                continue
+
+            if line.startswith(INSTALL_END_MARKER):
+                if installing is not None:
+                    # Install time doesn't count against the cell's budget.
+                    now = _time.monotonic() - start
+                    total_timeout = pre_install_total + (now - install_started)
+                    current_inactivity = pre_install_inactivity
+                    installing = None
                 continue
 
             if line == RESULT_START:

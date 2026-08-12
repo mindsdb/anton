@@ -169,6 +169,98 @@ class TestLivenessHeartbeat:
             await pad.close()
 
 
+class TestAutoInstallBudget:
+    """ENG-1275: the in-cell auto-installer must run under a budget derived
+    from CoreSettings.cell_install_timeout (one number, both sides), fail with
+    an error naming the install as the cause, and never take the pad down."""
+
+    async def test_install_past_install_timeout_fails_named_and_pad_survives(
+        self, monkeypatch, tmp_path
+    ):
+        """An install running past cell_install_timeout must produce a cell
+        error naming the auto-install and the module — and the worker must
+        survive it (no crash, next cell runs)."""
+        shrink_timers(monkeypatch)
+        monkeypatch.setenv("ANTON_CELL_INSTALL_TIMEOUT", "1")
+        stub = tmp_path / "hung_uv.sh"
+        stub.write_text("#!/bin/sh\nexec sleep 5\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute("import module_that_installs_slowly_eng1275")
+            assert cell.error is not None
+            low = cell.error.lower()
+            assert "auto-install" in low
+            assert "module_that_installs_slowly_eng1275" in cell.error
+            assert "liveness" not in low
+            follow_up = await pad.execute("print('pad-still-alive')")
+            assert follow_up.error is None
+            assert "pad-still-alive" in follow_up.stdout
+        finally:
+            await pad.close()
+
+    async def test_install_outlasting_total_budget_completes(
+        self, monkeypatch, tmp_path
+    ):
+        """The `import torch` shape: an install longer than the cell's total
+        budget must not be killed — the budget defers to the install's own
+        allowance while it runs, and the retried cell completes."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        fake_mod = tmp_path / "eng1275_fake_mod.py"
+        stub = tmp_path / "slow_ok_uv.sh"
+        stub.write_text(
+            f"#!/bin/sh\nsleep 3\necho 'VALUE = 42' > '{fake_mod}'\nexit 0\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                f"import sys\nsys.path.insert(0, {str(tmp_path)!r})\n"
+                "import eng1275_fake_mod\nprint(eng1275_fake_mod.VALUE)\n"
+            )
+            assert cell.error is None
+            assert "42" in cell.stdout
+        finally:
+            await pad.close()
+
+    async def test_worker_death_mid_install_names_install(
+        self, monkeypatch, tmp_path
+    ):
+        """A worker that dies while installing must not report the generic
+        'Process exited unexpectedly.' — the error names the install."""
+        shrink_timers(monkeypatch)
+        stub = tmp_path / "killer_uv.sh"
+        stub.write_text("#!/bin/sh\nkill -9 $PPID\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute("import module_whose_install_crashes_eng1275")
+            assert cell.error is not None
+            assert "auto-install" in cell.error.lower()
+            assert "module_whose_install_crashes_eng1275" in cell.error
+        finally:
+            await pad.close()
+
+
 class TestPartialStdoutSalvage:
     async def test_killed_cell_reports_partial_stdout(self, monkeypatch):
         """Prints from completed iterations survive a kill. Uses a
