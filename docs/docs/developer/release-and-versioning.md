@@ -32,15 +32,15 @@ feature/*  ──▶  dev  ──▶  staging  ──(soak ~1 day)──▶  mai
 - Every hotfix that lands on `main` **must** also be merged back into `dev` so
   the branches don't drift. If `staging` is mid-soak when the hotfix ships,
   bring it into `staging` too — otherwise the next promotion will overwrite it.
-- Hotfix back-merges to `dev`/`staging` carry the fix only — never the
-  `__version__` bump.
+- Hotfix back-merges to `dev`/`staging` carry the fix only — there's no
+  version file for them to touch.
 
 ### Promotion cadence
 
 Twice a week, on a fixed schedule:
 
-1. Bump the version in `dev`, then merge `dev → staging`. Leave it ~1 day for
-   soak tests.
+1. Merge `dev → staging`. Leave it ~1 day for soak tests. Each staging push
+   publishes a release candidate (see below).
 2. The day after the soak, merge `staging → main`. The release workflow tags
    and publishes from `main` automatically.
 
@@ -49,8 +49,10 @@ per week, each offset by a soak day.
 
 ## Versioning: calendar-derived
 
-The single source of truth is `__version__` in `anton/__init__.py`
-(hatch reads it via regex; see `pyproject.toml`). The scheme:
+The version is **derived from the release git tag**, not written by hand:
+`pyproject.toml` sets `[tool.hatch.version] source = "vcs"`, so hatch-vcs reads
+it off the tag at build time and `anton/__init__.py` re-exports it at runtime
+via `importlib.metadata`. The scheme:
 
 ```
 <MAJOR>.<YY>.<MONTH>.<DAY>.<PATCH>
@@ -66,10 +68,11 @@ The single source of truth is `__version__` in `anton/__init__.py`
 
 Rules:
 
-- Always write all 5 components (`__version__ = "2.26.4.30.0"`). PyPI may
-  canonicalize a trailing `.0` away — that's fine.
-- The bump happens on the `staging → main` promotion. The version *is* the
-  actual ship date.
+- Nothing to write by hand — the release workflows mint the tag and hatch-vcs
+  builds the wheel from it. PyPI may canonicalize a trailing `.0` away — that's
+  fine.
+- The version is set when the tag is cut on the `staging → main` promotion. The
+  version *is* the actual ship date.
 
 **Worked example:**
 
@@ -88,16 +91,30 @@ warranted a bump) and letting `YY=26` carry the year. PEP 440 sees
 
 ## The automated release flow
 
-How to ship a new version:
+Anton publishes two streams: **stable** from `main` and **release candidates**
+from `staging`.
 
-1. On the scheduled `staging → main` promotion, bump `__version__` in
-   `anton/__init__.py` to today's date.
-2. Get it reviewed and merge to `main`.
-3. That's it. On merge, `.github/workflows/release.yml` automatically:
-   - creates the matching git tag,
+How to ship a stable version:
+
+1. Merge the scheduled `staging → main` promotion (reviewed as usual). No
+   version file to touch — the tag carries the version.
+2. That's it. On merge, `.github/workflows/release.yml` automatically:
+   - computes today's CalVer version and creates the matching git tag,
+   - builds the wheel (hatch-vcs derives the version from that tag) and
+     publishes it to PyPI,
    - publishes a GitHub release with auto-generated notes,
    - triggers `tests_e2e_release.yml` to run live e2e tests against the
      released version.
+
+### Staging release candidates
+
+Every push to `staging` publishes a release candidate through
+`.github/workflows/publish-staging.yml`: it cuts a PEP 440 pre-release tag
+(`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to
+PyPI, so cowork-server staging installs an immutable, versioned Anton instead of
+a mutable branch or hand-pinned commit (ENG-1159). These never reach production:
+resolvers ignore pre-releases unless a specifier names one, and PyPI's
+`info.version` (read by the prod desktop updater) excludes them.
 
 ### What you should NOT do
 
@@ -105,8 +122,8 @@ How to ship a new version:
   via a repo ruleset — only the release workflow can create them. Manual
   attempts are rejected by GitHub.
 - **Don't push `v*` tags directly.** Same protection.
-- **Don't edit `__version__` outside a dedicated bump PR.** Keep version bumps
-  small and reviewable so the auto-release diff is easy to audit.
+- **Don't hand-edit a version.** There's no version file to bump — the tag is
+  the source of truth, and both publishers derive the wheel version from it.
 
 ### Out-of-band releases
 
