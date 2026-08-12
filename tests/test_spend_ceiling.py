@@ -93,17 +93,10 @@ def _session(workspace, *, ceiling: int = CEILING, responses=None,
     mock_llm.usage_listener = None
     mock_llm.plan_stream = _plan_stream
     mock_llm.plan = _plan
-    settings = MagicMock()
-    settings.max_tool_rounds = 25
-    settings.max_continuations = 3
-    settings.verify_min_tool_rounds = 1
-    settings.max_turn_tokens = ceiling
-    settings.max_consecutive_errors = 5
-    settings.resilience_nudge_at = 2
-    settings.context_pressure_threshold = 0.7
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
-    # Override post-construction: ChatSession reads a real CoreSettings in
-    # __init__, and only these two knobs matter here.
+    # Set post-construction rather than through a settings object: ChatSession
+    # resolves a real CoreSettings in __init__ (so every other knob keeps its
+    # production default), and this is the only one these tests vary.
     session._max_turn_tokens = ceiling
     from anton.core.tools.registry import ToolOutcome
     session.tool_registry.dispatch_tool = AsyncMock(
@@ -184,13 +177,23 @@ async def test_verification_is_skipped_after_a_ceiling_trip(workspace):
 
     Verification would spend more of the budget we just declared exhausted, and
     an INCOMPLETE verdict would force a continuation straight past the ceiling.
+
+    Asserts on CALL COUNT, not on a raising side-effect. The first version of
+    this test raised `AssertionError` from the verdict call — and passed with the
+    skip removed, because the verdict site catches bare `Exception` and converts
+    anything raised there into a "hard verdict failure" that continues down the
+    diagnosis path. A test whose failure mode is swallowed by the code under test
+    proves nothing.
     """
     session = _session(workspace, responses=[_tool_call(i) for i in range(1, 12)])
-    session._llm.generate_object_code = AsyncMock(
-        side_effect=AssertionError("verifier must not run after a ceiling trip")
-    )
+    verdict = AsyncMock()
+    session._llm.generate_object_code = verdict
     with patch("anton.analytics.send_event"):
         await _run(session)
+    assert verdict.call_count == 0, (
+        f"the completion verifier ran {verdict.call_count}x after the ceiling "
+        "stopped the turn"
+    )
 
 
 async def test_turn_under_the_ceiling_is_untouched(workspace):
