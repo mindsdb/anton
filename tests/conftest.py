@@ -83,8 +83,18 @@ def _no_browser_windows(monkeypatch):
     test_openai_setup.py answer ``Confirm.ask`` with a blanket ``False``, which
     the first prompt in ``_setup_minds`` reads as "no, I don't have an API key"
     and so opens the MindsHub signup page — three windows on every local run.
-    Same posture as the analytics kill above: the suite never touches the
-    desktop. Tests that assert on the call still patch it themselves.
+
+    Same *intent* as the analytics kill above — the suite never touches the
+    world outside the process — but not the same mechanism, which matters for
+    what it reaches: that one is a module-level env var, so it is live during
+    collection and inherited by subprocesses, while this is per-test and
+    parent-process only. Hence the one call site it cannot cover, the
+    module-level ``webbrowser.open`` in demo_data/nvda_btc_scratchpad_backup.py
+    that ``_agent_zero`` runs in a scratchpad subprocess (ENG-1453). No test
+    goes near it today.
+
+    Tests that assert on the call still patch it themselves. Deleting this
+    fixture is caught by tests/test_suite_guards.py.
     """
     import webbrowser
 
