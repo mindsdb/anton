@@ -366,6 +366,21 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+def _is_provider_auth_error(exc: BaseException) -> bool:
+    """A provider-auth 401 — anton's "Invalid API key — …" copy from
+    `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
+    request, so retrying can't succeed either. The substring match mirrors
+    cowork-server's `turn_errors.is_auth_error()`; the `isinstance` check is
+    an anton-only narrowing on top of it (both 401 raise sites always type
+    it this way, so it's a no-op in practice) — anything else (a bare
+    "temporarily unavailable" ConnectionError) is a different failure.
+
+    Shared by both `turn_stream` re-raise sites so the check can't drift
+    between them (review feedback on ENG-1310).
+    """
+    return isinstance(exc, ConnectionError) and "invalid api key" in str(exc).lower()
+
+
 # Shared closing instruction for every path that hands control back to the
 # user (STUCK, budget-exhausted, verifier-call failure): a plain self-
 # assessment of solvability, not just a status dump. Without this, a
@@ -2993,6 +3008,11 @@ class ChatSession:
                     ):
                         raise
 
+                    # Same reasoning applies to a provider-auth 401 (ENG-1310)
+                    # — see _is_provider_auth_error.
+                    if _is_provider_auth_error(_agent_exc):
+                        raise
+
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
                     # Back off and retry the SAME step within a per-turn budget —
@@ -3106,16 +3126,35 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
-                        except (TokenLimitExceeded, ModelUnavailableError):
-                            # Curated provider failures must FAIL the turn, not
-                            # get wrapped into assistant prose: the server maps
-                            # them to actionable error cards (token_limit /
-                            # model-unavailable), which can only fire when the
-                            # exception propagates. Wrapping them as text is
-                            # how "Server returned 403" ended up mid-chat with
-                            # "please rephrase your request" advice.
-                            raise
                         except Exception as e:
+                            if isinstance(e, (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError)):
+                                # Curated provider failures must FAIL the turn, not
+                                # get wrapped into assistant prose: the server maps
+                                # token_limit/model_unavailable to actionable cards,
+                                # which can only fire when the exception propagates.
+                                # Wrapping them as text is how "Server returned 403"
+                                # ended up mid-chat with "please rephrase your
+                                # request" advice. EndpointConfigurationError added
+                                # here to match the immediate re-raise site above —
+                                # this wrap-up call had been the one place it still
+                                # fell through (review feedback on ENG-1310). NOTE:
+                                # cowork-server has no dedicated card for
+                                # EndpointConfigurationError yet (grepped — zero
+                                # hits, friendly_turn_error falls through to the
+                                # generic message for it); re-raising it here still
+                                # stops the misleading "adjust your approach" prose,
+                                # it just doesn't get a *better* card until that
+                                # mapping exists server-side.
+                                raise
+                            if _is_provider_auth_error(e):
+                                # Same reasoning for a provider-auth 401 — see
+                                # _is_provider_auth_error. cowork-server's
+                                # turn_errors.is_auth_error() matches this exact
+                                # text and renders the "Reconnect MindsHub" /
+                                # BYOK-key action card, but only if the exception
+                                # propagates instead of being flattened into chat
+                                # text here (ENG-1310).
+                                raise
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
@@ -3200,10 +3239,11 @@ class ChatSession:
         """Retry a response that burned its output budget without finishing.
 
         ``llm_response`` hit ``max_tokens`` before producing a tool call —
-        detected by token count (`looks_truncated`), NOT ``stop_reason``:
-        the MindsHub gateway reports a normal stop at the cap (ENG-1082),
-        which is what kept this recovery dead for every hosted user
-        (ENG-1042).
+        detected by token count (`looks_truncated`) rather than relying on
+        ``stop_reason``. The gateway *used to* report a normal stop at the cap
+        (ENG-1082), which is what kept this recovery dead for every hosted user
+        (ENG-1042); it was fixed 2026-08-03 and now reports ``"length"``. The
+        token gate stays: it is the half that cannot regress upstream.
 
         The retry always CHANGES the call — an identical re-issue dies
         identically (measured: three unchanged retries 14 minutes apart,
@@ -3300,9 +3340,10 @@ class ChatSession:
         llm_response = response.response
 
         # Detect max_tokens truncation — the LLM was cut off mid-response.
-        # By token count, not stop_reason: the gateway reports a normal stop
-        # at the cap (ENG-1082), which made a stop_reason gate dead code for
-        # every MindsHub-routed user (ENG-1042).
+        # By token count rather than stop_reason alone: the gateway used to
+        # report a normal stop at the cap (ENG-1082, fixed 2026-08-03), which
+        # made a stop_reason gate dead code for every MindsHub-routed user
+        # (ENG-1042). `looks_truncated` checks both.
         if not llm_response.tool_calls and looks_truncated(
             llm_response, self._turn_max_tokens()
         ):

@@ -131,10 +131,13 @@ async def generate_with_truncation_retry(
 def looks_truncated(response, budget: int) -> bool:
     """True if `response` was cut off by the `max_tokens` budget.
 
-    Token count first, because the MindsHub gateway reports
-    ``finish_reason: "stop"`` at the cap for most aliases (ENG-1082) — the
-    standard ``"length"`` check can't be relied on there. Both dialects are
-    honoured when reported: OpenAI says ``"length"``, Anthropic ``"max_tokens"``.
+    Token count first: it is provider-agnostic and needs no dialect mapping.
+    The clause exists because the MindsHub gateway once reported
+    ``finish_reason: "stop"`` at the cap for most aliases (ENG-1082) — measured
+    2026-08-11, it now reports ``"length"`` on all 19 chat aliases, streaming
+    and non-streaming, so both gates fire. Keep both: the token count is the
+    one that cannot silently regress. Both dialects are honoured when
+    reported: OpenAI says ``"length"``, Anthropic ``"max_tokens"``.
     No usage information → ``False``; without evidence we don't buy a retry.
     """
     usage = getattr(response, "usage", None)
