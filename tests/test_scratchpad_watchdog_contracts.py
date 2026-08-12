@@ -14,6 +14,7 @@ import pytest
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SILENT_TIMEOUT_NUDGE,
     SCRATCHPAD_STUCK_NUDGE,
     SCRATCHPAD_TIMEOUT_NUDGE,
@@ -405,6 +406,39 @@ class TestNudgeRouting:
             ChatSession._select_resilience_nudge("web_search", "timed out")
             == RESILIENCE_NUDGE
         )
+
+    def test_install_timeout_error_routes_to_install_nudge(self):
+        """An install that ran out of its budget is neither a size nor a
+        liveness problem — 'make the cell smaller' cannot make a package
+        install (ENG-1275)."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "ModuleNotFoundError: No module named 'torch'\n"
+            "Auto-install of 'torch' was killed after 120s (cell_install_timeout) "
+            "without finishing — the package is not installed.",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
+        assert "too heavy" not in nudge
+        assert "smaller" not in nudge
+
+    def test_install_failure_routes_to_install_nudge(self):
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "ModuleNotFoundError: No module named 'torhc'\n"
+            "Auto-install failed:\nERROR: No matching distribution found for torhc",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
+
+    def test_kill_during_install_routes_to_install_nudge(self):
+        """The kill wording also contains 'liveness' — the install cause must
+        win over the stuck diagnosis."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "Cell killed during auto-install of 'torch' — no liveness signal "
+            "for 150s: the worker process died or the installer is wedged; "
+            "the package is likely not installed",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
 
 
 from anton.core.memory.acc import Event, detect_kill_loop

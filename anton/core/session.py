@@ -28,6 +28,7 @@ from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.memory.history_store import is_user_turn
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
     SCRATCHPAD_SILENT_TIMEOUT_NUDGE,
     SCRATCHPAD_STUCK_NUDGE,
@@ -972,6 +973,12 @@ class ChatSession:
         if tool_name != "scratchpad":
             return RESILIENCE_NUDGE
         low = result_text.lower()
+        # An install failure/kill is neither a size nor a liveness problem —
+        # checked before both: the mid-install kill wording also contains
+        # "liveness", and the worker's install errors contain "killed"/
+        # "timed out"-adjacent words (ENG-1275).
+        if "auto-install" in low:
+            return SCRATCHPAD_INSTALL_NUDGE
         # A silence/liveness kill means the worker looked dead — "make the
         # cell smaller" is exactly the wrong advice there (ENG-578: it taught
         # per-item LLM round-trips). A budget kill that produced no output is
