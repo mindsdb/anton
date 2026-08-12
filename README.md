@@ -28,8 +28,8 @@ Anton is the default agent in **MindsHub Cowork**, the unified workspace with da
 ### MindsHub Cowork app
 
 - **Web** — nothing to install: open **[console.mindshub.ai](https://console.mindshub.ai/?utm_source=github&utm_medium=repo-readme&utm_campaign=anton-readme)**.
-- **macOS** — [download the desktop app](https://downloads.mindsdb.com/mindshub-cowork/mac/mindshub-cowork-latest.pkg) (`.pkg`).
-- **Windows** — [download the desktop app](https://downloads.mindsdb.com/mindshub-cowork/windows/mindshub-cowork-latest.exe) (`.exe`).
+- **macOS** — [download the desktop app](https://downloads.mindshub.ai/mindshub-cowork/mac/mindshub-cowork-latest.pkg) (`.pkg`).
+- **Windows** — [download the desktop app](https://downloads.mindshub.ai/mindshub-cowork/windows/mindshub-cowork-latest.exe) (`.exe`).
 
 ### Anton CLI (standalone)
 
