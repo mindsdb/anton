@@ -3621,6 +3621,10 @@ class ChatSession:
                     # post-loop fallback appends it again and the message the user
                     # actually read is lost.
                     _reply_persisted = True
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's token budget — checking in with you...",
+                    )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling"
                     ):
@@ -4406,6 +4410,10 @@ class ChatSession:
                 # appends the assistant reply before requesting a verdict — so the
                 # post-loop fallback is already suppressed and only the diagnosis
                 # needs capturing.
+                yield StreamTaskProgress(
+                    phase="analyzing",
+                    message="Reached this task's token budget — checking in with you...",
+                )
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="spend-ceiling"
                 ):

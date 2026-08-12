@@ -196,6 +196,28 @@ async def test_verification_is_skipped_after_a_ceiling_trip(workspace):
     )
 
 
+async def test_ceiling_stop_announces_itself_to_the_host(workspace):
+    """The stop emits a progress marker, like the other hand-back paths.
+
+    Without it a ceiling stop is indistinguishable, at the host boundary, from
+    the agent simply choosing to ask a question — and the ceiling is expected to
+    fire on roughly 1 in 5 external turns, so "the agent gave up" is the reading
+    a user would otherwise land on. The marker is ephemeral in today's renderer;
+    a persistent paused-state affordance is tracked separately.
+    """
+    from anton.core.llm.provider import StreamTaskProgress
+
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 12)])
+    seen = []
+    with patch("anton.analytics.send_event"):
+        async for ev in session.turn_stream("do the thing"):
+            if isinstance(ev, StreamTaskProgress):
+                seen.append(ev.message or "")
+    assert any("token budget" in m for m in seen), (
+        f"no ceiling marker among progress events: {seen}"
+    )
+
+
 async def test_turn_under_the_ceiling_is_untouched(workspace):
     """No behaviour change for a turn that never reaches the gate."""
     session = _session(workspace, responses=[_tool_call(1), _text("all done")],
