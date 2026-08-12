@@ -22,6 +22,15 @@ class ToolCall:
     # the handler run with `input={}` and produce a confusing
     # "missing required field" trail. See `safe_parse_tool_input`.
     parse_error: str | None = None
+    # True when the arguments JSON was malformed but the repair pass in
+    # `safe_parse_tool_input` salvaged a parseable dict, so `parse_error` is
+    # None and the handler *would* run. The dict is syntactically valid and
+    # semantically unfinished — the repair closes an open string or brace, it
+    # cannot invent the argument the model never emitted. The session uses it
+    # twice: to tell a round cut off at the output cap from a complete one (so
+    # the round is retried with a bigger budget), and in the dispatcher, which
+    # never runs a handler on a repaired call.
+    repaired: bool = False
 
 
 @dataclass
@@ -289,7 +298,7 @@ def _try_repair_tool_json(raw: str):
     return None
 
 
-def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None]:
+def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     """Parse the JSON body of a streamed `tool_use` call without
     crashing the turn when the assembled body is malformed.
 
@@ -311,14 +320,19 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None]:
          commas. Catches the common "cut off mid-token" shape.
       3. Empty dict + `parse_error` populated.
 
-    Returns ``(parsed_dict, parse_error_or_None)``. The session
-    dispatcher reads ``parse_error`` to decide whether to invoke the
-    tool handler (parse_error is None) or short-circuit with a
-    structured tool_result that asks the LLM to re-emit the call
-    (parse_error is set). Either way this function never raises.
+    Returns ``(parsed_dict, parse_error_or_None, was_repaired)``. The
+    session dispatcher reads ``parse_error`` to decide whether to
+    invoke the tool handler (parse_error is None) or short-circuit
+    with a structured tool_result that asks the LLM to re-emit the
+    call (parse_error is set). ``was_repaired`` marks step 2: the dict
+    is parseable but built from an incomplete body, so a caller that
+    knows *why* the body was cut — the session, which can see the
+    round hit its output cap — can retry the round instead of running
+    a handler on arguments the model never finished. Either way this
+    function never raises.
     """
     if not raw_json:
-        return {}, None
+        return {}, None, False
     import json as _json
     import logging as _logging
 
@@ -333,20 +347,20 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None]:
                 "successfully. Raw bytes: %d.",
                 exc, len(raw_json),
             )
-            return repaired, None
+            return repaired, None, True
         _logging.getLogger(__name__).warning(
             "Tool-use input JSON was malformed and unrecoverable (%s). "
             "Raw bytes: %d, head: %r",
             exc, len(raw_json), raw_json[:160],
         )
-        return {}, str(exc)
+        return {}, str(exc), False
     # Anthropic occasionally emits a top-level scalar (e.g. a string
     # for a single-arg tool); coerce to a dict so callers always see
     # the same shape. Treat as a parse error so the dispatcher asks
     # for a re-emit instead of running the handler with an empty dict.
     if not isinstance(parsed, dict):
-        return {}, f"tool input was not a JSON object (got {type(parsed).__name__})"
-    return parsed, None
+        return {}, f"tool input was not a JSON object (got {type(parsed).__name__})", False
+    return parsed, None, False
 
 
 _CONTEXT_WINDOWS: list[tuple[str, int]] = [

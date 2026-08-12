@@ -116,6 +116,13 @@ _TRUNCATED_CONTINUE_NUDGE = (
     "Continue exactly where you left off. If you were about to call a tool, "
     "call it now. If the code you were writing was too long, split it into smaller parts."
 )
+_TRUNCATED_TOOL_CALL_NUDGE = (
+    "SYSTEM: Your response was truncated because it exceeded the output token limit — "
+    "the cut landed inside the arguments of the tool call you were making, so the call "
+    "was discarded rather than run with an unfinished body. Re-issue that tool call, and "
+    "make the arguments smaller: if you were passing a large payload, write it in several "
+    "smaller calls instead of one."
+)
 _TRUNCATED_SILENT_NUDGE = (
     "SYSTEM: Your previous response spent its entire output-token budget before "
     "producing any visible text or tool call — the user saw nothing. Respond again, "
@@ -133,6 +140,25 @@ _TRUNCATION_FAILURE_NOTICE = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _usable_tool_call(llm_response: LLMResponse) -> bool:
+    """True when the response carries tool calls and every one of them is intact.
+
+    A tool call is what lets a round that hit the output cap still be worth
+    dispatching — but only if nothing it emitted was cut:
+
+    - ``repaired`` marks arguments the repair pass patched back into valid JSON,
+      which means the model's own body ended mid-value. It closes an open string
+      or brace; it cannot invent the argument that never arrived.
+    - ``parse_error`` marks a body it could not salvage at all.
+
+    One damaged call makes the whole round unfinished, even alongside intact
+    ones: dispatching the intact half and dropping the rest silently executes
+    part of what the model was in the middle of asking for.
+    """
+    calls = llm_response.tool_calls
+    return bool(calls) and not any(tc.parse_error or tc.repaired for tc in calls)
 
 
 if TYPE_CHECKING:
@@ -3238,9 +3264,9 @@ class ChatSession:
     ) -> AsyncIterator[StreamEvent]:
         """Retry a response that burned its output budget without finishing.
 
-        ``llm_response`` hit ``max_tokens`` before producing a tool call —
-        detected by token count (`looks_truncated`) rather than relying on
-        ``stop_reason``. The gateway *used to* report a normal stop at the cap
+        ``llm_response`` hit ``max_tokens`` without producing a usable tool
+        call — detected by token count (`looks_truncated`) rather than relying
+        on ``stop_reason``. The gateway *used to* report a normal stop at the cap
         (ENG-1082), which is what kept this recovery dead for every hosted user
         (ENG-1042); it was fixed 2026-08-03 and now reports ``"length"``. The
         token gate stays: it is the half that cannot regress upstream.
@@ -3250,9 +3276,11 @@ class ChatSession:
         all silent):
 
         - the output budget is doubled for this one call, and
-        - a corrective nudge is injected into history — "continue where
-          you left off" when partial text arrived, "answer now, deliberate
-          less" when the whole budget went to internal reasoning.
+        - a corrective nudge is injected into history, matching how the round
+          died — "continue where you left off" when partial text arrived,
+          "answer now, deliberate less" when the whole budget went to internal
+          reasoning, "re-issue that call with smaller arguments" when the cut
+          landed inside a tool call's arguments.
 
         If the retry also comes back truncated with nothing visible, a
         failure notice is shown to the user (and recorded in history) —
@@ -3262,28 +3290,32 @@ class ChatSession:
         """
         budget = self._turn_max_tokens()
         silent = not (llm_response.content or "").strip()
+        # A damaged call is not re-appended to history: the arguments are
+        # unfinished, so the only useful instruction is "make that call again",
+        # which the nudge carries.
+        cut_tool_call = bool(llm_response.tool_calls)
+        if cut_tool_call:
+            nudge = _TRUNCATED_TOOL_CALL_NUDGE
+        elif silent:
+            nudge = _TRUNCATED_SILENT_NUDGE
+        else:
+            nudge = _TRUNCATED_CONTINUE_NUDGE
         # Empty-content appends are no-ops inside _append_history, so the
         # silent variant only records the nudge.
         self._append_history(
             {"role": "assistant", "content": llm_response.content or ""}
         )
-        self._append_history(
-            {
-                "role": "user",
-                "content": (
-                    _TRUNCATED_SILENT_NUDGE if silent else _TRUNCATED_CONTINUE_NUDGE
-                ),
-            }
-        )
+        self._append_history({"role": "user", "content": nudge})
         retry_budget = budget * 2
         logger.warning(
-            "Response truncated at the output budget with no tool call "
-            "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s) — "
-            "retrying once with max_tokens=%s",
+            "Response truncated at the output budget without a usable tool call "
+            "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s, "
+            "cut_tool_call=%s) — retrying once with max_tokens=%s",
             llm_response.usage.output_tokens,
             budget,
             llm_response.stop_reason,
             silent,
+            cut_tool_call,
             retry_budget,
         )
 
@@ -3344,8 +3376,14 @@ class ChatSession:
         # report a normal stop at the cap (ENG-1082, fixed 2026-08-03), which
         # made a stop_reason gate dead code for every MindsHub-routed user
         # (ENG-1042). `looks_truncated` checks both.
-        if not llm_response.tool_calls and looks_truncated(
-            llm_response, self._turn_max_tokens()
+        #
+        # A tool call in the response only exempts it when that call is intact.
+        # The cut can land *inside* the arguments JSON, and then the repair pass
+        # closes the open brace and hands back a parseable dict with no
+        # `parse_error` — so the round looked complete and the handler ran on
+        # arguments the model never finished (ENG-695).
+        if looks_truncated(llm_response, self._turn_max_tokens()) and not _usable_tool_call(
+            llm_response
         ):
             response = None
             async for event in self._recover_truncated_stream(
@@ -3493,25 +3531,41 @@ class ChatSession:
                             datasources=_extract_datasources(tc)
                         )
 
-                    # If the streamed tool-call arguments couldn't be
-                    # parsed (truncation mid-string, missing comma,
-                    # etc.), short-circuit before invoking the
-                    # handler. We synthesise a tool_result asking the
-                    # LLM to re-emit the call with valid JSON. This
-                    # keeps the recovery inside the tool_use /
-                    # tool_result protocol — no session-level retry,
-                    # no SYSTEM message clutter in history. The next
-                    # turn the LLM sees the explanation and re-emits
-                    # cleanly.
-                    if tc.parse_error:
+                    # An unfinished tool call is never dispatched, whichever
+                    # way it arrived here. Two shapes qualify:
+                    #
+                    # - `parse_error` — the streamed arguments couldn't be
+                    #   parsed at all (truncation mid-string, missing comma).
+                    # - `repaired` — they parsed only after the repair pass
+                    #   closed an open string or brace, so the dict is valid
+                    #   JSON built from a body the model never finished. It
+                    #   cannot contain the argument that never arrived, and
+                    #   running a handler on it acts on half a request.
+                    #
+                    # The truncation gates in `_stream_and_handle_tools` catch
+                    # the common case earlier and retry the whole round with a
+                    # bigger budget; this is the backstop for every other path
+                    # (a retry that came back cut too, a repair with no output
+                    # cap involved). We synthesise a tool_result asking the LLM
+                    # to re-emit the call, which keeps the recovery inside the
+                    # tool_use / tool_result protocol — no session-level retry,
+                    # no SYSTEM message clutter in history.
+                    if tc.parse_error or tc.repaired:
+                        reason = (
+                            f"failed to parse: {tc.parse_error}"
+                            if tc.parse_error
+                            else "arrived incomplete — the body ended mid-value and was "
+                                 "only closed off by a repair pass, so at least one "
+                                 "argument is missing or cut short"
+                        )
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tc.id,
                             "content": (
-                                f"Tool call arguments failed to parse: {tc.parse_error}. "
-                                "The streamed JSON was malformed (most often a token-cap "
-                                "truncation mid-call). Re-emit this call with a complete, "
-                                "valid JSON body."
+                                f"Tool call arguments {reason}. This is most often a "
+                                "token-cap truncation mid-call. Re-emit this call with a "
+                                "complete, valid JSON body; if an argument was large, "
+                                "make it smaller or split the work across several calls."
                             ),
                             "is_error": True,
                         })
@@ -3891,10 +3945,14 @@ class ChatSession:
                 llm_response = response.response
 
                 # Detect max_tokens truncation inside tool loop — same
-                # token-count evidence as the pre-loop gate (ENG-1042).
-                if not llm_response.tool_calls and looks_truncated(
+                # token-count evidence, and the same "a cut-open tool call is
+                # not a usable one" rule, as the pre-loop gate (ENG-1042,
+                # ENG-695). A continuation round is where this shape is most
+                # likely: history is at its longest, so the output budget is
+                # what runs out first.
+                if looks_truncated(
                     llm_response, self._turn_max_tokens()
-                ):
+                ) and not _usable_tool_call(llm_response):
                     response = None
                     async for event in self._recover_truncated_stream(
                         llm_response, system=system, tools=tools

@@ -973,17 +973,20 @@ class OpenAIProvider(LLMProvider):
         if message.tool_calls:
             for tc in message.tool_calls:
                 # safe_parse_tool_input returns (parsed_dict,
-                # parse_error). parse_error is forwarded to the
-                # session dispatcher so the tool_use/tool_result
-                # protocol can carry the recovery — see the streaming
-                # path in this file for the same pattern.
-                parsed_input, parse_error = safe_parse_tool_input(tc.function.arguments or "")
+                # parse_error, repaired). parse_error is forwarded to
+                # the session dispatcher so the tool_use/tool_result
+                # protocol can carry the recovery; repaired says the
+                # body parsed only after being patched up, which the
+                # session pairs with its output-cap evidence — see the
+                # streaming path in this file for the same pattern.
+                parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
                         input=parsed_input,
                         parse_error=parse_error,
+                        repaired=repaired,
                     )
                 )
 
@@ -1213,10 +1216,10 @@ class OpenAIProvider(LLMProvider):
         for idx in sorted(tc_state):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
-            parsed, parse_error = safe_parse_tool_input(raw_json)
+            parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
             tool_calls.append(ToolCall(
                 id=info["id"], name=info["name"], input=parsed,
-                parse_error=parse_error,
+                parse_error=parse_error, repaired=repaired,
             ))
             yield StreamToolUseEnd(id=info["id"])
 

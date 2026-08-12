@@ -356,19 +356,23 @@ class AnthropicProvider(LLMProvider):
                         if info.get("type") == "tool_use":
                             raw_json = "".join(info["json_parts"])
                             # safe_parse_tool_input never raises. It
-                            # returns (parsed_dict, parse_error). When
-                            # parse_error is set, the session
-                            # dispatcher short-circuits with a tool
-                            # result asking the LLM to re-emit a clean
-                            # call — that recovery happens via the
-                            # tool_use/tool_result protocol the LLM
-                            # already understands, so it doesn't need
-                            # to escalate to a session-level retry.
-                            parsed_input, parse_error = safe_parse_tool_input(raw_json)
+                            # returns (parsed_dict, parse_error,
+                            # repaired):
+                            #
+                            # - parse_error set → the session
+                            #   dispatcher short-circuits with a tool
+                            #   result asking the LLM to re-emit a
+                            #   clean call, over the tool_use /
+                            #   tool_result protocol the LLM already
+                            #   understands.
+                            # - repaired → the dict parses but the
+                            #   body was cut; the session decides
+                            #   whether that was its output cap.
+                            parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
                             tool_calls.append(
                                 ToolCall(
                                     id=info["id"], name=info["name"], input=parsed_input,
-                                    parse_error=parse_error,
+                                    parse_error=parse_error, repaired=repaired,
                                 )
                             )
                             yield StreamToolUseEnd(id=info["id"])

@@ -22,6 +22,9 @@ What must hold now:
 4. If the retry also dies silently, the user sees an explicit failure notice —
    a turn must never end silently.
 5. Completions that finish inside the budget are untouched.
+6. A tool call the cap opened up does not count as "finished" (ENG-695): the
+   repair pass makes such a call parseable, so without this the round looked
+   complete and its handler ran on arguments the model never emitted.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from anton.core.llm.provider import (
 from anton.core.session import (
     _TRUNCATED_CONTINUE_NUDGE,
     _TRUNCATED_SILENT_NUDGE,
+    _TRUNCATED_TOOL_CALL_NUDGE,
     _TRUNCATION_FAILURE_NOTICE,
     ChatSession,
     ChatSessionConfig,
@@ -326,10 +330,9 @@ async def test_completion_inside_the_budget_is_not_retried(workspace):
 
 
 async def test_at_cap_with_a_tool_call_is_not_intercepted(workspace):
-    """A response that hit the cap but still delivered a usable tool call
-    proceeds into the tool loop — the recovery only owns the no-tool-call
-    case. (Damaged tool-call JSON is the structured-output path's job,
-    ENG-1081.)"""
+    """A response that hit the cap but still delivered an *intact* tool call
+    proceeds into the tool loop — the cut landed after the call, so there is
+    nothing to recover. (The damaged-call case is below.)"""
     tool_call = ToolCall(
         id="tc_1",
         name="scratchpad",
@@ -361,3 +364,163 @@ async def test_at_cap_with_a_tool_call_is_not_intercepted(workspace):
     assert _TRUNCATED_SILENT_NUDGE not in "\n".join(
         _user_texts(script.calls[1]["messages"])
     )
+
+
+# --------------------------------------------------------------------------
+# 6. A tool call cut open at the cap is not a usable tool call (ENG-695).
+# --------------------------------------------------------------------------
+
+
+async def test_repaired_tool_call_at_the_cap_is_retried_not_dispatched(workspace):
+    """The prod shape from ENG-695: the budget ran out *inside* the arguments.
+
+    ``safe_parse_tool_input``'s repair pass closes the open brace, so the call
+    arrives parseable with ``parse_error`` unset — the round therefore looked
+    complete, and the handler ran on arguments the model never finished (in the
+    trace, a ``scratchpad exec`` whose ``code`` was simply gone). It has to take
+    the truncation retry instead.
+    """
+    cut_call = ToolCall(
+        id="tc_cut",
+        name="scratchpad",
+        # What the repair pass returns for
+        # '{"action": "exec", "name": "main", "estimated_execution_time_seconds": 15'
+        input={"action": "exec", "name": "main", "estimated_execution_time_seconds": 15},
+        repaired=True,
+    )
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut_call]),
+            _response("Re-issued the call in smaller parts. Done.", output_tokens=30),
+        ],
+        workspace,
+    )
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 2, "a cut-open tool call must be retried, not dispatched"
+    retry = script.calls[1]
+    assert retry.get("max_tokens") == BUDGET * 2
+    retry_user_texts = "\n".join(_user_texts(retry["messages"]))
+    assert _TRUNCATED_TOOL_CALL_NUDGE in retry_user_texts, (
+        "the nudge must name the real failure — a cut tool call, not silence"
+    )
+
+
+async def test_unparseable_tool_call_at_the_cap_is_retried_with_more_budget(workspace):
+    """Same round, worse damage: the body could not be salvaged at all.
+
+    The dispatcher's ``parse_error`` short-circuit asks the model to re-emit
+    over the tool protocol, but at the same budget that just ran out — so when
+    the cap is the cause, the raised-budget retry is the recovery that can
+    actually succeed.
+    """
+    broken_call = ToolCall(
+        id="tc_broken",
+        name="scratchpad",
+        input={},
+        parse_error="Unterminated string starting at: line 1 column 42",
+    )
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="length", tool_calls=[broken_call]),
+            _response("Recovered.", output_tokens=20),
+        ],
+        workspace,
+    )
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 2
+    assert script.calls[1].get("max_tokens") == BUDGET * 2
+
+
+async def test_cut_open_tool_call_in_a_continuation_round_is_also_retried(workspace):
+    """The same rule has to hold on the *second* gate, inside the tool loop.
+
+    That is where the shape is most likely: history is at its longest by then,
+    so the output budget is what runs out first. The gate is duplicated in the
+    session (pre-loop and in-loop), and fixing only the first one leaves every
+    round after the first tool call dispatching half a call.
+    """
+    intact = ToolCall(id="tc_1", name="scratchpad", input={"action": "exec", "name": "main", "code": "print(1)"})
+    cut = ToolCall(id="tc_2", name="scratchpad", input={"action": "exec", "name": "main"}, repaired=True)
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=40, stop_reason="tool_use", tool_calls=[intact]),
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut]),
+            _response("Split the cell up — done.", output_tokens=30),
+        ],
+        workspace,
+    )
+    session._llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="done")
+    )
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 3, "the continuation round's cut call must be retried"
+    assert script.calls[2].get("max_tokens") == BUDGET * 2
+
+
+async def test_a_repaired_call_below_the_cap_is_never_dispatched(workspace):
+    """The dispatcher backstop: no handler ever runs on repaired arguments.
+
+    Here the round finished well inside its budget, so neither truncation gate
+    fires — the repair had some other cause (a dropped connection, a model
+    glitch). The arguments are still a body the model never finished, so the
+    call has to come back as an is_error tool_result asking for a re-emit
+    rather than reaching `prepare_scratchpad_exec` with no `code`. This is also
+    what protects the one path the gates can't see: a truncation retry that
+    itself came back cut.
+    """
+    cut = ToolCall(
+        id="tc_net",
+        name="scratchpad",
+        input={"action": "exec", "name": "main"},
+        repaired=True,
+    )
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=120, stop_reason="tool_use", tool_calls=[cut]),
+            _response("Re-issued it with the code inline. Done.", output_tokens=30),
+        ],
+        workspace,
+    )
+    session._llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="done")
+    )
+
+    await _run_turn(session)
+
+    # No truncation retry (the round was nowhere near the cap) — the follow-up
+    # round carries the error tool_result instead.
+    assert script.calls[1].get("max_tokens") is None
+    results = [
+        block
+        for message in script.calls[1]["messages"]
+        for block in (message.get("content") if isinstance(message.get("content"), list) else [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert results, "the cut call must produce a tool_result, not a handler run"
+    assert results[0]["is_error"] is True
+    assert "arrived incomplete" in results[0]["content"]
+
+
+async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
+    """Dispatching the intact half of a cut-open round runs part of what the
+    model was still in the middle of asking for."""
+    intact = ToolCall(id="tc_ok", name="memorize", input={"content": "prefers weekly reports"})
+    cut = ToolCall(id="tc_cut", name="scratchpad", input={"action": "exec"}, repaired=True)
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[intact, cut]),
+            _response("Done.", output_tokens=15),
+        ],
+        workspace,
+    )
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 2
+    assert script.calls[1].get("max_tokens") == BUDGET * 2
