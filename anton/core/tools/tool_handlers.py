@@ -78,6 +78,92 @@ def _artifact_store(session: "ChatSession"):
     return ArtifactStore(workspace.artifacts_dir)
 
 
+def _prd_generation_failed(reason: str) -> str:
+    """Wrap a generate_prd failure so the outer agent reports it instead of
+    building the PRD (or the artifact) by hand. Mirrors
+    generate_artifact's `_generation_failed` wrapper — same rationale:
+    without this instruction the agent treats a pipeline failure as a cue
+    to DIY the next step, silently bypassing the confirmation flow."""
+    return (
+        "Error: PRD generation failed.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT write prd.md yourself and do NOT proceed to "
+        "building the artifact. Report this failure to the user: state in "
+        "plain language that PRD generation failed, quote the reason "
+        "above, and ask how they want to proceed."
+    )
+
+
+_PRD_CANCELLED_INSTRUCTION = (
+    "PRD generation was cancelled by the user — do NOT write prd.md "
+    "yourself, do NOT proceed to building the artifact, report back to "
+    "the user."
+)
+
+_PRD_UNCONFIRMED_INSTRUCTION = (
+    "The PRD was drafted best-effort but the user has NOT confirmed it "
+    "(question budget for this turn is exhausted) — do NOT proceed to "
+    "building the artifact yet; show `brief_summary` to the user and get "
+    "their explicit confirmation before continuing, in this turn if the "
+    "budget allows or in a follow-up turn otherwise."
+)
+
+
+async def handle_generate_prd(session: "ChatSession", tc_input: dict) -> str:
+    """Draft and confirm a PRD for an already-registered web artifact.
+
+    Validates input, then hands off to `anton.core.tools.generate_prd.generate`,
+    which runs the two-phase FSM (gather → draft/confirm/write) and writes
+    `prd.md` into the artifact folder. Never raises — pipeline failures come
+    back wrapped by `_prd_generation_failed`; a `cancelled` or
+    `prd_written_unconfirmed` result carries its own do-NOT-proceed
+    instruction instead.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        return "Error: `slug` is required."
+    artifact = store.open(slug)
+    if artifact is None:
+        return f"Error: no artifact found for slug `{slug}`."
+
+    user_request = (tc_input.get("user_request") or "").strip()
+    if not user_request:
+        return "Error: `user_request` is required."
+    agent_understanding = (tc_input.get("agent_understanding") or "").strip()
+    if not agent_understanding:
+        return "Error: `agent_understanding` is required."
+
+    folder = store.folder_for(slug)
+    from anton.core.tools.generate_prd import generate
+
+    try:
+        result = await generate(
+            session=session,
+            slug=slug,
+            artifact_path=folder,
+            artifact_type=artifact.type,
+            user_request=user_request,
+            agent_understanding=agent_understanding,
+            known_data=(tc_input.get("known_data") or "").strip(),
+            user_preferences=(tc_input.get("user_preferences") or "").strip(),
+        )
+    except Exception as exc:  # last-resort: never escalate to the dispatcher
+        return _prd_generation_failed(f"generator crashed: {exc}")
+
+    status = result.get("status")
+    if status == "cancelled":
+        return json.dumps({**result, "instruction": _PRD_CANCELLED_INSTRUCTION}, indent=2)
+    if status == "prd_written_unconfirmed":
+        return json.dumps({**result, "instruction": _PRD_UNCONFIRMED_INSTRUCTION}, indent=2)
+    return json.dumps(result, indent=2)
+
+
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
     """Create a fresh artifact folder + metadata.json + README.md.
 
@@ -254,6 +340,85 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     store.update(slug, port=result["port"])
     return json.dumps(
         {k: v for k, v in result.items() if k != "proc"},
+        indent=2,
+    )
+
+
+def _generation_failed(reason: str) -> str:
+    """Wrap an FSM failure so the outer agent reports it instead of DIY-ing.
+
+    Without this instruction the agent treats a pipeline failure as a cue to
+    build the artifact by hand (write_file/scratchpad fallback), silently
+    bypassing the whole verified pipeline. Input-validation errors are NOT
+    wrapped — those the agent should fix by correcting its call.
+    """
+    return (
+        "Error: artifact generation failed.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build or repair the artifact yourself — no "
+        "write_file / scratchpad fallback — and do not re-call "
+        "generate_artifact with the same input. Report this failure to the "
+        "user: state in plain language that artifact generation failed, quote "
+        "the reason above, and ask how they want to proceed."
+    )
+
+
+async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> str:
+    """Generate every file for an already-registered artifact via the FSM.
+
+    The handler loads artifact metadata to read its `type` (rejects types
+    outside {html-app, fullstack-stateless-app, fullstack-stateful-app}),
+    validates input shape (context required), and hands off to
+    `anton.core.tools.generate_artifact.generate`, which runs the deterministic
+    generation state machine and writes files into the artifact folder.
+    Pipeline failures come back wrapped by `_generation_failed` so the agent
+    surfaces them to the user instead of hand-building the artifact.
+    """
+    import json
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        return "Error: `slug` is required."
+    artifact = store.open(slug)
+    if artifact is None:
+        return f"Error: no artifact found for slug `{slug}`."
+
+    supported = {"html-app", "fullstack-stateless-app", "fullstack-stateful-app"}
+    if artifact.type not in supported:
+        return (
+            "Error: generate_artifact only supports html-app / "
+            "fullstack-stateless-app / fullstack-stateful-app. "
+            f"Got: {artifact.type}."
+        )
+
+    context = tc_input.get("context")
+    if not isinstance(context, str) or not context.strip():
+        return "Error: `context` is required (markdown brief)."
+
+    folder = store.folder_for(slug)
+    from anton.core.tools.generate_artifact import generate
+
+    try:
+        result = await generate(
+            session=session,
+            artifact_type=artifact.type,
+            artifact_path=folder,
+            context=context,
+            slug=slug,
+            primary=artifact.primary,
+        )
+    except Exception as exc:  # last-resort: never escalate to the dispatcher
+        return _generation_failed(f"generator crashed: {exc}")
+
+    if isinstance(result, str):
+        return _generation_failed(result)
+
+    return json.dumps(
+        {"slug": slug, "path": str(folder), **result},
         indent=2,
     )
 

@@ -471,6 +471,38 @@ def test_update_primary_and_port_together(store: ArtifactStore):
     assert updated.port == 5000
 
 
+def test_update_type(store: ArtifactStore):
+    artifact = store.create(name="X", description="x", type="html-app")
+    updated = store.update(artifact.slug, type="fullstack-stateless-app")
+    assert updated is not None
+    assert updated.type == "fullstack-stateless-app"
+    reloaded = store.open(artifact.slug)
+    assert reloaded.type == "fullstack-stateless-app"
+
+
+def test_update_type_together_with_other_fields(store: ArtifactStore):
+    artifact = store.create(name="X", description="x", type="html-app")
+    updated = store.update(artifact.slug, type="document", primary="report.pdf")
+    assert updated.type == "document"
+    assert updated.primary == "report.pdf"
+
+
+def test_update_invalid_type_raises(store: ArtifactStore):
+    artifact = store.create(name="X", description="x", type="html-app")
+    with pytest.raises(ValueError, match="type"):
+        store.update(artifact.slug, type="not-a-real-type")
+    # Rejected before any write — the artifact's type is untouched.
+    reloaded = store.open(artifact.slug)
+    assert reloaded.type == "html-app"
+
+
+def test_update_missing_slug_still_returns_none_not_valueerror(store: ArtifactStore):
+    """A missing slug and a bad `type` are different failure causes — the
+    ValueError must not fire before the existence check, or a caller testing
+    for a missing artifact via `is None` would see an exception instead."""
+    assert store.update("does-not-exist", type="not-a-real-type") is None
+
+
 def test_update_omitted_field_unchanged(store: ArtifactStore):
     artifact = store.create(
         name="App", description="x", type="fullstack-stateful-app",

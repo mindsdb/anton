@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from anton.core.artifacts.models import (
+    ARTIFACT_TYPES,
     METADATA_SCHEMA_VERSION,
     Artifact,
     ArtifactType,
@@ -199,6 +200,7 @@ class ArtifactStore:
         primary: str | None = _UNSET,  # type: ignore[assignment]
         port: int | None = _UNSET,  # type: ignore[assignment]
         datasources: list[DatasourceRef] | None = _UNSET,  # type: ignore[assignment]
+        type: ArtifactType | None = _UNSET,  # type: ignore[assignment]  # noqa: A002 (shadows builtin `type` — matches `create()`'s existing param name below)
     ) -> Artifact | None:
         """Update mutable agent-supplied fields on an existing artifact.
 
@@ -206,11 +208,26 @@ class ArtifactStore:
         left unchanged. Pass `primary=None` or `primary=""` to clear
         the entry-point pointer. Pass `port=None` to clear the port.
         Pass `datasources=[]` to clear the datasource list.
+
+        `type` is validated against `ARTIFACT_TYPES` after the slug is
+        confirmed to exist, but before anything is mutated — Pydantic's
+        `Artifact` model has no `validate_assignment`, so an invalid value
+        assigned directly would write corrupt JSON that only fails on the
+        *next* load. A missing slug always returns `None` regardless of
+        `type`'s validity (checked first): `None` already means "slug not
+        found", so a bad `type` on top of a missing slug must not escalate
+        that into a `ValueError` — the two causes stay distinguishable by
+        checking existence before validity.
+
         Returns the updated artifact, or None when the slug is missing.
         """
         artifact = self._load_silent(slug)
         if artifact is None:
             return None
+        if type is not _UNSET and type not in ARTIFACT_TYPES:
+            raise ValueError(
+                f"`type` must be one of {ARTIFACT_TYPES}. Got: {type!r}."
+            )
         if primary is not _UNSET:
             artifact.primary = (
                 primary.strip() if isinstance(primary, str) and primary.strip() else None
@@ -219,6 +236,8 @@ class ArtifactStore:
             artifact.port = int(port) if port is not None else None
         if datasources is not _UNSET:
             artifact.datasources = list(datasources or [])
+        if type is not _UNSET:
+            artifact.type = type
         artifact.updatedAt = _utc_now()
         self._save(artifact)
         return artifact
