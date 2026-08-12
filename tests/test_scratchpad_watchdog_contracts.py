@@ -524,6 +524,23 @@ class TestKillLoopLesson:
         ]
         assert detect_kill_loop(events) is None
 
+    def test_install_kills_write_no_rule(self):
+        """A kill during a package install says nothing about the cell's size
+        or the worker's health — no durable rule beats a wrong one (ENG-1275)."""
+        events = [
+            _kill_event(
+                "Cell killed during auto-install of 'torch' — the install ran "
+                "past its 120s budget and grace window without reporting a result",
+                round_idx=1,
+            ),
+            _kill_event(
+                "Cell killed during auto-install of 'torch' — no liveness signal "
+                "for 150s: the worker process died or the installer is wedged",
+                round_idx=2,
+            ),
+        ]
+        assert detect_kill_loop(events) is None
+
 
 class TestToolContractText:
     def test_description_does_not_claim_progress_is_survival_critical(self):
