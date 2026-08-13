@@ -349,11 +349,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 timeout=30,
             )
         else:
+            # symlinks=False is venv.create()'s own default on every platform
+            # (only the `python -m venv` CLI defaults it per-OS); a copied
+            # macOS Python binary loses its @rpath and crashes on launch.
             venv.create(
                 self._venv_dir,
                 system_site_packages=True,
                 with_pip=False,
                 clear=True,
+                symlinks=sys.platform != "win32",
             )
 
         if sys.platform == "win32":
