@@ -2206,30 +2206,74 @@ class ChatSession:
         so a host on older settings, or any path that runs outside a turn, keeps
         exactly its pre-ENG-1286 behaviour.
 
-        Note this can only ever be consulted AFTER at least one LLM call has been
-        made — every call site sits inside the tool loop, which is only entered
-        once a planning response exists. So the gate cannot produce a turn that
-        made no call and said nothing.
+        This is pure arithmetic and says nothing about whether the turn has done
+        any WORK yet. An earlier version of this docstring claimed it could only
+        fire after real work had happened, on the reasoning that every call site
+        sits inside the tool loop; that is true of LLM calls and false of tool
+        dispatches, which happen later in the same iteration. The per-round call
+        site carries the progress condition explicitly — see `_spend_ceiling_ok`.
         """
         if self._max_turn_tokens <= 0 or self._turn_cost is None:
             return False
         return self._turn_cost.total_tokens >= self._spend_ceiling_gate()
 
+    def _spend_ceiling_stops_the_tool_loop(self) -> bool:
+        """Should the tool loop stop here on the spend ceiling?
+
+        The ceiling, plus the one thing it must never do: end a turn that has
+        dispatched no tools at all. The gate is checked at the TOP of a round,
+        before dispatch, so on the first round a small ceiling would break the
+        loop having run nothing — the user gets a "this used a lot of tokens"
+        message for a task that never started.
+
+        `TurnCost.rounds` is turn-wide (it accumulates across verifier-forced
+        continuations rather than resetting with the loop-local counter), so
+        `> 1` means at least one round has completed its dispatch — including
+        rounds from an earlier continuation, which is why a continuation cannot
+        hand out a fresh free round.
+
+        Belt and braces with the reserve cap in `_spend_ceiling_gate`: that cap
+        keeps the gate proportional to the ceiling, this keeps the guarantee true
+        even for a ceiling smaller than a single call — a shape the settings
+        floor is supposed to prevent, but which anton's own `max_turn_tokens`
+        has no bounds on for CLI and host callers.
+        """
+        if not self._spend_ceiling_reached():
+            return False
+        rounds = self._turn_cost.rounds if self._turn_cost is not None else 0
+        return rounds > 1
+
     def _spend_ceiling_gate(self) -> int:
         """The token total at which the turn must stop starting new work.
 
         Sits a reserve below the ceiling because two more calls are still coming
-        after the last check that passed — the one that crosses the gate, and
-        the hand-back. Sized from this turn's own `peak_context_tokens` rather
-        than a constant: a turn carrying 190k of context per call overshoots a
-        flat 200k reserve by roughly a full call, which is precisely the bound
-        the ceiling exists to make true.
+        after the last check that passed — the one that crosses the gate (the
+        total is only read *between* calls, so the crossing is never observed
+        mid-flight), and the hand-back. Sized from this turn's own
+        `peak_context_tokens` rather than a constant: a turn carrying 190k of
+        context per call overshoots a flat 200k reserve by roughly a full call.
 
-        Floored at 1 so a pathological ceiling smaller than the reserve still
-        gates on something positive instead of tripping before any work.
+        **The reserve is capped at half the ceiling**, and that cap is the whole
+        reason small ceilings are usable. Without it the reserve bears no
+        relation to the ceiling's size, so any ceiling at or below the reserve
+        drove this to the `max(..., 1)` floor — the gate then tripped on the
+        first check, before any tool had been dispatched, and the turn still
+        paid for two calls. Measured at a 100k ceiling with 190k contexts: zero
+        tools run, 400k spent, 300% over the number the user asked for. The cap
+        binds only below ~2x the reserve; at the 1.25M default it changes
+        nothing.
+
+        The bound this produces is close, not exact: the reserve is derived from
+        `peak_context_tokens` (input + cache_read + cache_creation) but compared
+        against `total_tokens`, which also counts output, so a turn can land
+        over the ceiling by roughly two output budgets. See
+        `test_total_is_bounded_by_the_ceiling` for the asserted form.
         """
         peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
-        reserve = max(_SPEND_CEILING_RESERVE, 2 * peak)
+        reserve = min(
+            max(_SPEND_CEILING_RESERVE, 2 * peak),
+            max(self._max_turn_tokens // 2, 1),
+        )
         return max(self._max_turn_tokens - reserve, 1)
 
     def _spend_ceiling_notice(self) -> str:
@@ -3599,15 +3643,15 @@ class ChatSession:
                 # continuation-gate-only check never sees it. Ordered after the
                 # round cap so a turn that breaches both still reports
                 # `round_cap`, leaving that path's behaviour untouched.
-                if self._spend_ceiling_reached():
+                if self._spend_ceiling_stops_the_tool_loop():
                     _spend_ceiling_hit = True
                     if self._turn_cost is not None:
                         self._turn_cost.ended_by = "spend_ceiling"
                     logger.info(
-                        "spend ceiling reached: tokens=%d ceiling=%d reserve=%d "
+                        "spend ceiling reached: tokens=%d ceiling=%d gate=%d "
                         "tool_round=%d continuation=%d — pausing to ask the user",
                         self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, _SPEND_CEILING_RESERVE,
+                        self._max_turn_tokens, self._spend_ceiling_gate(),
                         tool_round, continuation,
                     )
                     self._append_history(
@@ -4388,11 +4432,19 @@ class ChatSession:
                 break
 
             # INCOMPLETE — continue working, unless the budget for this turn is
-            # already gone. Checked here as well as per-round because a
-            # continuation re-enters the tool loop with a full history: the round
-            # counter resets to 0, so without this gate a turn can spend the
-            # ceiling several times over across continuations and each pass looks
-            # cheap to the per-round check (ENG-1286).
+            # already gone.
+            #
+            # NOT because the per-round check misses continuation spend: an
+            # earlier version of this comment said the round counter resets so
+            # each pass "looks cheap", which is wrong — `TurnCost` is built once
+            # per turn and `add()` accumulates, so the per-round check always
+            # sees the turn's full running total. Deleting this gate on the
+            # strength of disproving that rationale would still be a regression.
+            #
+            # The real reason: a continuation whose planning call returns a TEXT
+            # reply never enters the tool loop, so the per-round check is never
+            # reached and the turn would end `completed` with no hand-back at
+            # all, however much it had spent (ENG-1286).
             if self._spend_ceiling_reached():
                 _spend_ceiling_hit = True
                 if self._turn_cost is not None:

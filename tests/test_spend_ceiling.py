@@ -28,9 +28,17 @@ from anton.core.llm.provider import (
 from anton.core.session import ChatSession, ChatSessionConfig, _SPEND_CEILING_RESERVE
 
 CEILING = 1_000_000
-# Per call: enough that two calls clear (CEILING - reserve) and one does not,
-# so the tests can place the trip at a known round.
-PER_CALL = 500_000
+# Sized so the trip needs SEVERAL rounds. The first version used 500_000, which
+# breached the gate on the very first call — that made `rounds`/`continuations`
+# assertions structurally unfalsifiable, so the placement guard below passed
+# even with the per-round gate disabled. At 100_000 (context 75_000, reserve
+# 200_000, gate 800_000) the trip lands around round 8.
+PER_CALL = 100_000
+# The product floor for the user-settable ceiling (cowork-server
+# `UserSettings.max_turn_tokens` ge=750_000). Below one call's cost no ceiling
+# can avoid overshooting, so the floor is what keeps the setting honest — these
+# tests pin that the floor itself still does real work.
+PRODUCT_FLOOR = 750_000
 
 
 @pytest.fixture()
@@ -128,16 +136,25 @@ async def test_ceiling_stops_the_turn_and_marks_the_exit(workspace):
 
 
 async def test_total_is_bounded_by_the_ceiling(workspace):
-    """The turn's spend lands at or under the ceiling.
+    """The turn's spend lands at the ceiling, give or take two output budgets.
 
-    The reserve is what makes this hold: the hand-back diagnosis is itself an
-    LLM call, so gating AT the ceiling would overshoot it by that call's cost.
+    The reserve is what makes this hold at all: the hand-back diagnosis is
+    itself an LLM call, so gating AT the ceiling would overshoot by that call.
+
+    The slack is not slop — it is the exact residual of the design. The reserve
+    is derived from `peak_context_tokens` (input + cache_read + cache_creation)
+    but compared against `total_tokens`, which also counts output, so the two
+    calls that land after the last passing check contribute their output on top.
+    Asserting `<= CEILING` exactly passed only because the old fixture happened
+    to land on 1,000,000 with zero margin; it reddened as soon as `per_call`
+    moved. State the real bound instead of a knife-edge one.
     """
-    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 20)])
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 40)])
     with patch("anton.analytics.send_event") as send:
         await _run(session)
+    slack = 2 * (PER_CALL // 4)  # `_usage` puts a quarter of each call in output
     # Analytics properties go over the wire as strings.
-    assert int(send.call_args.kwargs["tokens_total"]) <= CEILING
+    assert int(send.call_args.kwargs["tokens_total"]) <= CEILING + slack
 
 
 async def test_trips_inside_one_tool_loop_with_no_continuation(workspace):
@@ -147,13 +164,17 @@ async def test_trips_inside_one_tool_loop_with_no_continuation(workspace):
     consecutive scratchpad calls that reach the round cap having triggered no
     continuation at all. This is the regression guard for that placement.
     """
-    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 12)])
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 40)])
     with patch("anton.analytics.send_event") as send:
         await _run(session)
     kwargs = send.call_args.kwargs
     assert kwargs["ended_by"] == "spend_ceiling"
     assert int(kwargs["continuations"]) == 0, "must trip without needing a continuation"
     assert int(kwargs["rounds"]) < 25, "must trip before the round cap, not because of it"
+    # Load-bearing: without this the whole test passes on a turn that tripped on
+    # its FIRST call, where "no continuation" and "under the round cap" are true
+    # by construction and say nothing about where the check lives.
+    assert int(kwargs["rounds"]) > 1, "must have run several rounds before tripping"
 
 
 async def test_handback_asks_the_user_and_is_persisted_as_streamed(workspace):
@@ -284,3 +305,129 @@ async def test_cache_reads_count_toward_the_ceiling(workspace):
         "a turn made almost entirely of cache reads still exhausts the "
         "user's included-token allowance"
     )
+
+
+# ── The guarantee: a ceiling stop never ends a turn that did nothing ────────
+
+
+@pytest.mark.parametrize("ceiling", [PRODUCT_FLOOR, 250_000, 100_000, 1])
+async def test_a_ceiling_stop_never_dispatches_zero_tools(workspace, ceiling):
+    """At ANY ceiling, the turn runs at least one tool before stopping.
+
+    The regression this pins was user-reachable: the reserve was
+    `max(200_000, 2 * peak)` with no relation to the ceiling, so any ceiling at
+    or below the reserve drove the gate to its `max(..., 1)` floor. The check
+    runs at the TOP of a round, before dispatch, so the loop broke having run
+    nothing — and still paid for two calls. Measured at a 100k ceiling with
+    190k contexts: 0 tools, 400k spent, 300% over what the user asked for.
+
+    The whole lower half of the range the Settings UI advertised sat in that
+    band. Parametrised down to `1` deliberately: anton's own `max_turn_tokens`
+    has no lower bound for CLI and host callers, so the guarantee cannot rest
+    on the product floor alone.
+    """
+    session = _session(workspace, ceiling=ceiling, per_call=190_000,
+                       responses=[_tool_call(i) for i in range(1, 40)])
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+    assert session.tool_registry.dispatch_tool.call_count > 0, (
+        f"ceiling={ceiling:,} ended the turn having dispatched no tools"
+    )
+    assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+
+
+async def test_gate_stays_proportional_to_the_ceiling(workspace):
+    """The reserve can never eat the whole ceiling.
+
+    Unit-level companion to the parametrised test above: it pins the arithmetic
+    rather than the behaviour, so a future change that keeps tools running by
+    some other means still can't reintroduce a gate of 1.
+    """
+    from anton.core.turn_cost import TurnCost
+
+    session = _session(workspace, ceiling=300_000)
+    session._turn_cost = TurnCost()
+    session._turn_cost.peak_context_tokens = 5_000_000  # absurd, on purpose
+    assert session._spend_ceiling_gate() >= 300_000 // 2
+    # …and the cap does not disturb the shipped default.
+    session._max_turn_tokens = 1_250_000
+    session._turn_cost.peak_context_tokens = 190_000
+    assert session._spend_ceiling_gate() == 1_250_000 - 380_000
+
+
+async def test_the_setting_actually_reaches_the_session(workspace):
+    """The wiring from settings to session, which nothing else covers.
+
+    `getattr(s, "max_turn_tokens", 0)` is deliberately fail-open, so a typo in
+    the key name silently disables the ceiling with no exception, no log and no
+    `ended_by` — and every other test in this file pokes `_max_turn_tokens`
+    directly after construction, so all of them would still pass.
+    """
+    from anton.core.settings import CoreSettings
+
+    session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm(),
+                                            workspace=workspace))
+    assert session._max_turn_tokens == CoreSettings().max_turn_tokens == 1_250_000
+
+
+async def test_ceiling_trips_at_the_continuation_gate(workspace):
+    """A continuation whose planning call returns TEXT never enters the tool
+    loop, so only the continuation gate can stop it.
+
+    Both non-per-round call sites were previously uncovered: replacing either
+    with `if False:` left the entire 2,012-test suite green.
+    """
+    from anton.core.session import _VerifierVerdict
+
+    # One tool round, then text replies — so the tool loop exits and the
+    # verifier's INCOMPLETE drives a continuation that uses no tools at all.
+    session = _session(workspace, per_call=300_000,
+                       responses=[_tool_call(1), _text("partial"),
+                                  _text("still going"), _text("more")])
+    verdicts = [_VerifierVerdict(status="INCOMPLETE", reason="not done")]
+    session._llm.generate_object_code = AsyncMock(
+        side_effect=lambda *a, **k: verdicts.pop(0) if verdicts
+        else _VerifierVerdict(status="INCOMPLETE", reason="not done"))
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+    assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+
+
+async def test_ceiling_applies_to_the_non_streaming_turn(workspace):
+    """`turn()` runs no verifier, so its per-round check is the whole gate.
+
+    Public API with no in-tree caller, but its cost books are wired, so a
+    silently unbounded path here would under-report every host that uses it.
+    """
+    session = _session(workspace, per_call=190_000,
+                       responses=[_tool_call(i) for i in range(1, 40)])
+    with patch("anton.analytics.send_event") as send:
+        await session.turn("do the thing")
+    assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+    assert session.tool_registry.dispatch_tool.call_count > 0
+
+
+async def test_empty_diagnosis_does_not_double_append_the_reply(workspace):
+    """The ENG-1155 guard on this path is load-bearing and was untested.
+
+    `_reply_persisted = True` is the SOLE writer on the ceiling path — the
+    verification block's own assignment is unreachable because the verifier
+    skip breaks first. Deleting it survived the whole repo.
+    """
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 40)])
+    with patch("anton.analytics.send_event"), \
+         patch.object(ChatSession, "_stream_handback_diagnosis",
+                      lambda self, **kw: _empty_stream()):
+        await _run(session)
+    assistants = [i for i, m in enumerate(session._history)
+                  if m.get("role") == "assistant" and isinstance(m.get("content"), str)]
+    tails = [session._history[i]["content"] for i in assistants[-2:]]
+    assert len(tails) < 2 or tails[0] != tails[1], (
+        f"the pre-stop reply was appended twice: {tails!r}"
+    )
+
+
+async def _empty_stream():
+    """A hand-back that streams nothing — the guarded empty-diagnosis case."""
+    return
+    yield  # pragma: no cover - makes this an async generator
