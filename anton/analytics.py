@@ -90,6 +90,7 @@ import logging
 import os
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -232,9 +233,10 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
     }
     properties["$lib"] = _LIB
     # Store the event without creating a Person for the install fingerprint.
-    # Without this every `aid` becomes a "person" in a project keyed on
-    # Keycloak subs — roughly 800 of them against ~1,098 real identified
-    # people — inflating every person-count metric and cohort there.
+    # Without this every `aid` becomes a "person" in project 424726, which is
+    # keyed on the Keycloak `sub` — so machine fingerprints would be counted
+    # alongside real identified users in every person metric and cohort there,
+    # and no later query can separate them again.
     properties["$process_person_profile"] = False
 
     return json.dumps(
@@ -262,27 +264,37 @@ def _fire_posthog(url: str, body: bytes) -> None:
         bogus api_key      -> HTTP 200  {"status":"Ok"}     <- NOT detectable
         real api_key       -> HTTP 200  {"status":"Ok"}
         malformed payload  -> HTTP 400  "failed to hydrate events..."
+        absent  api_key    -> HTTP 401  "event submitted without an api_key"
 
     So this catches a malformed payload and any transport failure, and it
     **cannot** catch a wrong, rotated or revoked project token: PostHog accepts
-    an invalid key with 200 and drops the event server-side.  A token problem is
-    therefore invisible from here by construction, which is exactly why the
+    an invalid key with 200 and drops the event server-side.  The 401 is
+    unreachable from here — ``send_event`` returns early when the key is empty,
+    so a request without one is never built.  A token problem is therefore
+    invisible from this side by construction, which is exactly why the
     zero-volume alert on ``turn_completed`` is not optional.
+
+    Note the rejection is caught as ``HTTPError``, not read off a response.
+    ``urlopen`` **raises** on 4xx/5xx rather than returning something with a
+    ``.status`` to inspect — an earlier version of this function checked the
+    status inside a ``with`` block that a rejection never reaches, and its test
+    passed only because the stub returned where urllib raises.
     """
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": _POSTHOG_USER_AGENT,
+        },
+    )
     try:
-        request = urllib.request.Request(
-            url,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": _POSTHOG_USER_AGENT,
-            },
-        )
-        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
-            status = getattr(response, "status", None)
-            if status is not None and not 200 <= status < 300:
-                logger.debug("posthog capture rejected: HTTP %s", status)
+        urllib.request.urlopen(request, timeout=_TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        # The status is worth more than a traceback to whoever is reading logs
+        # on a user's machine.
+        logger.debug("posthog capture rejected: HTTP %s", exc.code)
     except Exception:
         logger.debug("posthog capture failed", exc_info=True)
 

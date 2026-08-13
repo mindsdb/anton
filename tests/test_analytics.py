@@ -189,10 +189,11 @@ def test_unregistered_events_still_use_the_collector(monkeypatch):
 
 def test_person_profile_is_disabled(monkeypatch):
     """Load-bearing: without this flag every install fingerprint becomes a
-    PostHog *Person* in a project keyed on Keycloak subs — roughly 800 of them
-    against ~1,098 real identified people — silently inflating every
-    person-count metric and cohort in it. Not cosmetic, and not recoverable by
-    a later query."""
+    PostHog *Person* in project 424726, which is keyed on the Keycloak `sub`.
+    Machine fingerprints would then be counted alongside real identified users
+    in every person metric and cohort there, and no later query can separate
+    them again. Deliberately unquantified — the ratio this docstring used to
+    give could not be reproduced from the description it carried."""
     _clear_ci(monkeypatch)
     captured = _capture_posthog(monkeypatch)
 
@@ -306,26 +307,23 @@ def test_turn_completed_respects_the_opt_out(monkeypatch):
     assert captured == []
 
 
-class _FakeResponse:
-    """Minimal stand-in for urlopen's context manager, so the status-reading
-    path in `_fire_posthog` is actually exercised rather than skipped."""
+def _capture_posthog_request(monkeypatch, status=None) -> list:
+    """Record the Request `_fire_posthog` builds.
 
-    def __init__(self, status=200):
-        self.status = status
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _capture_posthog_request(monkeypatch, status=200) -> list:
+    `status` raises `HTTPError` the way real urllib does on a 4xx/5xx — it does
+    NOT return a response object carrying a status. An earlier version of this
+    helper returned a fake response, which made the rejection test pass against
+    behaviour urllib does not have.
+    """
     seen: list[urllib.request.Request] = []
 
     def _urlopen(req, timeout=None):
         seen.append(req)
-        return _FakeResponse(status)
+        if status is not None:
+            raise urllib.error.HTTPError(
+                req.full_url, status, "rejected", hdrs=None, fp=None
+            )
+        return None
 
     monkeypatch.setattr(analytics.urllib.request, "urlopen", _urlopen)
     return seen
@@ -345,22 +343,28 @@ def test_posthog_request_is_a_post_with_json(monkeypatch):
     assert "python-urllib" not in seen[0].get_header("User-agent", "").lower()
 
 
-def test_posthog_rejection_is_logged_and_swallowed(monkeypatch, caplog):
-    """A non-2xx must leave a trace locally and still not raise.
+def test_posthog_rejection_logs_the_status_code(monkeypatch, caplog):
+    """A rejection must name its status, and still not raise.
 
-    Note what this can and cannot buy, measured against the live endpoint on
+    The stub **raises** `HTTPError`, which is what real urllib does on a 4xx —
+    it does not return a response whose `.status` can be read. That distinction
+    is the whole point of this test: a previous version asserted against a
+    fake that returned, so it passed while the code under it could never run.
+
+    What this can and cannot buy, measured against the live endpoint on
     2026-08-13: a **bogus api_key returns HTTP 200** `{"status":"Ok"}`, so a
-    wrong/rotated/revoked token is NOT detectable here. Only a malformed payload
-    (400) and transport failures are. The zero-volume alert remains the only
-    defence against a token problem — this test exists so that the errors which
-    *are* visible stop being silent, not to suggest all of them are.
+    wrong/rotated/revoked token is NOT detectable here at all. The 401 exists
+    only for an absent key, which `send_event` short-circuits before building a
+    request. Only malformed payloads and transport failures are visible. The
+    zero-volume alert stays the only possible detector for a token problem.
     """
     seen = _capture_posthog_request(monkeypatch, status=400)
 
     with caplog.at_level("DEBUG", logger=analytics.logger.name):
         analytics._fire_posthog("https://ph.example.test/capture/", b'{"bad":1}')
 
-    assert len(seen) == 1  # still sent; never raises
+    assert len(seen) == 1  # still attempted; never raises
+    # The code, not just a traceback — someone reading a user's logs needs it.
     assert any("400" in r.getMessage() for r in caplog.records), caplog.text
 
 
