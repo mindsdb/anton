@@ -393,18 +393,28 @@ async def test_ceiling_trips_at_the_continuation_gate(workspace):
     assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
 
 
-async def test_ceiling_applies_to_the_non_streaming_turn(workspace):
+@pytest.mark.parametrize("ceiling", [CEILING, 100_000, 1])
+async def test_ceiling_applies_to_the_non_streaming_turn(workspace, ceiling):
     """`turn()` runs no verifier, so its per-round check is the whole gate.
 
     Public API with no in-tree caller, but its cost books are wired, so a
     silently unbounded path here would under-report every host that uses it.
+
+    Parametrised down to a ceiling of 1 because this path is where the
+    never-zero-tools guarantee is easiest to lose: it gated on the bare
+    predicate rather than `_spend_ceiling_stops_the_tool_loop`, so a small
+    ceiling broke the loop on round 1 having dispatched nothing (#344 review).
+    CLI and host callers have no lower bound on `max_turn_tokens`, so the
+    product floor does not protect them.
     """
-    session = _session(workspace, per_call=190_000,
+    session = _session(workspace, ceiling=ceiling, per_call=190_000,
                        responses=[_tool_call(i) for i in range(1, 40)])
     with patch("anton.analytics.send_event") as send:
         await session.turn("do the thing")
     assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
-    assert session.tool_registry.dispatch_tool.call_count > 0
+    assert session.tool_registry.dispatch_tool.call_count > 0, (
+        f"ceiling={ceiling:,} ended turn() having dispatched no tools"
+    )
 
 
 async def test_empty_diagnosis_does_not_double_append_the_reply(workspace):

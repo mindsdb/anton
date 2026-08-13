@@ -2211,7 +2211,8 @@ class ChatSession:
         fire after real work had happened, on the reasoning that every call site
         sits inside the tool loop; that is true of LLM calls and false of tool
         dispatches, which happen later in the same iteration. The per-round call
-        site carries the progress condition explicitly — see `_spend_ceiling_ok`.
+        site carries the progress condition explicitly — see
+        `_spend_ceiling_stops_the_tool_loop`.
         """
         if self._max_turn_tokens <= 0 or self._turn_cost is None:
             return False
@@ -2788,7 +2789,14 @@ class ChatSession:
             # the cap mark above: public API, and the books are wired here too.
             # This path runs no completion verifier, so there is no continuation
             # gate to also check — the per-round check is the whole gate here.
-            if self._spend_ceiling_reached():
+            #
+            # Uses the same `_spend_ceiling_stops_the_tool_loop` as the streaming
+            # loop, NOT the bare predicate: the "never end a turn that dispatched
+            # no tools" guarantee is stated unconditionally ("at any ceiling"),
+            # and CLI/host callers have no lower bound on `max_turn_tokens` at
+            # all, so this path is exactly where a tiny ceiling would break the
+            # loop on round 1 having run nothing (#344 review).
+            if self._spend_ceiling_stops_the_tool_loop():
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "spend_ceiling"
                 logger.info(
