@@ -1448,10 +1448,16 @@ class OpenAIProvider(LLMProvider):
                     raw_json = "".join(info["args_parts"]) or getattr(
                         event, "arguments", ""
                     )
-                    parsed = json.loads(raw_json) if raw_json else {}
+                    # Same safe parse as the two other transports. A bare
+                    # `json.loads` raised out of this generator on a body cut
+                    # mid-JSON, tearing down the turn; and without the flags the
+                    # session cannot tell a cut call from a complete one, so it
+                    # would dispatch a handler on unfinished arguments.
+                    parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
                     tool_calls.append(
                         ToolCall(
-                            id=info["call_id"], name=info["name"], input=parsed
+                            id=info["call_id"], name=info["name"], input=parsed,
+                            parse_error=parse_error, repaired=repaired,
                         )
                     )
                     if info["call_id"]:
@@ -1569,11 +1575,15 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
             name = getattr(item, "name", "") or ""
             args_str = getattr(item, "arguments", "") or ""
-            try:
-                parsed = json.loads(args_str) if args_str else {}
-            except json.JSONDecodeError:
-                parsed = {}
-            tool_calls.append(ToolCall(id=call_id, name=name, input=parsed))
+            # Swallowing the decode error into an empty dict left a cut-off call
+            # indistinguishable from one the model chose to send with no
+            # arguments, and the session dispatched it. The shared parse records
+            # which it was.
+            parsed, parse_error, repaired = safe_parse_tool_input(args_str)
+            tool_calls.append(ToolCall(
+                id=call_id, name=name, input=parsed,
+                parse_error=parse_error, repaired=repaired,
+            ))
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 
