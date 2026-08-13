@@ -157,6 +157,36 @@ _TRUNCATION_FAILURE_NOTICE = (
 logger = logging.getLogger(__name__)
 
 
+def _discarded_tool_call_closer(tc: ToolCall) -> StreamTaskProgress:
+    """The phase event that closes the UI step of a call we refuse to run.
+
+    The provider announces a tool call as it streams (`StreamToolUseStart`),
+    long before anything decides whether the call is usable. A consumer has
+    therefore already opened a step for it, and the only events that close one
+    are the phase markers the dispatch path emits — so a refused call leaves a
+    step running forever unless the same marker is sent without it.
+
+    ``ok=False`` is what keeps it from rendering as a success. The phase mirrors
+    what the dispatch path would have used for this tool, because consumers key
+    their scratchpad rendering on the scratchpad phases specifically.
+
+    The message distinguishes the two reasons a step closes unrun: this call's
+    own arguments were cut, or an intact call went down with the round because a
+    sibling's were.
+    """
+    cut = bool(tc.parse_error or tc.repaired)
+    return StreamTaskProgress(
+        phase="scratchpad_done" if tc.name == "scratchpad" else "tool_done",
+        message=(
+            "Discarded: the call was cut off mid-arguments" if cut
+            else "Discarded: the round it belonged to was cut off"
+        ),
+        eta_seconds=0.0,
+        id=tc.id,
+        ok=False,
+    )
+
+
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
@@ -3300,6 +3330,12 @@ class ChatSession:
         # unfinished, so the only useful instruction is "make that call again",
         # which the nudge carries.
         cut_tool_call = bool(llm_response.tool_calls)
+        # Every call in this round is discarded, not just the damaged one — the
+        # retry replaces the whole response, so none of them is ever dispatched.
+        # Their UI steps opened as the arguments streamed, so each has to be
+        # closed here, before the retry opens steps of its own.
+        for tc in llm_response.tool_calls:
+            yield _discarded_tool_call_closer(tc)
         # A round can lose both halves at once: paragraphs already streamed to
         # the user, and then a tool call cut open. Both instructions have to
         # travel, or the retry rewrites the text it was supposed to continue and
@@ -3545,6 +3581,7 @@ class ChatSession:
                     damaged = damaged_tool_call_result(tc)
                     if damaged is not None:
                         tool_results.append(damaged)
+                        yield _discarded_tool_call_closer(tc)
                         continue
 
                     _tool_t0 = _time.monotonic()

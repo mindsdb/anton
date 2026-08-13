@@ -39,6 +39,7 @@ from tests.conftest import make_mock_llm
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
+    StreamTaskProgress,
     StreamTextDelta,
     ToolCall,
     Usage,
@@ -509,6 +510,38 @@ async def test_a_repaired_call_below_the_cap_is_never_dispatched(workspace):
     assert "arrived incomplete" in results[0]["content"]
 
 
+async def test_a_discarded_call_closes_its_ui_step(workspace):
+    """The step is already open downstream when the call is refused.
+
+    `StreamToolUseStart` is emitted while the arguments are still streaming, so
+    a consumer has drawn a running step before anything knows the call is
+    unusable — and only the dispatch path's phase markers close one. Refusing
+    the call without sending its marker leaves that step spinning next to the
+    retry's real one for the rest of the turn, and replaying the turn shows the
+    same thing.
+    """
+    cut = ToolCall(id="tc_cut", name="scratchpad", input={"action": "exec"}, repaired=True)
+    session, _ = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut]),
+            _response("Re-issued it, smaller. Done.", output_tokens=30),
+        ],
+        workspace,
+    )
+
+    events = await _run_turn(session)
+
+    closers = [
+        e for e in events
+        if isinstance(e, StreamTaskProgress) and e.id == "tc_cut"
+    ]
+    assert closers, "the refused call's step must be closed, not left running"
+    assert closers[-1].phase == "scratchpad_done", (
+        "scratchpad steps are keyed on the scratchpad phases, not the generic one"
+    )
+    assert closers[-1].ok is False, "a discarded call must not render as a success"
+
+
 async def test_a_round_that_lost_text_and_a_tool_call_gets_both_instructions(workspace):
     """Both halves can go at once, and both have to be asked for.
 
@@ -595,7 +628,21 @@ async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
         workspace,
     )
 
-    await _run_turn(session)
+    events = await _run_turn(session)
 
     assert len(script.calls) == 2
     assert script.calls[1].get("max_tokens") == BUDGET * 2
+
+    # Both steps close, and each says why — the intact one was not cut, it went
+    # down with the round, and a step claiming otherwise reports a failure that
+    # never happened.
+    closers = {
+        e.id: e for e in events
+        if isinstance(e, StreamTaskProgress) and e.id in ("tc_ok", "tc_cut")
+    }
+    assert set(closers) == {"tc_ok", "tc_cut"}
+    assert closers["tc_cut"].phase == "scratchpad_done"
+    assert closers["tc_ok"].phase == "tool_done", "memorize is not a scratchpad step"
+    assert "cut off mid-arguments" in closers["tc_cut"].message
+    assert "the round it belonged to" in closers["tc_ok"].message
+    assert all(e.ok is False for e in closers.values())
