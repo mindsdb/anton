@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from anton.core.memory.cortex import Cortex
+from anton.core.memory.cortex import Cortex, _CompactionResult
 from anton.core.memory.hippocampus import Engram, Hippocampus
 
 
@@ -522,3 +522,106 @@ class TestRuleRetrievalObservability:
         out = await self._run(cortex, llm, small)
         assert llm.calls == 0 and captured_events == []
         assert out == small
+
+
+
+class _CompactionLLM:
+    """Stands in for the coding model, capturing what compaction asked it."""
+
+    def __init__(self, keep: list[int]) -> None:
+        self._keep = keep
+        self.prompt = ""
+
+    async def generate_object_code(self, schema, *, system, messages, max_tokens):
+        self.prompt = messages[0]["content"]
+        return _CompactionResult(keep=self._keep)
+
+
+class TestCompactFile:
+    """Compaction selects entries by index; the file is rebuilt from disk.
+
+    Driven through `_compact_file` rather than a helper, because the defect
+    worth guarding is a mismatch between the numbering the model is shown and
+    the numbering applied to the result — an off-by-one there deletes the wrong
+    memory, and no test of the selection alone can see it.
+    """
+
+    @staticmethod
+    def _lessons(dirs, count: int) -> Hippocampus:
+        hc = Hippocampus(dirs[0])
+        for i in range(count):
+            hc.encode_lesson(f"Fact number {i}", topic=f"t{i}")
+        return hc
+
+    def _entries(self, hc: Hippocampus) -> list[str]:
+        return [
+            ln for ln in hc._lessons_path.read_text().splitlines() if ln.startswith("- ")
+        ]
+
+    async def _compact(self, dirs, hc, keep: list[int]) -> _CompactionLLM:
+        llm = _CompactionLLM(keep)
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=llm
+        )
+        await cortex._compact_file(hc, hc._lessons_path, "lesson")
+        return llm
+
+    async def test_numbering_shown_matches_the_numbering_applied(self, dirs):
+        """The index→entry mapping must survive the round trip."""
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        llm = await self._compact(dirs, hc, keep=[4])
+        assert llm.prompt.splitlines()[3].startswith("4. Fact number 3")
+        assert self._entries(hc) == [before[3]]
+
+    async def test_survivors_are_byte_identical_including_metadata(self, dirs):
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        await self._compact(dirs, hc, keep=[1, 5, 10])
+        assert self._entries(hc) == [before[0], before[4], before[9]]
+
+    async def test_output_follows_file_order_not_the_models_order(self, dirs):
+        """File position is the recency signal budget-limited recall reads."""
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        await self._compact(dirs, hc, keep=[9, 2, 5])
+        assert self._entries(hc) == [before[1], before[4], before[8]]
+
+    async def test_invented_and_duplicate_indices_cost_nothing(self, dirs):
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        await self._compact(dirs, hc, keep=[2, 2, 0, -1, 11, 9999])
+        assert self._entries(hc) == [before[1]]
+
+    async def test_empty_answer_leaves_the_file_untouched(self, dirs):
+        """A model that names nothing gets to skip compaction, not to wipe it."""
+        hc = self._lessons(dirs, 10)
+        before = hc._lessons_path.read_text()
+        await self._compact(dirs, hc, keep=[])
+        assert hc._lessons_path.read_text() == before
+
+    async def test_llm_failure_leaves_the_file_untouched(self, dirs):
+        hc = self._lessons(dirs, 10)
+        before = hc._lessons_path.read_text()
+        llm = AsyncMock()
+        llm.generate_object_code.side_effect = RuntimeError("gateway down")
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=llm
+        )
+        await cortex._compact_file(hc, hc._lessons_path, "lesson")
+        assert hc._lessons_path.read_text() == before
+
+    async def test_short_file_is_not_sent_to_the_model(self, dirs):
+        hc = self._lessons(dirs, 7)
+        llm = await self._compact(dirs, hc, keep=[1])
+        assert llm.prompt == ""
+        assert len(self._entries(hc)) == 7
+
+    async def test_survivors_reparse_as_engrams(self, dirs):
+        """Metadata must survive intact, or recall loses topic and recency."""
+        hc = self._lessons(dirs, 10)
+        await self._compact(dirs, hc, keep=[3, 7])
+        engrams = hc.get_lessons()
+        assert [e.text for e in engrams] == ["Fact number 2", "Fact number 6"]
+        assert [e.topic for e in engrams] == ["t2", "t6"]
+        assert all(e.updated_at is not None for e in engrams)
