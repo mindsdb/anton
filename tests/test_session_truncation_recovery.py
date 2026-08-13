@@ -41,6 +41,7 @@ from anton.core.llm.provider import (
     StreamComplete,
     StreamTaskProgress,
     StreamTextDelta,
+    StreamToolResult,
     ToolCall,
     Usage,
 )
@@ -541,6 +542,22 @@ async def test_a_discarded_call_closes_its_ui_step(workspace):
     )
     assert closers[-1].ok is False, "a discarded call must not render as a success"
 
+    # The phase marker alone leaves the cell looking complete: consumers read a
+    # cell's outcome from its result text, so the result has to arrive too, and
+    # it has to carry a marker their classifier recognises ("[error]" /
+    # "exec failed"). Otherwise the discarded cell renders as a success.
+    results = [
+        e for e in events
+        if isinstance(e, StreamToolResult) and e.id == "tc_cut"
+    ]
+    assert results, "a discarded cell needs a result, or it reads as succeeded"
+    assert "exec failed" in results[0].content
+    assert "cut off mid-arguments" in results[0].content
+    # Marker before result, as the dispatch path orders them: a consumer that
+    # marks the step complete on the marker has to see the failing result after
+    # it, or the cell ends up green again.
+    assert events.index(closers[-1]) < events.index(results[0])
+
 
 async def test_a_round_that_lost_text_and_a_tool_call_gets_both_instructions(workspace):
     """Both halves can go at once, and both have to be asked for.
@@ -633,9 +650,7 @@ async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
     assert len(script.calls) == 2
     assert script.calls[1].get("max_tokens") == BUDGET * 2
 
-    # Both steps close, and each says why — the intact one was not cut, it went
-    # down with the round, and a step claiming otherwise reports a failure that
-    # never happened.
+    # Both steps close, and each closes the way its own phase is consumed.
     closers = {
         e.id: e for e in events
         if isinstance(e, StreamTaskProgress) and e.id in ("tc_ok", "tc_cut")
@@ -643,6 +658,16 @@ async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
     assert set(closers) == {"tc_ok", "tc_cut"}
     assert closers["tc_cut"].phase == "scratchpad_done"
     assert closers["tc_ok"].phase == "tool_done", "memorize is not a scratchpad step"
-    assert "cut off mid-arguments" in closers["tc_cut"].message
-    assert "the round it belonged to" in closers["tc_ok"].message
     assert all(e.ok is False for e in closers.values())
+
+    # `tool_done.message` is the tool's NAME, not prose: the CLI closes an
+    # activity by matching `act.name == message` (chat_ui), so a sentence there
+    # matches nothing and leaves the activity open. The reason travels on the
+    # scratchpad phase instead, which carries a description by contract.
+    assert closers["tc_ok"].message == "memorize"
+    assert "cut off mid-arguments" in closers["tc_cut"].message
+    # The intact call went down with the round rather than being cut itself —
+    # its result must not claim otherwise.
+    assert not [
+        e for e in events if isinstance(e, StreamToolResult) and e.id == "tc_ok"
+    ], "a non-scratchpad call has no cell to fail"
