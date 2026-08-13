@@ -1,4 +1,4 @@
-"""LocalScratchpadRuntime venv provisioning (mindshub#12484).
+"""LocalScratchpadRuntime venv provisioning.
 
 `_find_uv()` only checked a couple of hardcoded directories with no live PATH
 search beyond `shutil.which`, so a uv installed via Homebrew/MacPorts/Linuxbrew

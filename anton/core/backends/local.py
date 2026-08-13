@@ -312,8 +312,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 os.path.expanduser("~/.cargo/bin/uv.exe"),
             )
         else:
-            # Package-manager locations a GUI-launched parent's PATH may miss
-            # (mindshub#12484). Keep in sync with cowork's uv-paths.ts.
+            # Package-manager locations a GUI-launched parent's PATH may miss.
+            # Keep in sync with cowork's uv-paths.ts.
             candidates = (
                 os.path.expanduser("~/.local/bin/uv"),
                 os.path.expanduser("~/.cargo/bin/uv"),
