@@ -26,7 +26,9 @@ text, no tool output, no file contents, no file paths, no credentials, no
 hostnames, no email addresses. The installation ID is a one-way SHA-256 hash of
 the machine's network adapter address, truncated to 16 hex characters; the raw
 address never leaves your device. Events are fire-and-forget: they never block
-Anton, and failures are logged at debug level and otherwise ignored.
+Anton and a failure to send is never surfaced to you. Failures on the per-turn
+accounting events are recorded in Anton's own debug log; failures on the other
+events are discarded without a trace.
 
 Two transports are in use, depending on the event: most events are a single
 HTTP GET to the collector at `ANTON_ANALYTICS_URL`, while the per-turn

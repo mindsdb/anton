@@ -280,16 +280,21 @@ def _fire_posthog(url: str, body: bytes) -> None:
     status inside a ``with`` block that a rejection never reaches, and its test
     passed only because the stub returned where urllib raises.
     """
-    request = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": _POSTHOG_USER_AGENT,
-        },
-    )
     try:
+        # Inside the try on purpose: `Request()` raises ValueError on a malformed
+        # URL, and a bad `ANTON_POSTHOG_HOST` is a user-supplied value. This runs
+        # in a daemon thread, outside `send_event`'s guard, so anything escaping
+        # here reaches the user as a traceback mid-session — which would break
+        # this module's stated guarantee that it never raises.
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": _POSTHOG_USER_AGENT,
+            },
+        )
         urllib.request.urlopen(request, timeout=_TIMEOUT)
     except urllib.error.HTTPError as exc:
         # The status is worth more than a traceback to whoever is reading logs

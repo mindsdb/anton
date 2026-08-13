@@ -379,6 +379,43 @@ def test_posthog_transport_failure_never_raises(monkeypatch):
     analytics._fire_posthog("https://ph.example.test/capture/", b'{"a":1}')  # no raise
 
 
+def test_posthog_malformed_host_never_raises():
+    """`Request()` itself raises ValueError on a malformed URL, and the host is
+    a user-supplied setting (`ANTON_POSTHOG_HOST`).
+
+    This runs in a daemon thread, *outside* `send_event`'s guard, so anything
+    escaping reaches the user as a traceback mid-session. A previous version of
+    `_fire_posthog` built the Request above the `try` and did exactly that.
+    """
+    analytics._fire_posthog("garbage-not-a-url/capture/", b'{"a":1}')  # no raise
+
+
+def test_send_event_with_a_bad_posthog_host_kills_no_thread(monkeypatch):
+    """End to end through the real path: a bad host must not surface at all."""
+    _clear_ci(monkeypatch)
+
+    class _BadHost(_PosthogSettings):
+        posthog_host = "garbage-not-a-url"
+
+    escaped: list[str] = []
+
+    class _SyncThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target, self._args = target, args
+
+        def start(self):
+            try:
+                self._target(*self._args)
+            except BaseException as exc:  # what threading would report and print
+                escaped.append(type(exc).__name__)
+
+    monkeypatch.setattr(analytics.threading, "Thread", _SyncThread)
+
+    analytics.send_event(_BadHost(), "turn_completed", tokens_total="1")
+
+    assert escaped == [], f"escaped the daemon thread: {escaped}"
+
+
 def test_rule_retrieval_goes_to_posthog(monkeypatch):
     """ENG-1390's signal, on the same path (ENG-1495).
 
