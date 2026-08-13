@@ -102,26 +102,40 @@ from anton.core.settings import CoreSettings
 # recognize and update it in place rather than summarize a summary.
 _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
 
-# Truncation-recovery nudges (ENG-1042). Two variants of the same failure —
-# the response burned its whole output budget without producing a tool call:
+# Truncation-recovery nudges. One failure — the response burned its whole
+# output budget before finishing — but what to ask for depends on which part
+# was lost, and a round can lose two parts at once:
 #
-# - Partial text arrived → the answer was cut mid-flight; ask the model to
-#   pick up where it stopped (the pre-existing recovery message).
+# - Partial text arrived → the answer was cut mid-flight; ask the model to pick
+#   up where it stopped.
+# - A tool call was cut open → its arguments are unfinished and the call was
+#   refused, so ask for that call again, smaller.
 # - Nothing visible arrived → the whole budget went to internal reasoning
 #   (reasoning models share one max_tokens between thinking and answer);
-#   "continue where you left off" is meaningless when nothing was emitted,
-#   so ask for the answer up front instead.
-_TRUNCATED_CONTINUE_NUDGE = (
-    "SYSTEM: Your response was truncated because it exceeded the output token limit. "
+#   "continue where you left off" is meaningless when nothing was emitted, so
+#   ask for the answer up front instead.
+#
+# Composed from one lead and per-loss tails so the both-halves case reads as a
+# single message instead of repeating the lead twice.
+_TRUNCATED_LEAD = (
+    "SYSTEM: Your response was truncated because it exceeded the output token limit."
+)
+_TRUNCATED_CONTINUE_TAIL = (
     "Continue exactly where you left off. If you were about to call a tool, "
     "call it now. If the code you were writing was too long, split it into smaller parts."
 )
-_TRUNCATED_TOOL_CALL_NUDGE = (
-    "SYSTEM: Your response was truncated because it exceeded the output token limit — "
-    "the cut landed inside the arguments of the tool call you were making, so the call "
-    "was discarded rather than run with an unfinished body. Re-issue that tool call, and "
-    "make the arguments smaller: if you were passing a large payload, write it in several "
+_TRUNCATED_TOOL_CALL_TAIL = (
+    "The cut landed inside the arguments of the tool call you were making, so that "
+    "call was discarded rather than run with an unfinished body. Re-issue it, and make "
+    "the arguments smaller: if you were passing a large payload, write it in several "
     "smaller calls instead of one."
+)
+_TRUNCATED_CONTINUE_NUDGE = f"{_TRUNCATED_LEAD} {_TRUNCATED_CONTINUE_TAIL}"
+_TRUNCATED_TOOL_CALL_NUDGE = f"{_TRUNCATED_LEAD} {_TRUNCATED_TOOL_CALL_TAIL}"
+# Text already shown to the user AND a cut-open call: both instructions travel,
+# in the order the model has to act on them.
+_TRUNCATED_TEXT_AND_TOOL_CALL_NUDGE = (
+    f"{_TRUNCATED_CONTINUE_NUDGE} {_TRUNCATED_TOOL_CALL_TAIL}"
 )
 _TRUNCATED_SILENT_NUDGE = (
     "SYSTEM: Your previous response spent its entire output-token budget before "
@@ -3323,7 +3337,13 @@ class ChatSession:
         # unfinished, so the only useful instruction is "make that call again",
         # which the nudge carries.
         cut_tool_call = bool(llm_response.tool_calls)
-        if cut_tool_call:
+        # A round can lose both halves at once: paragraphs already streamed to
+        # the user, and then a tool call cut open. Both instructions have to
+        # travel, or the retry rewrites the text it was supposed to continue and
+        # history ends up holding two copies of the same answer.
+        if cut_tool_call and not silent:
+            nudge = _TRUNCATED_TEXT_AND_TOOL_CALL_NUDGE
+        elif cut_tool_call:
             nudge = _TRUNCATED_TOOL_CALL_NUDGE
         elif silent:
             nudge = _TRUNCATED_SILENT_NUDGE

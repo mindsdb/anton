@@ -45,8 +45,10 @@ from anton.core.llm.provider import (
 )
 from anton.core.session import (
     _TRUNCATED_CONTINUE_NUDGE,
+    _TRUNCATED_LEAD,
     _TRUNCATED_SILENT_NUDGE,
     _TRUNCATED_TOOL_CALL_NUDGE,
+    _TRUNCATED_TOOL_CALL_TAIL,
     _TRUNCATION_FAILURE_NOTICE,
     ChatSession,
     ChatSessionConfig,
@@ -505,6 +507,38 @@ async def test_a_repaired_call_below_the_cap_is_never_dispatched(workspace):
     assert results, "the cut call must produce a tool_result, not a handler run"
     assert results[0]["is_error"] is True
     assert "arrived incomplete" in results[0]["content"]
+
+
+async def test_a_round_that_lost_text_and_a_tool_call_gets_both_instructions(workspace):
+    """Both halves can go at once, and both have to be asked for.
+
+    Paragraphs were already streamed to the user and appended to history, and
+    then the tool call was cut open. Telling the model only to re-issue the call
+    leaves it free to rewrite the answer from the top, which puts two copies of
+    it in history; telling it only to continue leaves the call unmade.
+    """
+    partial = "## Forecast method per account\n1. Revenue: run-rate…"
+    cut = ToolCall(id="tc_cut", name="scratchpad", input={"action": "exec"}, repaired=True)
+    session, script = _make_session(
+        [
+            _response(content=partial, output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut]),
+            _response("…2. COGS: seasonal average.", output_tokens=30),
+        ],
+        workspace,
+    )
+
+    await _run_turn(session)
+
+    retry_user_texts = "\n".join(_user_texts(script.calls[1]["messages"]))
+    assert _TRUNCATED_CONTINUE_NUDGE in retry_user_texts, "the text has to be continued"
+    assert _TRUNCATED_TOOL_CALL_TAIL in retry_user_texts, "the call has to be re-issued"
+    assert retry_user_texts.count(_TRUNCATED_LEAD) == 1, (
+        "one message, not two nudges stapled together"
+    )
+    assert any(
+        m.get("role") == "assistant" and partial in str(m.get("content"))
+        for m in script.calls[1]["messages"]
+    ), "the partial answer must stay in history for the continuation"
 
 
 async def test_the_non_streaming_turn_also_refuses_a_cut_open_call(workspace):
