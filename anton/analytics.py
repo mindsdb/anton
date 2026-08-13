@@ -112,9 +112,13 @@ _TIMEOUT = 3  # seconds
 #                    unknown_{tokens,calls}, llm_provider, harness,
 #                    anton_version, conversation_id, turn_index
 #
+#   rule_retrieval   outcome, when_rules, kept_rules, rules_chars,
+#                    stop_reason, input_tokens, output_tokens, duration_ms
+#                    (anton/core/memory/cortex.py::_emit_rule_retrieval)
+#
 # An event NOT listed here keeps the collector path, so moving one is an
 # explicit decision rather than something that happens by default.
-_POSTHOG_EVENTS = frozenset({"turn_completed"})
+_POSTHOG_EVENTS = frozenset({"turn_completed", "rule_retrieval"})
 
 # `$lib` names the sender, matching the convention the other emitters follow
 # (`cowork-desktop`, `mindshub-site-beacon`), so a per-emitter breakdown in

@@ -321,3 +321,41 @@ def test_posthog_request_is_a_post_with_json(monkeypatch):
     assert seen[0].method == "POST"
     assert seen[0].get_header("Content-type") == "application/json"
     assert "python-urllib" not in seen[0].get_header("User-agent", "").lower()
+
+
+def test_rule_retrieval_goes_to_posthog(monkeypatch):
+    """ENG-1390's signal, on the same path (ENG-1495).
+
+    It shipped as `rule_retrieval` — no `anton_` prefix — so the collector
+    dropped it on the action filter, exactly as it dropped `turn_completed`.
+    anton#332 proposed renaming it to `anton_rule_retrieval` to satisfy that
+    filter; this makes the rename unnecessary, and the prefix would have been
+    wrong in a project whose other events carry no prefix at all.
+    """
+    _clear_ci(monkeypatch)
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(
+        _PosthogSettings(),
+        "rule_retrieval",
+        outcome="ok",
+        when_rules="12",
+        kept_rules="3",
+        rules_chars="1840",
+        stop_reason="end_turn",
+        duration_ms="412",
+    )
+
+    assert len(captured) == 1
+    _, body = captured[0]
+    # The name stays unprefixed: nothing filters on it any more, and the other
+    # emitters in project 424726 (first_query, agent_session_started) carry no
+    # prefix either.
+    assert body["event"] == "rule_retrieval"
+    props = body["properties"]
+    # `outcome` and `stop_reason` are the two the collector's five-name
+    # allowlist would have eaten — they are the whole point of the signal.
+    assert props["outcome"] == "ok"
+    assert props["stop_reason"] == "end_turn"
+    assert props["kept_rules"] == "3"
+    assert props["$process_person_profile"] is False
