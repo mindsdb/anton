@@ -141,6 +141,26 @@ def test_verify_clears_the_error_on_success(tmp_path, monkeypatch):
     assert pad._last_verify_error is None
 
 
+def test_verify_clears_a_stale_error_when_venv_python_is_unset(tmp_path):
+    # A retry that never got as far as setting _venv_python must not carry
+    # a PREVIOUS attempt's error into this attempt's (unrelated) failure.
+    pad = make_pad(tmp_path)
+    pad._last_verify_error = "stale error from a previous attempt"
+    pad._venv_python = None
+
+    assert pad._verify_venv_python() is False
+    assert pad._last_verify_error is None
+
+
+def test_verify_clears_a_stale_error_when_the_interpreter_is_missing(tmp_path):
+    pad = make_pad(tmp_path)
+    pad._last_verify_error = "stale error from a previous attempt"
+    pad._venv_python = str(tmp_path / "does-not-exist")
+
+    assert pad._verify_venv_python() is False
+    assert pad._last_verify_error is None
+
+
 def test_verify_captures_an_exception_reason(tmp_path, monkeypatch):
     if sys.platform == "win32":
         pytest.skip("posix-only: exec-permission semantics differ on Windows")

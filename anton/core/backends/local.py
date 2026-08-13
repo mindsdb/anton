@@ -397,8 +397,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     def _verify_venv_python(self) -> bool:
         if self._venv_python is None:
+            self._last_verify_error = None
             return False
         if not os.path.exists(self._venv_python):
+            self._last_verify_error = None
             return False
         try:
             import subprocess
