@@ -207,7 +207,7 @@ def test_reason_coverage_reports_the_share_with_a_usable_reason():
 
     assert ledger.failures == 4
     assert ledger.reason_coverage == 0.5
-    assert ledger.event_fields()["rc_reason_coverage"] == 0.5
+    assert ledger.event_fields()["root_cause_reason_coverage"] == 0.5
 
 
 def test_event_fields_are_flat_and_complete():
@@ -224,12 +224,12 @@ def test_event_fields_are_flat_and_complete():
     ledger.add(classify("HTTPError: 429 Too Many Requests"))
 
     f = ledger.event_fields()
-    assert f["rc_failures"] == 6
-    assert f["rc_wall"] == 4
-    assert f["rc_self_inflicted"] == 1
-    assert f["rc_transient"] == 1
-    assert f["rc_max_class"] == 4
-    assert f["rc_top_class"] == "missing_dependency"
+    assert f["root_cause_failures"] == 6
+    assert f["root_cause_wall"] == 4
+    assert f["root_cause_self_inflicted"] == 1
+    assert f["root_cause_transient"] == 1
+    assert f["root_cause_max_class"] == 4
+    assert f["root_cause_top_class"] == "missing_dependency"
     assert all(not isinstance(v, (dict, list)) for v in f.values())
 
 

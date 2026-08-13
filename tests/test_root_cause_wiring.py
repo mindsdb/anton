@@ -174,9 +174,9 @@ async def test_counts_ride_the_turn_completed_event(workspace):
         await _run(session)
 
     kw = send.call_args.kwargs
-    assert int(kw["rc_failures"]) == 2
-    assert int(kw["rc_max_class"]) == 2
-    assert kw["rc_top_class"] == "missing_dependency"
+    assert int(kw["root_cause_failures"]) == 2
+    assert int(kw["root_cause_max_class"]) == 2
+    assert kw["root_cause_top_class"] == "missing_dependency"
     # Flat scalars only — the collector relays query params, not structures.
     assert all(not isinstance(v, (dict, list)) for v in kw.values())
 

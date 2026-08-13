@@ -2147,9 +2147,9 @@ class ChatSession:
         # Never let reporting break a turn — same contract as the analytics
         # sink below (ENG-1492).
         try:
-            _rc_fields = self._root_causes.event_fields()
+            _root_cause_fields = self._root_causes.event_fields()
         except Exception:  # pragma: no cover - defensive
-            _rc_fields = {}
+            _root_cause_fields = {}
         logger.info(
             "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
@@ -2169,7 +2169,7 @@ class ChatSession:
             # the collector allowlist that silently dropped `turn_completed`'s
             # properties for weeks (ENG-1355) — the log is the sink that does
             # not depend on it.
-            " ".join(f"{k}={v}" for k, v in _rc_fields.items()),
+            " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
         )
 
         # Analytics sink — same settings-resolution pattern as the
@@ -2195,7 +2195,7 @@ class ChatSession:
                 # route) to reach PostHog at all — until then the log line above
                 # is the only sink, and its absence here is not evidence the
                 # classification is broken.
-                **_rc_fields,
+                **_root_cause_fields,
                 ended_by=tc.ended_by,
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),

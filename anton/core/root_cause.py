@@ -363,14 +363,14 @@ class RootCauseLedger:
     def event_fields(self) -> dict:
         """Flat properties for the turn's analytics event and log line."""
         return {
-            "rc_failures": self.failures,
-            "rc_distinct": len(self.exact),
-            "rc_max_exact": self.max_exact,
-            "rc_max_class": self.max_class,
-            "rc_top_class": self.top_class,
-            "rc_reason_coverage": round(self.reason_coverage, 3),
-            "rc_self_inflicted": self.tiers.get(TIER_SELF, 0),
-            "rc_transient": self.tiers.get(TIER_TRANSIENT, 0),
-            "rc_wall": self.tiers.get(TIER_WALL, 0),
-            "rc_unclassified": self.tiers.get(TIER_UNCLASSIFIED, 0),
+            "root_cause_failures": self.failures,
+            "root_cause_distinct": len(self.exact),
+            "root_cause_max_exact": self.max_exact,
+            "root_cause_max_class": self.max_class,
+            "root_cause_top_class": self.top_class,
+            "root_cause_reason_coverage": round(self.reason_coverage, 3),
+            "root_cause_self_inflicted": self.tiers.get(TIER_SELF, 0),
+            "root_cause_transient": self.tiers.get(TIER_TRANSIENT, 0),
+            "root_cause_wall": self.tiers.get(TIER_WALL, 0),
+            "root_cause_unclassified": self.tiers.get(TIER_UNCLASSIFIED, 0),
         }
