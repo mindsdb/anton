@@ -219,6 +219,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
+        self._last_verify_error: str | None = None
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -286,8 +287,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     self._setup_parent_site_packages()
                     self._save_python_version()
                     return
+                detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
                 raise RuntimeError(
-                    f"venv Python binary at {self._venv_python} is not functional"
+                    f"venv Python binary at {self._venv_python} is not functional{detail}"
                 )
             except Exception as exc:
                 last_error = exc
@@ -305,14 +307,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             return uv
         if sys.platform == "win32":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
             candidates = (
                 os.path.expanduser("~/.local/bin/uv.exe"),
                 os.path.expanduser("~/.cargo/bin/uv.exe"),
+                os.path.expanduser("~/scoop/shims/uv.exe"),
+                os.path.join(local_app_data, "Microsoft", "WinGet", "Links", "uv.exe"),
             )
         else:
+            # Package-manager locations a GUI-launched parent's PATH may miss.
+            # Keep in sync with cowork's uv-paths.ts.
             candidates = (
                 os.path.expanduser("~/.local/bin/uv"),
                 os.path.expanduser("~/.cargo/bin/uv"),
+                "/opt/homebrew/bin/uv",
+                "/usr/local/bin/uv",
+                "/opt/local/bin/uv",
+                "/home/linuxbrew/.linuxbrew/bin/uv",
             )
         for candidate in candidates:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -327,27 +338,38 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         uv = self._find_uv()
         if uv:
-            _sp.run(
-                [
-                    uv,
-                    "venv",
-                    self._venv_dir,
-                    "--python",
-                    sys.executable,
-                    "--system-site-packages",
-                    "--seed",
-                    "--quiet",
-                ],
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
+            try:
+                _sp.run(
+                    [
+                        uv,
+                        "venv",
+                        self._venv_dir,
+                        "--python",
+                        sys.executable,
+                        "--system-site-packages",
+                        "--seed",
+                        "--quiet",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (_sp.CalledProcessError, _sp.TimeoutExpired) as exc:
+                # CalledProcessError/TimeoutExpired.__str__ omits the captured
+                # stderr, so uv's actual reason (bad --python, disk full) was
+                # never seen — only "returned non-zero exit status N".
+                stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+                raise RuntimeError(f"uv venv failed: {stderr}" if stderr else str(exc)) from exc
         else:
+            # symlinks=False is venv.create()'s own default on every platform
+            # (only the `python -m venv` CLI defaults it per-OS); a copied
+            # macOS Python binary loses its @rpath and crashes on launch.
             venv.create(
                 self._venv_dir,
                 system_site_packages=True,
                 with_pip=False,
                 clear=True,
+                symlinks=sys.platform != "win32",
             )
 
         if sys.platform == "win32":
@@ -384,6 +406,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         return self.venv_python()
 
     def _verify_venv_python(self) -> bool:
+        self._last_verify_error = None
         if self._venv_python is None:
             return False
         if not os.path.exists(self._venv_python):
@@ -396,8 +419,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 capture_output=True,
                 timeout=5,
             )
-            return result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
-        except Exception:
+            ok = result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
+            if not ok:
+                stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                self._last_verify_error = f"exit {result.returncode}" + (f": {stderr}" if stderr else "")
+            return ok
+        except Exception as exc:
+            self._last_verify_error = str(exc)
             return False
 
     def _nuke_venv(self) -> None:
