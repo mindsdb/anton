@@ -186,3 +186,28 @@ def test_ensure_venv_failure_message_includes_the_verify_detail(tmp_path, monkey
 
     with pytest.raises(RuntimeError, match="dyld: Library not loaded"):
         pad._ensure_venv()
+
+
+def test_find_uv_checks_scoop_on_windows(monkeypatch):
+    # scoop (~/scoop/shims/uv.exe) is the Windows analogue of Homebrew — a
+    # package-manager install invisible to a GUI-launched parent's PATH.
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    monkeypatch.setattr(local.shutil, "which", lambda _: None)
+    scoop_path = os.path.expanduser("~/scoop/shims/uv.exe")
+    monkeypatch.setattr(local.os.path, "isfile", lambda p: p == scoop_path)
+    monkeypatch.setattr(local.os, "access", lambda p, mode: True)
+
+    assert local.LocalScratchpadRuntime._find_uv() == scoop_path
+
+
+def test_find_uv_checks_winget_links_on_windows(monkeypatch):
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    monkeypatch.setattr(local.shutil, "which", lambda _: None)
+    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\u\\AppData\\Local")
+    winget_path = os.path.join(
+        "C:\\Users\\u\\AppData\\Local", "Microsoft", "WinGet", "Links", "uv.exe"
+    )
+    monkeypatch.setattr(local.os.path, "isfile", lambda p: p == winget_path)
+    monkeypatch.setattr(local.os, "access", lambda p, mode: True)
+
+    assert local.LocalScratchpadRuntime._find_uv() == winget_path

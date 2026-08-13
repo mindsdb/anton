@@ -307,9 +307,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             return uv
         if sys.platform == "win32":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
             candidates = (
                 os.path.expanduser("~/.local/bin/uv.exe"),
                 os.path.expanduser("~/.cargo/bin/uv.exe"),
+                os.path.expanduser("~/scoop/shims/uv.exe"),
+                os.path.join(local_app_data, "Microsoft", "WinGet", "Links", "uv.exe"),
             )
         else:
             # Package-manager locations a GUI-launched parent's PATH may miss.
