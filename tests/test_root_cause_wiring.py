@@ -241,3 +241,42 @@ async def test_the_non_streaming_turn_records_too(workspace):
         await session.turn("go")
     assert session._root_causes.failures == 2
     assert session._root_causes.max_exact == 2
+
+
+async def test_unmigrated_handlers_count_against_reason_coverage(workspace):
+    """A handler that returns an error STRING must not be silently excluded.
+
+    `reason_coverage` exists to expose under-coverage. Dropping `ok is None`
+    failures entirely made it report 1.0 by excluding the uncovered population
+    from its own denominator — measured: 1 migrated + 3 unmigrated failures
+    reported coverage 1.0, failures 1.
+
+    They count as `unclassified`, never trip-eligible: the text is prose the
+    model can influence, which is the ENG-1276 defect one level up.
+    """
+    legacy = ToolOutcome(content="[error] connect failed: no route to host")
+    assert legacy.ok is None  # the shape registry.py produces for a plain str
+    session = _session(workspace, [WALL, legacy, legacy, legacy], n_tool_calls=4)
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+
+    led = session._root_causes
+    assert led.failures == 4
+    assert led.reason_coverage == 0.25
+    assert led.tiers["unclassified"] == 3
+    assert led.max_exact == 1, "legacy text must never create a wall"
+    assert float(send.call_args.kwargs["root_cause_reason_coverage"]) == 0.25
+
+
+async def test_a_successful_legacy_result_is_not_counted_as_a_failure(workspace):
+    """The legacy verdict must not invent failures out of ordinary output."""
+    fine = ToolOutcome(content="Wrote 12 rows. 0 records failed validation.")
+    session = _session(workspace, [fine, fine], n_tool_calls=2)
+    with patch("anton.analytics.send_event"):
+        await _run(session)
+    # NOTE: this text DOES contain "failed", so it is counted — the legacy
+    # matcher's false-positive direction, inherited deliberately rather than
+    # forked. Pinning it so the inheritance is visible if it ever changes.
+    assert session._root_causes.failures == 2
+    assert session._root_causes.tiers["unclassified"] == 2
+    assert session._root_causes.max_exact == 0

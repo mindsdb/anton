@@ -53,6 +53,22 @@ TIER_UNCLASSIFIED = "unclassified"
 #: ignored — see the module docstring for why that is structural, not a default.
 TRIP_ELIGIBLE_TIERS = frozenset({TIER_WALL})
 
+#: Wall classes that count on the EXACT rung only, never the coarse one.
+#:
+#: `missing_file` is genuinely ambiguous — a wrong path the agent invented is
+#: self-inflicted, a missing binary is a wall — and the two are indistinguishable
+#: from the error alone. The exact rung tells them apart by construction: the
+#: same path three times is a wall, three different paths is an agent exploring.
+#: Counting it on the coarse rung merges those, and worse, drowns real walls:
+#: measured, five file probes plus the four-attempt ENG-836 dependency wall in
+#: one turn emitted `max_class=5, top_class="missing_file"` — the wall this
+#: whole ticket exists to see, masked by exploration.
+#:
+#: The cost, stated because ENG-1492 already accepted it: a genuine wall spread
+#: over several paths (one missing ODBC install surfacing as three absent files)
+#: scores 1 on both rungs and is invisible.
+_EXACT_ONLY_CLASSES = frozenset({"missing_file"})
+
 #: The agent's own bugs. It can fix these by writing better code, so repetition
 #: is iteration, not a wall — however many times it repeats.
 _SELF_INFLICTED = frozenset({
@@ -242,9 +258,30 @@ def classify(reason: str, result_text: str = "") -> RootCause:
 
     exc = _exception_name(reason)
 
-    # Status codes are checked BEFORE the exception type: an HTTPError carrying
-    # a 429 is transient no matter what its class name suggests, and one
-    # carrying a 403 is a wall. The type alone cannot tell those apart.
+    # The explicit type tables win over the status heuristic, and the ORDER here
+    # is the safety property — not a style choice.
+    #
+    # The status check used to run first, on the reasoning that an HTTPError
+    # carrying 429 is transient whatever its class name says. True, but it
+    # searched `\b(4\d\d|5\d\d)\b` against the WHOLE reason with no HTTP-shape
+    # precondition, so any self-inflicted exception whose message happened to
+    # contain a bare 401/403/404 was promoted to `external_wall`, trip-eligible.
+    # Measured on real raised exceptions:
+    #
+    #     {200:..,404:..}[403]        -> KeyError: 403          -> wall, trip=True
+    #     assert 404 == 200           -> AssertionError         -> wall, trip=True
+    #     SyntaxError … (line 404)    -> wall, trip=True
+    #     …the same error at line 405 -> self_inflicted, trip=False
+    #
+    # That is exactly the "agent retries the same broken line" case this tier
+    # exists to exclude, so the guarantee in the module docstring was false for
+    # 8 specific integers. `HTTPError` is in neither table, so it still falls
+    # through to the status branch — which keeps the legitimate case working.
+    if exc in _SELF_INFLICTED:
+        return RootCause(TIER_SELF, exc, "")
+    if exc in _TRANSIENT:
+        return RootCause(TIER_TRANSIENT, exc, "")
+
     status = _STATUS_RE.search(reason)
     if status:
         code = status.group(1)
@@ -253,11 +290,6 @@ def classify(reason: str, result_text: str = "") -> RootCause:
         wall_cls = _STATUS_WALLS.get(code)
         if wall_cls:
             return RootCause(TIER_WALL, wall_cls, _identifier_for(wall_cls, reason))
-
-    if exc in _SELF_INFLICTED:
-        return RootCause(TIER_SELF, exc, "")
-    if exc in _TRANSIENT:
-        return RootCause(TIER_TRANSIENT, exc, "")
 
     wall_cls = _WALL_TYPES.get(exc)
     if wall_cls:
@@ -336,7 +368,8 @@ class RootCauseLedger:
             # trip" actually happens.
             return
         self.exact[rc.key] += 1
-        self.classes[rc.cls] += 1
+        if rc.cls not in _EXACT_ONLY_CLASSES:
+            self.classes[rc.cls] += 1
 
     @property
     def max_exact(self) -> int:

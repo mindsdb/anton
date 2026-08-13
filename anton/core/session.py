@@ -138,6 +138,17 @@ _TRUNCATION_FAILURE_NOTICE = (
 
 logger = logging.getLogger(__name__)
 
+#: The legacy substring verdict, for handlers that never declared a `ToolOutcome`
+#: (ENG-1276 migrated five sites; the rest still return plain strings). Kept
+#: byte-identical to `_apply_error_tracking`'s fallback so the two cannot drift
+#: into disagreeing about what a failure is.
+_LEGACY_FAILURE_MARKERS = ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
+
+
+def _legacy_looks_like_failure(text: str) -> bool:
+    return any(m in text for m in _LEGACY_FAILURE_MARKERS)
+
+
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -600,6 +611,7 @@ def _build_verify_request(
 
 
 @dataclass
+
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
 
@@ -952,6 +964,27 @@ class ChatSession:
         path lands in `unclassified`, which no trip rung can read. Guarded whole
         because a reporting side-effect must never be able to fail a turn.
         """
+        if tool_ok is None:
+            # Unmigrated handler: it signals failure by RETURNING an error
+            # string, so `ok` is None and the legacy substring match is the only
+            # verdict available. Dropping these entirely was the defect —
+            # `reason_coverage` then reported 1.0 by excluding the uncovered
+            # population from its own denominator, i.e. the metric that exists
+            # to expose under-coverage could not. Measured: a turn with 1
+            # migrated and 3 unmigrated failures reported coverage 1.0.
+            #
+            # Counted as `unclassified`, which is not trip-eligible — the text
+            # is prose the model can influence, which is the ENG-1276 defect one
+            # level up, so it must never create a wall.
+            if not _legacy_looks_like_failure(result_text or ""):
+                return
+            try:
+                self._root_causes.add(
+                    classify_root_cause("", result_text or "")
+                )
+            except Exception:  # pragma: no cover - reporting must not break a turn
+                logger.debug("root-cause classification failed", exc_info=True)
+            return
         if tool_ok is not False:
             return
         try:

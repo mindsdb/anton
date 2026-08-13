@@ -76,6 +76,16 @@ SELF_INFLICTED_REASONS = [
     "PyCompileError: Sorry: IndentationError: unexpected unindent",
     "TypeError: unsupported operand type(s)",
     "KeyError: 'total'",
+    # Regression: a bare HTTP-looking integer anywhere in a self-inflicted
+    # message used to promote it to external_wall, trip-eligible — the status
+    # check ran before the type table. Every fixture above happens to use
+    # out-of-range numbers, which is why this shipped green. These are the
+    # 8 integers that did it, in messages a real producer emits.
+    "SyntaxError: invalid syntax (detected at line 404)",
+    "KeyError: 403",
+    "AssertionError: 404 != 200",
+    "ValueError: invalid literal for int() with base 10: '401'",
+    "IndexError: list index out of range at 500",
 ]
 
 
@@ -320,3 +330,34 @@ def test_pathological_input_cannot_stall_a_turn():
             f"classify took {elapsed*1000:.0f} ms on {len(evil)} chars — the "
             "input cap is gone and a tool failure can now stall a turn"
         )
+
+
+def test_missing_file_never_reaches_the_class_rung():
+    """ENG-1492 §4: `missing_file` counts on the exact rung only.
+
+    Without this, file probing drowns real walls. Measured before the fix: five
+    file probes plus the four-attempt ENG-836 dependency wall in one turn emitted
+    `max_class=5, top_class="missing_file"` — the wall the ticket exists to see,
+    masked by an agent looking around.
+    """
+    from anton.core.root_cause import RootCauseLedger, classify
+
+    led = RootCauseLedger()
+    for p in ("/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d", "/tmp/e"):
+        led.add(classify(f"FileNotFoundError: [Errno 2] No such file: '{p}'"))
+    for r in ("ModuleNotFoundError: No module named 'pyodbc'",
+              "package_install_failed",
+              "ModuleNotFoundError: No module named 'pymssql'",
+              "ModuleNotFoundError: No module named 'pyodbc'"):
+        led.add(classify(r))
+
+    f = led.event_fields()
+    assert f["root_cause_top_class"] == "missing_dependency"
+    assert f["root_cause_max_class"] == 4
+    # The exact rung still sees repeated file failures, which is where the
+    # same-path-three-times wall is meant to show up.
+    led2 = RootCauseLedger()
+    for _ in range(3):
+        led2.add(classify("FileNotFoundError: [Errno 2] No such file: '/usr/bin/odbcinst'"))
+    assert led2.max_exact == 3
+    assert led2.max_class == 0
