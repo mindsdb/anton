@@ -234,6 +234,16 @@ def test_event_fields_are_flat_and_complete():
     ledger.add(classify("HTTPError: 429 Too Many Requests"))
 
     f = ledger.event_fields()
+    # Completeness by EXACT SET, not by spot-check. Three properties could be
+    # deleted with the suite green, and reverse-renaming any of them to `rc_*`
+    # — the exact refactor 3d86aa6 performed forward — passed the full suite,
+    # because both sinks iterate the dict rather than indexing known keys.
+    assert set(f) == {
+        "root_cause_failures", "root_cause_distinct", "root_cause_max_exact",
+        "root_cause_max_class", "root_cause_top_class",
+        "root_cause_reason_coverage", "root_cause_self_inflicted",
+        "root_cause_transient", "root_cause_wall", "root_cause_unclassified",
+    }
     assert f["root_cause_failures"] == 6
     assert f["root_cause_wall"] == 4
     assert f["root_cause_self_inflicted"] == 1
@@ -243,15 +253,21 @@ def test_event_fields_are_flat_and_complete():
     assert all(not isinstance(v, (dict, list)) for v in f.values())
 
 
-def test_the_ledger_never_resets_on_success():
-    """There is no reset API at all — the absence IS the design.
+def test_the_ledger_only_ever_grows():
+    """Counts never decrease — the behaviour, not the method names.
 
-    The existing per-tool streak resets on success, and interleaved false
-    successes are why it stayed asleep through ENG-836. This counts occurrences.
+    The previous version asserted that `reset`/`clear`/`on_success` do not
+    exist, which is the wrong test in both directions: an uncalled no-op
+    `clear()` reddened it, while a real reset invoked from `_record_root_cause`
+    left it green. It would also have tripped on ENG-1531's natural refactor.
     """
-    assert not any(
-        hasattr(RootCauseLedger(), name) for name in ("reset", "clear", "on_success")
-    )
+    led = RootCauseLedger()
+    seen = []
+    for reason in ["ModuleNotFoundError: No module named 'pyodbc'"] * 5:
+        led.add(classify(reason))
+        seen.append((led.failures, led.max_exact, led.max_class))
+    assert seen == sorted(seen), f"a count went backwards: {seen}"
+    assert seen[-1] == (5, 5, 5)
 
 
 # ── The writer inventory, kept honest by the suite ─────────────────────────
@@ -279,7 +295,13 @@ def test_every_sentinel_reason_is_mapped():
     for path in root.rglob("*.py"):
         if path.name == "root_cause.py":
             continue
-        found |= set(re.findall(r'reason="([a-z_]+)"', path.read_text()))
+        # Both quote styles and any identifier shape. The previous pattern saw
+        # only `reason="[a-z_]+"`, so a single-quoted or digit-containing
+        # sentinel (`reason='wall_v2'`) slipped past — and single-quoted kwargs
+        # already exist in this tree, with no formatter config anywhere in the
+        # repo to prevent them.
+        found |= set(re.findall(r"""reason=["']([A-Za-z0-9_]+)["']""",
+                                path.read_text()))
 
     unmapped = found - set(_SENTINEL_REASONS)
     assert not unmapped, (
@@ -361,3 +383,35 @@ def test_missing_file_never_reaches_the_class_rung():
         led2.add(classify("FileNotFoundError: [Errno 2] No such file: '/usr/bin/odbcinst'"))
     assert led2.max_exact == 3
     assert led2.max_class == 0
+
+
+def test_a_broken_package_is_one_key_however_the_import_failed():
+    """ENG-1492 §4: the identifier for `missing_dependency` is the MODULE.
+
+    Keying on the imported *symbol* split one broken package into as many keys
+    as symbols the agent tried to pull from it. Four attempts against a broken
+    `pandas` scored `max_exact=1, distinct=4` — reading as four unrelated blips
+    instead of the one wall it is, which is precisely the signal ENG-1492 exists
+    to produce. It also made `cannot import name … from 'pandas'` a different
+    wall from `No module named 'pandas'`.
+    """
+    from anton.core.root_cause import RootCauseLedger, classify
+
+    attempts = (
+        "ImportError: cannot import name 'read_excel' from 'pandas' (/x/pandas/__init__.py)",
+        "ImportError: cannot import name 'to_datetime' from 'pandas' (/x/pandas/__init__.py)",
+        "ModuleNotFoundError: No module named 'pandas.io.parsers'",
+        "ImportError: cannot import name 'q' from partially initialized module "
+        "'pandas.core' (most likely due to a circular import)",
+    )
+    led = RootCauseLedger()
+    for a in attempts:
+        rc = classify(a)
+        # Every shape resolves to the package, never the symbol or submodule.
+        assert rc.key == "missing_dependency:pandas", a
+        assert rc.trip_eligible is True
+        led.add(rc)
+
+    # The whole point: one wall seen four times, not four things seen once.
+    assert led.max_exact == 4
+    assert len(led.exact) == 1

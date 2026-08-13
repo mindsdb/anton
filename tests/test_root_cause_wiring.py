@@ -12,6 +12,8 @@ look.
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -153,13 +155,21 @@ async def test_the_ledger_spans_turns_on_a_reused_session(workspace):
     session = _session(workspace, [WALL], n_tool_calls=1)
     with patch("anton.analytics.send_event"):
         await _run(session, "first")
+    assert session._root_causes.failures == 1
+
+    # Turn 2 must be DETERMINISTIC. The previous version installed a plan that
+    # returned a tool call forever, so turn 2 ran to the 25-round cap and
+    # contributed 25 failures against an assertion of `>= 2` — wiping the ledger
+    # between turns was invisible. One failing call, then a text answer.
+    replies = [_tool_call(9), _text("done")]
+    session._llm.plan_stream = lambda **kw: _one(replies.pop(0))
     session.tool_registry.dispatch_tool = AsyncMock(return_value=WALL)
-    session._llm.plan_stream = lambda **kw: _one(_tool_call(9))
     with patch("anton.analytics.send_event"):
         await _run(session, "second")
 
-    assert session._root_causes.failures >= 2
-    assert session._root_causes.max_exact >= 2
+    # Exact equality, so a reset between turns reddens this.
+    assert session._root_causes.failures == 2
+    assert session._root_causes.max_exact == 2
 
 
 def _one(resp):
@@ -213,7 +223,26 @@ async def test_classification_never_changes_the_turn(workspace):
 
     assert send_a.call_args.kwargs["ended_by"] == send_b.call_args.kwargs["ended_by"]
     assert send_a.call_args.kwargs["rounds"] == send_b.call_args.kwargs["rounds"]
-    assert [m.get("role") for m in a._history] == [m.get("role") for m in b._history]
+
+    # Roles alone are far too weak: injecting an extra user message from
+    # `_record_root_cause` passes a role-only comparison, because history
+    # bundling merges it into the adjacent tool-result block — the sequence
+    # stays byte-identical while what reaches the LLM changes. Compare CONTENT.
+    #
+    # Raw equality does not work either: index 6 embeds a repr containing a
+    # coroutine's memory address, which differs per run on clean HEAD. Normalise
+    # addresses (and the timestamp, which is minute-resolution and would flake
+    # across a minute boundary).
+    def _shape(history):
+        out = []
+        for m in history:
+            blob = json.dumps(m.get("content"), default=str)
+            blob = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", blob)
+            blob = re.sub(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", "<TS>", blob)
+            out.append((m.get("role"), blob))
+        return out
+
+    assert _shape(a._history) == _shape(b._history)
 
 
 async def test_a_raising_classifier_cannot_break_a_turn(workspace):
@@ -225,6 +254,17 @@ async def test_a_raising_classifier_cannot_break_a_turn(workspace):
         await _run(session)
 
     assert send.call_args.kwargs["ended_by"] == "completed"
+    # `ended_by` alone is far too weak. Unguarded, the raise escapes into the
+    # tool loop's broad `except Exception`, which seals the tool_use as
+    # "[interrupted by error — tool call did not complete]" and injects a
+    # "SYSTEM: An error interrupted execution … Adjust your approach" note, then
+    # retries — so the turn still ends `completed` while the model has LOST the
+    # tool output and been told to change tack because of an internal reporting
+    # bug. That is the actual damage, so assert on what reached the model.
+    blob = json.dumps(session._history, default=str)
+    assert "interrupted by error" not in blob
+    assert "An error interrupted execution" not in blob
+    assert "No module named 'pyodbc'" in blob
 
 
 async def test_successes_are_not_recorded_at_all(workspace):
@@ -280,3 +320,88 @@ async def test_a_successful_legacy_result_is_not_counted_as_a_failure(workspace)
     assert session._root_causes.failures == 2
     assert session._root_causes.tiers["unclassified"] == 2
     assert session._root_causes.max_exact == 0
+
+
+# ── The dominant production path: scratchpad `action: "exec"` ──────────────
+
+
+async def test_the_scratchpad_exec_path_records_its_traceback(workspace):
+    """`{"action": "exec"}` is where every real ENG-836-shaped failure arrives.
+
+    Coverage gap found in review: every other wiring test issues
+    `{"action": "view"}`, so the exec branch — gated on `action == "exec"` —
+    was never entered. Four of the five `tool_reason` writer sites had zero
+    coverage, including this one, and blanking it was invisible: a real
+    3-failure wall turn would silently emit `wall 3 -> 0`,
+    `reason_coverage 1.0 -> 0.0`, `unclassified 0 -> 3` while looking healthy.
+
+    Uses a realistic multi-line traceback, because the producer takes the LAST
+    line — the reason this path reads `cell.error.splitlines()[-1][:160]`
+    rather than the whole thing.
+    """
+    from anton.core.backends.base import Cell
+
+    traceback = (
+        'Traceback (most recent call last):\n'
+        '  File "<cell>", line 3, in <module>\n'
+        "    import pyodbc\n"
+        '  File "/usr/lib/python3.12/importlib/__init__.py", line 90, in import_module\n'
+        "    return _bootstrap._gcd_import(name[level:], package, level)\n"
+        "ModuleNotFoundError: No module named 'pyodbc'"
+    )
+    cell = Cell(code="import pyodbc", stdout="", stderr="", error=traceback)
+
+    llm = make_mock_llm()
+    llm.usage_listener = None
+    n = {"i": 0}
+
+    def plan_stream(**kw):
+        async def gen():
+            n["i"] += 1
+            resp = LLMResponse(
+                content="trying",
+                tool_calls=[ToolCall(id=f"tc{n['i']}", name="scratchpad",
+                                     input={"action": "exec", "name": "main",
+                                            "code": "import pyodbc"})],
+                usage=_usage(), stop_reason="tool_use",
+            ) if n["i"] <= 3 else _text()
+            yield StreamComplete(response=resp)
+        return gen()
+
+    llm.plan_stream = plan_stream
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    session._max_turn_tokens = 0
+
+    pad = MagicMock()
+    async def _exec_streaming(*a, **k):
+        yield cell
+    pad.execute_streaming = _exec_streaming
+    pad.cancel = AsyncMock()
+
+    with patch("anton.core.session.prepare_scratchpad_exec",
+               AsyncMock(return_value=(pad, "import pyodbc", "install driver", "5s", 5))), \
+         patch.object(ChatSession, "_record_cell_explainability", lambda *a, **k: None), \
+         patch("anton.analytics.send_event") as send:
+        await _run(session)
+
+    led = session._root_causes
+    assert led.failures == 3, f"exec-path failures not recorded: {led.failures}"
+    assert led.max_exact == 3
+    assert led.top_class == "missing_dependency"
+    assert led.reason_coverage == 1.0
+    assert int(send.call_args.kwargs["root_cause_wall"]) == 3
+
+
+async def test_a_raising_tool_records_its_exception_type(workspace):
+    """The dispatcher's own except-clause is the fifth writer site."""
+    session = _session(workspace, [], n_tool_calls=2)
+    session.tool_registry.dispatch_tool = AsyncMock(
+        side_effect=ConnectionRefusedError("[Errno 61] Connection refused")
+    )
+    with patch("anton.analytics.send_event"):
+        await _run(session)
+
+    led = session._root_causes
+    assert led.failures == 2
+    assert led.tiers["external_wall"] == 2
+    assert led.top_class == "connection_refused"

@@ -140,7 +140,16 @@ _SENTINEL_REASONS = {
 # matters here — the opposite error merely groups two walls together, which is
 # visible in the data rather than silent.
 _MODULE_RE = re.compile(r"No module named ['\"]([\w.]+)['\"]")
-_IMPORT_NAME_RE = re.compile(r"cannot import name ['\"](\w+)['\"]")
+# Captures the MODULE, not the symbol. Keying on the symbol split one broken
+# package into as many keys as symbols the agent tried to import from it —
+# three failures on `pandas` scoring max_exact=1, distinct=3 — and made
+# `cannot import name 'read_excel' from 'pandas'` a different wall from
+# `No module named 'pandas'`. The `.split(".")[0]` at the use site is a no-op on
+# a symbol, which is the evidence the module was always intended.
+_IMPORT_NAME_RE = re.compile(
+    r"cannot import name ['\"]\w+['\"] from "
+    r"(?:partially initialized module )?['\"]([\w.]+)['\"]"
+)
 _PATH_RE = re.compile(r"['\"]([^'\"]{1,120})['\"]")
 _WINERR_PATH_RE = re.compile(r"\[(?:Errno|WinError) \d+\][^:]*: ['\"]?([^'\"]{1,120})")
 _HOSTPORT_RE = re.compile(r"([\w.-]+):(\d{2,5})")
@@ -394,7 +403,19 @@ class RootCauseLedger:
         return (self.with_reason / self.failures) if self.failures else 0.0
 
     def event_fields(self) -> dict:
-        """Flat properties for the turn's analytics event and log line."""
+        """Flat properties for the turn's analytics event and log line.
+
+        **Emitted per turn; the VALUES are cumulative for the ledger's lifetime**
+        (see the class docstring — one turn under Cowork, the whole conversation
+        under the CLI). The names read as per-turn and are not.
+
+        This matters for ENG-1492's actual deliverable, the distribution that
+        sets ENG-1286/ENG-1531's thresholds: on a host where the ledger spans
+        turns, a 10-turn session emits 10 events whose counts only climb, so a
+        naive per-EVENT percentile is dominated by long sessions and reads high.
+        Take the LAST event per session, or compute per-session maxima — never
+        a percentile over the raw event stream.
+        """
         return {
             "root_cause_failures": self.failures,
             "root_cause_distinct": len(self.exact),
