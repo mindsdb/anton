@@ -690,13 +690,15 @@ class ChatSession:
         # older settings object doesn't break — absent means "no ceiling",
         # matching the pre-ENG-1286 behaviour rather than silently applying one.
         self._max_turn_tokens = getattr(s, "max_turn_tokens", 0)
-        # Session-scoped tally of classified tool failures (ENG-1492).
-        # MEASUREMENT ONLY — nothing reads this to change behaviour. The control
-        # that will (ENG-1531) is deliberately unbuilt until this has reported
-        # real numbers, because the thresholds it needs currently rest on one
-        # incident. Session-scoped, not per-turn: that control fires at most
-        # once per root cause per session, so the counts its thresholds are read
-        # off must be the session's too.
+        # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
+        # nothing reads this to change behaviour. The control that will
+        # (ENG-1531) is deliberately unbuilt until this has reported real
+        # numbers, because the thresholds it needs rest on one incident.
+        #
+        # Lifetime is this ChatSession, which is NOT the same as a conversation
+        # on every host: the CLI builds one session and loops, but cowork-server
+        # builds a fresh one per HTTP turn, so there this resets every turn.
+        # See `RootCauseLedger` for what that does and does not still measure.
         self._root_causes = RootCauseLedger()
         # Latch for a verifier that fails the same hard way every turn — e.g.
         # kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), which

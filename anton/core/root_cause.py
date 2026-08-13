@@ -279,9 +279,28 @@ class RootCauseLedger:
     valid archive) are precisely why it never counted to five through the
     ENG-836 runaway.
 
-    Session-scoped because the control that will consume this fires at most once
-    per root cause per session, so the counts the thresholds are read off must be
-    the session's, not one turn's.
+    **Lifetime is one ChatSession, and that means different things per host —
+    check before reading the numbers as "per conversation".**
+
+    | host | ChatSession built | ledger effectively |
+    |------|-------------------|--------------------|
+    | CLI (`chat.py`) | once, then loops `turn_stream` | spans the conversation |
+    | Cowork (`anton_harness`) | inside `stream_response()`, i.e. per HTTP turn | **per turn** |
+
+    So on the primary product this resets every turn. That was NOT the original
+    intent — the design note said session-scoped, on the reasoning that
+    ENG-1531 fires once per root cause per session — and it is recorded here
+    because the difference is invisible from this file.
+
+    What it still measures correctly: a wall hit repeatedly **within one turn**,
+    which is the ENG-836 shape (all four pyodbc/apt/.deb/pymssql attempts were
+    in a single turn of 29 calls). What it misses: a wall that persists across
+    turns because the user said "try again", where each turn starts from zero.
+
+    Consequence for ENG-1531: its "at most once per root cause per session"
+    cannot be built on this object alone — it needs cowork-server to hold the
+    ledger per conversation, or to accept per-turn scope deliberately. Sizing
+    thresholds from this data is still valid; claiming session coverage is not.
     """
 
     exact: Counter = field(default_factory=Counter)

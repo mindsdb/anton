@@ -139,8 +139,17 @@ async def test_self_inflicted_failures_reach_the_ledger_but_no_trip_rung(workspa
     assert led.max_class == 0
 
 
-async def test_the_ledger_spans_turns_within_a_session(workspace):
-    """Session-scoped, because ENG-1531 fires once per cause per SESSION."""
+async def test_the_ledger_spans_turns_on_a_reused_session(workspace):
+    """Spans turns when the SESSION is reused — which is the CLI, not Cowork.
+
+    Deliberately named for the shape it actually tests. `chat.py` builds one
+    ChatSession and loops `turn_stream`, so the ledger accumulates. cowork-server
+    calls `_build_chat_session()` inside `stream_response()` — once per HTTP turn
+    — so on the primary product this resets every turn instead.
+
+    Keeping the test (the object behaves as designed) but not letting its name
+    imply coverage the deployment does not give. See `RootCauseLedger`.
+    """
     session = _session(workspace, [WALL], n_tool_calls=1)
     with patch("anton.analytics.send_event"):
         await _run(session, "first")
