@@ -61,16 +61,66 @@ def test_classify_transient_retryable(status, body):
 
 def test_session_backoff_flag_splits_midstream_from_requesttime():
     # Mid-stream (overload smuggled into a 200) had NO prior retry → session
-    # backs off. Request-time errors (real 5xx/429/529) were SDK-retried already
+    # backs off. Request-time errors (real 5xx/529) were SDK-retried already
     # → fail fast, no extra session budget.
+    #
+    # The velocity 429 is the documented exception and has its own test below
+    # (ENG-1537): the SDK's retries fire seconds apart, which is the right
+    # answer for a 5xx that recovers instantly and useless against a
+    # per-minute token ceiling.
     assert classify_transient(
         200, {"error": {"type": "overloaded_error"}}, provider="X"
     ).session_backoff is True
     assert classify_transient(503, {}, provider="X").session_backoff is False
-    assert classify_transient(429, {}, provider="X").session_backoff is False
     assert classify_transient(
         529, {"error": {"type": "overloaded_error"}}, provider="X"
     ).session_backoff is False
+
+
+def test_velocity_429_backs_off_in_session_and_carries_retry_after():
+    # ENG-1537. A velocity rate-limit is the one request-time status the SESSION
+    # must wait on: it is the only failure class where waiting is both necessary
+    # and sufficient, and the server hands us the interval. With
+    # session_backoff=False this fell to the count-based path, which re-issued
+    # the request twice with NO delay and a recovery note appended each time —
+    # told "too many tokens per minute", anton immediately sent more.
+    t = classify_transient(429, {}, provider="X", retry_after=30.0)
+    assert isinstance(t, TransientProviderError)
+    assert t.code == "rate_limited"
+    assert t.session_backoff is True
+    assert t.retry_after == 30.0
+
+
+def test_velocity_429_without_a_hint_still_backs_off():
+    # No Retry-After (a provider that omits it) → still waits, on the jittered
+    # curve rather than a named interval.
+    t = classify_transient(429, {}, provider="X")
+    assert t.session_backoff is True
+    assert t.retry_after is None
+
+
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        # The M3 gate's out-of-credits denials, in both body dialects.
+        (429, {"error": {"code": "included_allowance_exhausted"}}),
+        (429, {"code": "included_allowance_exhausted"}),
+        (402, {"error": {"code": "wallet_empty"}}),
+        (402, {"code": "wallet_empty"}),
+        # OpenAI's own quota dialect.
+        (429, {"error": {"code": "insufficient_quota"}}),
+        (429, {"code": "insufficient_quota"}),
+    ],
+)
+def test_billing_denials_never_enter_the_retry_loop(status, body):
+    # ENG-1169 regression guard, re-asserted because ENG-1537 made the sibling
+    # 429 branch retryable. A spent allowance and an empty wallet share the 429
+    # status with the velocity limit but are PERMANENT for the identical
+    # request: the allowance resets monthly, so waiting can never help and a
+    # wait would only delay the out-of-credits card the user needs.
+    # A Retry-After is passed deliberately — even with a hint present, these
+    # must not become retryable.
+    assert classify_transient(status, body, provider="X", retry_after=30.0) is None
 
 
 @pytest.mark.parametrize(

@@ -27,6 +27,7 @@ from .provider import (
     Usage,
     classify_404,
     classify_transient,
+    retry_after_seconds,
     compute_context_pressure,
     wallet_denial_code,
     raise_on_empty_response,
@@ -106,11 +107,15 @@ def _raise_for_status_error(
             error_type=envelope.get("type"),
         ) from exc
 
-    transient = classify_transient(exc.status_code, body, provider=provider, model=model)
+    transient = classify_transient(
+        exc.status_code, body, provider=provider, model=model,
+        retry_after=retry_after_seconds(exc),
+    )
     if transient is not None:
         logger.warning(
-            "transient provider error (%s): status=%s body=%s",
-            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+            "transient provider error (%s): status=%s retry_after=%s body=%s",
+            transient.code, exc.status_code, transient.retry_after,
+            scrub_credentials(str(exc.body))[:500],
         )
         raise transient from exc
 

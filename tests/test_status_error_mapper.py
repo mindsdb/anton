@@ -138,15 +138,39 @@ def test_429_enveloped_detail_also_maps_to_token_limit():
     assert "Monthly limit exceeded" in str(err.value)
 
 
-def test_bare_429_is_transient_fail_fast():
-    # ENG-673: a plain 429 (no quota detail) is a retryable rate-limit, but the
-    # SDK already retried it at request time → fail fast (no session backoff).
-    # Replaces the old test_bare_429_stays_generic — this path is now typed.
+def test_bare_429_is_transient_and_backs_off_in_session():
+    # ENG-673 typed this path; ENG-1537 made it wait. A plain 429 is a velocity
+    # limit — the one request-time status where the session must spend its
+    # budget, because the SDK's retries fire seconds apart and the ceiling is
+    # per-minute. Was session_backoff=False, which sent it down the count-based
+    # path and re-issued the request twice with no delay.
     exc = _sdk_error(429, json_body={})
     with pytest.raises(TransientProviderError) as err:
         _raise_for_status_error(exc, "sonnet")
-    assert err.value.session_backoff is False
+    assert err.value.session_backoff is True
+    assert err.value.code == "rate_limited"
     assert "rate-limiting" in str(err.value).lower()
+
+
+def test_bare_429_reads_retry_after_off_the_response():
+    # ENG-1537: nothing in anton read this header before. The gateway sends it
+    # on every velocity 429 as integer seconds; without it the session falls
+    # back to a guessed curve instead of the interval the server named.
+    exc = _sdk_error(429, json_body={}, headers={"Retry-After": "42"})
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.retry_after == 42.0
+
+
+def test_retry_after_http_date_form_is_ignored_not_misparsed():
+    # The date form is legal but nothing in use emits it, and reading it as a
+    # number would produce an absurd delay. Absent hint → jittered curve.
+    exc = _sdk_error(
+        429, json_body={}, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}
+    )
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.retry_after is None
 
 
 def _openai_quota_429():
