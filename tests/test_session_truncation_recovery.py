@@ -22,7 +22,7 @@ What must hold now:
 4. If the retry also dies silently, the user sees an explicit failure notice —
    a turn must never end silently.
 5. Completions that finish inside the budget are untouched.
-6. A tool call the cap opened up does not count as "finished" (ENG-695): the
+6. A tool call the cap opened up does not count as "finished": the
    repair pass makes such a call parseable, so without this the round looked
    complete and its handler ran on arguments the model never emitted.
 """
@@ -369,12 +369,12 @@ async def test_at_cap_with_a_tool_call_is_not_intercepted(workspace):
 
 
 # --------------------------------------------------------------------------
-# 6. A tool call cut open at the cap is not a usable tool call (ENG-695).
+# 6. A tool call cut open at the cap is not a usable tool call.
 # --------------------------------------------------------------------------
 
 
 async def test_repaired_tool_call_at_the_cap_is_retried_not_dispatched(workspace):
-    """The prod shape from ENG-695: the budget ran out *inside* the arguments.
+    """The shape measured in prod: the budget ran out *inside* the arguments.
 
     ``safe_parse_tool_input``'s repair pass closes the open brace, so the call
     arrives parseable with ``parse_error`` unset — the round therefore looked
@@ -547,8 +547,8 @@ async def test_the_non_streaming_turn_also_refuses_a_cut_open_call(workspace):
     It has no truncation retry of its own, so the refusal *is* the recovery
     here: the handler must not run, and the model must get an is_error
     tool_result it can answer by re-emitting the call. Without this the loop
-    reaches `dispatch_tool` with arguments the model never finished — the
-    ENG-695 shape, on a path the streaming gates never see.
+    reaches `dispatch_tool` with arguments the model never finished, on a path
+    the streaming gates never see.
     """
     cut = ToolCall(
         id="tc_cut",

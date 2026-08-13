@@ -972,13 +972,8 @@ class OpenAIProvider(LLMProvider):
 
         if message.tool_calls:
             for tc in message.tool_calls:
-                # safe_parse_tool_input returns (parsed_dict,
-                # parse_error, repaired). parse_error is forwarded to
-                # the session dispatcher so the tool_use/tool_result
-                # protocol can carry the recovery; repaired says the
-                # body parsed only after being patched up, which the
-                # session pairs with its output-cap evidence — see the
-                # streaming path in this file for the same pattern.
+                # Both flags ride on the ToolCall for the session to act
+                # on. See `safe_parse_tool_input`.
                 parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
                 tool_calls.append(
                     ToolCall(
@@ -1448,11 +1443,9 @@ class OpenAIProvider(LLMProvider):
                     raw_json = "".join(info["args_parts"]) or getattr(
                         event, "arguments", ""
                     )
-                    # Same safe parse as the two other transports. A bare
-                    # `json.loads` raised out of this generator on a body cut
-                    # mid-JSON, tearing down the turn; and without the flags the
-                    # session cannot tell a cut call from a complete one, so it
-                    # would dispatch a handler on unfinished arguments.
+                    # Parsed through the shared helper rather than `json.loads`:
+                    # a body cut mid-JSON must not raise out of this generator,
+                    # and the flags are what let the session refuse the call.
                     parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
                     tool_calls.append(
                         ToolCall(
@@ -1575,10 +1568,9 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
             name = getattr(item, "name", "") or ""
             args_str = getattr(item, "arguments", "") or ""
-            # Swallowing the decode error into an empty dict left a cut-off call
-            # indistinguishable from one the model chose to send with no
-            # arguments, and the session dispatched it. The shared parse records
-            # which it was.
+            # Shared parse, not a bare `json.loads` with the error swallowed
+            # into `{}`: an empty dict cannot be told apart from a call the
+            # model deliberately sent with no arguments.
             parsed, parse_error, repaired = safe_parse_tool_input(args_str)
             tool_calls.append(ToolCall(
                 id=call_id, name=name, input=parsed,

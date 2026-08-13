@@ -316,6 +316,36 @@ def test_shared_classifier_is_used_by_both_structured_paths():
     )
 
 
+def test_the_subprocess_tool_loop_refuses_damaged_calls():
+    """`agentic_loop` runs inside the scratchpad subprocess and dispatches tool
+    calls of its own, so it needs the same refusal as the session's loops.
+
+    Checked by AST for the same reason as the test above — importing
+    `scratchpad_boot` reads stdin at import time. The assertion is that the
+    refusal is *the shared builder*: a hand-rolled copy here would drift from
+    the message the session sends, and the model would learn two recoveries.
+    """
+    import ast
+
+    boot_src = (
+        Path(__file__).resolve().parents[1]
+        / "anton" / "core" / "backends" / "scratchpad_boot.py"
+    ).read_text()
+    loop = next(
+        (n for n in ast.walk(ast.parse(boot_src))
+         if isinstance(n, ast.FunctionDef) and n.name == "agentic_loop"),
+        None,
+    )
+    assert loop is not None, "agentic_loop not found"
+    called = {
+        n.func.id for n in ast.walk(loop)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "damaged_tool_call_result" in called, (
+        "the subprocess loop must refuse a cut-open call before handle_tool runs"
+    )
+
+
 def test_classifier_tolerates_a_response_without_usage():
     """Defensive: a provider response missing `usage` must not blow up the
     classifier — it just can't prove truncation, which is the safe direction

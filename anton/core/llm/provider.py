@@ -25,11 +25,10 @@ class ToolCall:
     # True when the arguments JSON was malformed but the repair pass in
     # `safe_parse_tool_input` salvaged a parseable dict, so `parse_error` is
     # None and the handler *would* run. The dict is syntactically valid and
-    # semantically unfinished — the repair closes an open string or brace, it
-    # cannot invent the argument the model never emitted. The session uses it
-    # twice: to tell a round cut off at the output cap from a complete one (so
-    # the round is retried with a bigger budget), and in the dispatcher, which
-    # never runs a handler on a repaired call.
+    # semantically unfinished: the repair closes an open string or brace, it
+    # cannot invent the argument the model never emitted. Read in two places —
+    # `usable_tool_call`, to retry a round the output cap cut off, and
+    # `damaged_tool_call_result`, which refuses the call outright.
     repaired: bool = False
 
 
@@ -375,6 +374,46 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     if not isinstance(parsed, dict):
         return {}, f"tool input was not a JSON object (got {type(parsed).__name__})", False
     return parsed, None, False
+
+
+def damaged_tool_call_result(tc: ToolCall) -> dict | None:
+    """The `tool_result` to answer an unfinished tool call with, or None.
+
+    None means the call is intact and may be dispatched. Two shapes are not:
+
+    - ``parse_error`` — the arguments couldn't be parsed at all (a cut
+      mid-string, a missing comma).
+    - ``repaired`` — they parsed only after the repair pass closed an open
+      string or brace, so the dict is valid JSON built from a body the model
+      never finished. It cannot contain the argument that never arrived, and
+      running a handler on it acts on half a request.
+
+    Answering with a `tool_result` keeps the recovery inside the tool_use /
+    tool_result protocol the model already understands, so no caller needs a
+    retry of its own. Lives next to `safe_parse_tool_input`, which produces the
+    two flags, and is shared by every tool loop — the session's streaming and
+    non-streaming ones, and `agentic_loop` in the scratchpad subprocess — so a
+    damaged call is refused identically whichever one runs.
+    """
+    if not (tc.parse_error or tc.repaired):
+        return None
+    reason = (
+        f"failed to parse: {tc.parse_error}"
+        if tc.parse_error
+        else "arrived incomplete — the body ended mid-value and was only closed "
+             "off by a repair pass, so at least one argument is missing or cut short"
+    )
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": (
+            f"Tool call arguments {reason}. This is most often a token-cap "
+            "truncation mid-call. Re-emit this call with a complete, valid JSON "
+            "body; if an argument was large, make it smaller or split the work "
+            "across several calls."
+        ),
+        "is_error": True,
+    }
 
 
 _CONTEXT_WINDOWS: list[tuple[str, int]] = [

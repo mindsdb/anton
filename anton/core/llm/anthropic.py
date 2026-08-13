@@ -355,19 +355,9 @@ class AnthropicProvider(LLMProvider):
                         info = blocks.get(idx, {})
                         if info.get("type") == "tool_use":
                             raw_json = "".join(info["json_parts"])
-                            # safe_parse_tool_input never raises. It
-                            # returns (parsed_dict, parse_error,
-                            # repaired):
-                            #
-                            # - parse_error set → the session
-                            #   dispatcher short-circuits with a tool
-                            #   result asking the LLM to re-emit a
-                            #   clean call, over the tool_use /
-                            #   tool_result protocol the LLM already
-                            #   understands.
-                            # - repaired → the dict parses but the
-                            #   body was cut; the session decides
-                            #   whether that was its output cap.
+                            # Never raises; the two flags it returns tell
+                            # the session what the body was missing. See
+                            # `safe_parse_tool_input`.
                             parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
                             tool_calls.append(
                                 ToolCall(
