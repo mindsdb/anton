@@ -134,6 +134,25 @@ def test_error_signature_still_collapses_variable_parts():
     assert _normalise_error_signature("Error: plain") == "Error: plain"
 
 
+def test_envelope_unwrap_survives_leading_whitespace():
+    # Leading whitespace must not defeat the unwrap (the `{`-prefix guard),
+    # else two distinct messages collapse to one signature again.
+    a = "  " + SideEffectResult.failed("Error: `name` is required.").content
+    b = "  " + SideEffectResult.failed("PUBLISH FAILED: unsupported .docx").content
+    assert _normalise_error_signature(a) != _normalise_error_signature(b)
+
+
+def test_envelope_unwrap_ignores_empty_message():
+    import json as _json
+
+    from anton.core.memory.acc import _unwrap_envelope_message
+
+    # An empty message carries no signal to sign — do NOT return "" (which would
+    # sign every empty-message envelope alike); fall through to the raw text.
+    envelope = _json.dumps({"success": False, "message": "", "reason": "a"})
+    assert _unwrap_envelope_message(envelope) == envelope
+
+
 # --- update_artifact -------------------------------------------------------
 
 

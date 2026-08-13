@@ -246,14 +246,18 @@ def _unwrap_envelope_message(text: str) -> str:
     repeating. Signing the `message` keeps the discrimination the prose had.
     Non-JSON text passes through untouched.
     """
-    if not text.startswith("{"):
+    stripped = (text or "").lstrip()
+    if not stripped.startswith("{"):
         return text
     try:
-        payload = json.loads(text)
+        payload = json.loads(stripped)
     except ValueError:
         return text
-    if isinstance(payload, dict) and isinstance(payload.get("message"), str):
-        return payload["message"]
+    message = payload.get("message") if isinstance(payload, dict) else None
+    # Require a non-empty message — an empty one would sign every empty-message
+    # envelope alike, the residue of the same collapse this guards against.
+    if isinstance(message, str) and message:
+        return message
     return text
 
 
