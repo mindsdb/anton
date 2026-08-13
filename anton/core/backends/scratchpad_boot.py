@@ -571,8 +571,11 @@ if _scratchpad_model:
                     max_tokens=max_tokens,
                 )
 
-                if not response.tool_calls:
-                    # Same classification as the async path (ENG-1081).
+                if not response.tool_calls or any(
+                    tc.repaired for tc in response.tool_calls
+                ):
+                    # Same classification as the async path (ENG-1081), and the
+                    # same reason `parse_error` is left to the validation branch.
                     # Nothing retries here, but the message reaches the model as
                     # a traceback, so "you ran out of budget" is actionable
                     # where "did not return structured output" was not.

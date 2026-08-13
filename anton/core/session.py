@@ -51,7 +51,7 @@ from anton.core.llm.provider import (
     ToolCall,
     TransientProviderError,
 )
-from anton.core.llm.structured import looks_truncated
+from anton.core.llm.structured import looks_truncated, usable_tool_call
 from anton.core.llm.thalamus import (
     ACTION_RESPOND,
     ThalamicDecision,
@@ -142,23 +142,42 @@ _TRUNCATION_FAILURE_NOTICE = (
 logger = logging.getLogger(__name__)
 
 
-def _usable_tool_call(llm_response: LLMResponse) -> bool:
-    """True when the response carries tool calls and every one of them is intact.
+def _damaged_tool_call_result(tc: ToolCall) -> dict | None:
+    """The `tool_result` to answer an unfinished tool call with, or None.
 
-    A tool call is what lets a round that hit the output cap still be worth
-    dispatching — but only if nothing it emitted was cut:
+    None means the call is intact and may be dispatched. Two shapes are not:
 
-    - ``repaired`` marks arguments the repair pass patched back into valid JSON,
-      which means the model's own body ended mid-value. It closes an open string
-      or brace; it cannot invent the argument that never arrived.
-    - ``parse_error`` marks a body it could not salvage at all.
+    - ``parse_error`` — the arguments couldn't be parsed at all (a cut
+      mid-string, a missing comma).
+    - ``repaired`` — they parsed only after the repair pass closed an open
+      string or brace, so the dict is valid JSON built from a body the model
+      never finished. It cannot contain the argument that never arrived, and
+      running a handler on it acts on half a request.
 
-    One damaged call makes the whole round unfinished, even alongside intact
-    ones: dispatching the intact half and dropping the rest silently executes
-    part of what the model was in the middle of asking for.
+    Answering with a `tool_result` keeps the recovery inside the tool_use /
+    tool_result protocol the model already understands — no session-level
+    retry, no SYSTEM message in history. Shared by both tool loops (streaming
+    and `turn`) so a damaged call is refused identically whichever one runs.
     """
-    calls = llm_response.tool_calls
-    return bool(calls) and not any(tc.parse_error or tc.repaired for tc in calls)
+    if not (tc.parse_error or tc.repaired):
+        return None
+    reason = (
+        f"failed to parse: {tc.parse_error}"
+        if tc.parse_error
+        else "arrived incomplete — the body ended mid-value and was only closed "
+             "off by a repair pass, so at least one argument is missing or cut short"
+    )
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": (
+            f"Tool call arguments {reason}. This is most often a token-cap "
+            "truncation mid-call. Re-emit this call with a complete, valid JSON "
+            "body; if an argument was large, make it smaller or split the work "
+            "across several calls."
+        ),
+        "is_error": True,
+    }
 
 
 if TYPE_CHECKING:
@@ -2669,6 +2688,16 @@ class ChatSession:
             # Process each tool call via registry
             tool_results: list[dict] = []
             for tc in response.tool_calls:
+                # Same refusal as the streaming loop: arguments the model never
+                # finished are answered, not executed. This loop has no
+                # truncation retry of its own, so the tool_result is the whole
+                # recovery here — the model re-emits the call next round, with a
+                # full budget again.
+                damaged = _damaged_tool_call_result(tc)
+                if damaged is not None:
+                    tool_results.append(damaged)
+                    continue
+
                 try:
                     outcome = await self.tool_registry.dispatch_tool(
                         self, tc.name, tc.input, tool_call_id=tc.id,
@@ -3382,7 +3411,7 @@ class ChatSession:
         # closes the open brace and hands back a parseable dict with no
         # `parse_error` — so the round looked complete and the handler ran on
         # arguments the model never finished (ENG-695).
-        if looks_truncated(llm_response, self._turn_max_tokens()) and not _usable_tool_call(
+        if looks_truncated(llm_response, self._turn_max_tokens()) and not usable_tool_call(
             llm_response
         ):
             response = None
@@ -3531,44 +3560,14 @@ class ChatSession:
                             datasources=_extract_datasources(tc)
                         )
 
-                    # An unfinished tool call is never dispatched, whichever
-                    # way it arrived here. Two shapes qualify:
-                    #
-                    # - `parse_error` — the streamed arguments couldn't be
-                    #   parsed at all (truncation mid-string, missing comma).
-                    # - `repaired` — they parsed only after the repair pass
-                    #   closed an open string or brace, so the dict is valid
-                    #   JSON built from a body the model never finished. It
-                    #   cannot contain the argument that never arrived, and
-                    #   running a handler on it acts on half a request.
-                    #
-                    # The truncation gates in `_stream_and_handle_tools` catch
-                    # the common case earlier and retry the whole round with a
-                    # bigger budget; this is the backstop for every other path
-                    # (a retry that came back cut too, a repair with no output
-                    # cap involved). We synthesise a tool_result asking the LLM
-                    # to re-emit the call, which keeps the recovery inside the
-                    # tool_use / tool_result protocol — no session-level retry,
-                    # no SYSTEM message clutter in history.
-                    if tc.parse_error or tc.repaired:
-                        reason = (
-                            f"failed to parse: {tc.parse_error}"
-                            if tc.parse_error
-                            else "arrived incomplete — the body ended mid-value and was "
-                                 "only closed off by a repair pass, so at least one "
-                                 "argument is missing or cut short"
-                        )
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": (
-                                f"Tool call arguments {reason}. This is most often a "
-                                "token-cap truncation mid-call. Re-emit this call with a "
-                                "complete, valid JSON body; if an argument was large, "
-                                "make it smaller or split the work across several calls."
-                            ),
-                            "is_error": True,
-                        })
+                    # An unfinished tool call is never dispatched. The
+                    # truncation gates above catch the common case earlier and
+                    # retry the round with a bigger budget; this is the backstop
+                    # for every other path — a retry that came back cut too, a
+                    # repair with no output cap involved.
+                    damaged = _damaged_tool_call_result(tc)
+                    if damaged is not None:
+                        tool_results.append(damaged)
                         continue
 
                     _tool_t0 = _time.monotonic()
@@ -3952,7 +3951,7 @@ class ChatSession:
                 # what runs out first.
                 if looks_truncated(
                     llm_response, self._turn_max_tokens()
-                ) and not _usable_tool_call(llm_response):
+                ) and not usable_tool_call(llm_response):
                     response = None
                     async for event in self._recover_truncated_stream(
                         llm_response, system=system, tools=tools

@@ -204,6 +204,60 @@ async def test_tool_call_truncated_mid_arguments_is_retryable():
     assert "unusable tool call" in str(exc_info.value)
 
 
+async def test_repaired_tool_call_that_still_validates_is_not_accepted():
+    """The silent shape: the repair pass closed the cut and the schema is happy.
+
+    Every required field is present, so validation never fires and the `except`
+    branch below it never runs — the verdict would be returned as the model's
+    answer with `reason` a half-sentence. Only `repaired` can see it.
+    """
+    llm = _client_with_response(LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="tc_v", name="_VerifierVerdict",
+                             input={"status": "COMPLETE", "reason": "the task was fini"},
+                             repaired=True)],
+        usage=Usage(input_tokens=100, output_tokens=2048),
+        stop_reason="stop",
+    ))
+
+    with pytest.raises(StructuredOutputError) as exc_info:
+        await llm.generate_object_code(
+            _VerifierVerdict, system="s", messages=[{"role": "user", "content": "m"}],
+            max_tokens=2048,
+        )
+
+    assert exc_info.value.truncated is True, "must buy the bigger-budget retry"
+
+
+async def test_a_repaired_call_is_rejected_wherever_it_sits_in_the_list():
+    """The check covers every call, not just the first.
+
+    A forced `tool_choice` usually yields exactly one, but a model that emits a
+    second one puts the cut arguments at an index a `tool_calls[0]` check never
+    looks at — and the object would then be returned as the model's answer.
+    """
+    llm = _client_with_response(LLMResponse(
+        content="",
+        tool_calls=[
+            ToolCall(id="tc_a", name="_VerifierVerdict",
+                     input={"status": "COMPLETE", "reason": "all checks pass"}),
+            ToolCall(id="tc_b", name="_VerifierVerdict",
+                     input={"status": "COMPLETE", "reason": "and the second half was"},
+                     repaired=True),
+        ],
+        usage=Usage(input_tokens=100, output_tokens=2048),
+        stop_reason="stop",
+    ))
+
+    with pytest.raises(StructuredOutputError) as exc_info:
+        await llm.generate_object_code(
+            _VerifierVerdict, system="s", messages=[{"role": "user", "content": "m"}],
+            max_tokens=2048,
+        )
+
+    assert exc_info.value.truncated is True
+
+
 async def test_schema_mismatch_under_budget_is_not_disguised_as_truncation():
     """The mirror case: a malformed tool call with budget to spare is a real
     schema failure. It must keep propagating as a validation error rather than
