@@ -310,9 +310,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 os.path.expanduser("~/.cargo/bin/uv.exe"),
             )
         else:
+            # Package-manager locations a GUI-launched parent's PATH may miss
+            # (mindshub#12484). Keep in sync with cowork's uv-paths.ts.
             candidates = (
                 os.path.expanduser("~/.local/bin/uv"),
                 os.path.expanduser("~/.cargo/bin/uv"),
+                "/opt/homebrew/bin/uv",
+                "/usr/local/bin/uv",
+                "/opt/local/bin/uv",
+                "/home/linuxbrew/.linuxbrew/bin/uv",
             )
         for candidate in candidates:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
