@@ -142,9 +142,12 @@ class AntonSettings(CoreSettings):
     analytics_url: str = "https://x6nik28qi6.execute-api.us-east-2.amazonaws.com/default/zoomInfoCollector"
 
     # PostHog direct sink (ENG-1495). Events named in `analytics._POSTHOG_EVENTS`
-    # post here instead of through `analytics_url`, whose collector drops any
-    # action outside its `anton_`/`ds_connect` prefix filter while returning
-    # HTTP 200 — the reason `turn_completed` produced nothing at all.
+    # post here; everything else goes through `analytics_url`. The routing rule
+    # and each sink's behaviour are documented in one place — `anton/analytics.py`
+    # — deliberately not repeated here: `analytics_url` is expected to change
+    # collector (anton#333 repoints it at `collect.mindshub.ai`, which filters
+    # nothing), and a description of the old lambda's filters would survive that
+    # change as a silent falsehood. git raises no conflict on this file.
     #
     # `posthog_key` is a PostHog *project* token, not a credential in the usual
     # sense: it is write-only (it can send events and cannot read a single row)

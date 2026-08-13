@@ -306,14 +306,36 @@ def test_turn_completed_respects_the_opt_out(monkeypatch):
     assert captured == []
 
 
+class _FakeResponse:
+    """Minimal stand-in for urlopen's context manager, so the status-reading
+    path in `_fire_posthog` is actually exercised rather than skipped."""
+
+    def __init__(self, status=200):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _capture_posthog_request(monkeypatch, status=200) -> list:
+    seen: list[urllib.request.Request] = []
+
+    def _urlopen(req, timeout=None):
+        seen.append(req)
+        return _FakeResponse(status)
+
+    monkeypatch.setattr(analytics.urllib.request, "urlopen", _urlopen)
+    return seen
+
+
 def test_posthog_request_is_a_post_with_json(monkeypatch):
     """Exercises the real `_fire_posthog` rather than a stub: a GET would land
     the whole payload in gateway and CDN access logs, which is exactly how the
     sibling endpoint ended up logging email addresses."""
-    seen: list[urllib.request.Request] = []
-    monkeypatch.setattr(
-        analytics.urllib.request, "urlopen", lambda req, timeout=None: seen.append(req)
-    )
+    seen = _capture_posthog_request(monkeypatch)
 
     analytics._fire_posthog("https://ph.example.test/capture/", b'{"a":1}')
 
@@ -321,6 +343,36 @@ def test_posthog_request_is_a_post_with_json(monkeypatch):
     assert seen[0].method == "POST"
     assert seen[0].get_header("Content-type") == "application/json"
     assert "python-urllib" not in seen[0].get_header("User-agent", "").lower()
+
+
+def test_posthog_rejection_is_logged_and_swallowed(monkeypatch, caplog):
+    """A non-2xx must leave a trace locally and still not raise.
+
+    Note what this can and cannot buy, measured against the live endpoint on
+    2026-08-13: a **bogus api_key returns HTTP 200** `{"status":"Ok"}`, so a
+    wrong/rotated/revoked token is NOT detectable here. Only a malformed payload
+    (400) and transport failures are. The zero-volume alert remains the only
+    defence against a token problem — this test exists so that the errors which
+    *are* visible stop being silent, not to suggest all of them are.
+    """
+    seen = _capture_posthog_request(monkeypatch, status=400)
+
+    with caplog.at_level("DEBUG", logger=analytics.logger.name):
+        analytics._fire_posthog("https://ph.example.test/capture/", b'{"bad":1}')
+
+    assert len(seen) == 1  # still sent; never raises
+    assert any("400" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_posthog_transport_failure_never_raises(monkeypatch):
+    """Analytics must never break a turn — the guarantee the module docstring
+    makes. A raising urlopen has to be swallowed."""
+    def _boom(req, timeout=None):
+        raise OSError("network down")
+
+    monkeypatch.setattr(analytics.urllib.request, "urlopen", _boom)
+
+    analytics._fire_posthog("https://ph.example.test/capture/", b'{"a":1}')  # no raise
 
 
 def test_rule_retrieval_goes_to_posthog(monkeypatch):

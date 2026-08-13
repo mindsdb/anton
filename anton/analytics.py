@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 import time
@@ -96,6 +97,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
+
+logger = logging.getLogger(__name__)
 
 _TIMEOUT = 3  # seconds
 
@@ -126,7 +129,11 @@ _POSTHOG_EVENTS = frozenset({"turn_completed", "rule_retrieval"})
 _LIB = "anton-library"
 
 # urllib's default ``Python-urllib/3.x`` is answered with 403 by some edges.
-_USER_AGENT = "anton-analytics/1.0"
+# Named for its one consumer (``_fire_posthog``) rather than the module: ``_fire``
+# still sends urllib's default, and a bare ``_USER_AGENT`` here collides with the
+# identically-valued constant anton#333 adds for the collector path, dragging
+# ``_POSTHOG_EVENTS`` into a conflict region it has nothing to do with.
+_POSTHOG_USER_AGENT = "anton-posthog/1.0"
 
 # Transport noise, not analytics: appended as a cache buster for the GET path.
 # Carries no meaning as a property, so the PostHog payload drops it.
@@ -242,7 +249,26 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
 
 
 def _fire_posthog(url: str, body: bytes) -> None:
-    """POST one Capture payload.  Runs inside a daemon thread."""
+    """POST one Capture payload.  Runs inside a daemon thread.
+
+    Reads the status and logs a non-2xx at debug.  Still fire-and-forget — no
+    retry, no raise, no effect on the caller — but the failure leaves a trace on
+    the machine where it happened instead of only in an aggregate nobody has
+    built yet.
+
+    **What this does and does not catch.**  Measured against the live endpoint,
+    2026-08-13:
+
+        bogus api_key      -> HTTP 200  {"status":"Ok"}     <- NOT detectable
+        real api_key       -> HTTP 200  {"status":"Ok"}
+        malformed payload  -> HTTP 400  "failed to hydrate events..."
+
+    So this catches a malformed payload and any transport failure, and it
+    **cannot** catch a wrong, rotated or revoked project token: PostHog accepts
+    an invalid key with 200 and drops the event server-side.  A token problem is
+    therefore invisible from here by construction, which is exactly why the
+    zero-volume alert on ``turn_completed`` is not optional.
+    """
     try:
         request = urllib.request.Request(
             url,
@@ -250,12 +276,15 @@ def _fire_posthog(url: str, body: bytes) -> None:
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": _USER_AGENT,
+                "User-Agent": _POSTHOG_USER_AGENT,
             },
         )
-        urllib.request.urlopen(request, timeout=_TIMEOUT)
+        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
+            status = getattr(response, "status", None)
+            if status is not None and not 200 <= status < 300:
+                logger.debug("posthog capture rejected: HTTP %s", status)
     except Exception:
-        pass
+        logger.debug("posthog capture failed", exc_info=True)
 
 
 def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
