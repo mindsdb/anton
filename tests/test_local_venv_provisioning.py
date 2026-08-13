@@ -111,3 +111,58 @@ def test_stdlib_fallback_does_not_force_symlinks_on_windows(tmp_path, monkeypatc
     pad._create_venv()
 
     assert create.call_args.kwargs["symlinks"] is False
+
+
+def _write_fake_python(tmp_path, *, exit_code, stderr_text):
+    """A fake venv "python" that fails a specific way when invoked as
+    ``<path> -c "..."`` — stands in for a real dyld crash without needing one."""
+    script = tmp_path / "fake_python"
+    script.write_text(f'#!/bin/sh\necho "{stderr_text}" >&2\nexit {exit_code}\n')
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_verify_captures_exit_code_and_stderr_on_failure(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("posix-only: shebang scripts don't run directly on Windows")
+    pad = make_pad(tmp_path)
+    pad._venv_python = _write_fake_python(tmp_path, exit_code=7, stderr_text="boom")
+
+    assert pad._verify_venv_python() is False
+    assert pad._last_verify_error == "exit 7: boom"
+
+
+def test_verify_clears_the_error_on_success(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    pad._last_verify_error = "stale error from a previous attempt"
+    pad._venv_python = sys.executable
+
+    assert pad._verify_venv_python() is True
+    assert pad._last_verify_error is None
+
+
+def test_verify_captures_an_exception_reason(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("posix-only: exec-permission semantics differ on Windows")
+    pad = make_pad(tmp_path)
+    not_executable = tmp_path / "not_a_python"
+    not_executable.write_text("not a real interpreter")
+    not_executable.chmod(0o644)
+    pad._venv_python = str(not_executable)
+
+    assert pad._verify_venv_python() is False
+    assert pad._last_verify_error
+
+
+def test_ensure_venv_failure_message_includes_the_verify_detail(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+
+    def fake_verify():
+        pad._last_verify_error = "exit 1: dyld: Library not loaded"
+        return False
+
+    monkeypatch.setattr(pad, "_create_venv", lambda: None)
+    monkeypatch.setattr(pad, "_verify_venv_python", fake_verify)
+
+    with pytest.raises(RuntimeError, match="dyld: Library not loaded"):
+        pad._ensure_venv()

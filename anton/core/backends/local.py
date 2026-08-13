@@ -219,6 +219,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
+        self._last_verify_error: str | None = None
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -286,8 +287,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     self._setup_parent_site_packages()
                     self._save_python_version()
                     return
+                detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
                 raise RuntimeError(
-                    f"venv Python binary at {self._venv_python} is not functional"
+                    f"venv Python binary at {self._venv_python} is not functional{detail}"
                 )
             except Exception as exc:
                 last_error = exc
@@ -406,8 +408,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 capture_output=True,
                 timeout=5,
             )
-            return result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
-        except Exception:
+            ok = result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
+            if ok:
+                self._last_verify_error = None
+            else:
+                stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                self._last_verify_error = f"exit {result.returncode}" + (f": {stderr}" if stderr else "")
+            return ok
+        except Exception as exc:
+            self._last_verify_error = str(exc)
             return False
 
     def _nuke_venv(self) -> None:
