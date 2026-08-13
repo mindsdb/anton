@@ -13,6 +13,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     compute_context_pressure,
     raise_on_empty_response,
+    safe_parse_tool_input,
 )
 
 
@@ -112,6 +113,41 @@ class TestDataclasses:
         r = LLMResponse(content="", tool_calls=[tc], stop_reason="tool_use")
         assert len(r.tool_calls) == 1
         assert r.stop_reason == "tool_use"
+
+
+class TestSafeParseToolInput:
+    """`repaired` must mean "an argument is missing", not "json.loads failed once".
+
+    The session refuses to dispatch a repaired call, so marking a complete body
+    repaired costs a whole tool call: the model re-emits the same deterministic
+    shape and the round repeats until the tool-round cap.
+    """
+
+    def test_body_cut_mid_value_is_repaired(self):
+        parsed, error, repaired = safe_parse_tool_input(
+            '{"action": "exec", "name": "main", "code": "print(1'
+        )
+        assert error is None
+        assert repaired is True
+        assert parsed["name"] == "main"
+
+    def test_complete_body_with_trailing_junk_is_not_repaired(self):
+        # A relay leaking its stop sentinel into the arguments — every argument
+        # arrived, so the call stays dispatchable.
+        parsed, error, repaired = safe_parse_tool_input(
+            '{"action": "exec", "code": "print(1)"}<|tool_call_end|>'
+        )
+        assert (parsed, error, repaired) == (
+            {"action": "exec", "code": "print(1)"}, None, False,
+        )
+
+    def test_complete_body_with_a_stray_comma_is_not_repaired(self):
+        # Nothing was left open, so the comma is junk after a finished value —
+        # not the "cut off after a comma" shape.
+        assert safe_parse_tool_input('{"a": 1},') == ({"a": 1}, None, False)
+
+    def test_clean_body_is_not_repaired(self):
+        assert safe_parse_tool_input('{"a": 1}') == ({"a": 1}, None, False)
 
 
 class TestAnthropicProvider:

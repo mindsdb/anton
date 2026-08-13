@@ -228,8 +228,14 @@ def _try_repair_tool_json(raw: str):
       • Close any unterminated string with a `"`.
       • Append `]` / `}` to balance open `[` / `{`.
 
-    Returns the parsed dict on success, or None if even the repaired
-    string is unparseable. Never raises.
+    Returns ``(parsed_dict, was_truncated)`` on success, or None if even
+    the repaired string is unparseable. Never raises. The two recovery
+    branches mean different things to the caller:
+
+    - synthetic closers → the body ended mid-value, so an argument the
+      model meant to send is missing or cut short (``was_truncated``).
+    - trailing junk after a balanced top-level object → every argument
+      arrived; only the tail is garbage.
     """
     if not raw:
         return None
@@ -270,21 +276,25 @@ def _try_repair_tool_json(raw: str):
                 return None
 
     # Try the simplest repair first: close the open string + open
-    # containers in reverse order, drop a stray trailing comma.
-    repaired = s
-    if in_string:
-        repaired += '"'
-    # Strip trailing comma just before the synthetic closers, which is
-    # the most common shape of "model was cut off after a comma".
-    repaired = repaired.rstrip().rstrip(",")
-    for opener in reversed(stack):
-        repaired += "}" if opener == "{" else "]"
+    # containers in reverse order, drop a stray trailing comma. Only
+    # attempt it when something was actually left open — with nothing to
+    # close, the body is a complete value plus junk, which belongs to the
+    # `last_safe` branch below and is not a truncation.
+    if in_string or stack:
+        repaired = s
+        if in_string:
+            repaired += '"'
+        # Strip trailing comma just before the synthetic closers, which is
+        # the most common shape of "model was cut off after a comma".
+        repaired = repaired.rstrip().rstrip(",")
+        for opener in reversed(stack):
+            repaired += "}" if opener == "{" else "]"
 
-    try:
-        parsed = _json.loads(repaired)
-        return parsed if isinstance(parsed, dict) else None
-    except _json.JSONDecodeError:
-        pass
+        try:
+            parsed = _json.loads(repaired)
+            return (parsed, True) if isinstance(parsed, dict) else None
+        except _json.JSONDecodeError:
+            pass
 
     # Fall back to "everything up to the last fully-balanced close" —
     # works when the model emitted a complete top-level object plus
@@ -292,7 +302,7 @@ def _try_repair_tool_json(raw: str):
     if last_safe > 0:
         try:
             parsed = _json.loads(s[:last_safe])
-            return parsed if isinstance(parsed, dict) else None
+            return (parsed, False) if isinstance(parsed, dict) else None
         except _json.JSONDecodeError:
             pass
     return None
@@ -324,8 +334,11 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     session dispatcher reads ``parse_error`` to decide whether to
     invoke the tool handler (parse_error is None) or short-circuit
     with a structured tool_result that asks the LLM to re-emit the
-    call (parse_error is set). ``was_repaired`` marks step 2: the dict
-    is parseable but built from an incomplete body, so a caller that
+    call (parse_error is set). ``was_repaired`` marks the truncating
+    half of step 2 — a body that ended mid-value, as opposed to a
+    complete object with junk after it, which parses to every argument
+    the model sent and stays dispatchable. The dict is then parseable
+    but built from an incomplete body, so a caller that
     knows *why* the body was cut — the session, which can see the
     round hit its output cap — can retry the round instead of running
     a handler on arguments the model never finished. Either way this
@@ -340,14 +353,15 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
         parsed = _json.loads(raw_json)
     except _json.JSONDecodeError as exc:
         # Try the repair pass before giving up entirely.
-        repaired = _try_repair_tool_json(raw_json)
-        if repaired is not None:
+        repair = _try_repair_tool_json(raw_json)
+        if repair is not None:
+            repaired, truncated = repair
             _logging.getLogger(__name__).info(
                 "Tool-use input JSON was malformed (%s) but repaired "
-                "successfully. Raw bytes: %d.",
-                exc, len(raw_json),
+                "successfully. Raw bytes: %d, truncated: %s.",
+                exc, len(raw_json), truncated,
             )
-            return repaired, None, True
+            return repaired, None, truncated
         _logging.getLogger(__name__).warning(
             "Tool-use input JSON was malformed and unrecoverable (%s). "
             "Raw bytes: %d, head: %r",
