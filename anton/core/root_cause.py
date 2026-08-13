@@ -137,6 +137,21 @@ _STATUS_TRANSIENT = frozenset({"429", "500", "502", "503", "504"})
 
 _EXC_LINE_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*(?:Error|Exception|Warning))\b")
 
+#: Hard cap on what any regex here is allowed to see.
+#:
+#: `_HOSTPORT_RE` is O(n^2) on input containing no colon — `[\w.-]+` matches
+#: greedily from every start position and then fails. Measured: **1,051 ms** on
+#: 20,000 characters. Nothing reaches it that long today (the scratchpad handler
+#: caps its reason at 160 chars and every other producer emits a short sentinel
+#: or an exception name), but that guarantee lives in another file and would be
+#: silently lost the first time a handler passes a long reason. Capping here
+#: makes it local, and covers every pattern in this module rather than the one
+#: that happens to be quadratic.
+#:
+#: 500 is well past the longest real reason: a traceback's last line arrives
+#: pre-truncated to 160.
+_MAX_REASON_CHARS = 500
+
 
 @dataclass(frozen=True)
 class RootCause:
@@ -214,9 +229,10 @@ def classify(reason: str, result_text: str = "") -> RootCause:
     recorded as `from_reason=False` and lands in `unclassified`, which is not
     trip-eligible.
     """
-    reason = (reason or "").strip()
+    # Bounded before any regex sees it — see `_MAX_REASON_CHARS`.
+    reason = (reason or "").strip()[:_MAX_REASON_CHARS]
     if not reason:
-        sig = _normalise_error_signature(result_text or "")
+        sig = _normalise_error_signature((result_text or "")[:_MAX_REASON_CHARS])
         return RootCause(TIER_UNCLASSIFIED, "unclassified", sig[:80], from_reason=False)
 
     sentinel = _SENTINEL_REASONS.get(reason)

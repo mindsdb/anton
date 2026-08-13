@@ -288,3 +288,35 @@ def test_ambiguous_sentinels_resolve_away_from_tripping():
     # …while the unambiguous walls stay trip-eligible.
     for reason in ("package_install_failed", "store_unavailable"):
         assert classify(reason).trip_eligible, reason
+
+
+def test_pathological_input_cannot_stall_a_turn():
+    """`_HOSTPORT_RE` is O(n^2) on colon-free input — 1,051 ms at 20k chars.
+
+    Unreachable today because every producer caps its reason, but that
+    guarantee lives in another file. `classify` bounds its own input so the
+    property is local and survives a future handler passing something long.
+    """
+    import time
+
+    from anton.core.root_cause import classify
+
+    # These must ROUTE to `_identifier_for` to reach the quadratic pattern — an
+    # exception name that maps to a host-bearing wall class, then a long
+    # colon-free tail. A first version of this test used plain "A"*200_000,
+    # which never gets past the type lookup, so it passed with the cap removed
+    # and proved nothing. Measured without the cap: 6,565 ms.
+    evil_tail = "a" * 50_000
+    for evil in (
+        f"ConnectionRefusedError: {evil_tail}",
+        f"OperationalError: could not connect {evil_tail}",
+        f"HTTPError: 401 {evil_tail}",
+        f"PermissionError: [Errno 13] {evil_tail}",
+    ):
+        t0 = time.perf_counter()
+        classify(evil, result_text=evil)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.05, (
+            f"classify took {elapsed*1000:.0f} ms on {len(evil)} chars — the "
+            "input cap is gone and a tool failure can now stall a turn"
+        )
