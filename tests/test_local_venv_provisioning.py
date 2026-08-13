@@ -29,42 +29,21 @@ def make_pad(tmp_path, name="probe"):
     return LocalScratchpadRuntime(name=name, _venvs_base=tmp_path, **_DEFAULTS)
 
 
-def test_find_uv_checks_homebrew_apple_silicon(monkeypatch):
+@pytest.mark.parametrize(
+    "expected_path",
+    [
+        "/opt/homebrew/bin/uv",  # Homebrew, Apple Silicon
+        "/usr/local/bin/uv",  # Homebrew, Intel Mac
+        "/opt/local/bin/uv",  # MacPorts
+        "/home/linuxbrew/.linuxbrew/bin/uv",  # Linuxbrew
+    ],
+)
+def test_find_uv_checks_extra_unix_locations(monkeypatch, expected_path):
     monkeypatch.setattr(local.shutil, "which", lambda _: None)
-    monkeypatch.setattr(
-        local.os.path, "isfile", lambda p: p == "/opt/homebrew/bin/uv"
-    )
+    monkeypatch.setattr(local.os.path, "isfile", lambda p: p == expected_path)
     monkeypatch.setattr(local.os, "access", lambda p, mode: True)
 
-    assert local.LocalScratchpadRuntime._find_uv() == "/opt/homebrew/bin/uv"
-
-
-def test_find_uv_checks_homebrew_intel(monkeypatch):
-    monkeypatch.setattr(local.shutil, "which", lambda _: None)
-    monkeypatch.setattr(local.os.path, "isfile", lambda p: p == "/usr/local/bin/uv")
-    monkeypatch.setattr(local.os, "access", lambda p, mode: True)
-
-    assert local.LocalScratchpadRuntime._find_uv() == "/usr/local/bin/uv"
-
-
-def test_find_uv_checks_macports(monkeypatch):
-    monkeypatch.setattr(local.shutil, "which", lambda _: None)
-    monkeypatch.setattr(local.os.path, "isfile", lambda p: p == "/opt/local/bin/uv")
-    monkeypatch.setattr(local.os, "access", lambda p, mode: True)
-
-    assert local.LocalScratchpadRuntime._find_uv() == "/opt/local/bin/uv"
-
-
-def test_find_uv_checks_linuxbrew(monkeypatch):
-    monkeypatch.setattr(local.shutil, "which", lambda _: None)
-    monkeypatch.setattr(
-        local.os.path,
-        "isfile",
-        lambda p: p == "/home/linuxbrew/.linuxbrew/bin/uv",
-    )
-    monkeypatch.setattr(local.os, "access", lambda p, mode: True)
-
-    assert local.LocalScratchpadRuntime._find_uv() == "/home/linuxbrew/.linuxbrew/bin/uv"
+    assert local.LocalScratchpadRuntime._find_uv() == expected_path
 
 
 def test_find_uv_still_prefers_shutil_which(monkeypatch):
@@ -113,6 +92,27 @@ def test_stdlib_fallback_does_not_force_symlinks_on_windows(tmp_path, monkeypatc
     assert create.call_args.kwargs["symlinks"] is False
 
 
+def test_create_venv_surfaces_uvs_stderr_on_failure(tmp_path, monkeypatch):
+    # CalledProcessError.__str__ omits the captured stderr by default, so a
+    # real uv failure (bad --python, disk full) reached the user as just
+    # "returned non-zero exit status N" — the same masking this whole fix
+    # was about, just at venv CREATION instead of verification.
+    import subprocess
+
+    pad = make_pad(tmp_path)
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/fake/uv"))
+
+    def fake_run(args, **kwargs):
+        raise subprocess.CalledProcessError(
+            returncode=2, cmd=args, stderr=b"error: no interpreter found for python-3.99\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(Exception, match="no interpreter found for python-3.99"):
+        pad._create_venv()
+
+
 def _write_fake_python(tmp_path, *, exit_code, stderr_text):
     """A fake venv "python" that fails a specific way when invoked as
     ``<path> -c "..."`` — stands in for a real dyld crash without needing one."""
@@ -132,7 +132,7 @@ def test_verify_captures_exit_code_and_stderr_on_failure(tmp_path, monkeypatch):
     assert pad._last_verify_error == "exit 7: boom"
 
 
-def test_verify_clears_the_error_on_success(tmp_path, monkeypatch):
+def test_verify_clears_the_error_on_success(tmp_path):
     pad = make_pad(tmp_path)
     pad._last_verify_error = "stale error from a previous attempt"
     pad._venv_python = sys.executable
@@ -161,7 +161,7 @@ def test_verify_clears_a_stale_error_when_the_interpreter_is_missing(tmp_path):
     assert pad._last_verify_error is None
 
 
-def test_verify_captures_an_exception_reason(tmp_path, monkeypatch):
+def test_verify_captures_an_exception_reason(tmp_path):
     if sys.platform == "win32":
         pytest.skip("posix-only: exec-permission semantics differ on Windows")
     pad = make_pad(tmp_path)

@@ -338,21 +338,28 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         uv = self._find_uv()
         if uv:
-            _sp.run(
-                [
-                    uv,
-                    "venv",
-                    self._venv_dir,
-                    "--python",
-                    sys.executable,
-                    "--system-site-packages",
-                    "--seed",
-                    "--quiet",
-                ],
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
+            try:
+                _sp.run(
+                    [
+                        uv,
+                        "venv",
+                        self._venv_dir,
+                        "--python",
+                        sys.executable,
+                        "--system-site-packages",
+                        "--seed",
+                        "--quiet",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (_sp.CalledProcessError, _sp.TimeoutExpired) as exc:
+                # CalledProcessError/TimeoutExpired.__str__ omits the captured
+                # stderr, so uv's actual reason (bad --python, disk full) was
+                # never seen — only "returned non-zero exit status N".
+                stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+                raise RuntimeError(f"uv venv failed: {stderr}" if stderr else str(exc)) from exc
         else:
             # symlinks=False is venv.create()'s own default on every platform
             # (only the `python -m venv` CLI defaults it per-OS); a copied
@@ -399,11 +406,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         return self.venv_python()
 
     def _verify_venv_python(self) -> bool:
+        self._last_verify_error = None
         if self._venv_python is None:
-            self._last_verify_error = None
             return False
         if not os.path.exists(self._venv_python):
-            self._last_verify_error = None
             return False
         try:
             import subprocess
@@ -414,9 +420,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 timeout=5,
             )
             ok = result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
-            if ok:
-                self._last_verify_error = None
-            else:
+            if not ok:
                 stderr = result.stderr.decode("utf-8", errors="replace").strip()
                 self._last_verify_error = f"exit {result.returncode}" + (f": {stderr}" if stderr else "")
             return ok
