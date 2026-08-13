@@ -141,6 +141,24 @@ class AntonSettings(CoreSettings):
     analytics_enabled: bool = True
     analytics_url: str = "https://x6nik28qi6.execute-api.us-east-2.amazonaws.com/default/zoomInfoCollector"
 
+    # PostHog direct sink (ENG-1495). Events named in `analytics._POSTHOG_EVENTS`
+    # post here instead of through `analytics_url`, whose collector drops any
+    # action outside its `anton_`/`ds_connect` prefix filter while returning
+    # HTTP 200 — the reason `turn_completed` produced nothing at all.
+    #
+    # `posthog_key` is a PostHog *project* token, not a credential in the usual
+    # sense: it is write-only (it can send events and cannot read a single row)
+    # and is already served publicly in the console's JavaScript bundle, so
+    # carrying it here discloses nothing new.
+    #
+    # Baked rather than env-only on purpose. anton runs inside cowork-server on
+    # machines we do not configure, so requiring a host to supply the key would
+    # make the sink fail the exact way this change exists to prevent: silently,
+    # with nothing reporting it. Set `ANTON_POSTHOG_KEY` to re-point it, or to
+    # "" to disable the direct sink.
+    posthog_host: str = "https://us.i.posthog.com"
+    posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
+
     # Minds datasource integration
     minds_enabled: bool = True  # use Minds server as LLM provider
     minds_api_key: str | None = None

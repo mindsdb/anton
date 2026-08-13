@@ -605,10 +605,20 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
-    # Identifier for the host harness driving this session (e.g. "cowork",
-    # "cli"). Surfaced on telemetry / langfuse traces so the harness that
-    # produced a given trace is filterable in the dashboard. None means the
-    # host didn't identify itself.
+    # Identifier for the host driving this session. Surfaced on telemetry /
+    # langfuse traces so the host that produced a given trace is filterable.
+    #
+    # The values actually in use, which are NOT what this field's name suggests:
+    #   "cli"     — anton's own interactive chat (chat_session.py, chat.py)
+    #   "anton"   — cowork-server, which passes its *agent harness* id here;
+    #               desktop and hosted web are indistinguishable, both send
+    #               this (ENG-1459 is where that gets split)
+    #   "cloud"   — the one-turn-per-pod cloud path
+    #   None      — a host that did not identify itself
+    #
+    # None must stay reserved for that last case: until ENG-1495 the CLI left it
+    # unset, so "" meant both "CLI" and "unidentified" and nothing could tell
+    # them apart.
     harness: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
