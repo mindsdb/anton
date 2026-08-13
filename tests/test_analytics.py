@@ -379,14 +379,25 @@ def test_posthog_transport_failure_never_raises(monkeypatch):
     analytics._fire_posthog("https://ph.example.test/capture/", b'{"a":1}')  # no raise
 
 
-def test_posthog_malformed_host_never_raises():
+def test_posthog_malformed_host_never_raises(monkeypatch):
     """`Request()` itself raises ValueError on a malformed URL, and the host is
     a user-supplied setting (`ANTON_POSTHOG_HOST`).
 
     This runs in a daemon thread, *outside* `send_event`'s guard, so anything
     escaping reaches the user as a traceback mid-session. A previous version of
     `_fire_posthog` built the Request above the `try` and did exactly that.
+
+    `urlopen` is stubbed to fail rather than merely mocked, for two reasons: it
+    proves the failure comes from `Request()` and not from the send, and it means
+    this test cannot reach the network if someone later edits the URL to
+    something well-formed.
     """
+    monkeypatch.setattr(
+        analytics.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: pytest.fail("Request() should have raised first"),
+    )
+
     analytics._fire_posthog("garbage-not-a-url/capture/", b'{"a":1}')  # no raise
 
 
@@ -404,12 +415,23 @@ def test_send_event_with_a_bad_posthog_host_kills_no_thread(monkeypatch):
             self._target, self._args = target, args
 
         def start(self):
+            # Catch here rather than re-raise: in production the target runs in
+            # a real thread, so an escape reaches `threading.excepthook` and is
+            # printed, NOT caught by `send_event`'s guard. Re-raising would let
+            # that guard swallow it and the test would pass on a bug.
             try:
                 self._target(*self._args)
-            except BaseException as exc:  # what threading would report and print
+            except BaseException as exc:
                 escaped.append(type(exc).__name__)
 
     monkeypatch.setattr(analytics.threading, "Thread", _SyncThread)
+    # Belt and braces: this test must never reach the network even if the host
+    # above is later changed to something well-formed.
+    monkeypatch.setattr(
+        analytics.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: pytest.fail("should not have reached the network"),
+    )
 
     analytics.send_event(_BadHost(), "turn_completed", tokens_total="1")
 

@@ -70,8 +70,8 @@ see [Search providers](/configure/search-providers).
 | `ANTON_THEME` | `auto` | Terminal color theme |
 | `ANTON_DISABLE_AUTOUPDATES` | `false` | Skip automatic update checks — see [Updating](/start/updating) |
 | `ANTON_ANALYTICS_ENABLED` | `true` | Anonymous usage events, all transports — see [Analytics](/configure/analytics) |
-| `ANTON_ANALYTICS_URL` | collector endpoint | Re-points the collector. Governs **only** the events that use it, not the per-turn accounting events |
-| `ANTON_POSTHOG_KEY` | built-in | Destination for the per-turn accounting events. Set empty to disable just those |
+| `ANTON_ANALYTICS_URL` | collector endpoint | Re-points the collector. Governs **only** the events that use it, not the measurement events |
+| `ANTON_POSTHOG_KEY` | built-in | Destination for the measurement events. Set empty to disable just those |
 | `ANTON_LANGFUSE_HEADERS` | unset | Set to `1` to attach Langfuse trace headers on any OpenAI-compatible endpoint — see [Trace headers](/configure/trace-headers) |
 | `ANTON_PROACTIVE_DASHBOARDS` | `false` | When `true`, Anton builds HTML dashboards proactively; when `false`, CLI output only |
 | `ANTON_BACKEND` | `local` | Scratchpad backend: `local` or `remote` (remote requires Minds URL and API key) |

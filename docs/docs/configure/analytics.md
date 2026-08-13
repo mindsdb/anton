@@ -17,22 +17,26 @@ Every event carries:
 - an anonymous installation ID.
 
 Some events also carry **anonymous measurements of that action** — for example
-a datasource event names the engine (`postgres`), and the per-turn accounting
-event carries token counts, model names, durations and an opaque conversation
+a datasource event names the engine (`postgres`), and the **measurement
+events** carry token counts, model names, durations and an opaque conversation
 id. These are numbers, names and identifiers only.
+
+The measurement events are the two that report on Anton's own work rather than
+on something you did: what a turn cost, and how the memory-retrieval step
+behaved while assembling a prompt.
 
 **No personal data or query content is ever sent** — no prompts, no message
 text, no tool output, no file contents, no file paths, no credentials, no
 hostnames, no email addresses. The installation ID is a one-way SHA-256 hash of
 the machine's network adapter address, truncated to 16 hex characters; the raw
 address never leaves your device. Events are fire-and-forget: they never block
-Anton and a failure to send is never surfaced to you. Failures on the per-turn
-accounting events are recorded in Anton's own debug log; failures on the other
+Anton and a failure to send is never surfaced to you. Failures on the
+measurement events are recorded in Anton's own debug log; failures on the other
 events are discarded without a trace.
 
 Two transports are in use, depending on the event: most events are a single
-HTTP GET to the collector at `ANTON_ANALYTICS_URL`, while the per-turn
-accounting events are an HTTPS POST whose body carries the measurements —
+HTTP GET to the collector at `ANTON_ANALYTICS_URL`, while the measurement
+events are an HTTPS POST whose body carries the values —
 a body rather than a query string so the values do not end up in intermediate
 access logs.
 
@@ -55,8 +59,8 @@ That switch covers every event on every transport.
 ### Turning off one transport only
 
 `ANTON_ANALYTICS_URL` re-points the collector, and governs **only** the events
-that use it — the per-turn accounting events are unaffected by it. To disable
-those specifically, set an empty key:
+that use it — the measurement events are unaffected by it. To disable those
+specifically, set an empty key:
 
 ```text
 ANTON_POSTHOG_KEY=
