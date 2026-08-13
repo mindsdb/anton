@@ -21,6 +21,8 @@ from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
+from anton.core.root_cause import RootCauseLedger
+from anton.core.root_cause import classify as classify_root_cause
 from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
@@ -688,6 +690,14 @@ class ChatSession:
         # older settings object doesn't break — absent means "no ceiling",
         # matching the pre-ENG-1286 behaviour rather than silently applying one.
         self._max_turn_tokens = getattr(s, "max_turn_tokens", 0)
+        # Session-scoped tally of classified tool failures (ENG-1492).
+        # MEASUREMENT ONLY — nothing reads this to change behaviour. The control
+        # that will (ENG-1531) is deliberately unbuilt until this has reported
+        # real numbers, because the thresholds it needs currently rest on one
+        # incident. Session-scoped, not per-turn: that control fires at most
+        # once per root cause per session, so the counts its thresholds are read
+        # off must be the session's too.
+        self._root_causes = RootCauseLedger()
         # Latch for a verifier that fails the same hard way every turn — e.g.
         # kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), which
         # fails on every verdict call until the gateway fix lands. Without the
@@ -923,6 +933,31 @@ class ChatSession:
             "summary": self._history[0]["content"],
             "covered_through": min(self._last_compacted_count, self._seed_len),
         }
+
+
+    def _record_root_cause(
+        self, tool_ok: bool | None, reason: str, result_text: str
+    ) -> None:
+        """Classify one tool failure into the session ledger (ENG-1492).
+
+        MEASUREMENT ONLY. This must never change what the turn does — it exists
+        so ENG-1531's thresholds can come from data rather than from the single
+        ENG-836 trace, and so "is a wall-repeat population large enough to
+        justify a breaker at all" becomes answerable.
+
+        Keyed on the handler's own `ToolOutcome.reason` (ENG-1276), falling back
+        to the result text only to record that the reason was MISSING — that
+        path lands in `unclassified`, which no trip rung can read. Guarded whole
+        because a reporting side-effect must never be able to fail a turn.
+        """
+        if tool_ok is not False:
+            return
+        try:
+            self._root_causes.add(
+                classify_root_cause(reason or "", result_text or "")
+            )
+        except Exception:  # pragma: no cover - reporting must not break a turn
+            logger.debug("root-cause classification failed", exc_info=True)
 
     def _apply_error_tracking(
         self,
@@ -2107,11 +2142,17 @@ class ChatSession:
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
         turn_index = tc.turn_index or (self._turn_count + 1)
+        # Never let reporting break a turn — same contract as the analytics
+        # sink below (ENG-1492).
+        try:
+            _rc_fields = self._root_causes.event_fields()
+        except Exception:  # pragma: no cover - defensive
+            _rc_fields = {}
         logger.info(
             "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
-            "by_role=%s",
+            "by_role=%s %s",
             self._session_id, turn_index, tc.ended_by, tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
@@ -2120,6 +2161,13 @@ class ChatSession:
                 f"{role}={s.model}:{s.tokens}/{s.calls}"
                 for role, s in sorted(tc.by_role.items())
             ) or "-",
+            # Root-cause tally (ENG-1492), session-cumulative. Appended to the
+            # SAME line rather than emitted separately so a turn's cost and the
+            # failures behind it can never be read apart, and so this survives
+            # the collector allowlist that silently dropped `turn_completed`'s
+            # properties for weeks (ENG-1355) — the log is the sink that does
+            # not depend on it.
+            " ".join(f"{k}={v}" for k, v in _rc_fields.items()),
         )
 
         # Analytics sink — same settings-resolution pattern as the
@@ -2140,6 +2188,12 @@ class ChatSession:
             send_event(
                 settings,
                 "turn_completed",
+                # Root-cause tally (ENG-1492). These are new property NAMES, so
+                # they need ENG-1355's pass-through fix (or ENG-1495's direct
+                # route) to reach PostHog at all — until then the log line above
+                # is the only sink, and its absence here is not evidence the
+                # classification is broken.
+                **_rc_fields,
                 ended_by=tc.ended_by,
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
@@ -2872,6 +2926,7 @@ class ChatSession:
                         resilience_nudged.discard(tc.name)
                 else:
                     result = scrub_credentials(result)
+                    self._record_root_cause(outcome.ok, outcome.reason, result)
                     result = self._apply_error_tracking(
                         result,
                         tc.name,
@@ -3757,6 +3812,9 @@ class ChatSession:
                     # drives the error streak instead of text matching
                     # (ENG-1276). None = unmigrated handler → legacy fallback.
                     tool_ok: bool | None = None
+                    # ENG-1276 populated this and nothing ever read it; ENG-1492
+                    # is what reads it.
+                    tool_reason: str = ""
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
@@ -3764,6 +3822,7 @@ class ChatSession:
                             if isinstance(prep, ToolOutcome):
                                 result_text = prep.content
                                 tool_ok = prep.ok
+                                tool_reason = prep.reason
                             else:
                                 (
                                     pad,
@@ -3818,6 +3877,15 @@ class ChatSession:
                                 # success nor failure (ENG-1276).
                                 if cell is not None:
                                     tool_ok = not (cell.error or "").strip()
+                                    # Same source `tool_handlers` uses for its
+                                    # ToolOutcome: the traceback's LAST line is
+                                    # the cause, and it is the runtime's own
+                                    # output rather than anything the model
+                                    # wrote (ENG-1492).
+                                    _cell_err = (cell.error or "").strip()
+                                    tool_reason = (
+                                        _cell_err.splitlines()[-1][:160] if _cell_err else ""
+                                    )
                                 if cell is not None:
                                     self._record_cell_explainability(
                                         pad_name=tc.input.get("name", ""),
@@ -3883,6 +3951,7 @@ class ChatSession:
                                     yield self.emitter.get_nowait()
                                 result_text = _outcome.content
                                 tool_ok = _outcome.ok
+                                tool_reason = _outcome.reason
                             finally:
                                 if self.escape_watcher:
                                     self.escape_watcher.resume()
@@ -3937,6 +4006,7 @@ class ChatSession:
                                     yield self.emitter.get_nowait()
                                 result_text = _outcome.content
                                 tool_ok = _outcome.ok
+                                tool_reason = _outcome.reason
                             except Exception as exc:
                                 # Caught locally ONLY so the tool_done marker
                                 # below can still be yielded from ordinary
@@ -3990,6 +4060,7 @@ class ChatSession:
                         # A raise is a definitive failure verdict (ENG-1276).
                         result_text = f"Tool '{tc.name}' failed: {exc}"
                         tool_ok = False
+                        tool_reason = type(exc).__name__
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
@@ -4045,6 +4116,7 @@ class ChatSession:
                             tool=tc.name,
                         )
                     result_text = scrub_credentials(result_text)
+                    self._record_root_cause(tool_ok, tool_reason, result_text)
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,
                         ok=tool_ok,
