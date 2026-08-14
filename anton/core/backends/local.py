@@ -34,6 +34,13 @@ _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 # one would have.
 _SALVAGE_MAX = 10_000
 
+# The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
+# it's progressing, so a wedged cell stays silent — for as long as
+# cell_total_max — unless we say something. First notice no earlier than
+# this many seconds of silence, then no more often than this (ENG-1324).
+_QUIET_NOTICE_AFTER = 60.0
+_QUIET_NOTICE_EVERY = 60.0
+
 # Extra headroom on top of cell_install_timeout while an in-cell auto-install
 # runs: the worker enforces the budget itself and reports a named install
 # error, so the parent's windows must outlast the worker's timer for that
@@ -1040,6 +1047,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         in_result = False
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
+        last_notice = 0.0
+        last_output = 0.0
 
         # In-cell auto-install span (ENG-1275). While the worker's installer
         # runs, both kill windows defer to the install budget — the same
@@ -1135,6 +1144,28 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             if line.startswith(HEARTBEAT_MARKER):
                 # Liveness only: arrival already re-armed the readline timer.
+                # Do NOT extend current_inactivity here — a bare heartbeat is
+                # a machine signal, not evidence of progress; only an
+                # explicit progress() call earns that (ENG-1324). This
+                # branch only runs when the cell shipped no new output
+                # (otherwise STDOUT_CHUNK_MARKER fires instead), so a chatty
+                # cell never reaches it.
+                if (
+                    elapsed - last_output >= _QUIET_NOTICE_AFTER
+                    and elapsed - last_notice >= _QUIET_NOTICE_EVERY
+                ):
+                    last_notice = elapsed
+                    if installing:
+                        yield (
+                            f"still running — installing '{installing}', "
+                            f"{elapsed / 60:.0f}m elapsed of "
+                            f"~{total_timeout / 60:.0f}m budget"
+                        )
+                    else:
+                        yield (
+                            f"still running — {elapsed / 60:.0f}m elapsed of "
+                            f"~{total_timeout / 60:.0f}m budget"
+                        )
                 continue
 
             if line.startswith(STDOUT_CHUNK_MARKER):
@@ -1147,6 +1178,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 except json.JSONDecodeError:
                     chunk = ""
                 if isinstance(chunk, str) and chunk:
+                    last_output = elapsed
                     self._salvage.append(chunk)
                     total = sum(len(c) for c in self._salvage)
                     while total > _SALVAGE_MAX and len(self._salvage) > 1:
@@ -1155,6 +1187,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 continue
 
             if line.startswith(PROGRESS_MARKER):
+                last_output = elapsed
                 current_inactivity = max(
                     current_inactivity, float(s.cell_inactivity_after_progress)
                 )

@@ -11,6 +11,7 @@ import asyncio
 
 import pytest
 
+from anton.core.backends import local as local_backend
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
@@ -166,6 +167,102 @@ class TestLivenessHeartbeat:
             assert cell.error is not None
             assert "auto-install failed" in cell.error.lower()
             assert "liveness" not in cell.error.lower()
+        finally:
+            await pad.close()
+
+
+class TestQuietCellNotice:
+    """The heartbeat is unconditional liveness, not progress — but a cell
+    silent past the notice threshold should surface that to the user instead
+    of staying silent until it either finishes or hits cell_total_max
+    (ENG-1324)."""
+
+    async def test_quiet_cell_gets_rate_limited_notice(self, monkeypatch):
+        """A cell producing no stdout past the notice threshold gets a
+        periodic 'still running' notice, rate-limited rather than once per
+        heartbeat."""
+        shrink_timers(monkeypatch, heartbeat="0.2")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.3)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.5)
+        pad = make_pad()
+        await pad.start()
+        try:
+            messages: list[str] = []
+            async for item in pad.execute_streaming(
+                "import time; time.sleep(1.8); print('done')"
+            ):
+                if isinstance(item, str):
+                    messages.append(item)
+            notices = [m for m in messages if m.startswith("still running")]
+            # ~9 heartbeats fire over 1.8s of silence at a 0.2s interval, but
+            # notifying only every 0.5s (after a 0.3s threshold) should
+            # produce a handful, not one per beat.
+            assert 1 <= len(notices) <= 4
+        finally:
+            await pad.close()
+
+    async def test_chatty_cell_never_gets_a_quiet_notice(self, monkeypatch):
+        """The gate is keyed to time since the last output, not time since the
+        cell started (ENG-1324): a cell printing on a cadence longer than the
+        heartbeat but shorter than the notice threshold must never see one,
+        even once total elapsed time alone would clear the threshold."""
+        shrink_timers(monkeypatch, heartbeat="0.2")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.7)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.1)
+        pad = make_pad()
+        await pad.start()
+        try:
+            messages: list[str] = []
+            code = (
+                "import time\n"
+                "for _ in range(6):\n"
+                "    print('tick')\n"
+                "    time.sleep(0.4)\n"
+            )
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    messages.append(item)
+            assert not any(m.startswith("still running") for m in messages)
+        finally:
+            await pad.close()
+
+    async def test_quiet_notice_during_install_names_the_install(
+        self, monkeypatch, tmp_path
+    ):
+        """A notice firing mid-install must name the install (ENG-1275's span
+        temporarily inflates the budget the notice quotes, so a bare 'still
+        running' would read as the cell's own progress instead of the
+        install's)."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.3)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.1)
+        fake_mod = tmp_path / "eng1324_fake_mod.py"
+        stub = tmp_path / "slow_ok_uv.sh"
+        stub.write_text(
+            f"#!/bin/sh\nsleep 1\necho 'VALUE = 1' > '{fake_mod}'\nexit 0\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            messages: list[str] = []
+            code = (
+                f"import sys\nsys.path.insert(0, {str(tmp_path)!r})\n"
+                "import eng1324_fake_mod\nprint(eng1324_fake_mod.VALUE)\n"
+            )
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    messages.append(item)
+            notices = [m for m in messages if m.startswith("still running")]
+            assert notices, "expected a quiet notice during the slow install"
+            assert all("eng1324_fake_mod" in m for m in notices)
         finally:
             await pad.close()
 
@@ -710,6 +807,50 @@ class TestKillLoopLesson:
             ),
         ]
         assert detect_kill_loop(events) is None
+
+
+class TestBeatingWedgeTotalBudgetStop:
+    """The behavioural counterpart to TestKillLoopLesson's string-level
+    tests: cell_total_max is the ONLY thing that ends a beating-but-wedged
+    cell now that the liveness heartbeat keeps it alive through the
+    inactivity window (ENG-578). Proves the stop path still works, and pins
+    down the lesson it teaches — 'heavy' ('make cells smaller'), never
+    'liveness' ('retry unchanged') — for the case that actually matters: a
+    cell that already produced partial output (looks like real progress)
+    before wedging on a later step, the exact shape of a throttled batch
+    that hangs partway through (ENG-1324)."""
+
+    async def test_beating_wedge_dies_at_total_budget_as_heavy_kill(self, monkeypatch):
+        shrink_timers(monkeypatch)  # heartbeat stays on (0.2s default)
+        monkeypatch.setenv("ANTON_CELL_TOTAL_MAX", "2")
+        pad = make_pad()
+        await pad.start()
+        try:
+            # A tight CPU loop still beats: CPython periodically drops the
+            # GIL even inside `while True: pass`, so the worker's heartbeat
+            # thread keeps running — this is the "beats happily" case the
+            # ticket describes, not a genuinely dead worker.
+            cell = await pad.execute(
+                "print('sent 1/50', flush=True)\nwhile True:\n    pass\n"
+            )
+            assert cell.error is not None
+            assert "timed out" in cell.error.lower()
+            assert "liveness" not in cell.error[:120].lower()
+            # Salvage present -> the message must NOT read as an ambiguous
+            # silent kill (that's the already-covered zero-output case).
+            assert "without producing any output" not in cell.error[:120].lower()
+
+            events = [
+                _kill_event(cell.error, round_idx=1),
+                _kill_event(cell.error, round_idx=2),
+            ]
+            lesson = detect_kill_loop(events)
+            assert lesson is not None
+            low = lesson.rule.lower()
+            assert "smaller" in low
+            assert "reset" not in low
+        finally:
+            await pad.close()
 
 
 class TestToolContractText:
