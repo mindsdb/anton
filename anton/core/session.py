@@ -989,9 +989,14 @@ class ChatSession:
             # Counted as `unclassified`, which is not trip-eligible — the text
             # is prose the model can influence, which is the ENG-1276 defect one
             # level up, so it must never create a wall.
-            if not _legacy_looks_like_failure(result_text or ""):
-                return
+            # The predicate is INSIDE the guard on purpose. No reachable crash
+            # exists today (`result_text` is only ever `str` or `list`, both safe
+            # for `in`), but "guarded whole" is the claim the whole
+            # no-behaviour-change argument rests on, and a claim that is only
+            # almost true is the kind that rots quietly. #348 review.
             try:
+                if not _legacy_looks_like_failure(result_text or ""):
+                    return
                 self._root_causes.add(
                     classify_root_cause("", result_text or "")
                 )

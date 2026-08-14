@@ -304,10 +304,28 @@ def classify(reason: str, result_text: str = "") -> RootCause:
     # it is visible as noise in the ENG-1492 distribution rather than hiding a
     # wall — and this is measurement-only until ENG-1531 reads any of it.
     #
+    # SECOND, OPPOSITE INTERACTION — this branch also runs BEFORE the
+    # `_WALL_TYPES` lookup below, so an ENUMERATED wall type whose path or host
+    # happens to contain a bare 3-digit 4xx/5xx token is demoted to transient
+    # and never reaches `root_cause_wall` or any trip rung. Measured:
+    #
+    #     FileNotFoundError … '/data/500/report.csv'  -> transient http_500
+    #     ConnectionRefusedError … db.internal:503    -> transient http_503
+    #     …'/data/report.csv'                         -> external_wall  (control)
+    #     …db.internal:5432                           -> external_wall  (control,
+    #                                                    4 digits, `\b` blocks it)
+    #
+    # So the status branch errs BOTH ways: it inflates walls from non-enumerated
+    # types (above) and deflates walls from enumerated ones (here). Both are
+    # tolerable while nothing consumes the tier, and the motivating dependency
+    # walls carry no such tokens (`pyodbc`/`pymssql` are unaffected).
+    #
     # For ENG-1531: do not trip on `_STATUS_WALLS` classes without either an
     # HTTP-shape precondition on the reason or a check that the exception type
-    # was enumerated. Frequency here is UNMEASURED; the combinatorial floor is
-    # 3/900 of uniformly distributed 3-digit tokens.
+    # was enumerated — that single precondition fixes both directions at once.
+    # And when sizing thresholds from the ENG-1492 distribution, know that walls
+    # with numeric ports or paths read LOW. Frequency here is UNMEASURED; the
+    # combinatorial floor is 3/900 of uniformly distributed 3-digit tokens.
     status = _STATUS_RE.search(reason)
     if status:
         code = status.group(1)

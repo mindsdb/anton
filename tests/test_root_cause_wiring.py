@@ -405,3 +405,33 @@ async def test_a_raising_tool_records_its_exception_type(workspace):
     assert led.failures == 2
     assert led.tiers["external_wall"] == 2
     assert led.top_class == "connection_refused"
+
+
+async def test_the_legacy_predicate_is_inside_the_guard(workspace):
+    """"Guarded whole" means the predicate too, not just the classify call.
+
+    `_legacy_looks_like_failure` used to run OUTSIDE the try/except, so a
+    `result_text` that raised on `in` would escape into the tool loop's broad
+    `except`, seal the tool_use as "[interrupted by error]" and inject a
+    "adjust your approach" note — the finding-4 damage, reached by a different
+    door. No such input is reachable today (`result_text` is only ever `str` or
+    `list`), which is exactly why the invariant needs a test rather than a
+    reader's goodwill. #348 review.
+    """
+    class Hostile:
+        """Truthy, so `result_text or ""` yields it; explodes on membership."""
+
+        def __bool__(self):
+            return True
+
+        def __contains__(self, item):
+            raise RuntimeError("boom")
+
+    session = _session(workspace, [WALL], n_tool_calls=1)
+    before = session._root_causes.failures
+
+    # Must not raise. `tool_ok=None` is the unmigrated-handler path.
+    session._record_root_cause(None, "", Hostile())
+
+    # …and must not have booked anything from an input it could not read.
+    assert session._root_causes.failures == before
