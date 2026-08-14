@@ -183,9 +183,16 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
     # session loop rather than surfacing an instant, misleading failure (ENG-673).
+    # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
+    # our gateway names it on the reason header and in the body code. Anything
+    # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
+    # old fail-fast path rather than burning the budget on a limit that may not
+    # clear.
+    _velocity = gate_reason == "rate_limited" or code == "rate_limited"
     transient = classify_transient(
         exc.status_code, body, provider="The model provider", model=model,
         retry_after=retry_after_seconds(exc),
+        velocity_confirmed=_velocity,
     )
     if transient is not None:
         logger.warning(

@@ -1819,12 +1819,24 @@ class ChatSession:
         value; a rate limit passes a larger one, because there the hint is a
         real end time rather than a guess and clamping it to 30s would retry
         into a window that is still closed (ENG-1537).
+
+        **A hint never retries FASTER than the curve** — it is a floor on the
+        wait, not a replacement for it. Obeying a small hint verbatim ignores
+        ``attempt`` entirely, and the gateway's small hints are the common case,
+        not an edge one: an RPM denial computes ``ceil(deficit / refill)``,
+        which at the deployed capacity/refill is always exactly 1, and a
+        concurrency denial sends a flat 1 whose own config calls it a fake end
+        time ("slots free on report, not on a clock"). Taken verbatim inside a
+        90s budget that is ~90 retries of one denial. Only the TPM control
+        produces hints large enough to be meaningful, and for those the hint
+        still wins because it exceeds the curve.
         """
-        if retry_after is not None and retry_after > 0:
-            return min(float(retry_after), max_delay)
         base = (2.0, 10.0, 18.0)
         d = base[attempt] if attempt < len(base) else base[-1]
-        return d * (0.8 + 0.4 * random.random())
+        d *= 0.8 + 0.4 * random.random()
+        if retry_after is not None and retry_after > 0:
+            return min(max(float(retry_after), d), max_delay)
+        return d
 
     async def _backoff_sleep(self, delay: float) -> bool:
         """Sleep `delay` seconds, waking early if the turn is cancelled.
@@ -3130,7 +3142,13 @@ class ChatSession:
         _transient_attempt = 0
         # ENG-1537: velocity rate-limits are budgeted separately from incidents
         # (see _rate_limit_budget_s) so neither starves the other in one turn.
-        _rate_limit_deadline: float | None = None
+        # Accounted as TIME SLEPT, not a wall-clock deadline: the cohort this
+        # targets hits the ceiling repeatedly across a long turn, so denials
+        # arrive minutes apart with real work between them. A deadline set on
+        # the first denial would charge that work — tool rounds, continuations,
+        # compaction — against the wait budget and exhaust it without ever
+        # having waited 90s.
+        _rate_limit_slept = 0.0
         self._active_explainability = ExplainabilityCollector(
             self._explainability_store,
             turn=self._turn_count + 1,
@@ -3249,17 +3267,31 @@ class ChatSession:
                         # keeps the ENG-673 incident budget unchanged.
                         _rate_limited = _agent_exc.code == "rate_limited"
                         if _rate_limited:
-                            if _rate_limit_deadline is None:
-                                _rate_limit_deadline = now + self._rate_limit_budget_s
-                            deadline = _rate_limit_deadline
+                            remaining_budget = self._rate_limit_budget_s - _rate_limit_slept
                             max_delay = self._rate_limit_max_delay_s
                         else:
                             if _transient_deadline is None:
                                 _transient_deadline = now + self._transient_budget_s
-                            deadline = _transient_deadline
+                            remaining_budget = _transient_deadline - now
                             max_delay = 30.0
                         self._seal_dangling_tool_uses("interrupted by a transient provider error")
-                        remaining = deadline - now
+                        # A hint longer than we are willing to sleep: card NOW
+                        # and name the interval, rather than sleeping the cap
+                        # and then claiming "a moment" (ENG-1537 How #3). The
+                        # user can decide about a five-minute wait; we cannot
+                        # decide it for them by stalling the turn.
+                        _hint = getattr(_agent_exc, "retry_after", None)
+                        if _rate_limited and _hint is not None and _hint > max_delay:
+                            raise ProviderOverloadedError(
+                                "Too many requests too quickly — the limit clears in about "
+                                f"{int(_hint)}s. This isn't a credits problem.",
+                                provider=getattr(_agent_exc, "provider", "") or "",
+                                model=(getattr(_agent_exc, "model", "") or "")
+                                or getattr(self._llm, "planning_model", "") or "",
+                                code="rate_limited",
+                                retry_after=_hint,
+                            ) from _agent_exc
+                        remaining = remaining_budget
                         if remaining > 0.5:
                             delay = min(
                                 self._transient_backoff_delay(
@@ -3268,6 +3300,8 @@ class ChatSession:
                                 remaining,
                             )
                             _transient_attempt += 1
+                            if _rate_limited:
+                                _rate_limit_slept += delay
                             # Tell the user WHY the turn is quiet. A silent
                             # 90s pause is indistinguishable from a hang, and
                             # that is how a correct wait gets reported as a
@@ -3307,6 +3341,7 @@ class ChatSession:
                                 provider=getattr(_agent_exc, "provider", "") or "",
                                 model=_model,
                                 code="rate_limited",
+                                retry_after=getattr(_agent_exc, "retry_after", None),
                             ) from _agent_exc
                         raise ProviderOverloadedError(
                             f"{_agent_exc.provider or 'The model provider'} is experiencing an "

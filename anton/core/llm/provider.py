@@ -478,12 +478,17 @@ class ProviderOverloadedError(ConnectionError):
 
     def __init__(
         self, message: str, *, provider: str = "", model: str = "",
-        code: str = "provider_overloaded",
+        code: str = "provider_overloaded", retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.model = model
         self.code = code
+        # Seconds the server said to wait, when it said so (ENG-1537). Set only
+        # on the rate-limit exhaustion path, where the wait was skipped or ran
+        # out and the card needs to name the interval rather than say
+        # "a moment".
+        self.retry_after = retry_after
 
 
 # Body ``error.type``/``error.code`` values that mean "provider is momentarily
@@ -562,6 +567,7 @@ def classify_transient(
     provider: str = "",
     model: str = "",
     retry_after: float | None = None,
+    velocity_confirmed: bool = False,
 ) -> "TransientProviderError | None":
     """Arm A of the transient classifier (see ENG-673): inspect an
     ``APIStatusError``'s status + body and return a ``TransientProviderError`` if
@@ -574,6 +580,16 @@ def classify_transient(
     ``retry_after`` is the parsed ``Retry-After`` hint (see
     :func:`retry_after_seconds`); it is attached to the velocity-429 result so
     the session waits the interval the server actually named (ENG-1537).
+
+    ``velocity_confirmed`` says the caller POSITIVELY identified a velocity
+    limit — our gateway's ``rate_limited`` reason header or body code. Only then
+    does the 429 earn a session wait. The absence of billing carriers is not
+    evidence of transience: both fail-fast guards below are string-exact, so a
+    provider whose quota denial uses a different dialect (Gemini sends an
+    INTEGER ``code`` with ``status: RESOURCE_EXHAUSTED``) slips past them and
+    would otherwise spend the whole budget waiting out a daily quota that resets
+    at midnight — then be told it is not a credits problem. Unconfirmed 429s
+    keep the pre-ENG-1537 behaviour: typed, honest, and failed fast.
     """
     b = body if isinstance(body, dict) else {}
     # Two body dialects: Anthropic nests the error under `error` ({"error":
@@ -622,8 +638,10 @@ def classify_transient(
         # interval the server named, when it named one.
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
-            provider=provider, code="rate_limited", session_backoff=True,
-            retry_after=retry_after, model=model,
+            provider=provider, code="rate_limited",
+            session_backoff=velocity_confirmed,
+            retry_after=retry_after if velocity_confirmed else None,
+            model=model,
         )
     return None
 

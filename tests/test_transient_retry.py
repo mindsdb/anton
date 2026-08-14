@@ -77,6 +77,21 @@ def test_session_backoff_flag_splits_midstream_from_requesttime():
     ).session_backoff is False
 
 
+def test_an_unconfirmed_429_does_not_earn_a_session_wait():
+    # ENG-1537 finding 5. The session wait needs POSITIVE evidence of a velocity
+    # limit, not merely the absence of billing carriers. Both fail-fast guards
+    # are string-exact, so a provider quota in an unrecognised dialect — Gemini
+    # sends an INTEGER `code` with status RESOURCE_EXHAUSTED — slips past them.
+    # Waiting there burns the whole budget on a daily quota that resets at
+    # midnight, then tells the user it isn't a credits problem.
+    gemini_quota = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}
+    t = classify_transient(429, gemini_quota, provider="Gemini", retry_after=30.0)
+    assert t.session_backoff is False
+    assert t.retry_after is None  # not carried, so nothing downstream waits on it
+    # A bare 429 from any BYOK provider keeps the pre-ENG-1537 behaviour too.
+    assert classify_transient(429, {}, provider="X", retry_after=1.0).session_backoff is False
+
+
 def test_velocity_429_backs_off_in_session_and_carries_retry_after():
     # ENG-1537. A velocity rate-limit is the one request-time status the SESSION
     # must wait on: it is the only failure class where waiting is both necessary
@@ -84,7 +99,7 @@ def test_velocity_429_backs_off_in_session_and_carries_retry_after():
     # session_backoff=False this fell to the count-based path, which re-issued
     # the request twice with NO delay and a recovery note appended each time —
     # told "too many tokens per minute", anton immediately sent more.
-    t = classify_transient(429, {}, provider="X", retry_after=30.0)
+    t = classify_transient(429, {}, provider="X", retry_after=30.0, velocity_confirmed=True)
     assert isinstance(t, TransientProviderError)
     assert t.code == "rate_limited"
     assert t.session_backoff is True
@@ -94,7 +109,7 @@ def test_velocity_429_backs_off_in_session_and_carries_retry_after():
 def test_velocity_429_without_a_hint_still_backs_off():
     # No Retry-After (a provider that omits it) → still waits, on the jittered
     # curve rather than a named interval.
-    t = classify_transient(429, {}, provider="X")
+    t = classify_transient(429, {}, provider="X", velocity_confirmed=True)
     assert t.session_backoff is True
     assert t.retry_after is None
 
@@ -504,3 +519,76 @@ async def test_turn_transient_backoff_cancels_on_stop():
     # Clean cancel: no transient-error prose leaks into the transcript.
     text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert "overloaded" not in text.lower()
+
+
+# ── Session-side wiring (ENG-1537 review finding 3) ────────────────────────
+# The 85-line session.py half of ENG-1537 reverted with the suite green — the
+# wait itself is covered via `session_backoff`, but the budgets, the cap, the
+# progress event and the exhaustion code were not. Each of these was watched
+# failing against the merge-base.
+
+def test_rate_limits_get_their_own_budget_and_cap():
+    # Separate from the incident budget so neither starves the other in a turn,
+    # and a larger hint cap because a velocity hint is a real end time whereas
+    # an incident's is a guess. Reverting the cap silently clamps a 45s hint to
+    # 30s — retrying into a window that is still open.
+    from anton.core.session import ChatSession
+
+    assert ChatSession._rate_limit_budget_s == 90.0
+    assert ChatSession._transient_budget_s == 30.0  # unchanged
+    assert ChatSession._rate_limit_max_delay_s == 60.0
+
+
+def test_a_hint_never_retries_faster_than_the_curve():
+    # ENG-1537 finding 1. Obeying a small hint verbatim ignores `attempt`, and
+    # the gateway's small hints are the COMMON case: an RPM denial always
+    # computes exactly 1, and a concurrency denial sends a flat 1 that its own
+    # config calls a fake end time. Taken literally inside a 90s budget that is
+    # ~90 retries of a single denial.
+    from anton.core.session import ChatSession
+
+    first = ChatSession._transient_backoff_delay(0, 1.0, 60.0)
+    second = ChatSession._transient_backoff_delay(1, 1.0, 60.0)
+    assert first >= 1.5, first          # the curve's floor wins over the 1s hint
+    assert second > first               # and it still escalates
+    # A hint LARGER than the curve is still honoured — that's the TPM case.
+    assert ChatSession._transient_backoff_delay(0, 45.0, 60.0) == 45.0
+    # And never above the cap.
+    assert ChatSession._transient_backoff_delay(0, 3600.0, 60.0) == 60.0
+
+
+def test_incident_backoff_is_untouched_by_the_rate_limit_cap():
+    # "No change to 5xx incident handling" — the incident path keeps its own
+    # 30s clamp even though the rate-limit path now passes 60.
+    from anton.core.session import ChatSession
+
+    assert ChatSession._transient_backoff_delay(0, 3600.0) == 30.0
+
+
+def test_exhaustion_carries_the_rate_limited_code_and_the_interval():
+    # cowork-server maps this code to the wait-and-retry card instead of the
+    # out-of-credits one, and the card gates its Retry on the interval — so
+    # both must survive the raise.
+    from anton.core.llm.provider import ProviderOverloadedError
+
+    exc = ProviderOverloadedError(
+        "x", provider="P", model="sonnet", code="rate_limited", retry_after=30.0,
+    )
+    assert exc.code == "rate_limited"
+    assert exc.retry_after == 30.0
+    # The incident default is unchanged and carries no interval.
+    plain = ProviderOverloadedError("y")
+    assert plain.code == "provider_overloaded"
+    assert plain.retry_after is None
+
+
+def test_the_progress_event_the_other_two_repos_key_on():
+    # cowork-server's never-throttle set and PHASE_LABELS, and cowork's reducer
+    # branch, all key on this exact phase string. Nothing else in anton pins it,
+    # so renaming it here would silently make the wait invisible in the UI —
+    # the "a silent 90s pause is indistinguishable from a hang" failure.
+    import inspect
+    from anton.core import session as sess
+
+    src = inspect.getsource(sess)
+    assert 'phase="rate_limited"' in src
