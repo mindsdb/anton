@@ -202,26 +202,67 @@ class TestQuietCellNotice:
             await pad.close()
 
     async def test_chatty_cell_never_gets_a_quiet_notice(self, monkeypatch):
-        """A cell that keeps producing stdout never hits the heartbeat-only
-        branch, so it can never trigger the notice — the gate is the
-        existing STDOUT_CHUNK/HEARTBEAT split, not an extra check."""
-        shrink_timers(monkeypatch, heartbeat="0.3")
-        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.05)
-        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.05)
+        """The gate is keyed to time since the last output, not time since the
+        cell started (ENG-1324): a cell printing on a cadence longer than the
+        heartbeat but shorter than the notice threshold must never see one,
+        even once total elapsed time alone would clear the threshold."""
+        shrink_timers(monkeypatch, heartbeat="0.2")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.7)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.1)
         pad = make_pad()
         await pad.start()
         try:
             messages: list[str] = []
             code = (
                 "import time\n"
-                "for _ in range(100):\n"
+                "for _ in range(6):\n"
                 "    print('tick')\n"
-                "    time.sleep(0.02)\n"
+                "    time.sleep(0.4)\n"
             )
             async for item in pad.execute_streaming(code):
                 if isinstance(item, str):
                     messages.append(item)
             assert not any(m.startswith("still running") for m in messages)
+        finally:
+            await pad.close()
+
+    async def test_quiet_notice_during_install_names_the_install(
+        self, monkeypatch, tmp_path
+    ):
+        """A notice firing mid-install must name the install (ENG-1275's span
+        temporarily inflates the budget the notice quotes, so a bare 'still
+        running' would read as the cell's own progress instead of the
+        install's)."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.3)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.1)
+        fake_mod = tmp_path / "eng1324_fake_mod.py"
+        stub = tmp_path / "slow_ok_uv.sh"
+        stub.write_text(
+            f"#!/bin/sh\nsleep 1\necho 'VALUE = 1' > '{fake_mod}'\nexit 0\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            messages: list[str] = []
+            code = (
+                f"import sys\nsys.path.insert(0, {str(tmp_path)!r})\n"
+                "import eng1324_fake_mod\nprint(eng1324_fake_mod.VALUE)\n"
+            )
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    messages.append(item)
+            notices = [m for m in messages if m.startswith("still running")]
+            assert notices, "expected a quiet notice during the slow install"
+            assert all("eng1324_fake_mod" in m for m in notices)
         finally:
             await pad.close()
 

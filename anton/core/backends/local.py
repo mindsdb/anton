@@ -891,6 +891,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
         last_notice = 0.0
+        last_output = 0.0
 
         # In-cell auto-install span (ENG-1275). While the worker's installer
         # runs, both kill windows defer to the install budget — the same
@@ -993,14 +994,21 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # (otherwise STDOUT_CHUNK_MARKER fires instead), so a chatty
                 # cell never reaches it.
                 if (
-                    elapsed >= _QUIET_NOTICE_AFTER
+                    elapsed - last_output >= _QUIET_NOTICE_AFTER
                     and elapsed - last_notice >= _QUIET_NOTICE_EVERY
                 ):
                     last_notice = elapsed
-                    yield (
-                        f"still running — {elapsed / 60:.0f}m elapsed of "
-                        f"~{total_timeout / 60:.0f}m budget"
-                    )
+                    if installing:
+                        yield (
+                            f"still running — installing '{installing}', "
+                            f"{elapsed / 60:.0f}m elapsed of "
+                            f"~{total_timeout / 60:.0f}m budget"
+                        )
+                    else:
+                        yield (
+                            f"still running — {elapsed / 60:.0f}m elapsed of "
+                            f"~{total_timeout / 60:.0f}m budget"
+                        )
                 continue
 
             if line.startswith(STDOUT_CHUNK_MARKER):
@@ -1013,6 +1021,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 except json.JSONDecodeError:
                     chunk = ""
                 if isinstance(chunk, str) and chunk:
+                    last_output = elapsed
                     self._salvage.append(chunk)
                     total = sum(len(c) for c in self._salvage)
                     while total > _SALVAGE_MAX and len(self._salvage) > 1:
@@ -1021,6 +1030,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 continue
 
             if line.startswith(PROGRESS_MARKER):
+                last_output = elapsed
                 current_inactivity = max(
                     current_inactivity, float(s.cell_inactivity_after_progress)
                 )
