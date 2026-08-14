@@ -3149,6 +3149,10 @@ class ChatSession:
         # compaction — against the wait budget and exhaust it without ever
         # having waited 90s.
         _rate_limit_slept = 0.0
+        # Its own attempt index too: a shared counter let a rate-limit wait
+        # advance the INCIDENT curve (and vice versa), so an interleaved turn
+        # jumped straight to the back of a curve it had never actually walked.
+        _rate_limit_attempt = 0
         self._active_explainability = ExplainabilityCollector(
             self._explainability_store,
             turn=self._turn_count + 1,
@@ -3293,13 +3297,19 @@ class ChatSession:
                             ) from _agent_exc
                         remaining = remaining_budget
                         if remaining > 0.5:
+                            _attempt = (
+                                _rate_limit_attempt if _rate_limited else _transient_attempt
+                            )
                             delay = min(
                                 self._transient_backoff_delay(
-                                    _transient_attempt, _agent_exc.retry_after, max_delay
+                                    _attempt, _agent_exc.retry_after, max_delay
                                 ),
                                 remaining,
                             )
-                            _transient_attempt += 1
+                            if _rate_limited:
+                                _rate_limit_attempt += 1
+                            else:
+                                _transient_attempt += 1
                             if _rate_limited:
                                 _rate_limit_slept += delay
                             # Tell the user WHY the turn is quiet. A silent

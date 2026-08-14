@@ -592,3 +592,73 @@ def test_the_progress_event_the_other_two_repos_key_on():
 
     src = inspect.getsource(sess)
     assert 'phase="rate_limited"' in src
+
+
+async def test_a_hint_above_the_cap_cards_immediately_and_names_the_interval():
+    """ENG-1537 How #3, and the item most likely to regress.
+
+    A hint longer than we are willing to sleep must NOT be absorbed: card at
+    once and name the real number, rather than sleeping the cap twice and then
+    telling the user to wait "a moment". This is pinned specifically because
+    the branch was absent for a whole revision while both the ticket and the PR
+    body asserted it shipped — and disabling it left the entire suite green.
+    """
+    s = _session()
+    sleeps = []
+
+    async def _record_sleep(delay):
+        sleeps.append(delay)
+        return False
+
+    s._backoff_sleep = _record_sleep
+
+    async def _always_rate_limited(user_msg):
+        raise TransientProviderError(
+            "The model provider is rate-limiting requests.",
+            provider="The model provider", code="rate_limited",
+            session_backoff=True, retry_after=3600.0,
+        )
+        yield  # pragma: no cover  (async generator)
+
+    s._stream_and_handle_tools = _always_rate_limited
+
+    with pytest.raises(ProviderOverloadedError) as ei:
+        _ = [e async for e in s.turn_stream("do it")]
+
+    assert sleeps == [], f"must not sleep at all, slept {sleeps}"
+    assert ei.value.code == "rate_limited"
+    assert ei.value.retry_after == 3600.0
+    assert "3600s" in str(ei.value)
+    # And never the out-of-credits framing.
+    assert "credits" in str(ei.value).lower()  # as a denial: "isn't a credits problem"
+    assert "add credits" not in str(ei.value).lower()
+
+
+async def test_a_hint_within_the_cap_still_waits_rather_than_carding():
+    """The complement — otherwise the branch above could swallow every case."""
+    s = _session()
+    sleeps = []
+
+    async def _record_sleep(delay):
+        sleeps.append(delay)
+        return False
+
+    s._backoff_sleep = _record_sleep
+    calls = {"n": 0}
+
+    async def _fail_then_succeed(user_msg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientProviderError(
+                "The model provider is rate-limiting requests.",
+                provider="The model provider", code="rate_limited",
+                session_backoff=True, retry_after=30.0,
+            )
+        yield StreamTextDelta("done")
+
+    s._stream_and_handle_tools = _fail_then_succeed
+
+    _ = [e async for e in s.turn_stream("do it")]
+
+    assert sleeps == [30.0], sleeps          # the hint, honoured
+    assert calls["n"] == 2                   # and the SAME step resumed
