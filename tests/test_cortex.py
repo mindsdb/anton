@@ -531,10 +531,12 @@ class _CompactionLLM:
     def __init__(self, keep: list[int]) -> None:
         self._keep = keep
         self.prompt = ""
+        self.answer: _CompactionResult | None = None
 
     async def generate_object_code(self, schema, *, system, messages, max_tokens):
         self.prompt = messages[0]["content"]
-        return _CompactionResult(keep=self._keep)
+        self.answer = _CompactionResult(keep=self._keep)
+        return self.answer
 
 
 class TestCompactFile:
@@ -629,6 +631,27 @@ class TestCompactFile:
         llm = await self._compact(dirs, hc, keep=[1])
         assert llm.prompt == ""
         assert len(self._entries(hc)) == 7
+
+    async def test_the_answer_fits_the_budget_at_the_size_that_broke_it(self, dirs):
+        """Rebuild the shape of the file that produced the bug report.
+
+        Echoing survivors back cost 5,272 output tokens on that file and blew
+        both rungs of the (4096, 8192) ladder. Every other test here runs 10
+        short entries, where an echo-back answer still fits — so only a fixture
+        at the real size can tell a schema that scales from one that does not.
+        """
+        hc = Hippocampus(dirs[0])
+        for i in range(78):
+            hc.encode_lesson(f"Fact number {i}: " + "detail " * 40, topic=f"t{i}")
+
+        llm = await self._compact(dirs, hc, keep=list(range(1, 79)))
+
+        assert len(self._entries(hc)) == 78
+        # Guards the fixture itself: a shrunken file would pass the budget
+        # assertion below for the wrong reason.
+        assert len(llm.prompt) > 20_000
+        # ~4 chars/token, the same convention `_filter_by_token_budget` uses.
+        assert len(llm.answer.model_dump_json()) / 4 < 4096
 
     async def test_survivors_reparse_as_engrams(self, dirs):
         """Metadata must survive intact, or recall loses topic and recency."""
