@@ -58,7 +58,9 @@ paths, credentials, hostnames, or email addresses.
 Guarantees:
   • Never blocks the caller.
   • Never raises — all exceptions are silently swallowed.
-  • Daemon threads die automatically when the process exits.
+  • Exit waits briefly for sends already in flight (see ``flush``), then
+    gives up.  Daemon threads are killed at interpreter shutdown, so
+    without that wait a send started just before exit is simply lost.
 
 Machine fingerprint
 ===================
@@ -84,6 +86,7 @@ enough to be a readable query parameter.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
@@ -102,6 +105,52 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 3  # seconds
+
+# ── Exit flush (ENG-1617) ───────────────────────────────────────────
+# Every send runs in a daemon thread, and daemon threads are killed at
+# interpreter shutdown without running to completion.  In a long-lived
+# process that is harmless — the thread finished minutes ago.  In a
+# short-lived one it means the event is silently lost.
+#
+# ``anton/cloud_turn/__main__.py`` runs exactly one turn and returns, so
+# ``turn_completed``'s POST races teardown.  Measured 2026-08-14 on
+# CPython 3.14, a daemon thread started immediately before ``main()``
+# returns does not finish *at any duration* — not at 200ms, not at 1ms:
+#
+#     daemon needing   1ms  ->  did NOT finish
+#     daemon needing   5ms  ->  did NOT finish
+#     daemon needing  50ms  ->  did NOT finish
+#     daemon needing 200ms  ->  did NOT finish
+#
+# So this is not a race the cloud path sometimes loses.  On that entry
+# point it loses every time.
+#
+# The wait lives here rather than in each host on purpose: a new
+# short-lived entry point would otherwise reintroduce the bug by
+# forgetting, which is how this one arrived.
+#
+# Why 1 second.  Measured round trip of a real POST to
+# ``us.i.posthog.com/capture/`` on 2026-08-14, 12 samples:
+#
+#     cold (DNS + TLS handshake)  351 ms
+#     median                      283 ms
+#     max                         296 ms
+#
+# urllib opens a fresh connection per ``urlopen``, so a one-shot process
+# pays the cold number every time.  1s is ~3x the median with headroom for
+# a slower network, and stays well under ``_TIMEOUT``'s 3s — a send that
+# has genuinely hung costs exit 1s rather than 3s.  It is a ceiling, not a
+# cost: ``flush`` returns immediately when nothing is outstanding, which is
+# the normal case for an interactive CLI, where the event went out long
+# before the user quit.
+_FLUSH_TIMEOUT = 1.0  # seconds, total across all outstanding sends
+
+# One entry per send still in flight.  Events rather than Thread objects
+# because ``Event.wait`` gives the same semantics as ``Thread.join`` without
+# holding a reference to the thread — which keeps this working when a caller
+# or a test substitutes something else for ``threading.Thread``.
+_pending: set[threading.Event] = set()
+_pending_lock = threading.Lock()
 
 # ── The PostHog sink (ENG-1495) ─────────────────────────────────────
 # The register of events that bypass the collector and post straight to
@@ -301,6 +350,73 @@ def _fire_posthog(url: str, body: bytes) -> None:
         logger.debug("posthog capture failed", exc_info=True)
 
 
+def _spawn(target, *args) -> None:
+    """Start one sender thread and register it as outstanding.
+
+    The registration is added *before* the thread starts and cleared in a
+    ``finally``, so a send is either visible to ``flush`` or already finished —
+    never in a gap between the two.
+    """
+    done = threading.Event()
+    with _pending_lock:
+        _pending.add(done)
+
+    def run() -> None:
+        try:
+            target(*args)
+        finally:
+            done.set()
+            with _pending_lock:
+                _pending.discard(done)
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception:
+        # A thread that never started will never clear its own registration,
+        # and a stale one costs every later `flush` the full budget waiting for
+        # a send that is not happening. Clear it here and re-raise into
+        # `send_event`'s guard, which is where "never raises" is enforced.
+        with _pending_lock:
+            _pending.discard(done)
+        raise
+
+
+def flush(timeout: float = _FLUSH_TIMEOUT) -> None:
+    """Wait up to ``timeout`` seconds, in total, for in-flight sends to land.
+
+    Registered with ``atexit`` below, so short-lived processes get this without
+    asking.  Callers may also invoke it directly.
+
+    ``timeout`` is a whole budget shared across every outstanding send, not a
+    per-send allowance — otherwise a turn that emitted several events could
+    hold exit for a multiple of it.
+
+    Best-effort by design.  When the budget runs out the remaining sends are
+    abandoned and the process exits; this narrows the loss window, it does not
+    close it.  Never raises, in keeping with the rest of the module.
+    """
+    try:
+        deadline = time.monotonic() + timeout
+        with _pending_lock:
+            outstanding = list(_pending)
+        for done in outstanding:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.debug("analytics flush budget exhausted, %d send(s) abandoned",
+                             sum(1 for d in outstanding if not d.is_set()))
+                return
+            done.wait(remaining)
+    except Exception:
+        logger.debug("analytics flush failed", exc_info=True)
+
+
+# Runs during interpreter shutdown, while daemon threads are still alive and
+# schedulable — CPython calls atexit callbacks before tearing down the thread
+# state that kills them. Registering at import is what makes this the module's
+# responsibility rather than each host's.
+atexit.register(flush)
+
+
 def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
     """Send an analytics event in a background thread.
 
@@ -351,19 +467,11 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
             host = (getattr(settings, "posthog_host", "") or "").rstrip("/")
             if not key or not host:
                 return
-            t = threading.Thread(
-                target=_fire_posthog,
-                args=(f"{host}/capture/", _posthog_body(key, action, params)),
-                daemon=True,
-            )
+            _spawn(_fire_posthog,
+                   f"{host}/capture/", _posthog_body(key, action, params))
         else:
             url = settings.analytics_url
-            t = threading.Thread(
-                target=_fire,
-                args=(f"{url}?{urllib.parse.urlencode(params)}",),
-                daemon=True,
-            )
-        t.start()
+            _spawn(_fire, f"{url}?{urllib.parse.urlencode(params)}")
     except Exception:
         pass
 
