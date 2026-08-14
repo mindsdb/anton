@@ -133,6 +133,87 @@ class TestScratchpadReset:
             await pad.close()
 
 
+class TestAutoResume:
+    """ENG-1273: `resume()` restarts without discarding the snapshot, and
+    `_auto_resume()`'s cap falls back to a real `reset()` instead of
+    retrying `resume()` forever."""
+
+    async def test_resume_preserves_namespace_reset_does_not(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        pad = make_scratchpad(
+            name="resume-vs-reset", _venvs_base=tmp_path / "venvs", session_id="conv"
+        )
+        await pad.start()
+        try:
+            await pad.execute("kept = 'alive'")
+
+            await pad.resume()
+            cell = await pad.execute("print(kept)")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "alive"
+
+            await pad.reset()
+            cell = await pad.execute("print('kept' in dir())")
+            assert cell.stdout.strip() == "False"
+        finally:
+            await pad.cleanup()
+
+    async def test_falls_back_to_reset_after_max_consecutive_deaths(self, monkeypatch):
+        pad = make_scratchpad(name="cap-test")
+        calls: list[str] = []
+
+        async def _fake_resume():
+            calls.append("resume")
+
+        async def _fake_reset():
+            calls.append("reset")
+
+        monkeypatch.setattr(pad, "resume", _fake_resume)
+        monkeypatch.setattr(pad, "reset", _fake_reset)
+
+        cap = pad._MAX_CONSECUTIVE_AUTO_RESUMES
+        for _ in range(cap):
+            await pad._auto_resume()
+        assert calls == ["resume"] * cap
+
+        await pad._auto_resume()
+        assert calls[-1] == "reset"
+
+    async def test_manual_reset_also_clears_the_death_counter(self):
+        pad = make_scratchpad(name="manual-reset-clears")
+        await pad.start()
+        try:
+            pad._consecutive_deaths = 2
+            await pad.reset()
+            assert pad._consecutive_deaths == 0
+        finally:
+            await pad.cleanup()
+
+    async def test_auto_resume_reports_the_underlying_error_when_unrecoverable(
+        self, monkeypatch
+    ):
+        pad = make_scratchpad(name="unrecoverable")
+
+        async def _broken_resume():
+            raise RuntimeError("venv is gone")
+
+        monkeypatch.setattr(pad, "resume", _broken_resume)
+        ok = await pad._auto_resume()
+        assert ok is False
+        assert "venv is gone" in pad._last_resume_error
+
+    async def test_a_successful_cell_resets_the_death_counter(self):
+        pad = make_scratchpad(name="counter-reset")
+        await pad.start()
+        try:
+            pad._consecutive_deaths = 1  # simulate one prior death this streak
+            cell = await pad.execute("print('alive')")
+            assert cell.error is None
+            assert pad._consecutive_deaths == 0
+        finally:
+            await pad.close()
+
+
 class TestScratchpadEdgeCases:
     async def test_timeout_kills_process(self, monkeypatch):
         """Long-running code triggers timeout."""
@@ -159,16 +240,17 @@ class TestScratchpadEdgeCases:
         finally:
             await pad.close()
 
-    async def test_dead_process_detected(self):
-        """If process is dead, execute reports it."""
+    async def test_dead_process_auto_resumes(self):
+        """If the process dies, the NEXT exec call auto-resumes instead of
+        just reporting it dead (ENG-1273) — no explicit reset needed."""
         pad = make_scratchpad(name="test")
         await pad.start()
-        # Kill the process manually
+        # Kill the process manually, simulating a crash/watchdog kill.
         pad._proc.kill()
         await pad._proc.wait()
         cell = await pad.execute("print(1)")
-        assert cell.error is not None
-        assert "not running" in cell.error.lower()
+        assert cell.error is None, cell.error
+        assert cell.stdout.strip() == "1"
         await pad.close()
 
     async def test_stderr_captured(self):

@@ -526,11 +526,12 @@ def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
         return Lesson(
             rule=(
                 "When a scratchpad cell is killed for a missing liveness signal "
-                "(worker dead or wedged), the fix is reset and retry the SAME "
-                "cell unchanged — do NOT shrink the batch or split the loop. "
-                "Pass estimated_execution_time_seconds; call progress() during "
-                "long phases. If the same code wedges twice, a native call is "
-                "likely hanging — give that call its own timeout."
+                "(worker dead or wedged), just retry the SAME cell unchanged — "
+                "the scratchpad restarts automatically — do NOT shrink the "
+                "batch or split the loop. Pass estimated_execution_time_seconds; "
+                "call progress() during long phases. If the same code wedges "
+                "twice, a native call is likely hanging — give that call its "
+                "own timeout."
             ),
             kind="when",
             triggers=("scratchpad_killed",),
