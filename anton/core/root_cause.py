@@ -455,6 +455,19 @@ class RootCauseLedger:
         The live form of the writer inventory: a key computed over a third of
         failures would set thresholds wrong in the safe-looking direction, and
         this is the number that says whether that is happening.
+
+        **Read this together with `classify_errors`.** A classification that
+        RAISED reaches neither counter, so it leaves this ratio entirely — on
+        partial failure the number reads high:
+
+            3 classified (2 with reason) + 2 raised
+              -> reported 0.667, true 2/5 = 0.4
+
+        The systematic case is safe rather than flattering (if every
+        classification raises, `failures` is 0 and this reads 0.0, not 1.0), and
+        `classify_errors` is non-zero in both cases — so a dashboard should
+        treat any `classify_errors > 0` as "this ratio is an over-estimate"
+        rather than trusting it at face value.
         """
         return (self.with_reason / self.failures) if self.failures else 0.0
 

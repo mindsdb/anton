@@ -1000,10 +1000,15 @@ class ChatSession:
                 self._root_causes.add(
                     classify_root_cause("", result_text or "")
                 )
-            except Exception:  # pragma: no cover - reporting must not break a turn
+            except Exception:
                 # Count it, don't just log it — `logger.debug` is not emitted in
                 # production, so a systematically broken classifier would be
                 # indistinguishable from a turn where nothing failed.
+                #
+                # Both guards deliberately carry NO `pragma: no cover`: the
+                # wiring tests execute them, and excluding them would hide a
+                # removed `note_error()` from a coverage gate — the same silent
+                # hole this counter exists to close. #348 review.
                 self._root_causes.note_error()
                 logger.debug("root-cause classification failed", exc_info=True)
             return
@@ -1013,7 +1018,7 @@ class ChatSession:
             self._root_causes.add(
                 classify_root_cause(reason or "", result_text or "")
             )
-        except Exception:  # pragma: no cover - reporting must not break a turn
+        except Exception:
             self._root_causes.note_error()
             logger.debug("root-cause classification failed", exc_info=True)
 
