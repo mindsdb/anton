@@ -101,6 +101,9 @@ class AntonSettings(CoreSettings):
     brave_api_key: str | None = None
 
     skills_root: Path | None = None
+    # Read-only skill roots the host ships alongside its own tools (ENG-764).
+    # Take precedence over anton's built-ins; user skills still shadow them.
+    skills_extra_roots: list[Path] | None = None
 
     memory_enabled: bool = True
     # TODO: Calling this memory_dir is a bit misleading, because there are other directories that live here

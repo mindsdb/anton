@@ -153,8 +153,10 @@ class LLMClient:
 
         Exposed so the session's truncation recovery can compare a
         response's ``output_tokens`` against the budget the call actually
-        ran with (ENG-1042) — the gateway's ``finish_reason`` can't be
-        trusted at the cap (ENG-1082).
+        ran with (ENG-1042). This gate was added because the gateway once
+        reported a normal stop at the cap (ENG-1082, fixed 2026-08-03); it is
+        kept because a token count needs no dialect mapping and no provider
+        can get it wrong.
         """
         return self._max_tokens
 

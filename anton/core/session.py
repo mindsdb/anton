@@ -28,6 +28,7 @@ from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.memory.history_store import is_user_turn
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
     SCRATCHPAD_SILENT_TIMEOUT_NUDGE,
     SCRATCHPAD_STUCK_NUDGE,
@@ -77,6 +78,7 @@ from anton.core.tools.tool_defs import (
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
+    SELECT_PATH_TOOL_PICK_ONLY,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
@@ -290,6 +292,21 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # verdict" can never fire, since a latched session makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
 
+# Floor for the tokens held back from the spend ceiling (ENG-1286).
+#
+# TWO calls land after the last check that passed, not one: the call that
+# carried the total over the gate (the gate is only read between calls, so the
+# crossing is never observed mid-flight), and then the hand-back diagnosis,
+# which is a full-history planning call. So the reserve has to cover both or the
+# turn overshoots the ceiling it promised — the actual per-call cost on these
+# turns is ~200k, which a flat 200k reserve under-covers by half.
+#
+# The live reserve is therefore `max(this, 2 x peak_context_tokens)`: the
+# turn's own largest call is the best available estimate of what the next two
+# will cost, and ENG-1288 already tracks it. This floor only applies before any
+# call has reported usage.
+_SPEND_CEILING_RESERVE = 200_000
+
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
 # budgets above. Tool name comes off the schema class so it can't go stale.
@@ -364,6 +381,21 @@ def _safe_error_detail(exc: BaseException) -> str:
         # and never the message.
         pass
     return name
+
+
+def _is_provider_auth_error(exc: BaseException) -> bool:
+    """A provider-auth 401 — anton's "Invalid API key — …" copy from
+    `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
+    request, so retrying can't succeed either. The substring match mirrors
+    cowork-server's `turn_errors.is_auth_error()`; the `isinstance` check is
+    an anton-only narrowing on top of it (both 401 raise sites always type
+    it this way, so it's a no-op in practice) — anything else (a bare
+    "temporarily unavailable" ConnectionError) is a different failure.
+
+    Shared by both `turn_stream` re-raise sites so the check can't drift
+    between them (review feedback on ENG-1310).
+    """
+    return isinstance(exc, ConnectionError) and "invalid api key" in str(exc).lower()
 
 
 # Shared closing instruction for every path that hands control back to the
@@ -652,6 +684,10 @@ class ChatSession:
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
+        # Per-turn raw-token ceiling (ENG-1286). getattr so a host passing an
+        # older settings object doesn't break — absent means "no ceiling",
+        # matching the pre-ENG-1286 behaviour rather than silently applying one.
+        self._max_turn_tokens = getattr(s, "max_turn_tokens", 0)
         # Latch for a verifier that fails the same hard way every turn — e.g.
         # kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), which
         # fails on every verdict call until the gateway fix lands. Without the
@@ -692,6 +728,10 @@ class ChatSession:
         self._started_at = config.started_at
         self._extra_tools = config.tools
         self._tool_allowlist = config.tool_allowlist
+        # Deferred tool bundles: tools tagged with `unlock_skill`
+        # are held here, keyed by skill label, and registered only when that
+        # skill is recalled. Populated in `_build_tools`.
+        self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
         self._console = config.console
@@ -728,6 +768,14 @@ class ChatSession:
         # Host-injected first; a console-backed session (the real CLI,
         # chat.py passes console=console) falls back to CLIElicitor so it
         # always gets a working elicitor.
+        #
+        # Inject through `config.elicitor` — NEVER by setting
+        # `session.elicitor` after construction. Registration below picks the
+        # select_path variant from this value (full vs pick-only), so a late
+        # setter leaves the model told there is no file browser while browse
+        # would actually work at runtime: the capability exists and the agent
+        # never learns it. That failure is silent in both directions, which is
+        # what makes it worth a comment rather than a docstring.
         self.elicitor: Elicitor | None = config.elicitor
         if self.elicitor is None and config.console is not None:
             from anton.core.interaction.cli import CLIElicitor
@@ -759,7 +807,10 @@ class ChatSession:
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
         # Lives at ~/.anton/skills/<label>/. The recall_skill tool retrieves
         # entries on demand and increments per-stage usage counters.
-        self._skill_store = SkillStore(root=getattr(s, "skills_root", None))
+        self._skill_store = SkillStore(
+            root=getattr(s, "skills_root", None),
+            extra_roots=getattr(s, "skills_extra_roots", None),
+        )
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
@@ -950,6 +1001,12 @@ class ChatSession:
         if tool_name != "scratchpad":
             return RESILIENCE_NUDGE
         low = result_text.lower()
+        # An install failure/kill is neither a size nor a liveness problem —
+        # checked before both: the mid-install kill wording also contains
+        # "liveness", and the worker's install errors contain "killed"/
+        # "timed out"-adjacent words (ENG-1275).
+        if "auto-install" in low:
+            return SCRATCHPAD_INSTALL_NUDGE
         # A silence/liveness kill means the worker looked dead — "make the
         # cell smaller" is exactly the wrong advice there (ENG-578: it taught
         # per-item LLM round-trips). A budget kill that produced no output is
@@ -1309,13 +1366,32 @@ class ChatSession:
         if not self.tool_registry:
             self._build_core_tools()
             for tool in self._extra_tools:
-                self.tool_registry.register_tool(tool)
+                # Deferred tools wait in `_deferred_bundles` until
+                # their skill is recalled; the rest register up front.
+                if tool.unlock_skill:
+                    self._deferred_bundles.setdefault(
+                        tool.unlock_skill, []
+                    ).append(tool)
+                else:
+                    self.tool_registry.register_tool(tool)
+            # After extra tools: re-unlock bundles from a prior recall in the
+            # loaded history, at the same tail position the live path uses, so
+            # tool order stays cache-stable across turns.
+            self._replay_tool_bundles_from_history()
         # Enforce the allowlist on every build (None = full desktop set).
         if self._tool_allowlist is not None:
             built = {t.name for t in self.tool_registry.get_tool_defs()}
-            # Fail loud on a name that matches no built tool (typo / unavailable
-            # here) rather than silently dropping it.
-            unknown = set(self._tool_allowlist) - built
+            # Deferred tools aren't registered until their skill unlocks them,
+            # so exempt their names here — otherwise an allowlist that
+            # (correctly) lists a deferred tool would raise before it unlocks.
+            # Once unlocked they enter `built` and the allowlist governs them
+            # normally below.
+            deferred = {
+                t.name for b in self._deferred_bundles.values() for t in b
+            }
+            # Fail loud on a name that matches no built or deferred tool (typo /
+            # unavailable here) rather than silently dropping it.
+            unknown = set(self._tool_allowlist) - built - deferred
             if unknown:
                 raise ValueError(
                     "tool_allowlist names not registered in this session: "
@@ -1325,6 +1401,45 @@ class ChatSession:
             for name in built - set(self._tool_allowlist):
                 self.tool_registry.unregister_tool(name)
         return self.tool_registry.dump()
+
+    def _register_tool_bundle(self, label: str) -> None:
+        """Register the deferred tools a recalled skill unlocks.
+
+        Sticky for the session; `register_tool` dedups by name so repeated
+        recalls are safe. No-op if the label unlocks no bundle.
+        """
+        for tool in self._deferred_bundles.get(label, []):
+            self.tool_registry.register_tool(tool)
+
+    def _replay_tool_bundles_from_history(self) -> None:
+        """Re-unlock bundles from prior `recall_skill` calls in the history.
+
+        Lets sticky tools survive a session rebuild (e.g. server restart). If
+        compaction evicted the call, the model re-recalls when next needed.
+        """
+        store = self._skill_store
+        for msg in self._history:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("name") == "recall_skill"
+                ):
+                    raw = (block.get("input") or {}).get("label")
+                    if not isinstance(raw, str):
+                        continue
+                    raw = raw.strip()
+                    # Resolve to the canonical label through the store, exactly
+                    # as the live recall paths do: history keeps the raw
+                    # as-typed label (e.g. `connect_datasource`), but bundle
+                    # keys are canonical skill labels (`connect-datasource`).
+                    # Fall back to the raw label so a missing store never
+                    # regresses an already-matching key.
+                    skill = store.load(raw) if store is not None else None
+                    self._register_tool_bundle(skill.label if skill else raw)
 
     def _build_core_tools(self) -> None:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
@@ -1351,10 +1466,25 @@ class ChatSession:
 
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
-        # Interactive file/folder disambiguation — always available; degrades
-        # to picker_unavailable (and still auto-resolves a single candidate)
-        # when no elicitor supports path questions.
-        self.tool_registry.register_tool(SELECT_PATH_TOOL)
+        # Interactive file/folder disambiguation. Registered on every host, but
+        # in one of two shapes — because "degrades to picker_unavailable" is
+        # not a neutral degradation when the definition also injects a
+        # system-prompt rule telling the model to use the picker INSTEAD of the
+        # alternatives.
+        #
+        # Without a path elicitor, BROWSE mode cannot run at all, so a user who
+        # says "analyse my sales data" without attaching it left the model with
+        # no legitimate move: picker dead, asking for a path forbidden by the
+        # prompt AND by the host's file-access policy, guessing forbidden. It
+        # fabricated the data and reported a forecast from it (ENG-1357).
+        #
+        # PICK mode does still work here — one match auto-resolves, and ≥2
+        # comes back with the candidate list to ask about — so this is a
+        # narrowing, not a removal.
+        if self.elicitor is not None and "path" in self.elicitor.supported_kinds:
+            self.tool_registry.register_tool(SELECT_PATH_TOOL)
+        else:
+            self.tool_registry.register_tool(SELECT_PATH_TOOL_PICK_ONLY)
 
         # Multiple-choice questions — only when some host can actually render
         # them. Without this the model would ask into a void. The cowork kill
@@ -1389,9 +1519,18 @@ class ChatSession:
         # appear in the registry; the model uses the provider's server-side
         # web tools instead and Anton's dispatch loop never sees a ``tool_use``
         # for them. See ``anton/core/tools/web_tools.py`` for the handlers.
+        #
+        # ``web_search`` additionally needs a usable Exa/Brave credential — a
+        # model offered a tool that can only fail will call it anyway, so skip
+        # registration outright rather than let it dispatch to a guaranteed
+        # error.
         if "web_search" in self._fallback_web_tools:
-            from anton.core.tools.web_tools import WEB_SEARCH_FALLBACK_TOOL
-            self.tool_registry.register_tool(WEB_SEARCH_FALLBACK_TOOL)
+            from anton.core.tools.web_tools import (
+                WEB_SEARCH_FALLBACK_TOOL,
+                has_search_credential,
+            )
+            if has_search_credential(self._settings):
+                self.tool_registry.register_tool(WEB_SEARCH_FALLBACK_TOOL)
         if "web_fetch" in self._fallback_web_tools:
             from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL
             self.tool_registry.register_tool(WEB_FETCH_FALLBACK_TOOL)
@@ -2055,6 +2194,116 @@ class ChatSession:
             # Reporting must never affect the turn that just ran.
             pass
 
+    def _spend_ceiling_reached(self) -> bool:
+        """True when this turn has spent enough that it must stop and ask.
+
+        Reads `TurnCost.total_tokens` — raw tokens, the unit the user's included
+        allowance drains in (see `CoreSettings.max_turn_tokens` for why cache
+        reads are NOT discounted here). Gated at `ceiling - reserve` so the
+        hand-back's own call fits inside the promised ceiling.
+
+        Returns False when the ceiling is disabled (0) or the books are closed,
+        so a host on older settings, or any path that runs outside a turn, keeps
+        exactly its pre-ENG-1286 behaviour.
+
+        This is pure arithmetic and says nothing about whether the turn has done
+        any WORK yet. An earlier version of this docstring claimed it could only
+        fire after real work had happened, on the reasoning that every call site
+        sits inside the tool loop; that is true of LLM calls and false of tool
+        dispatches, which happen later in the same iteration. The per-round call
+        site carries the progress condition explicitly — see
+        `_spend_ceiling_stops_the_tool_loop`.
+        """
+        if self._max_turn_tokens <= 0 or self._turn_cost is None:
+            return False
+        return self._turn_cost.total_tokens >= self._spend_ceiling_gate()
+
+    def _spend_ceiling_stops_the_tool_loop(self) -> bool:
+        """Should the tool loop stop here on the spend ceiling?
+
+        The ceiling, plus the one thing it must never do: end a turn that has
+        dispatched no tools at all. The gate is checked at the TOP of a round,
+        before dispatch, so on the first round a small ceiling would break the
+        loop having run nothing — the user gets a "this used a lot of tokens"
+        message for a task that never started.
+
+        `TurnCost.rounds` is turn-wide (it accumulates across verifier-forced
+        continuations rather than resetting with the loop-local counter), so
+        `> 1` means at least one round has completed its dispatch — including
+        rounds from an earlier continuation, which is why a continuation cannot
+        hand out a fresh free round.
+
+        Belt and braces with the reserve cap in `_spend_ceiling_gate`: that cap
+        keeps the gate proportional to the ceiling, this keeps the guarantee true
+        even for a ceiling smaller than a single call — a shape the settings
+        floor is supposed to prevent, but which anton's own `max_turn_tokens`
+        has no bounds on for CLI and host callers.
+        """
+        if not self._spend_ceiling_reached():
+            return False
+        rounds = self._turn_cost.rounds if self._turn_cost is not None else 0
+        return rounds > 1
+
+    def _spend_ceiling_gate(self) -> int:
+        """The token total at which the turn must stop starting new work.
+
+        Sits a reserve below the ceiling because two more calls are still coming
+        after the last check that passed — the one that crosses the gate (the
+        total is only read *between* calls, so the crossing is never observed
+        mid-flight), and the hand-back. Sized from this turn's own
+        `peak_context_tokens` rather than a constant: a turn carrying 190k of
+        context per call overshoots a flat 200k reserve by roughly a full call.
+
+        **The reserve is capped at half the ceiling**, and that cap is the whole
+        reason small ceilings are usable. Without it the reserve bears no
+        relation to the ceiling's size, so any ceiling at or below the reserve
+        drove this to the `max(..., 1)` floor — the gate then tripped on the
+        first check, before any tool had been dispatched, and the turn still
+        paid for two calls. Measured at a 100k ceiling with 190k contexts: zero
+        tools run, 400k spent, 300% over the number the user asked for. The cap
+        binds only below ~2x the reserve; at the 1.25M default it changes
+        nothing.
+
+        The bound this produces is close, not exact: the reserve is derived from
+        `peak_context_tokens` (input + cache_read + cache_creation) but compared
+        against `total_tokens`, which also counts output, so a turn can land
+        over the ceiling by roughly two output budgets. See
+        `test_total_is_bounded_by_the_ceiling` for the asserted form.
+        """
+        peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
+        reserve = min(
+            max(_SPEND_CEILING_RESERVE, 2 * peak),
+            max(self._max_turn_tokens // 2, 1),
+        )
+        return max(self._max_turn_tokens - reserve, 1)
+
+    def _spend_ceiling_notice(self) -> str:
+        """The SYSTEM injection for a ceiling stop.
+
+        Mirrors the 25-round cap's pause-and-ask wording deliberately: the user
+        already meets that shape when a long turn stops, and two different
+        "I stopped, shall I go on?" behaviours would read as two different
+        products. `Do NOT retry automatically` is what keeps this a question
+        rather than a speed bump the model drives straight through.
+
+        Deliberately does NOT quote a share of the user's allowance. The turn
+        knows its token count but not the plan behind it — BYOK users have no
+        MindsHub allowance at all — and inventing "you've used a quarter of your
+        month" for them would be a confident lie. The model is told what it
+        spent and asked to be honest that it was a lot.
+        """
+        spent = self._turn_cost.total_tokens if self._turn_cost is not None else 0
+        return (
+            f"SYSTEM: This turn has used {spent:,} tokens, which is a large amount "
+            "of work for a single request and counts against the user's plan. "
+            "Pause here. Summarize what you have accomplished so far and what "
+            "remains. Be straightforward that this has already taken a lot of "
+            "work, so the user can decide whether it is worth continuing. "
+            "If you are on a good track and can finish, say so and ask if they'd "
+            "like you to continue. "
+            "Do NOT retry automatically — wait for the user's response."
+        )
+
     async def _stream_handback_diagnosis(self, *, system: str, label: str):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -2407,6 +2656,9 @@ class ChatSession:
                 skill = None
             if skill is None:
                 continue
+            # Unlock gated tools before the skip below, so a preload
+            # registers the bundle even when it won't re-inject the body.
+            self._register_tool_bundle(skill.label)
             # Skip skills whose full body is already in context — mirrors
             # handle_recall_skill's stub path so a preload can't duplicate a
             # procedure the planning model already has (wasted tokens).
@@ -2533,6 +2785,35 @@ class ChatSession:
                 response = await self.plan_with_recovery(system=system)
                 break
 
+            # Spend ceiling (ENG-1286), mirroring turn_stream. Same reasoning as
+            # the cap mark above: public API, and the books are wired here too.
+            # This path runs no completion verifier, so there is no continuation
+            # gate to also check — the per-round check is the whole gate here.
+            #
+            # Uses the same `_spend_ceiling_stops_the_tool_loop` as the streaming
+            # loop, NOT the bare predicate: the "never end a turn that dispatched
+            # no tools" guarantee is stated unconditionally ("at any ceiling"),
+            # and CLI/host callers have no lower bound on `max_turn_tokens` at
+            # all, so this path is exactly where a tiny ceiling would break the
+            # loop on round 1 having run nothing (#344 review).
+            if self._spend_ceiling_stops_the_tool_loop():
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "spend_ceiling"
+                logger.info(
+                    "spend ceiling reached (turn): tokens=%d ceiling=%d "
+                    "tool_round=%d — pausing to ask the user",
+                    self._turn_cost.total_tokens if self._turn_cost else 0,
+                    self._max_turn_tokens, tool_round,
+                )
+                self._append_history(
+                    {"role": "assistant", "content": response.content or ""}
+                )
+                self._append_history(
+                    {"role": "user", "content": self._spend_ceiling_notice()}
+                )
+                response = await self.plan_with_recovery(system=system)
+                break
+
             # Build assistant message with content blocks
             assistant_content: list[dict] = []
             if response.content:
@@ -2609,6 +2890,10 @@ class ChatSession:
                 )
 
             self._append_history({"role": "user", "content": tool_results})
+
+            # Rebuild: a tool this round (e.g. recall_skill) may have
+            # registered new tools the follow-up must see.
+            tools = self._build_tools()
 
             # Get follow-up from LLM
             response = await self.plan_with_recovery(system=system, tools=tools)
@@ -2912,6 +3197,11 @@ class ChatSession:
                     ):
                         raise
 
+                    # Same reasoning applies to a provider-auth 401 (ENG-1310)
+                    # — see _is_provider_auth_error.
+                    if _is_provider_auth_error(_agent_exc):
+                        raise
+
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
                     # Back off and retry the SAME step within a per-turn budget —
@@ -3025,16 +3315,35 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
-                        except (TokenLimitExceeded, ModelUnavailableError):
-                            # Curated provider failures must FAIL the turn, not
-                            # get wrapped into assistant prose: the server maps
-                            # them to actionable error cards (token_limit /
-                            # model-unavailable), which can only fire when the
-                            # exception propagates. Wrapping them as text is
-                            # how "Server returned 403" ended up mid-chat with
-                            # "please rephrase your request" advice.
-                            raise
                         except Exception as e:
+                            if isinstance(e, (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError)):
+                                # Curated provider failures must FAIL the turn, not
+                                # get wrapped into assistant prose: the server maps
+                                # token_limit/model_unavailable to actionable cards,
+                                # which can only fire when the exception propagates.
+                                # Wrapping them as text is how "Server returned 403"
+                                # ended up mid-chat with "please rephrase your
+                                # request" advice. EndpointConfigurationError added
+                                # here to match the immediate re-raise site above —
+                                # this wrap-up call had been the one place it still
+                                # fell through (review feedback on ENG-1310). NOTE:
+                                # cowork-server has no dedicated card for
+                                # EndpointConfigurationError yet (grepped — zero
+                                # hits, friendly_turn_error falls through to the
+                                # generic message for it); re-raising it here still
+                                # stops the misleading "adjust your approach" prose,
+                                # it just doesn't get a *better* card until that
+                                # mapping exists server-side.
+                                raise
+                            if _is_provider_auth_error(e):
+                                # Same reasoning for a provider-auth 401 — see
+                                # _is_provider_auth_error. cowork-server's
+                                # turn_errors.is_auth_error() matches this exact
+                                # text and renders the "Reconnect MindsHub" /
+                                # BYOK-key action card, but only if the exception
+                                # propagates instead of being flattened into chat
+                                # text here (ENG-1310).
+                                raise
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
@@ -3119,10 +3428,11 @@ class ChatSession:
         """Retry a response that burned its output budget without finishing.
 
         ``llm_response`` hit ``max_tokens`` before producing a tool call —
-        detected by token count (`looks_truncated`), NOT ``stop_reason``:
-        the MindsHub gateway reports a normal stop at the cap (ENG-1082),
-        which is what kept this recovery dead for every hosted user
-        (ENG-1042).
+        detected by token count (`looks_truncated`) rather than relying on
+        ``stop_reason``. The gateway *used to* report a normal stop at the cap
+        (ENG-1082), which is what kept this recovery dead for every hosted user
+        (ENG-1042); it was fixed 2026-08-03 and now reports ``"length"``. The
+        token gate stays: it is the half that cannot regress upstream.
 
         The retry always CHANGES the call — an identical re-issue dies
         identically (measured: three unchanged retries 14 minutes apart,
@@ -3219,9 +3529,10 @@ class ChatSession:
         llm_response = response.response
 
         # Detect max_tokens truncation — the LLM was cut off mid-response.
-        # By token count, not stop_reason: the gateway reports a normal stop
-        # at the cap (ENG-1082), which made a stop_reason gate dead code for
-        # every MindsHub-routed user (ENG-1042).
+        # By token count rather than stop_reason alone: the gateway used to
+        # report a normal stop at the cap (ENG-1082, fixed 2026-08-03), which
+        # made a stop_reason gate dead code for every MindsHub-routed user
+        # (ENG-1042). `looks_truncated` checks both.
         if not llm_response.tool_calls and looks_truncated(
             llm_response, self._turn_max_tokens()
         ):
@@ -3259,6 +3570,12 @@ class ChatSession:
         # task isn't actually done yet.
         continuation = 0
         _max_rounds_hit = False
+        # Set when the per-turn spend ceiling stopped the turn (ENG-1286). Like
+        # `_max_rounds_hit` it also suppresses verification: the turn is already
+        # ending on an honest "I stopped, shall I continue?", and a verdict call
+        # would both cost more of the budget we just declared spent and risk
+        # forcing a continuation past it.
+        _spend_ceiling_hit = False
         # Set per verification-loop iteration (see below): tells the post-loop
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
@@ -3323,6 +3640,45 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds"
+                    ):
+                        yield event
+                    break
+
+                # Spend ceiling (ENG-1286). Checked per round rather than only at
+                # the continuation gate: the measured runaway shape is 13-26
+                # CONSECUTIVE scratchpad calls inside one tool loop, which reaches
+                # the round cap having triggered no continuation at all — a
+                # continuation-gate-only check never sees it. Ordered after the
+                # round cap so a turn that breaches both still reports
+                # `round_cap`, leaving that path's behaviour untouched.
+                if self._spend_ceiling_stops_the_tool_loop():
+                    _spend_ceiling_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "spend_ceiling"
+                    logger.info(
+                        "spend ceiling reached: tokens=%d ceiling=%d gate=%d "
+                        "tool_round=%d continuation=%d — pausing to ask the user",
+                        self._turn_cost.total_tokens if self._turn_cost else 0,
+                        self._max_turn_tokens, self._spend_ceiling_gate(),
+                        tool_round, continuation,
+                    )
+                    self._append_history(
+                        {"role": "assistant", "content": llm_response.content or ""}
+                    )
+                    self._append_history(
+                        {"role": "user", "content": self._spend_ceiling_notice()}
+                    )
+                    # Same ENG-1155 capture the other four hand-back sites need:
+                    # the reply above is already in history, so without this the
+                    # post-loop fallback appends it again and the message the user
+                    # actually read is lost.
+                    _reply_persisted = True
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's token budget — checking in with you...",
+                    )
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="spend-ceiling"
                     ):
                         yield event
                     break
@@ -3731,6 +4087,10 @@ class ChatSession:
 
                 self._append_history({"role": "user", "content": tool_results})
 
+                # Rebuild: a tool this round (e.g. recall_skill) may have
+                # registered new tools the follow-up must see.
+                tools = self._build_tools()
+
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
                 yield StreamTaskProgress(
@@ -3803,7 +4163,7 @@ class ChatSession:
             # Skip when too few tool rounds were used (pure Q&A always skips at
             # tool_round==0; raising verify_min_tool_rounds also skips trivial
             # single-round turns) or when we hit the max-rounds hard stop.
-            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit:
+            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit or _spend_ceiling_hit:
                 break
 
             # Append the assistant's final text so the verifier can see it.
@@ -4079,7 +4439,47 @@ class ChatSession:
                     yield event
                 break
 
-            # INCOMPLETE — continue working
+            # INCOMPLETE — continue working, unless the budget for this turn is
+            # already gone.
+            #
+            # NOT because the per-round check misses continuation spend: an
+            # earlier version of this comment said the round counter resets so
+            # each pass "looks cheap", which is wrong — `TurnCost` is built once
+            # per turn and `add()` accumulates, so the per-round check always
+            # sees the turn's full running total. Deleting this gate on the
+            # strength of disproving that rationale would still be a regression.
+            #
+            # The real reason: a continuation whose planning call returns a TEXT
+            # reply never enters the tool loop, so the per-round check is never
+            # reached and the turn would end `completed` with no hand-back at
+            # all, however much it had spent (ENG-1286).
+            if self._spend_ceiling_reached():
+                _spend_ceiling_hit = True
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "spend_ceiling"
+                logger.info(
+                    "spend ceiling reached at the continuation gate: tokens=%d "
+                    "ceiling=%d continuation=%d — pausing to ask the user",
+                    self._turn_cost.total_tokens if self._turn_cost else 0,
+                    self._max_turn_tokens, continuation,
+                )
+                self._append_history(
+                    {"role": "user", "content": self._spend_ceiling_notice()}
+                )
+                # `_reply_persisted` is already True here — the verification block
+                # appends the assistant reply before requesting a verdict — so the
+                # post-loop fallback is already suppressed and only the diagnosis
+                # needs capturing.
+                yield StreamTaskProgress(
+                    phase="analyzing",
+                    message="Reached this task's token budget — checking in with you...",
+                )
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="spend-ceiling"
+                ):
+                    yield event
+                break
+
             continuation += 1
             if self._turn_cost is not None:
                 self._turn_cost.continuations = continuation

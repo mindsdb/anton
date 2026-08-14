@@ -440,9 +440,25 @@ async def _fetch_url(url: str, max_chars: int) -> str:
 
 
 _NO_PROVIDER_MSG = (
-    "No search provider configured for this LLM endpoint. "
-    "Run `anton setup search` to configure Exa.ai or Brave Search."
+    "No search provider configured for this LLM endpoint. Web search is "
+    "unavailable in this session; if you're running the anton CLI standalone, "
+    "run `anton setup search` to configure Exa.ai or Brave Search."
 )
+
+
+def has_search_credential(settings: object) -> bool:
+    """Whether ``settings`` has a usable Exa/Brave key for the fallback handler.
+
+    Shared by the registration gate (``ChatSession.__init__`` skips registering
+    ``WEB_SEARCH_FALLBACK_TOOL`` when this is False) and the handler itself, so
+    the two can't drift out of sync.
+    """
+    provider = (getattr(settings, "external_search_provider", None) or "").lower()
+    if provider == "exa":
+        return bool(getattr(settings, "exa_api_key", None))
+    if provider == "brave":
+        return bool(getattr(settings, "brave_api_key", None))
+    return False
 
 
 async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> str:
@@ -453,19 +469,14 @@ async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> 
     max_results = max(1, min(max_results, 20))
 
     settings = session._settings
+    if not has_search_credential(settings):
+        return _NO_PROVIDER_MSG
+
     provider = (getattr(settings, "external_search_provider", None) or "").lower()
-
     if provider == "exa":
-        key = getattr(settings, "exa_api_key", None)
-        if not key:
-            return _NO_PROVIDER_MSG
-        return await _search_exa(query, key, max_results)
+        return await _search_exa(query, settings.exa_api_key, max_results)
     if provider == "brave":
-        key = getattr(settings, "brave_api_key", None)
-        if not key:
-            return _NO_PROVIDER_MSG
-        return await _search_brave(query, key, max_results)
-
+        return await _search_brave(query, settings.brave_api_key, max_results)
     return _NO_PROVIDER_MSG
 
 

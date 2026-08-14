@@ -36,6 +36,7 @@ from anton.core.llm.provider import (
     classify_transient,
     wallet_denial_code,
 )
+from anton.core.session import _is_provider_auth_error
 
 
 def _sdk_error(status_code, json_body=None, text_body=None, headers=None):
@@ -98,6 +99,11 @@ def test_401_maps_to_invalid_key_connection_error():
     # cowork-server's provider_auth detection keys on this exact phrase.
     assert "Invalid API key" in str(err.value)
     assert not isinstance(err.value, ModelUnavailableError)
+    # session.py's own re-raise checks (ENG-1310) key on this predicate, not
+    # the raw text — pin against the REAL mapper output so an edit to this
+    # copy that drops "invalid api key" fails here too, not just silently in
+    # production (review feedback on ENG-1310).
+    assert _is_provider_auth_error(err.value)
 
 
 def test_401_html_body_maps_to_invalid_key():
@@ -106,6 +112,7 @@ def test_401_html_body_maps_to_invalid_key():
     with pytest.raises(ConnectionError) as err:
         _raise_for_status_error(exc, "sonnet")
     assert "Invalid API key" in str(err.value)
+    assert _is_provider_auth_error(err.value)
 
 
 # ── 429 (quota) ───────────────────────────────────────────────────────
@@ -497,6 +504,20 @@ def test_wallet_denial_code_reads_both_dialects():
 
 
 # ── the anthropic twin (ENG-1169) ─────────────────────────────────────
+
+def test_anthropic_401_maps_to_invalid_key_connection_error():
+    # No real-SDK 401 coverage existed for the anthropic mapper before this
+    # (review feedback on ENG-1310) — only openai's 401 was pinned against
+    # actual SDK output; anthropic's own "Invalid API key — …" copy was
+    # untested except via a hand-built ConnectionError.
+    exc = _anthropic_sdk_error(401, json_body={"type": "error", "error": {
+        "type": "authentication_error",
+        "message": "invalid x-api-key",
+    }})
+    with pytest.raises(ConnectionError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert "Invalid API key" in str(err.value)
+    assert _is_provider_auth_error(err.value)
 
 def _anthropic_sdk_error(status_code, json_body=None, headers=None):
     """Real `anthropic.APIStatusError` from the pinned SDK — the anthropic

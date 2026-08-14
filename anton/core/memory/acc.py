@@ -88,6 +88,7 @@ inspired this module.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -235,6 +236,31 @@ _SEVERITY_CLIMB_LEN = 3
 _SEVERITY_CLIMB_PEAK = 5
 
 
+def _unwrap_envelope_message(text: str) -> str:
+    """Reduce a structured tool result to its human-readable message.
+
+    Side-effecting tools return a JSON envelope (ENG-696). JSON is almost
+    entirely quoted runs, and the signature pass below collapses every quoted
+    run ≤80 chars — so every envelope failure, whatever went wrong, normalises
+    to one identical signature and unrelated errors read as the same error
+    repeating. Signing the `message` keeps the discrimination the prose had.
+    Non-JSON text passes through untouched.
+    """
+    stripped = (text or "").lstrip()
+    if not stripped.startswith("{"):
+        return text
+    try:
+        payload = json.loads(stripped)
+    except ValueError:
+        return text
+    message = payload.get("message") if isinstance(payload, dict) else None
+    # Require a non-empty message — an empty one would sign every empty-message
+    # envelope alike, the residue of the same collapse this guards against.
+    if isinstance(message, str) and message:
+        return message
+    return text
+
+
 def _normalise_error_signature(text: str) -> str:
     """Collapse the variable parts of an error message into a stable
     signature so that "Refusing to save record for engine='gmail-1'"
@@ -242,7 +268,7 @@ def _normalise_error_signature(text: str) -> str:
     same string. Cheap regex pass — paths, integers, hex, quoted
     short tokens all become placeholders.
     """
-    s = text or ""
+    s = _unwrap_envelope_message(text or "")
     s = re.sub(r"0x[0-9a-fA-F]+", "0xN", s)
     s = re.sub(r"\b\d+\b", "N", s)
     s = re.sub(r"'[^']{1,80}'", "'X'", s)
@@ -470,6 +496,11 @@ def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
         # AMBIGUOUS and counts toward neither lesson: this rule is written
         # into durable memory, and no rule beats a wrong one.
         r = (e.detail.get("reason") or "").lower()
+        # Checked before "liveness": the mid-install kill wording contains
+        # both, and a kill during a package install says nothing about the
+        # cell's size or the worker's health (ENG-1275).
+        if "auto-install" in r:
+            return "ambiguous"
         if "liveness" in r or "inactivity" in r:
             return "liveness"
         if not r or "without producing any output" in r:

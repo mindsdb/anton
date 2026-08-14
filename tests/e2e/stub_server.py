@@ -30,9 +30,14 @@ class _Response:
     # None = honour request's `stream` flag; True/False = override
     force_streaming: bool | None = None
     # Reported as `usage.completion_tokens`. Set it equal to the request's
-    # `max_tokens` to emulate a truncated response — which is how the real
-    # MindsHub gateway presents one, since it still says
-    # `finish_reason: "stop"` at the cap (ENG-1082).
+    # `max_tokens` to emulate a truncated response.
+    #
+    # This stub reports `finish_reason: "stop"` at the cap. That is NO LONGER
+    # what the gateway does — ENG-1082 was fixed 2026-08-03 and it now returns
+    # `"length"` on every alias. The stub keeps the old behaviour ON PURPOSE:
+    # it is the harder case, and a recovery that survives a gateway which lies
+    # also survives one that is honest. Do not "correct" this to `"length"` —
+    # that deletes the only coverage of the case ENG-1042 was built for.
     output_tokens: int = 10
 
 
