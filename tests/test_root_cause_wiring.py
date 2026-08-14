@@ -435,3 +435,52 @@ async def test_the_legacy_predicate_is_inside_the_guard(workspace):
 
     # …and must not have booked anything from an input it could not read.
     assert session._root_causes.failures == before
+    # …but must NOT swallow it silently either. This guard is a separate writer
+    # from the one on the migrated path, and removing its `note_error()` alone
+    # passed the whole file before this assertion existed.
+    assert session._root_causes.classify_errors == 1
+
+
+async def test_a_broken_classifier_is_distinguishable_from_a_quiet_turn(workspace):
+    """A silent instrument must not read as a legitimate answer.
+
+    Before `classify_errors`, a turn with three real wall failures and a
+    raising classifier emitted all ten properties IDENTICAL to a turn where
+    nothing failed — the guard swallowed each failure and left only a
+    `logger.debug` line, which production does not emit.
+
+    That ambiguity is load-bearing, not cosmetic: "the wall-repeat population
+    is too small to justify the control at all" is one of ENG-1492's own
+    sanctioned conclusions, so a broken classifier reads as a real finding and
+    would cancel ENG-1531 on the strength of a bug.
+    """
+    def _fields(send):
+        return {k: v for k, v in send.call_args.kwargs.items()
+                if k.startswith("root_cause")}
+
+    # Three real wall failures, classifier raising on every one.
+    broken = _session(workspace, [WALL, WALL, WALL], n_tool_calls=3)
+    with patch("anton.core.session.classify_root_cause",
+               side_effect=RuntimeError("boom")), \
+         patch("anton.analytics.send_event") as send_broken:
+        await _run(broken)
+    broken_fields = _fields(send_broken)
+
+    # A genuinely quiet turn: three successes, nothing to classify.
+    quiet = _session(workspace, [OK, OK, OK], n_tool_calls=3)
+    with patch("anton.analytics.send_event") as send_quiet:
+        await _run(quiet)
+    quiet_fields = _fields(send_quiet)
+
+    # The signal that separates them.
+    assert broken_fields["root_cause_classify_errors"] == 3
+    assert quiet_fields["root_cause_classify_errors"] == 0
+    assert broken_fields != quiet_fields
+
+    # Everything else still reads zero in BOTH — which is exactly why the
+    # counter had to be added rather than inferred from the existing ten.
+    for k in ("root_cause_failures", "root_cause_wall", "root_cause_max_exact"):
+        assert broken_fields[k] == 0 and quiet_fields[k] == 0, k
+
+    # And the turn itself is untouched either way — the guard still holds.
+    assert send_broken.call_args.kwargs["ended_by"] == "completed"

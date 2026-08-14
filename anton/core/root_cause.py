@@ -400,6 +400,27 @@ class RootCauseLedger:
     tiers: Counter = field(default_factory=Counter)
     failures: int = 0
     with_reason: int = 0
+    #: Times the recorder's guard swallowed an exception instead of booking a
+    #: failure. Emitted so a BROKEN instrument is distinguishable from a QUIET
+    #: one — without it the two are byte-identical:
+    #:
+    #:     3 wall failures, classifier raising -> failures=0 … wall=0
+    #:     3 successes, genuinely clean turn   -> failures=0 … wall=0
+    #:
+    #: That ambiguity matters because "the wall-repeat population is too small
+    #: to justify the control" is one of ENG-1492's own sanctioned conclusions,
+    #: so a silent instrument failure reads as a legitimate answer and would
+    #: cancel ENG-1531 on the strength of a bug. Same defect `reason_coverage`
+    #: was built to fix, one level down: a metric must not exclude its own
+    #: failures from its own denominator.
+    #:
+    #: Deliberately NOT counted in `failures` — that would corrupt the very
+    #: distribution this exists to protect. It is a separate signal.
+    classify_errors: int = 0
+
+    def note_error(self) -> None:
+        """Record that the guard caught something. Must never raise."""
+        self.classify_errors += 1
 
     def add(self, rc: RootCause) -> None:
         self.failures += 1
@@ -453,6 +474,7 @@ class RootCauseLedger:
         """
         return {
             "root_cause_failures": self.failures,
+            "root_cause_classify_errors": self.classify_errors,
             "root_cause_distinct": len(self.exact),
             "root_cause_max_exact": self.max_exact,
             "root_cause_max_class": self.max_class,

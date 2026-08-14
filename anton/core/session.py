@@ -1001,6 +1001,10 @@ class ChatSession:
                     classify_root_cause("", result_text or "")
                 )
             except Exception:  # pragma: no cover - reporting must not break a turn
+                # Count it, don't just log it — `logger.debug` is not emitted in
+                # production, so a systematically broken classifier would be
+                # indistinguishable from a turn where nothing failed.
+                self._root_causes.note_error()
                 logger.debug("root-cause classification failed", exc_info=True)
             return
         if tool_ok is not False:
@@ -1010,6 +1014,7 @@ class ChatSession:
                 classify_root_cause(reason or "", result_text or "")
             )
         except Exception:  # pragma: no cover - reporting must not break a turn
+            self._root_causes.note_error()
             logger.debug("root-cause classification failed", exc_info=True)
 
     def _apply_error_tracking(

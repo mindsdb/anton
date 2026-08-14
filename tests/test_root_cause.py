@@ -243,7 +243,12 @@ def test_event_fields_are_flat_and_complete():
         "root_cause_max_class", "root_cause_top_class",
         "root_cause_reason_coverage", "root_cause_self_inflicted",
         "root_cause_transient", "root_cause_wall", "root_cause_unclassified",
+        "root_cause_classify_errors",
     }
+    # Not folded into `failures` — a swallowed classification is not a tool
+    # failure, and counting it as one would corrupt the distribution this
+    # property exists to protect.
+    assert f["root_cause_classify_errors"] == 0
     assert f["root_cause_failures"] == 6
     assert f["root_cause_wall"] == 4
     assert f["root_cause_self_inflicted"] == 1
