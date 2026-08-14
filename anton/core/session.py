@@ -322,8 +322,9 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # model-access-denied). These latch on the FIRST occurrence and stay silent:
 # the turn's work already succeeded, and "the task-completion check failed
 # (internal error)" is a lie when the check was merely priced out (ENG-1632 —
-# 208 aux-call wallet-402s across 33 users in 14 days, every one surfaced to
-# the user as an internal error and an apology).
+# of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
+# were aux-surface calls like this one, across 33 of those users; every aux
+# one surfaced to the user as an internal error and an apology).
 #
 # ORDER MATTERS in the verdict loop: this clause must precede
 # _TRANSIENT_VERDICT_ERRORS. ModelUnavailableError subclasses ConnectionError →

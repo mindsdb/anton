@@ -20,6 +20,7 @@ from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
     StreamTextDelta,
+    TokenLimitExceeded,
     ToolCall,
     Usage,
 )
@@ -363,6 +364,28 @@ async def test_verifier_failure_reports_handback_verifier_failure(workspace):
         async for _ in session.turn_stream("run my script"):
             pass
     assert _ended_by(send) == "handback_verifier_failure"
+
+
+async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
+    # ENG-1632: a deterministic denial (wallet 402 → TokenLimitExceeded)
+    # latches silently — the turn's work succeeded and the user saw a normal
+    # reply, so the terminal is "completed", NOT handback_verifier_failure.
+    # This is a deliberate taxonomy decision: `group by ended_by` error-rate
+    # queries must not count a priced-out completion check as a broken turn,
+    # and the denied probe stays countable from the gateway-side ERROR trace
+    # in Langfuse, so no signal is lost by booking the turn as completed.
+    mock_llm = _verdict_llm("COMPLETE")
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=TokenLimitExceeded(
+            "402: Your wallet has no balance to cover the model 'haiku'."
+        )
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "completed"
 
 
 async def test_callers_already_handled_exception_is_not_reported_as_error(workspace):
