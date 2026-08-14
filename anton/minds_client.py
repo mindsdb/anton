@@ -88,8 +88,24 @@ def minds_request(
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
-    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as err:
+        # urllib discards the response body by default, so callers only ever
+        # see "HTTP Error 400: Bad Request" with no server-side reason. Read
+        # the body once and fold it into the message (and reason) so the real
+        # cause — e.g. {"error": "Report not found"} — reaches the UI. Re-raise
+        # as HTTPError so describe_minds_connection_error's isinstance check and
+        # the .code still work.
+        try:
+            body = err.read().decode("utf-8", "replace").strip()
+        except Exception:
+            body = ""
+        reason = f"{err.reason}: {body[:500]}" if body else err.reason
+        raise urllib.error.HTTPError(
+            err.url, err.code, reason, err.headers, None
+        ) from None
 
 
 def normalize_minds_url(url: str) -> str:
