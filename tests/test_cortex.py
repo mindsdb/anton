@@ -625,3 +625,89 @@ class TestCompactFile:
         assert [e.text for e in engrams] == ["Fact number 2", "Fact number 6"]
         assert [e.topic for e in engrams] == ["t2", "t6"]
         assert all(e.updated_at is not None for e in engrams)
+
+
+class TestCompactRulesFile:
+    """The rules rebuild must round-trip each entry's section, not guess it.
+
+    `rules.md` differs from `lessons.md` in a way that matters: its rewrite is
+    not a no-op, so a bug here can grow or misfile the file the agent reads as
+    its own behavioural gates.
+    """
+
+    @staticmethod
+    def _rules(dirs, count: int) -> Hippocampus:
+        hc = Hippocampus(dirs[0])
+        for i in range(count):
+            # "when ... always ..." matches two of the old keyword buckets at
+            # once — the shape that got written twice.
+            hc.encode_rule(
+                f"When condition {i} holds, always prefer option {i}",
+                kind="when", confidence="high", source="user",
+            )
+        hc.encode_rule("Use httpx", kind="always", confidence="high", source="user")
+        hc.encode_rule("Never log secrets", kind="never", confidence="high", source="user")
+        return hc
+
+    async def _compact(self, dirs, hc, keep: list[int]) -> None:
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=_CompactionLLM(keep)
+        )
+        await cortex._compact_file(hc, hc._rules_path, "rules")
+
+    async def test_keeping_everything_is_idempotent(self, dirs):
+        """A rule matching two headings' keywords must still be written once."""
+        hc = self._rules(dirs, 8)
+        before = hc.get_rules()
+        await self._compact(dirs, hc, keep=list(range(1, 11)))
+        after = hc.get_rules()
+        assert [(e.kind, e.text) for e in after] == [(e.kind, e.text) for e in before]
+        assert len(after) == 10
+
+    async def test_entries_stay_under_their_original_heading(self, dirs):
+        # File order is by section, not by insertion: 1 always, 2 never, 3+ when.
+        hc = self._rules(dirs, 8)
+        await self._compact(dirs, hc, keep=[1, 2, 3])
+        by_kind = {e.kind: e.text for e in hc.get_rules()}
+        assert by_kind["always"] == "Use httpx"
+        assert by_kind["never"] == "Never log secrets"
+        assert by_kind["when"].startswith("When condition 0 holds")
+
+    async def test_empty_answer_does_not_rewrite_the_rules_file(self, dirs):
+        """The lessons rewrite is byte-identical, so only rules can catch this."""
+        hc = self._rules(dirs, 8)
+        before = hc._rules_path.read_text()
+        await self._compact(dirs, hc, keep=[])
+        assert hc._rules_path.read_text() == before
+
+    async def test_an_emptied_section_keeps_its_heading(self, dirs):
+        """`get_rules` needs the heading to assign a kind to later entries."""
+        hc = self._rules(dirs, 8)
+        await self._compact(dirs, hc, keep=[3])  # one "when" rule, nothing else
+        content = hc._rules_path.read_text()
+        assert "## Always" in content and "## Never" in content and "## When" in content
+        hc.encode_rule("Added later", kind="never", confidence="high", source="user")
+        assert {e.kind for e in hc.get_rules()} == {"never", "when"}
+
+    async def test_entries_above_the_first_heading_are_not_lost(self, dirs):
+        """Hand-edited files exist; a stray rule must survive, not vanish."""
+        hc = self._rules(dirs, 8)
+        hc._rules_path.write_text(
+            "# Rules\n- Stray hand-added rule <!-- confidence:high source:user ts:2026-01-01 -->\n"
+            + hc._rules_path.read_text().removeprefix("# Rules\n")
+        )
+        await self._compact(dirs, hc, keep=list(range(1, 12)))
+        assert "Stray hand-added rule" in hc._rules_path.read_text()
+        assert len(hc.get_rules()) == 11
+
+    async def test_entries_under_an_unknown_heading_are_not_lost(self, dirs):
+        """`save_rules` only writes three headings, so a fourth must be folded
+        into one of them rather than silently dropped on rebuild."""
+        hc = self._rules(dirs, 8)
+        hc._rules_path.write_text(
+            hc._rules_path.read_text()
+            + "\n## Notes\n- Hand-added note <!-- confidence:high source:user ts:2026-01-01 -->\n"
+        )
+        await self._compact(dirs, hc, keep=list(range(1, 12)))
+        assert "Hand-added note" in hc._rules_path.read_text()
+        assert len(hc.get_rules()) == 11

@@ -162,6 +162,11 @@ You are a memory compaction system. The user message is a numbered list of memor
 An index you leave out is deleted. Be conservative — when in doubt, keep the entry: two overlapping entries cost less than losing what only one of them said.
 """
 
+# The `## ` headings of `rules.md`, in file order. `save_rules` writes exactly
+# these three and `get_rules` reads each entry's `kind` off them, so compaction
+# has to round-trip the same set. First one doubles as the fallback heading.
+_RULE_SECTIONS = ("always", "never", "when")
+
 
 class Cortex:
     """Executive coordinator for Anton's memory systems.
@@ -586,10 +591,20 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if not path.is_file():
             return
 
-        content = path.read_text(encoding="utf-8")
-        entries = [
-            ln.strip() for ln in content.splitlines() if ln.strip().startswith("- ")
-        ]
+        # Read with sections
+        sections: list[str] = []
+        entries: list[str] = []
+        # Entries above the first heading (a hand-edited file) are kept rather
+        # than dropped, under the same heading the keyword pass defaulted to.
+        section = _RULE_SECTIONS[0]
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                heading = stripped[3:].lower()
+                section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
+            elif stripped.startswith("- "):
+                sections.append(section)
+                entries.append(stripped)
 
         if len(entries) < 8:
             return
@@ -619,7 +634,11 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             # alter one. Walking the file also bounds the indices for free:
             # duplicates collapse into the set, invented ones never come up.
             keep = set(result.keep)
-            kept = [e for i, e in enumerate(entries, 1) if i in keep]
+            kept = [
+                pair
+                for i, pair in enumerate(zip(sections, entries), 1)
+                if i in keep
+            ]
         except Exception as exc:
             # Don't corrupt memory on failure — but never silently: an
             # unlogged swallow made a dead memory subsystem indistinguishable
@@ -639,21 +658,16 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # Rebuild the file. Every entry still carries the `- ` prefix it was
         # selected by, so nothing here has to re-add one.
         if kind == "rules":
-            # Preserve section structure
-            always = [
-                e
-                for e in kept
-                if "always" in e.lower()
-                or not any(k in e.lower() for k in ("never", "when", "if "))
-            ]
-            never = [e for e in kept if "never" in e.lower()]
-            when_rules = [e for e in kept if "when" in e.lower() or "if " in e.lower()]
-
-            lines = ["# Rules\n", "## Always", *always, "", "## Never", *never]
-            lines.extend(["", "## When", *when_rules])
-            new_content = "\n".join(lines) + "\n"
+            # Each entry goes back under its own heading and no other, so the
+            # rewrite is idempotent — a rule cannot be filed twice.
+            lines = ["# Rules\n"]
+            for name in _RULE_SECTIONS:
+                lines.append(f"## {name.capitalize()}")
+                lines.extend(e for s, e in kept if s == name)
+                lines.append("")
+            new_content = "\n".join(lines[:-1]) + "\n"
         else:
-            new_content = "\n".join(["# Lessons", *kept]) + "\n"
+            new_content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
 
         hc._encode_with_lock(path, new_content, mode="write")
 
