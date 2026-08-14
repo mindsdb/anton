@@ -3953,6 +3953,16 @@ class ChatSession:
                     # runs; a re-probe denied again lands back here and stays
                     # latched, so adding credits self-heals within
                     # _VERIFIER_LATCH_REPROBE_TURNS turns.
+                    #
+                    # Scope note: the latch is ChatSession state, and Cowork
+                    # rebuilds the session PER MESSAGE — there it only spans
+                    # one message's continuations, the steady-state cost of a
+                    # persistent denial is one silent verdict call per
+                    # message, and top-up recovery is simply the next message.
+                    # The re-probe window above is long-session (CLI)
+                    # behaviour. The cross-message fix is server-side model
+                    # resolution (cowork-server, same ticket); this branch is
+                    # the guarantee the user is never told the turn failed.
                     self._verifier_latched = True
                     self._verifier_latch_reason = "denied"
                     _verifier_log.info(
