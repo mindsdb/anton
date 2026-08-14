@@ -142,12 +142,26 @@ logger = logging.getLogger(__name__)
 #: (ENG-1276 migrated five sites; the rest still return plain strings). Kept
 #: byte-identical to `_apply_error_tracking`'s fallback so the two cannot drift
 #: into disagreeing about what a failure is.
+#:
+#: **This tuple is the boundary of the coverage metric.** A legacy handler that
+#: reports failure in plain prose matches nothing here and is not counted at all
+#: — cowork-server's `connect_new_datasource` returns "Could not connect to the
+#: datasource.", which matches none of the five. Measured:
+#:
+#:     captured=True   Install failed (exit 1): … fatal error: sql.h
+#:     captured=True   Install timed out after 300s.
+#:     captured=False  Could not connect to the datasource.
+#:     captured=False  Successfully installed pandas-2.2.0   <- correctly skipped
+#:
+#: The direction is safe — a miss shows up as LOW `reason_coverage` rather than
+#: the false 1.0 this list exists to prevent — but do not read coverage as
+#: "share of failures classified" without remembering the denominator is itself
+#: substring-defined.
 _LEGACY_FAILURE_MARKERS = ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
 
 
 def _legacy_looks_like_failure(text: str) -> bool:
     return any(m in text for m in _LEGACY_FAILURE_MARKERS)
-
 
 
 if TYPE_CHECKING:
@@ -611,7 +625,6 @@ def _build_verify_request(
 
 
 @dataclass
-
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
 

@@ -291,6 +291,23 @@ def classify(reason: str, result_text: str = "") -> RootCause:
     if exc in _TRANSIENT:
         return RootCause(TIER_TRANSIENT, exc, "")
 
+    # RESIDUAL, by construction — the guarantee above is scoped to types IN the
+    # table, and this branch is what a non-enumerated type falls through to. An
+    # agent bug raising a type nobody enumerated (`RuntimeError`, `LookupError`,
+    # a bare `Exception`) whose message happens to carry 401/403/404 still mints
+    # a trip-eligible `external_wall` — `RuntimeError: record 404 not found` is
+    # the realistic shape.
+    #
+    # Left as-is deliberately: widening `_SELF_INFLICTED` to catch it would have
+    # to include `Exception`, which would swallow every genuine wall raised as a
+    # generic type. The direction is the safe one — it INFLATES wall counts, so
+    # it is visible as noise in the ENG-1492 distribution rather than hiding a
+    # wall — and this is measurement-only until ENG-1531 reads any of it.
+    #
+    # For ENG-1531: do not trip on `_STATUS_WALLS` classes without either an
+    # HTTP-shape precondition on the reason or a check that the exception type
+    # was enumerated. Frequency here is UNMEASURED; the combinatorial floor is
+    # 3/900 of uniformly distributed 3-digit tokens.
     status = _STATUS_RE.search(reason)
     if status:
         code = status.group(1)
