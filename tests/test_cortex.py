@@ -593,16 +593,29 @@ class TestCompactFile:
         await self._compact(dirs, hc, keep=[2, 2, 0, -1, 11, 9999])
         assert self._entries(hc) == [before[1]]
 
+    @staticmethod
+    def _with_hand_written_note(hc: Hippocampus) -> str:
+        """Seed a line the rebuild does not preserve, and return the file.
+
+        The rebuild keeps `- ` entries and nothing else, so on an already
+        canonical file "returned early" and "rewrote every entry" produce the
+        same bytes — a test on such a file cannot tell a working guard from a
+        missing one. A hand-written note makes the two outcomes differ.
+        """
+        note = "A note the user typed here by hand.\n"
+        hc._lessons_path.write_text(hc._lessons_path.read_text() + note)
+        return hc._lessons_path.read_text()
+
     async def test_empty_answer_leaves_the_file_untouched(self, dirs):
         """A model that names nothing gets to skip compaction, not to wipe it."""
         hc = self._lessons(dirs, 10)
-        before = hc._lessons_path.read_text()
+        before = self._with_hand_written_note(hc)
         await self._compact(dirs, hc, keep=[])
         assert hc._lessons_path.read_text() == before
 
     async def test_llm_failure_leaves_the_file_untouched(self, dirs):
         hc = self._lessons(dirs, 10)
-        before = hc._lessons_path.read_text()
+        before = self._with_hand_written_note(hc)
         llm = AsyncMock()
         llm.generate_object_code.side_effect = RuntimeError("gateway down")
         cortex = Cortex(
@@ -674,8 +687,11 @@ class TestCompactRulesFile:
         assert by_kind["when"].startswith("When condition 0 holds")
 
     async def test_empty_answer_does_not_rewrite_the_rules_file(self, dirs):
-        """The lessons rewrite is byte-identical, so only rules can catch this."""
+        """Same guard as on the lessons path, checked on the file that matters."""
         hc = self._rules(dirs, 8)
+        hc._rules_path.write_text(
+            hc._rules_path.read_text() + "\nA note the user typed here by hand.\n"
+        )
         before = hc._rules_path.read_text()
         await self._compact(dirs, hc, keep=[])
         assert hc._rules_path.read_text() == before
