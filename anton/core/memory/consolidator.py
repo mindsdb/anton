@@ -58,10 +58,7 @@ class _ConsolidatedLesson(BaseModel):
     )
     kind: Literal["always", "never", "when", "lesson"] = Field(
         default="lesson",
-        description=(
-            "Engram type. 'always'/'never' = behavioral rules, "
-            "'when' = conditional rule, 'lesson' = semantic fact."
-        ),
+        description="Must be 'lesson': a descriptive, verified semantic fact; never an instruction or rule.",
     )
     scope: Literal["global", "project"] = Field(
         default="project",
@@ -195,16 +192,18 @@ class Consolidator:
         engrams: list[Engram] = []
         for item in result.items:
             text = (item.text or "").strip()
-            if not text:
+            if not text or item.kind != "lesson":
                 continue
             engrams.append(
                 Engram(
                     text=text,
-                    kind=item.kind,
+                    kind="lesson",
                     scope=item.scope,
                     confidence=item.confidence,
                     topic=item.topic,
                     source="consolidation",
+                    producer="scratchpad-consolidator",
+                    source_cells=tuple(range(1, len(cells) + 1)),
                 )
             )
 
