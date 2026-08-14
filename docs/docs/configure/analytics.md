@@ -34,11 +34,18 @@ Anton and a failure to send is never surfaced to you. Failures on the
 measurement events are recorded in Anton's own debug log; failures on the other
 events are discarded without a trace.
 
-Two transports are in use, depending on the event: most events are a single
-HTTP GET to the collector at `ANTON_ANALYTICS_URL`, while the measurement
-events are an HTTPS POST whose body carries the values —
-a body rather than a query string so the values do not end up in intermediate
-access logs.
+## Where it goes
+
+Two transports, depending on the event:
+
+- **Most events** are a single HTTP GET to a MindsDB-operated collector, at
+  `ANTON_ANALYTICS_URL`. That collector forwards them to PostHog.
+- **The measurement events** are an HTTPS POST directly to **PostHog Inc.**
+  (`us.i.posthog.com`), a US analytics processor. A body rather than a query
+  string, so the values do not end up in intermediate access logs.
+
+Either way the data ends up in PostHog; the difference is whether it passes
+through MindsDB's collector on the way.
 
 ## Opting out
 

@@ -474,3 +474,40 @@ def test_rule_retrieval_goes_to_posthog(monkeypatch):
     assert props["stop_reason"] == "end_turn"
     assert props["kept_rules"] == "3"
     assert props["$process_person_profile"] is False
+
+
+def test_blanking_analytics_url_stops_the_routed_events_too(monkeypatch):
+    """`ANTON_ANALYTICS_URL=""` is a de-facto kill switch and must stay one.
+
+    Before ENG-1495 the `if not url: return` guard sat above the routing branch,
+    so blanking the URL stopped every event. Moving it into the `else` let the
+    two routed events out regardless — so someone who had switched telemetry off
+    would have started shipping turn metadata to PostHog on upgrade, silently.
+    That is a consent regression, not a behaviour change.
+    """
+    _clear_ci(monkeypatch)
+
+    class _Blanked(_PosthogSettings):
+        analytics_url = ""
+
+    monkeypatch.setattr(
+        analytics,
+        "_fire_posthog",
+        lambda url, body: pytest.fail(f"sent to PostHog despite a blanked URL: {url}"),
+    )
+    monkeypatch.setattr(
+        analytics, "_fire", lambda url: pytest.fail(f"sent to the collector: {url}")
+    )
+
+    class _SyncThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target, self._args = target, args
+
+        def start(self):
+            self._target(*self._args)
+
+    monkeypatch.setattr(analytics.threading, "Thread", _SyncThread)
+
+    analytics.send_event(_Blanked(), "turn_completed", tokens_total="1")
+    analytics.send_event(_Blanked(), "rule_retrieval", outcome="ok")
+    analytics.send_event(_Blanked(), "ds_connect_success", engine="pg")

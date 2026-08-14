@@ -130,10 +130,7 @@ _POSTHOG_EVENTS = frozenset({"turn_completed", "rule_retrieval"})
 _LIB = "anton-library"
 
 # urllib's default ``Python-urllib/3.x`` is answered with 403 by some edges.
-# Named for its one consumer (``_fire_posthog``) rather than the module: ``_fire``
-# still sends urllib's default, and a bare ``_USER_AGENT`` here collides with the
-# identically-valued constant anton#333 adds for the collector path, dragging
-# ``_POSTHOG_EVENTS`` into a conflict region it has nothing to do with.
+# Only ``_fire_posthog`` sends this; ``_fire`` still sends urllib's default.
 _POSTHOG_USER_AGENT = "anton-posthog/1.0"
 
 # Transport noise, not analytics: appended as a cache buster for the GET path.
@@ -331,6 +328,21 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
         }
         params.update(extra)
 
+        # Blanking ``analytics_url`` has always stopped EVERY event, because the
+        # ``if not url: return`` below used to sit above this branch. Keep that
+        # true: it is a de-facto kill switch people rely on, and a routed event
+        # that ignored it would start shipping turn metadata to PostHog on
+        # upgrade for someone who had deliberately switched telemetry off, with
+        # nothing telling them.
+        #
+        # Re-pointing the URL at a private collector is NOT treated as
+        # suppression here — that is a live question about what the variable
+        # means, not something to settle silently. ``ANTON_POSTHOG_KEY=""``
+        # disables this sink specifically; both are documented in
+        # docs/configure/analytics.md.
+        if not settings.analytics_url:
+            return
+
         if action in _POSTHOG_EVENTS:
             # POST, not GET: a query string is copied into gateway, CDN and WAF
             # access logs, which is how the sibling endpoint ended up with real
@@ -346,8 +358,6 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
             )
         else:
             url = settings.analytics_url
-            if not url:
-                return
             t = threading.Thread(
                 target=_fire,
                 args=(f"{url}?{urllib.parse.urlencode(params)}",),

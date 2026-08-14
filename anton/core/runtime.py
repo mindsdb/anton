@@ -85,7 +85,7 @@ async def build_chat_session(
         describe their UI affordances. None → no suffix.
     harness
         Identifier for the host driving this session, forwarded to telemetry and to
-        Langfuse tags/metadata (ENG-1495). Hosts should set it — leaving it None is
+        Langfuse tags/metadata. Hosts should set it — leaving it None is
         what made "which host produced this trace?" unanswerable, since an unset
         value could not be told apart from a host that simply never bothered. See
         `ChatSessionConfig.harness` for the values already in use.
