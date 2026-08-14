@@ -478,12 +478,17 @@ class ProviderOverloadedError(ConnectionError):
 
     def __init__(
         self, message: str, *, provider: str = "", model: str = "",
-        code: str = "provider_overloaded",
+        code: str = "provider_overloaded", retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.model = model
         self.code = code
+        # Seconds the server said to wait, when it said so (ENG-1537). Set only
+        # on the rate-limit exhaustion path, where the wait was skipped or ran
+        # out and the card needs to name the interval rather than say
+        # "a moment".
+        self.retry_after = retry_after
 
 
 # Body ``error.type``/``error.code`` values that mean "provider is momentarily
@@ -521,8 +526,48 @@ def wallet_denial_code(body: Any) -> str | None:
     return code if isinstance(code, str) and code in _WALLET_DENIAL_CODES else None
 
 
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """Seconds from a response's ``Retry-After`` header, or ``None`` (ENG-1537).
+
+    The MindsHub gateway sends this on the velocity 429 (``rate_limited``,
+    `minds/inference/errors.py`) as integer seconds — the only form we act on.
+    The HTTP-date form is legal but nothing in use emits it, and mis-reading a
+    date as a number would produce an absurd delay, so an unparseable value is
+    treated as absent: the caller then falls back to its own backoff curve.
+
+    Negative and non-finite values are dropped for the same reason. Zero is
+    meaningful ("retry now") and is preserved by the caller's ``> 0`` checks
+    behaving as "no hint", which is the same outcome.
+    """
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        headers = getattr(exc, "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        secs = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None  # HTTP-date form, or junk
+    if secs != secs or secs in (float("inf"), float("-inf")) or secs < 0:
+        return None
+    return secs
+
+
 def classify_transient(
-    status_code: int | None, body: Any, *, provider: str = "", model: str = ""
+    status_code: int | None,
+    body: Any,
+    *,
+    provider: str = "",
+    model: str = "",
+    retry_after: float | None = None,
+    velocity_confirmed: bool = False,
 ) -> "TransientProviderError | None":
     """Arm A of the transient classifier (see ENG-673): inspect an
     ``APIStatusError``'s status + body and return a ``TransientProviderError`` if
@@ -531,6 +576,20 @@ def classify_transient(
     Shared by both providers so the mapping can't drift. Call this only AFTER the
     permanent classifications (401 / 429-quota / 403 model-gate) have been ruled
     out — this decides between "retryable transient" and "generic unavailable".
+
+    ``retry_after`` is the parsed ``Retry-After`` hint (see
+    :func:`retry_after_seconds`); it is attached to the velocity-429 result so
+    the session waits the interval the server actually named (ENG-1537).
+
+    ``velocity_confirmed`` says the caller POSITIVELY identified a velocity
+    limit — our gateway's ``rate_limited`` reason header or body code. Only then
+    does the 429 earn a session wait. The absence of billing carriers is not
+    evidence of transience: both fail-fast guards below are string-exact, so a
+    provider whose quota denial uses a different dialect (Gemini sends an
+    INTEGER ``code`` with ``status: RESOURCE_EXHAUSTED``) slips past them and
+    would otherwise spend the whole budget waiting out a daily quota that resets
+    at midnight — then be told it is not a credits problem. Unconfirmed 429s
+    keep the pre-ENG-1537 behaviour: typed, honest, and failed fast.
     """
     b = body if isinstance(body, dict) else {}
     # Two body dialects: Anthropic nests the error under `error` ({"error":
@@ -567,9 +626,22 @@ def classify_transient(
             return None
         if wallet_denial_code(b):
             return None
+        # session_backoff=True, unlike every other request-time status here
+        # (ENG-1537). The flag means "should the SESSION spend its budget on
+        # this?", and the SDK's own 2 retries fire seconds apart — the right
+        # answer for a 5xx that recovers instantly, and useless against a
+        # per-minute token ceiling. Leaving it False sent this down the
+        # count-based path, which re-issued the request TWICE with no delay and
+        # a recovery note appended each time: told "too many tokens per
+        # minute", we immediately sent more. This is the one failure class
+        # where waiting is both necessary and sufficient, so it waits — for the
+        # interval the server named, when it named one.
         return TransientProviderError(
             f"{provider or 'The model provider'} is rate-limiting requests.",
-            provider=provider, code="rate_limited", session_backoff=False, model=model,
+            provider=provider, code="rate_limited",
+            session_backoff=velocity_confirmed,
+            retry_after=retry_after if velocity_confirmed else None,
+            model=model,
         )
     return None
 
