@@ -18,29 +18,21 @@ concurrency:
 
 jobs:
   unfreeze:
+    # No notify job here any more; the reusable ends with one. See staging-freeze.yml.
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
        github.event.pull_request.head.ref == 'staging' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    uses: mindsdb/github-actions/.github/workflows/release-unfreeze.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
-    secrets: inherit
-
-  notify:
-    # Alert the eng channel if the unfreeze or main->staging sync-back fails —
-    # otherwise staging stays frozen (or drifts from main) with no signal.
-    needs: [unfreeze]
-    if: failure()
     permissions:
       contents: read
-      # Declared even though this caller never runs the prior-run lookup: a
-      # reusable workflow's requested permissions are validated when the file
-      # is parsed, not when the step that needs them runs, so a caller that
-      # grants less than the reusable asks for is INVALID rather than merely
-      # degraded, and the whole workflow fails to load.
+      # Turns the "recovered" message on, and it is the ONLY thing that does. The
+      # reusable declares no `permissions:` block of its own, so its job inherits
+      # exactly what is granted here; a block there would cap the token instead and
+      # the lookup would be refused however much this granted. The default workflow
+      # token carries contents + packages read only, and without the grant the
+      # lookup is refused, logs why, and stays quiet — a missing recovery message
+      # rather than a broken run.
       actions: read
-    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
-    with:
-      env-name: "staging unfreeze"
-      runs-on: ubuntu-latest
+    uses: mindsdb/github-actions/.github/workflows/release-unfreeze.yml@main
     secrets: inherit

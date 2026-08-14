@@ -34,6 +34,22 @@ class CoreSettings(BaseSettings):
     # is skipped). Raise to 2 to also skip trivial single-tool-round turns once
     # verdict logs confirm they're rarely INCOMPLETE (ENG-716).
     verify_min_tool_rounds: int = 1
+    # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
+    # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
+    #
+    # RAW is deliberate, and the instinct to discount cache reads here is wrong:
+    # they bill at ~a tenth, but they draw the user's included-token allowance at
+    # full 1:1 weight (`auth/entitlements/services/included_usage.py` sums
+    # input + output + cached_input). This ceiling protects the user's allowance,
+    # so it counts the unit that allowance drains in. The TPM limiter's identical
+    # weighting IS a defect (ENG-1132) because it guards money — same arithmetic,
+    # opposite verdict, because they protect different things.
+    #
+    # 1.25M measured against 30 days of production (2026-08-12): trips ~15% of
+    # external turns at a median of 16 LLM calls in. Set above Kiranam's worst
+    # turn (1,480,766) and you stop catching the case this exists for — 1.5M
+    # misses it by 20k tokens.
+    max_turn_tokens: int = 1_250_000
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
