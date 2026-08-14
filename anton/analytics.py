@@ -401,11 +401,16 @@ def flush(timeout: float = _FLUSH_TIMEOUT) -> None:
             outstanding = list(_pending)
         for done in outstanding:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            # Both halves of the budget check matter. `remaining <= 0` catches a
+            # budget already spent by earlier sends; `not done.wait(...)` catches
+            # it running out *inside* the wait, which is what happens whenever
+            # there is a single outstanding send — the common case. Checking only
+            # the first left exactly that case exiting the loop silently, so the
+            # loss it exists to record was the one it never recorded.
+            if remaining <= 0 or not done.wait(remaining):
                 logger.debug("analytics flush budget exhausted, %d send(s) abandoned",
                              sum(1 for d in outstanding if not d.is_set()))
                 return
-            done.wait(remaining)
     except Exception:
         logger.debug("analytics flush failed", exc_info=True)
 

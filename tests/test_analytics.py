@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import http.server
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -655,6 +656,24 @@ def test_flush_gives_up_at_the_budget():
         elapsed = time.monotonic() - start
 
         assert 0.2 <= elapsed < 1.0
+    finally:
+        release.set()
+
+
+def test_flush_logs_when_the_only_pending_send_is_abandoned(caplog):
+    """One outstanding send is the common case, and it is the case an earlier
+    version logged nothing for: the budget ran out *inside* `Event.wait`, so the
+    `remaining <= 0` branch was never reached and the loop just ended. The loss
+    this line exists to record was the one it never recorded."""
+    release = threading.Event()
+    try:
+        analytics._spawn(release.wait)
+
+        with caplog.at_level(logging.DEBUG, logger="anton.analytics"):
+            analytics.flush(timeout=0.2)
+
+        assert any("budget exhausted" in r.getMessage() for r in caplog.records)
+        assert any("1 send(s) abandoned" in r.getMessage() for r in caplog.records)
     finally:
         release.set()
 
