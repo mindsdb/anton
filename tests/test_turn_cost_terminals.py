@@ -386,6 +386,24 @@ async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
         async for _ in session.turn_stream("run my script"):
             pass
     assert _ended_by(send) == "completed"
+    # ...but never byte-identical to a verified pass: the flag is what lets
+    # honest-stop denominators exclude unverified turns without a
+    # per-conversation Langfuse hop (ENG-1632 review).
+    assert send.call_args.kwargs["verification_skipped"] == "true"
+
+
+async def test_verified_turn_reports_verification_not_skipped(workspace):
+    # The control for the flag above: a turn whose verdict actually ran
+    # (COMPLETE) books verification_skipped="false".
+    session = ChatSession(
+        ChatSessionConfig(llm_client=_verdict_llm("COMPLETE"), workspace=workspace)
+    )
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "completed"
+    assert send.call_args.kwargs["verification_skipped"] == "false"
 
 
 async def test_callers_already_handled_exception_is_not_reported_as_error(workspace):

@@ -109,7 +109,10 @@ _TIMEOUT = 3  # seconds
 # cowork's renderer register (``src/renderer/cowork/lib/analytics.js``), so
 # both clients read the same way.
 #
-#   turn_completed   ended_by, tokens_total, input_tokens, output_tokens,
+#   turn_completed   ended_by, verification_skipped ("true" when the turn
+#                    completed without a verifier verdict — denied/latched,
+#                    ENG-1632 — so honest-stop denominators can exclude it),
+#                    tokens_total, input_tokens, output_tokens,
 #                    cache_read_tokens, cache_creation_tokens, llm_calls,
 #                    rounds, continuations, peak_context_tokens, duration_ms,
 #                    {planning,coding,router}_{model,tokens,calls},

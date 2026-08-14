@@ -2286,11 +2286,13 @@ class ChatSession:
         except Exception:  # pragma: no cover - defensive
             _root_cause_fields = {}
         logger.info(
-            "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
+            "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
+            "tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
             "by_role=%s %s",
-            self._session_id, turn_index, tc.ended_by, tc.total_tokens,
+            self._session_id, turn_index, tc.ended_by,
+            str(tc.verification_skipped).lower(), tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
             tc.continuations, tc.peak_context_tokens, tc.duration_ms,
@@ -2332,6 +2334,10 @@ class ChatSession:
                 # classification is broken.
                 **_root_cause_fields,
                 ended_by=tc.ended_by,
+                # A completed-but-unverified turn (denied/latched verifier,
+                # ENG-1632) must be excludable from the honest-stop
+                # denominator without a per-conversation Langfuse hop.
+                verification_skipped=str(tc.verification_skipped).lower(),
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -4529,6 +4535,14 @@ class ChatSession:
                         _VERIFIER_LATCH_REPROBE_TURNS, continuation,
                         self._max_continuations, tool_round,
                     )
+                    # Stamp the books: this turn books ended_by="completed"
+                    # but was NOT verified — without the flag it is
+                    # byte-identical in analytics to a verified pass and
+                    # silently joins the honest-stop denominator (ENG-1632
+                    # review). Stamped here, never read from latch state at
+                    # emit (late finalizers would see a later turn's state).
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
                     break
                 _verifier_log.info(
                     "completion-verifier re-probing after %d skipped verifications",
@@ -4652,6 +4666,9 @@ class ChatSession:
                         "verification this session; turn ends on the "
                         "already-streamed reply"
                     )
+                    # Unverified turn — see the latched-skip stamp above.
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
                     break
                 if verdict_failure == "hard":
                     self._verifier_hard_failures += 1
@@ -4664,6 +4681,9 @@ class ChatSession:
                         _verifier_log.info(
                             "completion-verifier re-probe failed — staying latched"
                         )
+                        # Unverified turn — see the latched-skip stamp above.
+                        if self._turn_cost is not None:
+                            self._turn_cost.verification_skipped = True
                         break
                     if self._verifier_hard_failures >= 2:
                         # Second hard failure in a row: the first could have been
@@ -4693,6 +4713,9 @@ class ChatSession:
                             "verification this session",
                             self._verifier_hard_failures,
                         )
+                        # Unverified turn — see the latched-skip stamp above.
+                        if self._turn_cost is not None:
+                            self._turn_cost.verification_skipped = True
                         break
                 # The verifier call failed on every budget it was given —
                 # truncated past the last retry, an unusable tool call, or a
