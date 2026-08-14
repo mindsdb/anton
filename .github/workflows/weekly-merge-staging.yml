@@ -1,7 +1,19 @@
 name: Create staging to main release PR
+
+# Fires at freeze time AND after every staging pipeline, so the release PR is a
+# live view of what is queued for production rather than a Friday-only snapshot.
+# The reusable opens it as a DRAFT and marks it ready for review when the freeze
+# window opens, so an always-open staging -> main PR is never a merge button
+# sitting next to production mid-week.
+#
+# `workflow_run` rather than `push: staging`, deliberately: a second workflow on
+# `push: staging` would be a second disconnected run tree, which is exactly what
+# the shared workflow lint forbids. `workflow_run` is its own event, so this stays
+# one entry point.
+
 on:
   workflow_run:
-    workflows: ["Staging Freeze"]
+    workflows: ["Staging Freeze", "Staging pre-release and publish to PyPI"]
     types: [completed]
   workflow_dispatch:
 
@@ -10,8 +22,20 @@ permissions:
 
 jobs:
   create-pr:
+    # A failed FREEZE means staging was never locked, so opening the release PR
+    # would be premature. A failed staging PIPELINE says nothing about what is
+    # queued — the PR body is a commit list, not a health report — so the refresh
+    # still runs, and the red-branch sweep is what reports the pipeline.
     if: >
       github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.name != 'Staging Freeze' ||
       github.event.workflow_run.conclusion == 'success'
-    uses: mindsdb/github-actions/.github/workflows/release-pr.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
+    permissions:
+      contents: read
+      # Turns the "recovered" message on. The reusable's notify step reads run
+      # history to tell a recovery from an ordinary green run, and the default
+      # workflow token carries contents + packages read only. Without this the
+      # lookup is refused, logs why, and stays quiet.
+      actions: read
+    uses: mindsdb/github-actions/.github/workflows/release-pr.yml@main
     secrets: inherit
