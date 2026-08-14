@@ -36,24 +36,20 @@ permissions:
 
 jobs:
   sync:
-    uses: mindsdb/github-actions/.github/workflows/sync-main-to-staging.yml@main
-    secrets: inherit
-
-  notify:
-    # A silently failing sync is the whole reason this workflow exists, so it
-    # alerts rather than trusting anyone to notice staging drifting behind main.
-    needs: [sync]
-    if: failure()
+    # No notify job here any more. The reusable ends with one, so a sync that
+    # fails and is then re-run successfully reports BOTH. It previously could not:
+    # on 2026-08-14 this workflow failed on cowork, alerted, was re-run green, and
+    # the wrapper's `if: failure()` notify was skipped, so the channel was left
+    # holding a red alert for a sync that had already succeeded.
     permissions:
       contents: read
-      # Declared even though this caller never runs the prior-run lookup: a
-      # reusable workflow's requested permissions are validated when the file
-      # is parsed, not when the step that needs them runs, so a caller that
-      # grants less than the reusable asks for is INVALID rather than merely
-      # degraded, and the whole workflow fails to load.
+      # Turns the "recovered" message on, and it is the ONLY thing that does. The
+      # reusable declares no `permissions:` block of its own, so its job inherits
+      # exactly what is granted here; a block there would cap the token instead and
+      # the lookup would be refused however much this granted. The default workflow
+      # token carries contents + packages read only, and without the grant the
+      # lookup is refused, logs why, and stays quiet — a missing recovery message
+      # rather than a broken run.
       actions: read
-    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
-    with:
-      env-name: "main -> staging sync"
-      runs-on: ubuntu-latest
+    uses: mindsdb/github-actions/.github/workflows/sync-main-to-staging.yml@main
     secrets: inherit
