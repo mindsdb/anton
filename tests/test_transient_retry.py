@@ -259,7 +259,7 @@ import openai  # noqa: E402
 
 from anton.chat import ChatSession  # noqa: E402
 from anton.core.llm.openai import OpenAIProvider  # noqa: E402
-from anton.core.llm.provider import StreamComplete, StreamTextDelta  # noqa: E402
+from anton.core.llm.provider import StreamComplete, StreamTaskProgress, StreamTextDelta  # noqa: E402
 from anton.core.session import ChatSessionConfig  # noqa: E402
 from tests.conftest import make_mock_llm  # noqa: E402
 
@@ -582,16 +582,37 @@ def test_exhaustion_carries_the_rate_limited_code_and_the_interval():
     assert plain.retry_after is None
 
 
-def test_the_progress_event_the_other_two_repos_key_on():
+async def test_the_wait_emits_the_progress_event_the_other_two_repos_key_on():
     # cowork-server's never-throttle set and PHASE_LABELS, and cowork's reducer
-    # branch, all key on this exact phase string. Nothing else in anton pins it,
-    # so renaming it here would silently make the wait invisible in the UI —
-    # the "a silent 90s pause is indistinguishable from a hang" failure.
-    import inspect
-    from anton.core import session as sess
+    # branch, all key on this exact phase string. A silent wait is
+    # indistinguishable from a hang, which is the failure this event prevents.
+    #
+    # Asserted as an EMITTED EVENT, not a source literal: the previous version
+    # grepped `inspect.getsource` and survived moving the yield into dead code
+    # — the event never fired and the whole suite stayed green.
+    s = _session()
+    s._backoff_sleep = AsyncMock(return_value=False)
+    calls = {"n": 0}
 
-    src = inspect.getsource(sess)
-    assert 'phase="rate_limited"' in src
+    async def _fail_then_succeed(user_msg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientProviderError(
+                "The model provider is rate-limiting requests.",
+                provider="P", code="rate_limited",
+                session_backoff=True, retry_after=30.0,
+            )
+        yield StreamTextDelta(text="ok")
+
+    s._stream_and_handle_tools = _fail_then_succeed
+    events = [e async for e in s.turn_stream("do it")]
+
+    phases = [e.phase for e in events if isinstance(e, StreamTaskProgress)]
+    assert "rate_limited" in phases, phases
+    notice = next(e for e in events
+                  if isinstance(e, StreamTaskProgress) and e.phase == "rate_limited")
+    assert "30" in notice.message           # names the wait
+    assert notice.eta_seconds == 30.0       # and carries it structurally
 
 
 async def test_a_hint_above_the_cap_cards_immediately_and_names_the_interval():
@@ -662,3 +683,93 @@ async def test_a_hint_within_the_cap_still_waits_rather_than_carding():
 
     assert sleeps == [30.0], sleeps          # the hint, honoured
     assert calls["n"] == 2                   # and the SAME step resumed
+
+
+async def test_the_wait_budget_is_finite_across_multiple_denials():
+    """The loop's ONLY termination guarantee is `_rate_limit_slept += delay`.
+
+    Nothing pinned it: deleting that line makes every velocity 429 that does
+    not clear retry forever — sleeping tens of seconds between attempts, with
+    no exhaustion card and no way out — and the suite stayed green. The two
+    adjacent `if _rate_limited:` blocks actively invite that merge.
+
+    A single-denial test cannot catch it; this needs repeated denials so the
+    accumulator has to advance.
+    """
+    s = _session()
+    sleeps = []
+
+    async def _record(delay):
+        sleeps.append(delay)
+        # Bail loudly rather than hanging. With the accumulator removed the
+        # loop is genuinely infinite and `_backoff_sleep` is mocked, so it
+        # spins at full speed — a plain assertion at the end would never be
+        # reached and CI would sit on a 10-minute timeout with no diagnosis
+        # (observed while mutation-testing this very test).
+        if len(sleeps) > 20:
+            raise AssertionError(
+                "the rate-limit wait never terminates — `_rate_limit_slept` "
+                "is not advancing, so the budget can never be spent"
+            )
+        return False
+
+    s._backoff_sleep = _record
+
+    async def _always(user_msg):
+        raise TransientProviderError(
+            "The model provider is rate-limiting requests.",
+            provider="P", code="rate_limited", session_backoff=True, retry_after=30.0,
+        )
+        yield  # pragma: no cover
+
+    s._stream_and_handle_tools = _always
+
+    with pytest.raises(ProviderOverloadedError) as ei:
+        _ = [e async for e in s.turn_stream("do it")]
+
+    assert ei.value.code == "rate_limited"
+    # Terminates, and within the stated budget rather than merely "eventually".
+    assert sum(sleeps) <= s._rate_limit_budget_s + 0.01, sleeps
+    assert len(sleeps) <= 6, sleeps
+
+
+async def test_a_rate_limit_wait_does_not_advance_the_incident_curve():
+    """The split attempt index — the headline of the commit that added it, and
+    unpinned until now: reverting to the shared counter kept the suite green.
+
+    An interleaved turn is the common shape when a gateway is degraded. With
+    one counter, the incident that follows a rate-limit wait starts partway
+    down a curve it never walked.
+    """
+    s = _session()
+    sleeps = []
+
+    async def _record(delay):
+        sleeps.append(delay)
+        return False
+
+    s._backoff_sleep = _record
+    calls = {"n": 0}
+
+    async def _rate_then_incident(user_msg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientProviderError(
+                "rate-limiting", provider="P", code="rate_limited",
+                session_backoff=True, retry_after=45.0,
+            )
+        if calls["n"] == 2:
+            raise TransientProviderError(
+                "overloaded", provider="P", code="overloaded_error",
+                session_backoff=True,
+            )
+        yield StreamTextDelta(text="ok")
+
+    s._stream_and_handle_tools = _rate_then_incident
+    _ = [e async for e in s.turn_stream("do it")]
+
+    assert len(sleeps) == 2, sleeps
+    assert sleeps[0] == 45.0                 # the rate limit honoured its hint
+    # The incident starts at ITS OWN curve position 0 (~2s ±20%), not position
+    # 1 (~10s) as a shared counter would give.
+    assert sleeps[1] < 5.0, sleeps
