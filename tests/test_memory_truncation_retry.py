@@ -292,3 +292,100 @@ async def test_credential_extraction_survives_narration():
 
     assert result.variables.get("host") == "db.example.com"
     assert complete.await_count == 2
+
+
+# --------------------------------------------------------------------------
+# Which truncation was it (ENG-1523)
+# --------------------------------------------------------------------------
+
+
+def _truncated_mid_json(budget: int) -> LLMResponse:
+    """The call started but the budget ran out inside its JSON arguments, so
+    `safe_parse_tool_input` salvaged a partial dict and set `parse_error`."""
+    return LLMResponse(
+        content="",
+        tool_calls=[
+            ToolCall(
+                id="tc_1", name="_Probe", input={},
+                parse_error="Unterminated string starting at char 4021",
+            )
+        ],
+        usage=Usage(input_tokens=100, output_tokens=budget),
+        stop_reason="length",
+    )
+
+
+def _ladder_over(*responses) -> tuple[LLMClient, AsyncMock]:
+    provider = MagicMock()
+    calls = iter(responses)
+
+    async def complete(**kwargs):
+        return next(calls)(kwargs.get("max_tokens"))
+
+    provider.complete = AsyncMock(side_effect=complete)
+    client = LLMClient(
+        planning_provider=provider, planning_model="p",
+        coding_provider=provider, coding_model="c",
+    )
+    return client, provider.complete
+
+
+async def _run_ladder(client, caplog):
+    from pydantic import BaseModel
+
+    class _Probe(BaseModel):
+        value: str
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(StructuredOutputError) as exc_info:
+            await generate_with_truncation_retry(
+                client.generate_object_code, _Probe, system="s",
+                messages=[{"role": "user", "content": "m"}],
+                budgets=(256,),
+            )
+    return exc_info.value
+
+
+async def test_narration_overflow_is_logged_as_before_call(caplog):
+    """No tool call at all — the cure is a bigger budget."""
+    client, _ = _ladder_over(_prose_at_cap)
+    exc = await _run_ladder(client, caplog)
+
+    assert exc.truncated is True
+    assert exc.reached_tool_call is False
+    assert "TRUNCATED_BEFORE_CALL" in caplog.text
+    assert "TRUNCATED_INSIDE_CALL" not in caplog.text
+
+
+async def test_payload_overflow_is_logged_as_inside_call(caplog):
+    """The call was reached and its arguments were cut off — the cure is a
+    smaller response, which a bigger budget only postpones."""
+    client, _ = _ladder_over(_truncated_mid_json)
+    exc = await _run_ladder(client, caplog)
+
+    assert exc.truncated is True
+    assert exc.reached_tool_call is True
+    assert "TRUNCATED_INSIDE_CALL" in caplog.text
+    assert "TRUNCATED_BEFORE_CALL" not in caplog.text
+
+
+async def test_the_two_truncations_are_distinguishable_in_the_log(caplog):
+    """The whole point: one `TRUNCATED` for both could not say which fix to
+    apply, and that ambiguity cost a diagnosis round-trip (ENG-1523)."""
+    narrated, _ = _ladder_over(_prose_at_cap)
+    payload, _ = _ladder_over(_truncated_mid_json)
+
+    await _run_ladder(narrated, caplog)
+    first = caplog.text
+    caplog.clear()
+    await _run_ladder(payload, caplog)
+
+    assert first != caplog.text
+
+
+async def test_the_verdict_never_leaks_the_model_text(caplog):
+    """The message can quote the conversation, so only the verdict is logged."""
+    client, _ = _ladder_over(_prose_at_cap)
+    await _run_ladder(client, caplog)
+
+    assert SECRET not in caplog.text

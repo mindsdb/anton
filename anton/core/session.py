@@ -52,7 +52,7 @@ from anton.core.llm.provider import (
     ToolCall,
     TransientProviderError,
 )
-from anton.core.llm.structured import looks_truncated
+from anton.core.llm.structured import looks_truncated, truncation_verdict
 from anton.core.llm.thalamus import (
     ACTION_RESPOND,
     ThalamicDecision,
@@ -4075,7 +4075,7 @@ class ChatSession:
                     _verifier_log.info(
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s retrying=%s",
-                        "TRUNCATED" if exc.truncated else "NO_TOOL_CALL",
+                        truncation_verdict(exc),
                         budget, exc.output_tokens, exc.stop_reason, retrying,
                     )
                     if not retrying:
