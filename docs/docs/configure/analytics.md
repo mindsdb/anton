@@ -65,9 +65,9 @@ That switch covers every event on every transport.
 
 ### Turning off one transport only
 
-`ANTON_ANALYTICS_URL` re-points the collector, and governs **only** the events
-that use it — the measurement events are unaffected by it. To disable those
-specifically, set an empty key:
+`ANTON_ANALYTICS_URL` set empty stops **every** event. Re-pointing it moves only
+the collector-path events; the measurement events still go to PostHog. To
+disable just those, set an empty key:
 
 ```text
 ANTON_POSTHOG_KEY=
