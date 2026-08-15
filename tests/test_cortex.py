@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -631,6 +632,28 @@ class TestCompactFile:
         llm = await self._compact(dirs, hc, keep=[1])
         assert llm.prompt == ""
         assert len(self._entries(hc)) == 7
+
+    _LOGGER = "anton.core.memory.cortex"
+
+    async def test_a_rewrite_reports_how_much_it_deleted(self, dirs, caplog):
+        """Over-pruning is silent and, by index, cheaper than keeping.
+
+        The exact message is asserted so entry text cannot start riding along:
+        these files hold user content.
+        """
+        hc = self._lessons(dirs, 10)
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            await self._compact(dirs, hc, keep=[1, 5, 10])
+        recs = [r for r in caplog.records if r.name == self._LOGGER]
+        assert len(recs) == 1
+        assert recs[0].getMessage() == "memory-compaction: lessons.md kept 3 of 10 entries"
+
+    async def test_a_skipped_rewrite_reports_nothing(self, dirs, caplog):
+        """The line means "the file changed", so it must sit past the guard."""
+        hc = self._lessons(dirs, 10)
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            await self._compact(dirs, hc, keep=[])
+        assert [r for r in caplog.records if r.name == self._LOGGER] == []
 
     async def test_the_answer_fits_the_budget_at_the_size_that_broke_it(self, dirs):
         """Rebuild the shape of the file that produced the bug report.

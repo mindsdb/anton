@@ -671,6 +671,17 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         hc._encode_with_lock(path, new_content, mode="write")
 
+        # The only record that the file changed size, and the only pressure
+        # against over-pruning: naming survivors by index makes dropping most
+        # of the file a *shorter* answer than keeping it, so the call itself no
+        # longer penalises it. Counts only — the entries are user content.
+        logger.info(
+            "memory-compaction: %s kept %d of %d entries",
+            path.name,
+            len(kept),
+            len(entries),
+        )
+
     async def maybe_update_identity(self, user_message: str) -> None:
         """Check if conversation reveals identity facts worth profiling.
 
