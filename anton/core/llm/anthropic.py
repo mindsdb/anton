@@ -237,6 +237,13 @@ class AnthropicProvider(LLMProvider):
                     ToolCall(id=block.id, name=block.name, input=block.input)
                 )
 
+        # The SDK hands back an already-parsed `input`, so unlike the streaming
+        # path there is no raw JSON to check: `stop_reason` is the only evidence
+        # that the last call's arguments (blocks arrive in order) are unfinished.
+        if response.stop_reason == "max_tokens" and tool_calls:
+            tool_calls[-1].repaired = True
+
+
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
             stop_reason=response.stop_reason, provider="Anthropic", model=model,

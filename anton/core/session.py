@@ -3315,6 +3315,22 @@ class ChatSession:
         budget = getattr(self._llm, "max_tokens", None)
         return budget if isinstance(budget, int) and budget > 0 else 8192
 
+    def _needs_truncation_recovery(self, llm_response: LLMResponse) -> bool:
+        """True when the round burned its output budget without finishing.
+
+        The condition, in one place because the tool loop asks it twice — once
+        before the loop and once per continuation round — and the two copies
+        drifting apart is a live failure mode, not a hypothetical: the first
+        version of the cut-open-tool-call rule landed on the pre-loop copy only,
+        which left every round after the first tool call dispatching half a call.
+
+        A tool call exempts the round only when it is intact; see
+        `usable_tool_call`.
+        """
+        return looks_truncated(
+            llm_response, self._turn_max_tokens()
+        ) and not usable_tool_call(llm_response)
+
     async def _recover_truncated_stream(
         self,
         llm_response: LLMResponse,
@@ -3444,14 +3460,7 @@ class ChatSession:
 
         llm_response = response.response
 
-        # Detect max_tokens truncation — the LLM was cut off mid-response. By
-        # token count rather than stop_reason alone: a gateway can report a
-        # normal stop at the cap, which leaves a stop_reason gate dead.
-        # `looks_truncated` checks both. A tool call in the response exempts it
-        # only when that call is intact — see `usable_tool_call`.
-        if looks_truncated(llm_response, self._turn_max_tokens()) and not usable_tool_call(
-            llm_response
-        ):
+        if self._needs_truncation_recovery(llm_response):
             response = None
             async for event in self._recover_truncated_stream(
                 llm_response, system=system, tools=tools
@@ -3983,12 +3992,9 @@ class ChatSession:
                     return
                 llm_response = response.response
 
-                # Same truncation gate as before the loop. Continuation rounds
-                # carry the longest history, so this is where the output budget
-                # runs out first.
-                if looks_truncated(
-                    llm_response, self._turn_max_tokens()
-                ) and not usable_tool_call(llm_response):
+                # Continuation rounds carry the longest history, so this is
+                # where the output budget runs out first.
+                if self._needs_truncation_recovery(llm_response):
                     response = None
                     async for event in self._recover_truncated_stream(
                         llm_response, system=system, tools=tools
