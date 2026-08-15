@@ -313,6 +313,30 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.TransportError,
 )
 
+# Verdict-call failures that are DETERMINISTIC DENIALS: the provider will give
+# the identical answer on every retry this session — a wallet that can't pay
+# for the verifier's model (TokenLimitExceeded: 402 ``wallet_empty`` / 429
+# ``included_allowance_exhausted``, both code-exact per ENG-1169; velocity 429s
+# map to TransientProviderError and never land here) or a model id that doesn't
+# resolve for this key (ModelUnavailableError: 404 model-not-found / 403
+# model-access-denied). These latch on the FIRST occurrence and stay silent:
+# the turn's work already succeeded, and "the task-completion check failed
+# (internal error)" is a lie when the check was merely priced out (ENG-1632 —
+# of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
+# were aux-surface calls like this one, across 33 of those users; every aux
+# one surfaced to the user as an internal error and an apology).
+#
+# ORDER MATTERS in the verdict loop: this clause must precede
+# _TRANSIENT_VERDICT_ERRORS. ModelUnavailableError subclasses ConnectionError →
+# OSError, so the transient clause would otherwise swallow it as a blip and
+# re-diagnose every turn forever (its pre-ENG-1632 behavior). TokenLimitExceeded
+# is a plain Exception and would fall to the generic "hard" handler instead —
+# wrong the other way: a full-history diagnosis on turn one, latch only at two.
+_DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
+    TokenLimitExceeded,
+    ModelUnavailableError,
+)
+
 # Turns a latched session skips before spending one verdict call to see whether
 # the cause has gone away (user switched model, gateway fix shipped). Without a
 # re-probe the latch is permanent for the session and "reset on a successful
@@ -761,6 +785,10 @@ class ChatSession:
         self._verifier_hard_failures = 0
         self._verifier_latched = False
         self._verifier_latch_skips = 0
+        # Why the latch is set — "hard" (capability, ENG-1095) or "denied"
+        # (billing/model access, ENG-1632) — so the skip log names the real
+        # cause instead of reporting "0 hard failures" for a denied latch.
+        self._verifier_latch_reason = ""
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -2258,11 +2286,13 @@ class ChatSession:
         except Exception:  # pragma: no cover - defensive
             _root_cause_fields = {}
         logger.info(
-            "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
+            "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
+            "tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
             "by_role=%s %s",
-            self._session_id, turn_index, tc.ended_by, tc.total_tokens,
+            self._session_id, turn_index, tc.ended_by,
+            str(tc.verification_skipped).lower(), tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
             tc.continuations, tc.peak_context_tokens, tc.duration_ms,
@@ -2304,6 +2334,10 @@ class ChatSession:
                 # classification is broken.
                 **_root_cause_fields,
                 ended_by=tc.ended_by,
+                # A completed-but-unverified turn (denied/latched verifier,
+                # ENG-1632) must be excludable from the honest-stop
+                # denominator without a per-conversation Langfuse hop.
+                verification_skipped=str(tc.verification_skipped).lower(),
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -4490,14 +4524,25 @@ class ChatSession:
                 self._verifier_latch_skips += 1
                 if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
                     _verifier_log.info(
-                        "completion-verifier skipped — latched after %d hard "
-                        "failures with no successful verdict between them "
+                        "completion-verifier skipped — latched (%s) "
                         "(skip %d/%d before re-probe); "
                         "continuation=%d/%d tool_rounds=%d",
-                        self._verifier_hard_failures, self._verifier_latch_skips,
+                        "deterministic denial: billing or model access"
+                        if self._verifier_latch_reason == "denied"
+                        else f"{self._verifier_hard_failures} hard failures "
+                        "with no successful verdict between them",
+                        self._verifier_latch_skips,
                         _VERIFIER_LATCH_REPROBE_TURNS, continuation,
                         self._max_continuations, tool_round,
                     )
+                    # Stamp the books: this turn books ended_by="completed"
+                    # but was NOT verified — without the flag it is
+                    # byte-identical in analytics to a verified pass and
+                    # silently joins the honest-stop denominator (ENG-1632
+                    # review). Stamped here, never read from latch state at
+                    # emit (late finalizers would see a later turn's state).
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
                     break
                 _verifier_log.info(
                     "completion-verifier re-probing after %d skipped verifications",
@@ -4542,6 +4587,17 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except _DENIED_VERDICT_ERRORS as exc:
+                    # Deterministic denial — see _DENIED_VERDICT_ERRORS (and the
+                    # ordering note there: this clause must stay ahead of the
+                    # transient tuple). Retrying, diagnosing, or telling the
+                    # user buys nothing: handled below by latching silently.
+                    verdict_failure = "denied"
+                    _verifier_log.info(
+                        "completion-verifier verdict=DENIED budget=%d error=%s",
+                        budget, _safe_error_detail(exc),
+                    )
+                    break
                 except _TRANSIENT_VERDICT_ERRORS as exc:
                     # Explicitly NOT a latch candidate. The latch is for a model
                     # that cannot produce a verdict at all (kimi-K3 rejecting the
@@ -4576,9 +4632,44 @@ class ChatSession:
                 # is no longer failing.
                 self._verifier_hard_failures = 0
                 self._verifier_latched = False
+                self._verifier_latch_reason = ""
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
+                if verdict_failure == "denied":
+                    # A denied verdict recurs every turn by construction, so
+                    # don't wait for a second sample: latch NOW and end the
+                    # turn quietly on the reply that already streamed. No
+                    # history injection, no diagnosis stream — the work
+                    # succeeded and the user must not be told an "internal
+                    # error" occurred (ENG-1632). Deliberately silent rather
+                    # than auto-upgrading to the planning model: a missing
+                    # check beats a surprise bill. The periodic re-probe still
+                    # runs; a re-probe denied again lands back here and stays
+                    # latched, so adding credits self-heals within
+                    # _VERIFIER_LATCH_REPROBE_TURNS turns.
+                    #
+                    # Scope note: the latch is ChatSession state, and Cowork
+                    # rebuilds the session PER MESSAGE — there it only spans
+                    # one message's continuations, the steady-state cost of a
+                    # persistent denial is one silent verdict call per
+                    # message, and top-up recovery is simply the next message.
+                    # The re-probe window above is long-session (CLI)
+                    # behaviour. The cross-message fix is server-side model
+                    # resolution (cowork-server, same ticket); this branch is
+                    # the guarantee the user is never told the turn failed.
+                    self._verifier_latched = True
+                    self._verifier_latch_reason = "denied"
+                    _verifier_log.info(
+                        "completion-verifier latched after a deterministic "
+                        "denial (billing or model access) — skipping further "
+                        "verification this session; turn ends on the "
+                        "already-streamed reply"
+                    )
+                    # Unverified turn — see the latched-skip stamp above.
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
+                    break
                 if verdict_failure == "hard":
                     self._verifier_hard_failures += 1
                     if self._verifier_latched:
@@ -4590,6 +4681,9 @@ class ChatSession:
                         _verifier_log.info(
                             "completion-verifier re-probe failed — staying latched"
                         )
+                        # Unverified turn — see the latched-skip stamp above.
+                        if self._turn_cost is not None:
+                            self._turn_cost.verification_skipped = True
                         break
                     if self._verifier_hard_failures >= 2:
                         # Second hard failure in a row: the first could have been
@@ -4612,12 +4706,16 @@ class ChatSession:
                         # produce one, and a truncation in between is no evidence
                         # that it can (review: pnewsam on #299).
                         self._verifier_latched = True
+                        self._verifier_latch_reason = "hard"
                         _verifier_log.info(
                             "completion-verifier latched after %d hard failures with "
                             "no successful verdict between them — skipping further "
                             "verification this session",
                             self._verifier_hard_failures,
                         )
+                        # Unverified turn — see the latched-skip stamp above.
+                        if self._turn_cost is not None:
+                            self._turn_cost.verification_skipped = True
                         break
                 # The verifier call failed on every budget it was given —
                 # truncated past the last retry, an unusable tool call, or a
