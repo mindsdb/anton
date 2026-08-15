@@ -23,8 +23,10 @@ from tests.conftest import make_mock_llm
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.llm.provider import (
     LLMResponse,
+    ModelUnavailableError,
     StreamComplete,
     StreamTaskProgress,
+    TokenLimitExceeded,
     ToolCall,
     Usage,
 )
@@ -826,6 +828,144 @@ async def test_empty_diagnosis_is_logged_not_circular(workspace, caplog):
             m.get("content") not in ("",)
             for m in session.history
             if m.get("role") == "assistant"
+        )
+    finally:
+        await session.close()
+
+
+# ── Deterministic denials latch silently on the FIRST occurrence (ENG-1632) ──
+#
+# A wallet 402 / allowance 429 (TokenLimitExceeded, code-exact per ENG-1169) or
+# a 404'd/403'd model (ModelUnavailableError) recurs on every retry by
+# construction. The turn's work already succeeded — telling the user "the
+# task-completion check failed to run (internal error)" and streaming an
+# apology is a misreport (measured: 208 aux-call wallet-402s across 33 users in
+# 14 days, every one surfaced as an internal error). The denied path must be
+# SILENT: no history injection, no diagnosis stream, latch on call one.
+#
+# ModelUnavailableError additionally subclasses ConnectionError → OSError, so
+# before ENG-1632 it was swallowed by the TRANSIENT clause — diagnose every
+# turn, never latch. These tests pin the except-clause ordering that fixes that.
+
+@pytest.mark.parametrize("exc_factory, label", [
+    (lambda: TokenLimitExceeded(
+        "402: Your wallet has no balance to cover the model 'haiku'."), "wallet-402"),
+    (lambda: TokenLimitExceeded(
+        "429: Your included token allowance for 'haiku' is exhausted."), "allowance-429"),
+    (lambda: ModelUnavailableError(
+        "404: The model 'gemini-3.6-flash' does not exist",
+        code="model_not_found", model="gemini-3.6-flash"), "model-404"),
+])
+async def test_denied_verdict_latches_silently_on_first_occurrence(
+    workspace, caplog, exc_factory, label
+):
+    import logging
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def always_denied(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        raise exc_factory()
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_denied)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    progress_messages: list[str] = []
+    try:
+        with caplog.at_level(logging.INFO):
+            for turn in range(4):
+                plan, state = _tool_then_text_plan()
+                mock_llm.plan_stream = plan
+                async for event in session.turn_stream(f"do step {turn}"):
+                    if isinstance(event, StreamTaskProgress):
+                        progress_messages.append(event.message or "")
+                if state["n"] >= 3:
+                    diagnoses += 1
+
+        # Silent: no diagnosis stream ever fires, and the user never sees the
+        # "Something went wrong — checking in with you..." progress line.
+        assert diagnoses == 0, (
+            f"denied verdicts must not stream a diagnosis, got {diagnoses}"
+        )
+        assert not any("Something went wrong" in m for m in progress_messages)
+        # The "internal error" SYSTEM injection must never enter history —
+        # it persists into every later turn's payload once appended.
+        assert not any(
+            "task-completion check failed" in str(m.get("content", ""))
+            for m in session._history
+            if isinstance(m, dict)
+        ), "the internal-error injection reached history on a denied verdict"
+        # Latched on the FIRST call: turns 2-4 pay nothing.
+        assert calls["n"] == 1, (
+            f"denied verdict must latch on the first occurrence, got {calls['n']} calls"
+        )
+        assert session._verifier_latched is True
+        # Denied is not a capability failure — the hard counter stays clean so
+        # a later hard failure still gets its honest one-per-session diagnosis.
+        assert session._verifier_hard_failures == 0
+        announcements = [
+            r for r in caplog.records
+            if "latched after a deterministic denial" in r.message
+        ]
+        assert len(announcements) == 1, (
+            f"the denied latch must announce itself exactly once in the log, "
+            f"got {len(announcements)}"
+        )
+        # The per-turn skip log names the real cause, not "0 hard failures".
+        skips = [
+            r for r in caplog.records
+            if "completion-verifier skipped — latched" in r.getMessage()
+        ]
+        assert len(skips) == 3
+        assert all("deterministic denial" in r.getMessage() for r in skips)
+    finally:
+        await session.close()
+
+
+async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
+    """After _VERIFIER_LATCH_REPROBE_TURNS skips, the latch re-probes once; a
+    still-denied re-probe must land back in the denied branch — stay latched,
+    stay silent, no diagnosis — so a top-up self-heals on a later re-probe
+    while a persistent denial costs one quiet call per re-probe window."""
+    import logging
+
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def always_denied(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        raise TokenLimitExceeded(
+            "402: Your wallet has no balance to cover the model 'haiku'."
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=always_denied)
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        with caplog.at_level(logging.INFO):
+            for turn in range(_VERIFIER_LATCH_REPROBE_TURNS + 2):
+                plan, state = _tool_then_text_plan()
+                mock_llm.plan_stream = plan
+                async for _ in session.turn_stream(f"do step {turn}"):
+                    pass
+                if state["n"] >= 3:
+                    diagnoses += 1
+
+        # Call 1 latches; the single re-probe is call 2; everything else skips.
+        assert calls["n"] == 2, (
+            f"expected first call + one re-probe, got {calls['n']}"
+        )
+        assert session._verifier_latched is True
+        assert diagnoses == 0
+        assert not any(
+            "task-completion check failed" in str(m.get("content", ""))
+            for m in session._history
+            if isinstance(m, dict)
         )
     finally:
         await session.close()
