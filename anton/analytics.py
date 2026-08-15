@@ -8,21 +8,37 @@ an anonymous machine fingerprint, and whatever the caller passes as
 Where these events actually land
 ================================
 
-The collector lambda RELAYS into PostHog — verified 2026-08-06 against
-project 355390 ("Anton"), where anton's events appear tagged
-``source = mindsdb-zoominfo-lambda``.  Two consequences worth knowing before
-adding a caller:
+Two sinks, chosen per event name — see ``_POSTHOG_EVENTS``.
 
-* **Every ``extra`` kwarg becomes a queryable PostHog event property.**  Not
-  an allowlist — ``ds_connect_success`` carries its ``engine=postgres``
-  through, and ``turn_completed`` carries its full token breakdown.  So the
-  parameter names here ARE the analytics schema; renaming one silently breaks
-  whatever queries or dashboards read it.
-* **``distinct_id`` is the ``aid`` fingerprint, so these events are
-  per-INSTALL, not per-user.**  They do not join to the Keycloak ``sub`` that
-  the console, the desktop renderer's PostHog client, and the billing mirror
-  all key on.  Per-user questions need either that identified client or the
-  ``conversation_id`` -> Langfuse -> user hop.
+**Direct to PostHog, project 424726 ("MindsHub main").**  Events named in
+``_POSTHOG_EVENTS`` POST straight to the Capture API.  Every property
+survives, because nothing sits in between to drop them.
+
+**Everything else goes to the collector lambda,** which relays into PostHog
+project 355390 ("Anton") — verified 2026-08-06, where those events appear
+tagged ``source = mindsdb-zoominfo-lambda``.  That path filters **twice**:
+it relays only actions beginning ``anton_`` or ``ds_connect`` (a prefix
+rule, case-sensitive), and of the properties only ``action``, ``aid``,
+``engine``, ``llm_provider`` and ``has_mdb_key`` survive.  It returns
+**HTTP 200 while dropping**, and ``_fire`` never reads the response, so a
+caller cannot tell (ENG-1355).
+
+This docstring asserted the opposite until ENG-1495 — it claimed every
+``extra`` kwarg became a queryable property, "not an allowlist".  That was
+false, and it is the likeliest reason ``turn_completed`` shipped with a sink
+that produced nothing at all: it told the author no collector work was
+needed.  Do not restore that claim for either path.
+
+Consequences worth knowing before adding a caller:
+
+* **Choose the sink deliberately.**  A new event left on the collector path
+  arrives with its properties stripped unless they are the five above, and
+  does not arrive at all unless its name carries one of the two prefixes.
+* **``distinct_id`` is the ``aid`` fingerprint on both paths, so these events
+  are per-INSTALL, not per-user.**  They do not join to the Keycloak ``sub``
+  that the console, the desktop renderer's PostHog client, and the billing
+  mirror all key on.  Per-user questions need either that identified client
+  or the ``conversation_id`` -> Langfuse -> user hop.
 * PostHog additionally enriches server-side with IP and GeoIP.
 
 Identifier policy
@@ -69,9 +85,12 @@ enough to be a readable query parameter.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import os
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -80,7 +99,46 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
 
+logger = logging.getLogger(__name__)
+
 _TIMEOUT = 3  # seconds
+
+# ── The PostHog sink (ENG-1495) ─────────────────────────────────────
+# The register of events that bypass the collector and post straight to
+# PostHog, each with its own properties documented — the same shape as
+# cowork's renderer register (``src/renderer/cowork/lib/analytics.js``), so
+# both clients read the same way.
+#
+#   turn_completed   ended_by, verification_skipped ("true" when the turn
+#                    completed without a verifier verdict — denied/latched,
+#                    ENG-1632 — so honest-stop denominators can exclude it),
+#                    tokens_total, input_tokens, output_tokens,
+#                    cache_read_tokens, cache_creation_tokens, llm_calls,
+#                    rounds, continuations, peak_context_tokens, duration_ms,
+#                    {planning,coding,router}_{model,tokens,calls},
+#                    unknown_{tokens,calls}, llm_provider, harness,
+#                    anton_version, conversation_id, turn_index
+#
+#   rule_retrieval   outcome, when_rules, kept_rules, rules_chars,
+#                    stop_reason, input_tokens, output_tokens, duration_ms
+#                    (anton/core/memory/cortex.py::_emit_rule_retrieval)
+#
+# An event NOT listed here keeps the collector path, so moving one is an
+# explicit decision rather than something that happens by default.
+_POSTHOG_EVENTS = frozenset({"turn_completed", "rule_retrieval"})
+
+# `$lib` names the sender, matching the convention the other emitters follow
+# (`cowork-desktop`, `mindshub-site-beacon`), so a per-emitter breakdown in
+# project 424726 stays honest.
+_LIB = "anton-library"
+
+# urllib's default ``Python-urllib/3.x`` is answered with 403 by some edges.
+# Only ``_fire_posthog`` sends this; ``_fire`` still sends urllib's default.
+_POSTHOG_USER_AGENT = "anton-posthog/1.0"
+
+# Transport noise, not analytics: appended as a cache buster for the GET path.
+# Carries no meaning as a property, so the PostHog payload drops it.
+_CACHE_BUSTER_KEY = "_"
 
 # Cached after first computation — the fingerprint never changes within
 # a process, so computing it once is sufficient.
@@ -153,6 +211,99 @@ def get_installation_id() -> str:
     return _cached_aid
 
 
+def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
+    """Build the PostHog Capture API payload for one event.
+
+    ``aid`` becomes ``distinct_id`` and is kept as a property too, so a query
+    can group on the install without touching person data.  ``timestamp`` is
+    promoted to PostHog's own field: it is the moment the turn ended, not the
+    moment a queued daemon thread got around to sending, and for a cost event
+    that difference is the one you would go on to plot.
+
+    Deliberately no ``$insert_id``.  The natural key would be
+    ``(conversation_id, turn_index)``, but an abandoned turn's books and a
+    later retry can legitimately share both, and dropping that row would lose
+    exactly the runaway a cancel was investigating (anton#309 review).
+    ``TurnCost.emitted`` already stops the same books emitting twice, so
+    dedupe here could only add a way to lose real events.
+    """
+    properties = {
+        k: v for k, v in params.items()
+        if k not in (_CACHE_BUSTER_KEY, "action", "timestamp")
+    }
+    properties["$lib"] = _LIB
+    # Store the event without creating a Person for the install fingerprint.
+    # Without this every `aid` becomes a "person" in project 424726, which is
+    # keyed on the Keycloak `sub` — so machine fingerprints would be counted
+    # alongside real identified users in every person metric and cohort there,
+    # and no later query can separate them again.
+    properties["$process_person_profile"] = False
+
+    return json.dumps(
+        {
+            "api_key": key,
+            "event": action,
+            "distinct_id": params.get("aid") or "unknown",
+            "timestamp": params.get("timestamp"),
+            "properties": properties,
+        }
+    ).encode()
+
+
+def _fire_posthog(url: str, body: bytes) -> None:
+    """POST one Capture payload.  Runs inside a daemon thread.
+
+    Reads the status and logs a non-2xx at debug.  Still fire-and-forget — no
+    retry, no raise, no effect on the caller — but the failure leaves a trace on
+    the machine where it happened instead of only in an aggregate nobody has
+    built yet.
+
+    **What this does and does not catch.**  Measured against the live endpoint,
+    2026-08-13:
+
+        bogus api_key      -> HTTP 200  {"status":"Ok"}     <- NOT detectable
+        real api_key       -> HTTP 200  {"status":"Ok"}
+        malformed payload  -> HTTP 400  "failed to hydrate events..."
+        absent  api_key    -> HTTP 401  "event submitted without an api_key"
+
+    So this catches a malformed payload and any transport failure, and it
+    **cannot** catch a wrong, rotated or revoked project token: PostHog accepts
+    an invalid key with 200 and drops the event server-side.  The 401 is
+    unreachable from here — ``send_event`` returns early when the key is empty,
+    so a request without one is never built.  A token problem is therefore
+    invisible from this side by construction, which is exactly why the
+    zero-volume alert on ``turn_completed`` is not optional.
+
+    Note the rejection is caught as ``HTTPError``, not read off a response.
+    ``urlopen`` **raises** on 4xx/5xx rather than returning something with a
+    ``.status`` to inspect — an earlier version of this function checked the
+    status inside a ``with`` block that a rejection never reaches, and its test
+    passed only because the stub returned where urllib raises.
+    """
+    try:
+        # Inside the try on purpose: `Request()` raises ValueError on a malformed
+        # URL, and a bad `ANTON_POSTHOG_HOST` is a user-supplied value. This runs
+        # in a daemon thread, outside `send_event`'s guard, so anything escaping
+        # here reaches the user as a traceback mid-session — which would break
+        # this module's stated guarantee that it never raises.
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": _POSTHOG_USER_AGENT,
+            },
+        )
+        urllib.request.urlopen(request, timeout=_TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        # The status is worth more than a traceback to whoever is reading logs
+        # on a user's machine.
+        logger.debug("posthog capture rejected: HTTP %s", exc.code)
+    except Exception:
+        logger.debug("posthog capture failed", exc_info=True)
+
+
 def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
     """Send an analytics event in a background thread.
 
@@ -171,21 +322,50 @@ def send_event(settings: "AntonSettings", action: str, **extra: str) -> None:
         # from CI runs, and dropping avoids a per-query exclusion filter.
         if _is_ci():
             return
-        url = settings.analytics_url
-        if not url:
-            return
 
         params: dict[str, str] = {
             "action": action,
             "aid": get_installation_id(),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "_": str(int(time.time() * 1000)),
+            _CACHE_BUSTER_KEY: str(int(time.time() * 1000)),
         }
         params.update(extra)
 
-        full_url = f"{url}?{urllib.parse.urlencode(params)}"
+        # Blanking ``analytics_url`` has always stopped EVERY event, because the
+        # ``if not url: return`` below used to sit above this branch. Keep that
+        # true: it is a de-facto kill switch people rely on, and a routed event
+        # that ignored it would start shipping turn metadata to PostHog on
+        # upgrade for someone who had deliberately switched telemetry off, with
+        # nothing telling them.
+        #
+        # Re-pointing the URL at a private collector is NOT treated as
+        # suppression here — that is a live question about what the variable
+        # means, not something to settle silently. ``ANTON_POSTHOG_KEY=""``
+        # disables this sink specifically; both are documented in
+        # docs/configure/analytics.md.
+        if not settings.analytics_url:
+            return
 
-        t = threading.Thread(target=_fire, args=(full_url,), daemon=True)
+        if action in _POSTHOG_EVENTS:
+            # POST, not GET: a query string is copied into gateway, CDN and WAF
+            # access logs, which is how the sibling endpoint ended up with real
+            # email addresses in them (ENG-1355 §2). A body is not.
+            key = getattr(settings, "posthog_key", "") or ""
+            host = (getattr(settings, "posthog_host", "") or "").rstrip("/")
+            if not key or not host:
+                return
+            t = threading.Thread(
+                target=_fire_posthog,
+                args=(f"{host}/capture/", _posthog_body(key, action, params)),
+                daemon=True,
+            )
+        else:
+            url = settings.analytics_url
+            t = threading.Thread(
+                target=_fire,
+                args=(f"{url}?{urllib.parse.urlencode(params)}",),
+                daemon=True,
+            )
         t.start()
     except Exception:
         pass

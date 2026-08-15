@@ -34,6 +34,13 @@ _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 # one would have.
 _SALVAGE_MAX = 10_000
 
+# The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
+# it's progressing, so a wedged cell stays silent — for as long as
+# cell_total_max — unless we say something. First notice no earlier than
+# this many seconds of silence, then no more often than this (ENG-1324).
+_QUIET_NOTICE_AFTER = 60.0
+_QUIET_NOTICE_EVERY = 60.0
+
 # Extra headroom on top of cell_install_timeout while an in-cell auto-install
 # runs: the worker enforces the budget itself and reports a named install
 # error, so the parent's windows must outlast the worker's timer for that
@@ -180,6 +187,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
     _MAX_VENV_RETRIES = 3
+    # ENG-1273: how many times in a row execute_streaming() will silently
+    # resume() a dead process before concluding resume() itself isn't the
+    # fix (most likely the snapshot it keeps reloading) and falling back to
+    # a full reset() instead of retrying resume() forever.
+    _MAX_CONSECUTIVE_AUTO_RESUMES = 2
 
     def __init__(
         self,
@@ -219,6 +231,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
         self._venv_python: str | None = None
+        # recovery bookkeeping for a process that died on its own
+        # (watchdog kill, crash) — see resume() / _auto_resume(). The death
+        # counter is zeroed by reset(): whatever was wrong before, a reset is
+        # a clean slate. The recovery note and error are preserved separately
+        # for Task 2 to consume and report to the UI.
+        self._consecutive_deaths: int = 0
+        self._pending_recovery_note: str | None = None
+        self._last_resume_error: str | None = None
+        self._last_verify_error: str | None = None
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -249,6 +270,24 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         except OSError:
             return None
         return path
+
+    def _snapshot_configured(self) -> bool:
+        """Whether this pad's namespace snapshot will actually be read or
+        written for THIS run — both conditions must hold: a session id
+        that resolves to a writable path (see `_session_snapshot_path`),
+        and persistence turned on for the child, read the same way
+        `scratchpad_boot.py` reads `ANTON_SCRATCHPAD_PERSIST_SESSION`.
+
+        Used to keep the kill message honest (ENG-1273): claiming a
+        restoration that cannot happen — e.g. bare CLI use with no session
+        id — is the same false contract this ticket exists to fix, just
+        pointed the other way.
+        """
+        if self._session_snapshot_path() is None:
+            return False
+        return os.environ.get(
+            "ANTON_SCRATCHPAD_PERSIST_SESSION", "false"
+        ).lower() in {"1", "true", "yes", "on"}
 
     def _discard_session_snapshot(self) -> None:
         """Delete this pad's namespace snapshot, if any. Best-effort."""
@@ -286,8 +325,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     self._setup_parent_site_packages()
                     self._save_python_version()
                     return
+                detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
                 raise RuntimeError(
-                    f"venv Python binary at {self._venv_python} is not functional"
+                    f"venv Python binary at {self._venv_python} is not functional{detail}"
                 )
             except Exception as exc:
                 last_error = exc
@@ -305,14 +345,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             return uv
         if sys.platform == "win32":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
             candidates = (
                 os.path.expanduser("~/.local/bin/uv.exe"),
                 os.path.expanduser("~/.cargo/bin/uv.exe"),
+                os.path.expanduser("~/scoop/shims/uv.exe"),
+                os.path.join(local_app_data, "Microsoft", "WinGet", "Links", "uv.exe"),
             )
         else:
+            # Package-manager locations a GUI-launched parent's PATH may miss.
+            # Keep in sync with cowork's uv-paths.ts.
             candidates = (
                 os.path.expanduser("~/.local/bin/uv"),
                 os.path.expanduser("~/.cargo/bin/uv"),
+                "/opt/homebrew/bin/uv",
+                "/usr/local/bin/uv",
+                "/opt/local/bin/uv",
+                "/home/linuxbrew/.linuxbrew/bin/uv",
             )
         for candidate in candidates:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -327,27 +376,38 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         uv = self._find_uv()
         if uv:
-            _sp.run(
-                [
-                    uv,
-                    "venv",
-                    self._venv_dir,
-                    "--python",
-                    sys.executable,
-                    "--system-site-packages",
-                    "--seed",
-                    "--quiet",
-                ],
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
+            try:
+                _sp.run(
+                    [
+                        uv,
+                        "venv",
+                        self._venv_dir,
+                        "--python",
+                        sys.executable,
+                        "--system-site-packages",
+                        "--seed",
+                        "--quiet",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (_sp.CalledProcessError, _sp.TimeoutExpired) as exc:
+                # CalledProcessError/TimeoutExpired.__str__ omits the captured
+                # stderr, so uv's actual reason (bad --python, disk full) was
+                # never seen — only "returned non-zero exit status N".
+                stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+                raise RuntimeError(f"uv venv failed: {stderr}" if stderr else str(exc)) from exc
         else:
+            # symlinks=False is venv.create()'s own default on every platform
+            # (only the `python -m venv` CLI defaults it per-OS); a copied
+            # macOS Python binary loses its @rpath and crashes on launch.
             venv.create(
                 self._venv_dir,
                 system_site_packages=True,
                 with_pip=False,
                 clear=True,
+                symlinks=sys.platform != "win32",
             )
 
         if sys.platform == "win32":
@@ -384,6 +444,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         return self.venv_python()
 
     def _verify_venv_python(self) -> bool:
+        self._last_verify_error = None
         if self._venv_python is None:
             return False
         if not os.path.exists(self._venv_python):
@@ -396,8 +457,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 capture_output=True,
                 timeout=5,
             )
-            return result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
-        except Exception:
+            ok = result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
+            if not ok:
+                stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                self._last_verify_error = f"exit {result.returncode}" + (f": {stderr}" if stderr else "")
+            return ok
+        except Exception as exc:
+            self._last_verify_error = str(exc)
             return False
 
     def _nuke_venv(self) -> None:
@@ -673,18 +739,97 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 "The Python venv has been deleted and will be recreated on next attempt."
             ) from exc
 
+    async def resume(self) -> None:
+        """Restart a dead process WITHOUT discarding its namespace snapshot.
+
+        Recovery from something the agent did not ask for — a watchdog kill, a
+        crash — so the last COMPLETED cell's state (dumped to disk after every
+        cell, ENG-1124) is exactly what should come back. `start()` below
+        already reloads the snapshot whenever ANTON_SCRATCHPAD_SESSION_PATH
+        points at one, so there is no separate load path to write here — the
+        only thing this adds over a bare restart is NOT calling
+        `_discard_session_snapshot()` first, which is what `reset()` does.
+
+        Called automatically by `execute_streaming()` when it finds the
+        process dead (see `_auto_resume`) — the agent never has to ask for
+        this explicitly.
+        """
+        await self._stop_process()
+        await self.start()
+
     async def reset(self) -> None:
-        """Kill the process, clear cells, and restart."""
+        """Kill the process, clear cells, and restart — discarding all state,
+        including the on-disk namespace snapshot.
+
+        Deliberately different from `resume()`: `reset` is the agent's
+        explicit "wipe everything" ask (or the auto-resume fallback below
+        giving up on resume()), so the snapshot has to go too. Since the
+        namespace is now snapshotted to disk (ENG-1124), leaving it in place
+        would mean `start()` below reloads it and `reset` silently stops
+        resetting anything. Also clears the auto-resume death counter —
+        whatever was wrong before, a reset is a clean slate either way.
+        """
         await self._stop_process()
         self.cells.clear()
-        # The tool contract for `reset` is "clearing all state (installed packages
-        # survive)". Since the namespace is now snapshotted to disk (ENG-1124), the
-        # snapshot has to go too — otherwise start() below reloads it and `reset`
-        # silently stops resetting anything.
         self._discard_session_snapshot()
+        self._consecutive_deaths = 0
         if not self._verify_venv_python():
             self._nuke_venv()
         await self.start()
+
+    async def _auto_resume(self) -> bool:
+        """Best-effort recovery from a dead scratchpad process (ENG-1273).
+
+        Called from the top of `execute_streaming()` when the process isn't
+        running. Tries `resume()` first, so the pad comes back with the
+        namespace as of the last completed cell intact. After
+        `_MAX_CONSECUTIVE_AUTO_RESUMES` deaths in a row with `resume()`
+        itself never once producing a live process in between, `resume()`
+        clearly isn't fixing whatever is wrong, so this falls back to a
+        full `reset()` instead of retrying `resume()` forever.
+
+        The counter tracks resume() FAILING to come back alive, not cells
+        getting killed: a resume that succeeds — proven by the process
+        being alive right after — zeroes it immediately, even if the cell
+        that runs next gets killed for its own reasons (e.g. running over
+        its own time budget). Otherwise a batch of several legitimately
+        slow cells in a row would trip the fallback and wipe state for a
+        reason that has nothing to do with resume() failing (final-review
+        finding, ENG-1273).
+
+        Returns whether the process is running afterward. Never raises — a
+        `resume()`/`reset()` failure (e.g. the venv itself won't come up) is
+        reported via `_last_resume_error` and a False return, so the caller
+        can degrade to an error Cell instead of crashing the turn.
+        """
+        if self._consecutive_deaths >= self._MAX_CONSECUTIVE_AUTO_RESUMES:
+            try:
+                await self.reset()
+            except Exception as exc:
+                self._last_resume_error = str(exc)
+                return False
+            if self._proc is None or self._proc.returncode is not None:
+                self._last_resume_error = "process not running after reset"
+                return False
+            self._consecutive_deaths = 0
+            self._pending_recovery_note = (
+                f"Scratchpad kept dying after {self._MAX_CONSECUTIVE_AUTO_RESUMES} "
+                "resume attempts, so it was fully reset (all state cleared, "
+                "including the saved namespace) before running this cell."
+            )
+            return True
+
+        self._consecutive_deaths += 1
+        try:
+            await self.resume()
+        except Exception as exc:
+            self._last_resume_error = str(exc)
+            return False
+        if self._proc is None or self._proc.returncode is not None:
+            self._last_resume_error = "process not running after resume"
+            return False
+        self._consecutive_deaths = 0
+        return True
 
     async def close(self) -> None:
         """Kill the process and save requirements; preserve the venv."""
@@ -730,16 +875,33 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         estimated_seconds: int = 0,
     ):
         """Async generator: yields progress strings then a final Cell."""
+        recovery_note: str | None = None
         if self._proc is None or self._proc.returncode is not None:
-            yield Cell(
-                code=code,
-                stdout="",
-                stderr="",
-                error="Scratchpad process is not running. Use reset to restart.",
-                description=description,
-                estimated_time=estimated_time,
-            )
-            return
+            # ENG-1273: a dead process (watchdog kill, crash, or anything
+            # else) recovers automatically here rather than making the agent
+            # discover it and call reset — which used to be the only path,
+            # and which throws away the very state ENG-1124 started saving.
+            if not await self._auto_resume():
+                yield Cell(
+                    code=code,
+                    stdout="",
+                    stderr="",
+                    error=(
+                        "Scratchpad process is not running and could not be "
+                        "recovered automatically "
+                        f"({self._last_resume_error or 'unknown error'}). "
+                        "Use reset to restart with a clean state."
+                    ),
+                    description=description,
+                    estimated_time=estimated_time,
+                )
+                return
+            # Grabbed once and cleared immediately: whatever happens to THIS
+            # cell (succeeds, errors, or is killed again), the note must
+            # reach the agent exactly once, attached to this cell's result —
+            # never left dangling on a later, unrelated one.
+            recovery_note = self._pending_recovery_note
+            self._pending_recovery_note = None
 
         # Fresh salvage state per cell: _read_result accumulates the worker's
         # stdout chunks here so a kill/crash can still report partial output.
@@ -768,8 +930,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 await asyncio.wait_for(self._proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
+            if self._snapshot_configured():
+                state_note = (
+                    "This cell's own progress is lost, but the scratchpad's "
+                    "namespace as of the last completed cell was already "
+                    "saved to disk — the next exec call restores it "
+                    "automatically, so you do not need to call reset for "
+                    "this. Use reset only if you want to deliberately wipe "
+                    "all state instead."
+                )
+            else:
+                state_note = (
+                    "This cell's state is lost, and this scratchpad has no "
+                    "session persistence configured, so nothing survives "
+                    "the restart. Use reset if you want a clean slate — "
+                    "either way the next exec call starts from an empty "
+                    "namespace."
+                )
             error_msg = (
-                f"{exc}. Process killed — state lost. Use reset to restart.\n\n"
+                f"{exc}. {state_note}\n\n"
                 "If a database query was running, it may still be executing server-side.\n"
                 "To check and cancel: run SHOW PROCESSLIST (MySQL) or\n"
                 "SELECT * FROM information_schema.processlist WHERE status='running' "
@@ -794,6 +973,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 error=error_msg,
                 description=description,
                 estimated_time=estimated_time,
+                logs=recovery_note or "",
             )
             self.cells.append(cell)
             yield cell
@@ -809,6 +989,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 ),
                 description=description,
                 estimated_time=estimated_time,
+                logs=recovery_note or "",
             )
             self.cells.append(cell)
             yield cell
@@ -824,6 +1005,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         for pkg in result_data.get("auto_installed") or []:
             self._installed_packages.add(pkg.lower())
 
+        logs = result_data.get("logs", "")
+        if recovery_note:
+            logs = f"{recovery_note}\n\n{logs}" if logs else recovery_note
         cell = Cell(
             code=code,
             stdout=result_data.get("stdout", ""),
@@ -831,9 +1015,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             error=result_data.get("error"),
             description=description,
             estimated_time=estimated_time,
-            logs=result_data.get("logs", ""),
+            logs=logs,
         )
         self.cells.append(cell)
+        # The process proved itself alive by completing this round trip —
+        # whatever earlier death streak led here (if any) is over. This is
+        # in addition to (not instead of) the reset inside _auto_resume()
+        # when a resume succeeds — that one covers a cell that gets killed
+        # right after a successful resume; this one covers the steady-state
+        # case where the pad was never dead to begin with.
+        if self._proc is not None and self._proc.returncode is None:
+            self._consecutive_deaths = 0
         yield cell
 
     async def _read_result(
@@ -855,6 +1047,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         in_result = False
         start = _time.monotonic()
         current_inactivity = inactivity_timeout
+        last_notice = 0.0
+        last_output = 0.0
 
         # In-cell auto-install span (ENG-1275). While the worker's installer
         # runs, both kill windows defer to the install budget — the same
@@ -950,6 +1144,28 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
             if line.startswith(HEARTBEAT_MARKER):
                 # Liveness only: arrival already re-armed the readline timer.
+                # Do NOT extend current_inactivity here — a bare heartbeat is
+                # a machine signal, not evidence of progress; only an
+                # explicit progress() call earns that (ENG-1324). This
+                # branch only runs when the cell shipped no new output
+                # (otherwise STDOUT_CHUNK_MARKER fires instead), so a chatty
+                # cell never reaches it.
+                if (
+                    elapsed - last_output >= _QUIET_NOTICE_AFTER
+                    and elapsed - last_notice >= _QUIET_NOTICE_EVERY
+                ):
+                    last_notice = elapsed
+                    if installing:
+                        yield (
+                            f"still running — installing '{installing}', "
+                            f"{elapsed / 60:.0f}m elapsed of "
+                            f"~{total_timeout / 60:.0f}m budget"
+                        )
+                    else:
+                        yield (
+                            f"still running — {elapsed / 60:.0f}m elapsed of "
+                            f"~{total_timeout / 60:.0f}m budget"
+                        )
                 continue
 
             if line.startswith(STDOUT_CHUNK_MARKER):
@@ -962,6 +1178,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 except json.JSONDecodeError:
                     chunk = ""
                 if isinstance(chunk, str) and chunk:
+                    last_output = elapsed
                     self._salvage.append(chunk)
                     total = sum(len(c) for c in self._salvage)
                     while total > _SALVAGE_MAX and len(self._salvage) > 1:
@@ -970,6 +1187,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 continue
 
             if line.startswith(PROGRESS_MARKER):
+                last_output = elapsed
                 current_inactivity = max(
                     current_inactivity, float(s.cell_inactivity_after_progress)
                 )

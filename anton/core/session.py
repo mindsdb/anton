@@ -21,6 +21,8 @@ from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
+from anton.core.root_cause import RootCauseLedger
+from anton.core.root_cause import classify as classify_root_cause
 from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
@@ -135,6 +137,31 @@ _TRUNCATION_FAILURE_NOTICE = (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The legacy substring verdict, for handlers that never declared a `ToolOutcome`
+#: (ENG-1276 migrated five sites; the rest still return plain strings). Kept
+#: byte-identical to `_apply_error_tracking`'s fallback so the two cannot drift
+#: into disagreeing about what a failure is.
+#:
+#: **This tuple is the boundary of the coverage metric.** A legacy handler that
+#: reports failure in plain prose matches nothing here and is not counted at all
+#: — cowork-server's `connect_new_datasource` returns "Could not connect to the
+#: datasource.", which matches none of the five. Measured:
+#:
+#:     captured=True   Install failed (exit 1): … fatal error: sql.h
+#:     captured=True   Install timed out after 300s.
+#:     captured=False  Could not connect to the datasource.
+#:     captured=False  Successfully installed pandas-2.2.0   <- correctly skipped
+#:
+#: The direction is safe — a miss shows up as LOW `reason_coverage` rather than
+#: the false 1.0 this list exists to prevent — but do not read coverage as
+#: "share of failures classified" without remembering the denominator is itself
+#: substring-defined.
+_LEGACY_FAILURE_MARKERS = ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
+
+
+def _legacy_looks_like_failure(text: str) -> bool:
+    return any(m in text for m in _LEGACY_FAILURE_MARKERS)
 
 
 if TYPE_CHECKING:
@@ -286,11 +313,50 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.TransportError,
 )
 
+# Verdict-call failures that are DETERMINISTIC DENIALS: the provider will give
+# the identical answer on every retry this session — a wallet that can't pay
+# for the verifier's model (TokenLimitExceeded: 402 ``wallet_empty`` / 429
+# ``included_allowance_exhausted``, both code-exact per ENG-1169; velocity 429s
+# map to TransientProviderError and never land here) or a model id that doesn't
+# resolve for this key (ModelUnavailableError: 404 model-not-found / 403
+# model-access-denied). These latch on the FIRST occurrence and stay silent:
+# the turn's work already succeeded, and "the task-completion check failed
+# (internal error)" is a lie when the check was merely priced out (ENG-1632 —
+# of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
+# were aux-surface calls like this one, across 33 of those users; every aux
+# one surfaced to the user as an internal error and an apology).
+#
+# ORDER MATTERS in the verdict loop: this clause must precede
+# _TRANSIENT_VERDICT_ERRORS. ModelUnavailableError subclasses ConnectionError →
+# OSError, so the transient clause would otherwise swallow it as a blip and
+# re-diagnose every turn forever (its pre-ENG-1632 behavior). TokenLimitExceeded
+# is a plain Exception and would fall to the generic "hard" handler instead —
+# wrong the other way: a full-history diagnosis on turn one, latch only at two.
+_DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
+    TokenLimitExceeded,
+    ModelUnavailableError,
+)
+
 # Turns a latched session skips before spending one verdict call to see whether
 # the cause has gone away (user switched model, gateway fix shipped). Without a
 # re-probe the latch is permanent for the session and "reset on a successful
 # verdict" can never fire, since a latched session makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
+
+# Floor for the tokens held back from the spend ceiling (ENG-1286).
+#
+# TWO calls land after the last check that passed, not one: the call that
+# carried the total over the gate (the gate is only read between calls, so the
+# crossing is never observed mid-flight), and then the hand-back diagnosis,
+# which is a full-history planning call. So the reserve has to cover both or the
+# turn overshoots the ceiling it promised — the actual per-call cost on these
+# turns is ~200k, which a flat 200k reserve under-covers by half.
+#
+# The live reserve is therefore `max(this, 2 x peak_context_tokens)`: the
+# turn's own largest call is the best available estimate of what the next two
+# will cost, and ENG-1288 already tracks it. This floor only applies before any
+# call has reported usage.
+_SPEND_CEILING_RESERVE = 200_000
 
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
@@ -605,10 +671,20 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
-    # Identifier for the host harness driving this session (e.g. "cowork",
-    # "cli"). Surfaced on telemetry / langfuse traces so the harness that
-    # produced a given trace is filterable in the dashboard. None means the
-    # host didn't identify itself.
+    # Identifier for the host driving this session. Surfaced on telemetry /
+    # langfuse traces so the host that produced a given trace is filterable.
+    #
+    # The values actually in use, which are NOT what this field's name suggests:
+    #   "cli"     — anton's own interactive chat (chat_session.py, chat.py)
+    #   "anton"   — cowork-server, which passes its *agent harness* id here;
+    #               desktop and hosted web are indistinguishable, both send
+    #               this (ENG-1459 is where that gets split)
+    #   "cloud"   — the one-turn-per-pod cloud path
+    #   None      — a host that did not identify itself
+    #
+    # None must stay reserved for that last case: until ENG-1495 the CLI left it
+    # unset, so "" meant both "CLI" and "unidentified" and nothing could tell
+    # them apart.
     harness: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
@@ -659,6 +735,23 @@ class ChatSession:
     # per-surface / config knob) and injectable in tests.
     _transient_budget_s: float = 30.0
 
+    # ENG-1537: a velocity rate-limit gets its OWN, larger budget, accounted
+    # separately from the incident budget above. Two reasons they can't share:
+    # a provider incident has an unknown duration, so 30s is a guess at "long
+    # enough to be worth waiting, short enough not to hang the turn" — whereas
+    # a rate limit has a *known* end time the server hands us in Retry-After,
+    # and the MindsHub ceiling is a per-MINUTE token window, so 30s can expire
+    # while the window still has 30s to run. 90s covers a full window rolling
+    # over. Separate accounting also stops one failure mode starving the other
+    # inside a single turn.
+    _rate_limit_budget_s: float = 90.0
+
+    # Longest single sleep honoured from a Retry-After on a rate limit. Above
+    # this we stop waiting and surface the card naming the interval: silently
+    # absorbing a multi-minute hint reads as a hang, and the user can make a
+    # better decision about a 5-minute wait than we can.
+    _rate_limit_max_delay_s: float = 60.0
+
     def __init__(self, config: ChatSessionConfig) -> None:
         s = config.settings or CoreSettings()
         # Stash the full settings object (may be AntonSettings, CoreSettings,
@@ -669,6 +762,20 @@ class ChatSession:
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
+        # Per-turn raw-token ceiling (ENG-1286). getattr so a host passing an
+        # older settings object doesn't break — absent means "no ceiling",
+        # matching the pre-ENG-1286 behaviour rather than silently applying one.
+        self._max_turn_tokens = getattr(s, "max_turn_tokens", 0)
+        # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
+        # nothing reads this to change behaviour. The control that will
+        # (ENG-1531) is deliberately unbuilt until this has reported real
+        # numbers, because the thresholds it needs rest on one incident.
+        #
+        # Lifetime is this ChatSession, which is NOT the same as a conversation
+        # on every host: the CLI builds one session and loops, but cowork-server
+        # builds a fresh one per HTTP turn, so there this resets every turn.
+        # See `RootCauseLedger` for what that does and does not still measure.
+        self._root_causes = RootCauseLedger()
         # Latch for a verifier that fails the same hard way every turn — e.g.
         # kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), which
         # fails on every verdict call until the gateway fix lands. Without the
@@ -678,6 +785,10 @@ class ChatSession:
         self._verifier_hard_failures = 0
         self._verifier_latched = False
         self._verifier_latch_skips = 0
+        # Why the latch is set — "hard" (capability, ENG-1095) or "denied"
+        # (billing/model access, ENG-1632) — so the skip log names the real
+        # cause instead of reporting "0 hard failures" for a denied latch.
+        self._verifier_latch_reason = ""
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -904,6 +1015,67 @@ class ChatSession:
             "summary": self._history[0]["content"],
             "covered_through": min(self._last_compacted_count, self._seed_len),
         }
+
+
+    def _record_root_cause(
+        self, tool_ok: bool | None, reason: str, result_text: str
+    ) -> None:
+        """Classify one tool failure into the session ledger (ENG-1492).
+
+        MEASUREMENT ONLY. This must never change what the turn does — it exists
+        so ENG-1531's thresholds can come from data rather than from the single
+        ENG-836 trace, and so "is a wall-repeat population large enough to
+        justify a breaker at all" becomes answerable.
+
+        Keyed on the handler's own `ToolOutcome.reason` (ENG-1276), falling back
+        to the result text only to record that the reason was MISSING — that
+        path lands in `unclassified`, which no trip rung can read. Guarded whole
+        because a reporting side-effect must never be able to fail a turn.
+        """
+        if tool_ok is None:
+            # Unmigrated handler: it signals failure by RETURNING an error
+            # string, so `ok` is None and the legacy substring match is the only
+            # verdict available. Dropping these entirely was the defect —
+            # `reason_coverage` then reported 1.0 by excluding the uncovered
+            # population from its own denominator, i.e. the metric that exists
+            # to expose under-coverage could not. Measured: a turn with 1
+            # migrated and 3 unmigrated failures reported coverage 1.0.
+            #
+            # Counted as `unclassified`, which is not trip-eligible — the text
+            # is prose the model can influence, which is the ENG-1276 defect one
+            # level up, so it must never create a wall.
+            # The predicate is INSIDE the guard on purpose. No reachable crash
+            # exists today (`result_text` is only ever `str` or `list`, both safe
+            # for `in`), but "guarded whole" is the claim the whole
+            # no-behaviour-change argument rests on, and a claim that is only
+            # almost true is the kind that rots quietly. #348 review.
+            try:
+                if not _legacy_looks_like_failure(result_text or ""):
+                    return
+                self._root_causes.add(
+                    classify_root_cause("", result_text or "")
+                )
+            except Exception:
+                # Count it, don't just log it — `logger.debug` is not emitted in
+                # production, so a systematically broken classifier would be
+                # indistinguishable from a turn where nothing failed.
+                #
+                # Both guards deliberately carry NO `pragma: no cover`: the
+                # wiring tests execute them, and excluding them would hide a
+                # removed `note_error()` from a coverage gate — the same silent
+                # hole this counter exists to close. #348 review.
+                self._root_causes.note_error()
+                logger.debug("root-cause classification failed", exc_info=True)
+            return
+        if tool_ok is not False:
+            return
+        try:
+            self._root_causes.add(
+                classify_root_cause(reason or "", result_text or "")
+            )
+        except Exception:
+            self._root_causes.note_error()
+            logger.debug("root-cause classification failed", exc_info=True)
 
     def _apply_error_tracking(
         self,
@@ -1769,19 +1941,38 @@ class ChatSession:
         return compacted
 
     @staticmethod
-    def _transient_backoff_delay(attempt: int, retry_after: float | None = None) -> float:
+    def _transient_backoff_delay(
+        attempt: int, retry_after: float | None = None, max_delay: float = 30.0
+    ) -> float:
         """Backoff for a transient-provider retry (ENG-673).
 
         Honors a provider `retry_after` when present (usually only on
         request-time 429/529 — the mid-stream 200 case carries none). Otherwise
         ~2s → ~10s → ~18s with ±20% jitter, so a fleet recovering from the same
         incident doesn't retry in lockstep against an already-struggling provider.
+
+        ``max_delay`` caps a server-supplied hint. It defaults to the incident
+        value; a rate limit passes a larger one, because there the hint is a
+        real end time rather than a guess and clamping it to 30s would retry
+        into a window that is still closed (ENG-1537).
+
+        **A hint never retries FASTER than the curve** — it is a floor on the
+        wait, not a replacement for it. Obeying a small hint verbatim ignores
+        ``attempt`` entirely, and the gateway's small hints are the common case,
+        not an edge one: an RPM denial computes ``ceil(deficit / refill)``,
+        which at the deployed capacity/refill is always exactly 1, and a
+        concurrency denial sends a flat 1 whose own config calls it a fake end
+        time ("slots free on report, not on a clock"). Taken verbatim inside a
+        90s budget that is ~90 retries of one denial. Only the TPM control
+        produces hints large enough to be meaningful, and for those the hint
+        still wins because it exceeds the curve.
         """
-        if retry_after is not None and retry_after > 0:
-            return min(float(retry_after), 30.0)
         base = (2.0, 10.0, 18.0)
         d = base[attempt] if attempt < len(base) else base[-1]
-        return d * (0.8 + 0.4 * random.random())
+        d *= 0.8 + 0.4 * random.random()
+        if retry_after is not None and retry_after > 0:
+            return min(max(float(retry_after), d), max_delay)
+        return d
 
     async def _backoff_sleep(self, delay: float) -> bool:
         """Sleep `delay` seconds, waking early if the turn is cancelled.
@@ -2088,12 +2279,20 @@ class ChatSession:
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
         turn_index = tc.turn_index or (self._turn_count + 1)
+        # Never let reporting break a turn — same contract as the analytics
+        # sink below (ENG-1492).
+        try:
+            _root_cause_fields = self._root_causes.event_fields()
+        except Exception:  # pragma: no cover - defensive
+            _root_cause_fields = {}
         logger.info(
-            "turn_cost session=%s turn=%d ended_by=%s tokens_total=%d "
+            "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
+            "tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
-            "by_role=%s",
-            self._session_id, turn_index, tc.ended_by, tc.total_tokens,
+            "by_role=%s %s",
+            self._session_id, turn_index, tc.ended_by,
+            str(tc.verification_skipped).lower(), tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
             tc.continuations, tc.peak_context_tokens, tc.duration_ms,
@@ -2101,6 +2300,13 @@ class ChatSession:
                 f"{role}={s.model}:{s.tokens}/{s.calls}"
                 for role, s in sorted(tc.by_role.items())
             ) or "-",
+            # Root-cause tally (ENG-1492), session-cumulative. Appended to the
+            # SAME line rather than emitted separately so a turn's cost and the
+            # failures behind it can never be read apart, and so this survives
+            # the collector allowlist that silently dropped `turn_completed`'s
+            # properties for weeks (ENG-1355) — the log is the sink that does
+            # not depend on it.
+            " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
         )
 
         # Analytics sink — same settings-resolution pattern as the
@@ -2121,7 +2327,17 @@ class ChatSession:
             send_event(
                 settings,
                 "turn_completed",
+                # Root-cause tally (ENG-1492). These are new property NAMES, so
+                # they need ENG-1355's pass-through fix (or ENG-1495's direct
+                # route) to reach PostHog at all — until then the log line above
+                # is the only sink, and its absence here is not evidence the
+                # classification is broken.
+                **_root_cause_fields,
                 ended_by=tc.ended_by,
+                # A completed-but-unverified turn (denied/latched verifier,
+                # ENG-1632) must be excludable from the honest-stop
+                # denominator without a per-conversation Langfuse hop.
+                verification_skipped=str(tc.verification_skipped).lower(),
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -2174,6 +2390,116 @@ class ChatSession:
         except Exception:
             # Reporting must never affect the turn that just ran.
             pass
+
+    def _spend_ceiling_reached(self) -> bool:
+        """True when this turn has spent enough that it must stop and ask.
+
+        Reads `TurnCost.total_tokens` — raw tokens, the unit the user's included
+        allowance drains in (see `CoreSettings.max_turn_tokens` for why cache
+        reads are NOT discounted here). Gated at `ceiling - reserve` so the
+        hand-back's own call fits inside the promised ceiling.
+
+        Returns False when the ceiling is disabled (0) or the books are closed,
+        so a host on older settings, or any path that runs outside a turn, keeps
+        exactly its pre-ENG-1286 behaviour.
+
+        This is pure arithmetic and says nothing about whether the turn has done
+        any WORK yet. An earlier version of this docstring claimed it could only
+        fire after real work had happened, on the reasoning that every call site
+        sits inside the tool loop; that is true of LLM calls and false of tool
+        dispatches, which happen later in the same iteration. The per-round call
+        site carries the progress condition explicitly — see
+        `_spend_ceiling_stops_the_tool_loop`.
+        """
+        if self._max_turn_tokens <= 0 or self._turn_cost is None:
+            return False
+        return self._turn_cost.total_tokens >= self._spend_ceiling_gate()
+
+    def _spend_ceiling_stops_the_tool_loop(self) -> bool:
+        """Should the tool loop stop here on the spend ceiling?
+
+        The ceiling, plus the one thing it must never do: end a turn that has
+        dispatched no tools at all. The gate is checked at the TOP of a round,
+        before dispatch, so on the first round a small ceiling would break the
+        loop having run nothing — the user gets a "this used a lot of tokens"
+        message for a task that never started.
+
+        `TurnCost.rounds` is turn-wide (it accumulates across verifier-forced
+        continuations rather than resetting with the loop-local counter), so
+        `> 1` means at least one round has completed its dispatch — including
+        rounds from an earlier continuation, which is why a continuation cannot
+        hand out a fresh free round.
+
+        Belt and braces with the reserve cap in `_spend_ceiling_gate`: that cap
+        keeps the gate proportional to the ceiling, this keeps the guarantee true
+        even for a ceiling smaller than a single call — a shape the settings
+        floor is supposed to prevent, but which anton's own `max_turn_tokens`
+        has no bounds on for CLI and host callers.
+        """
+        if not self._spend_ceiling_reached():
+            return False
+        rounds = self._turn_cost.rounds if self._turn_cost is not None else 0
+        return rounds > 1
+
+    def _spend_ceiling_gate(self) -> int:
+        """The token total at which the turn must stop starting new work.
+
+        Sits a reserve below the ceiling because two more calls are still coming
+        after the last check that passed — the one that crosses the gate (the
+        total is only read *between* calls, so the crossing is never observed
+        mid-flight), and the hand-back. Sized from this turn's own
+        `peak_context_tokens` rather than a constant: a turn carrying 190k of
+        context per call overshoots a flat 200k reserve by roughly a full call.
+
+        **The reserve is capped at half the ceiling**, and that cap is the whole
+        reason small ceilings are usable. Without it the reserve bears no
+        relation to the ceiling's size, so any ceiling at or below the reserve
+        drove this to the `max(..., 1)` floor — the gate then tripped on the
+        first check, before any tool had been dispatched, and the turn still
+        paid for two calls. Measured at a 100k ceiling with 190k contexts: zero
+        tools run, 400k spent, 300% over the number the user asked for. The cap
+        binds only below ~2x the reserve; at the 1.25M default it changes
+        nothing.
+
+        The bound this produces is close, not exact: the reserve is derived from
+        `peak_context_tokens` (input + cache_read + cache_creation) but compared
+        against `total_tokens`, which also counts output, so a turn can land
+        over the ceiling by roughly two output budgets. See
+        `test_total_is_bounded_by_the_ceiling` for the asserted form.
+        """
+        peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
+        reserve = min(
+            max(_SPEND_CEILING_RESERVE, 2 * peak),
+            max(self._max_turn_tokens // 2, 1),
+        )
+        return max(self._max_turn_tokens - reserve, 1)
+
+    def _spend_ceiling_notice(self) -> str:
+        """The SYSTEM injection for a ceiling stop.
+
+        Mirrors the 25-round cap's pause-and-ask wording deliberately: the user
+        already meets that shape when a long turn stops, and two different
+        "I stopped, shall I go on?" behaviours would read as two different
+        products. `Do NOT retry automatically` is what keeps this a question
+        rather than a speed bump the model drives straight through.
+
+        Deliberately does NOT quote a share of the user's allowance. The turn
+        knows its token count but not the plan behind it — BYOK users have no
+        MindsHub allowance at all — and inventing "you've used a quarter of your
+        month" for them would be a confident lie. The model is told what it
+        spent and asked to be honest that it was a lot.
+        """
+        spent = self._turn_cost.total_tokens if self._turn_cost is not None else 0
+        return (
+            f"SYSTEM: This turn has used {spent:,} tokens, which is a large amount "
+            "of work for a single request and counts against the user's plan. "
+            "Pause here. Summarize what you have accomplished so far and what "
+            "remains. Be straightforward that this has already taken a lot of "
+            "work, so the user can decide whether it is worth continuing. "
+            "If you are on a good track and can finish, say so and ask if they'd "
+            "like you to continue. "
+            "Do NOT retry automatically — wait for the user's response."
+        )
 
     async def _stream_handback_diagnosis(self, *, system: str, label: str):
         """Stream a hand-back diagnosis and persist exactly what the user read.
@@ -2656,6 +2982,35 @@ class ChatSession:
                 response = await self.plan_with_recovery(system=system)
                 break
 
+            # Spend ceiling (ENG-1286), mirroring turn_stream. Same reasoning as
+            # the cap mark above: public API, and the books are wired here too.
+            # This path runs no completion verifier, so there is no continuation
+            # gate to also check — the per-round check is the whole gate here.
+            #
+            # Uses the same `_spend_ceiling_stops_the_tool_loop` as the streaming
+            # loop, NOT the bare predicate: the "never end a turn that dispatched
+            # no tools" guarantee is stated unconditionally ("at any ceiling"),
+            # and CLI/host callers have no lower bound on `max_turn_tokens` at
+            # all, so this path is exactly where a tiny ceiling would break the
+            # loop on round 1 having run nothing (#344 review).
+            if self._spend_ceiling_stops_the_tool_loop():
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "spend_ceiling"
+                logger.info(
+                    "spend ceiling reached (turn): tokens=%d ceiling=%d "
+                    "tool_round=%d — pausing to ask the user",
+                    self._turn_cost.total_tokens if self._turn_cost else 0,
+                    self._max_turn_tokens, tool_round,
+                )
+                self._append_history(
+                    {"role": "assistant", "content": response.content or ""}
+                )
+                self._append_history(
+                    {"role": "user", "content": self._spend_ceiling_notice()}
+                )
+                response = await self.plan_with_recovery(system=system)
+                break
+
             # Build assistant message with content blocks
             assistant_content: list[dict] = []
             if response.content:
@@ -2714,6 +3069,7 @@ class ChatSession:
                         resilience_nudged.discard(tc.name)
                 else:
                     result = scrub_credentials(result)
+                    self._record_root_cause(outcome.ok, outcome.reason, result)
                     result = self._apply_error_tracking(
                         result,
                         tc.name,
@@ -2946,6 +3302,19 @@ class ChatSession:
         # connection errors) carry session_backoff=False and skip this path.
         _transient_deadline: float | None = None
         _transient_attempt = 0
+        # ENG-1537: velocity rate-limits are budgeted separately from incidents
+        # (see _rate_limit_budget_s) so neither starves the other in one turn.
+        # Accounted as TIME SLEPT, not a wall-clock deadline: the cohort this
+        # targets hits the ceiling repeatedly across a long turn, so denials
+        # arrive minutes apart with real work between them. A deadline set on
+        # the first denial would charge that work — tool rounds, continuations,
+        # compaction — against the wait budget and exhaust it without ever
+        # having waited 90s.
+        _rate_limit_slept = 0.0
+        # Its own attempt index too: a shared counter let a rate-limit wait
+        # advance the INCIDENT curve (and vice versa), so an interleaved turn
+        # jumped straight to the back of a curve it had never actually walked.
+        _rate_limit_attempt = 0
         self._active_explainability = ExplainabilityCollector(
             self._explainability_store,
             turn=self._turn_count + 1,
@@ -3059,18 +3428,66 @@ class ChatSession:
                     # count-based path below with their honest typed message.
                     if isinstance(_agent_exc, TransientProviderError) and _agent_exc.session_backoff:
                         now = asyncio.get_running_loop().time()
-                        if _transient_deadline is None:
-                            _transient_deadline = now + self._transient_budget_s
+                        # ENG-1537: a velocity rate-limit runs on its own budget
+                        # and its own longer Retry-After cap. Everything else
+                        # keeps the ENG-673 incident budget unchanged.
+                        _rate_limited = _agent_exc.code == "rate_limited"
+                        if _rate_limited:
+                            remaining_budget = self._rate_limit_budget_s - _rate_limit_slept
+                            max_delay = self._rate_limit_max_delay_s
+                        else:
+                            if _transient_deadline is None:
+                                _transient_deadline = now + self._transient_budget_s
+                            remaining_budget = _transient_deadline - now
+                            max_delay = 30.0
                         self._seal_dangling_tool_uses("interrupted by a transient provider error")
-                        remaining = _transient_deadline - now
+                        # A hint longer than we are willing to sleep: card NOW
+                        # and name the interval, rather than sleeping the cap
+                        # and then claiming "a moment" (ENG-1537 How #3). The
+                        # user can decide about a five-minute wait; we cannot
+                        # decide it for them by stalling the turn.
+                        _hint = getattr(_agent_exc, "retry_after", None)
+                        if _rate_limited and _hint is not None and _hint > max_delay:
+                            raise ProviderOverloadedError(
+                                "Too many requests too quickly — the limit clears in about "
+                                f"{int(_hint)}s. This isn't a credits problem.",
+                                provider=getattr(_agent_exc, "provider", "") or "",
+                                model=(getattr(_agent_exc, "model", "") or "")
+                                or getattr(self._llm, "planning_model", "") or "",
+                                code="rate_limited",
+                                retry_after=_hint,
+                            ) from _agent_exc
+                        remaining = remaining_budget
                         if remaining > 0.5:
+                            _attempt = (
+                                _rate_limit_attempt if _rate_limited else _transient_attempt
+                            )
                             delay = min(
                                 self._transient_backoff_delay(
-                                    _transient_attempt, _agent_exc.retry_after
+                                    _attempt, _agent_exc.retry_after, max_delay
                                 ),
                                 remaining,
                             )
-                            _transient_attempt += 1
+                            if _rate_limited:
+                                _rate_limit_attempt += 1
+                            else:
+                                _transient_attempt += 1
+                            if _rate_limited:
+                                _rate_limit_slept += delay
+                            # Tell the user WHY the turn is quiet. A silent
+                            # 90s pause is indistinguishable from a hang, and
+                            # that is how a correct wait gets reported as a
+                            # freeze. The SSE keepalive holds the connection
+                            # open; this holds the user's attention. Reuses the
+                            # existing progress affordance rather than adding
+                            # an event type, so the turn stays alive and the
+                            # user never has to type "continue" (ENG-1537).
+                            if _rate_limited:
+                                yield StreamTaskProgress(
+                                    phase="rate_limited",
+                                    message=f"waiting {max(1, round(delay))}s before continuing",
+                                    eta_seconds=delay,
+                                )
                             if await self._backoff_sleep(delay):
                                 # User cancelled during backoff — stop cleanly
                                 # (like a normal stop), not with an error card.
@@ -3080,12 +3497,29 @@ class ChatSession:
                         # the server renders as the provider_overloaded card.
                         # Name the model that actually failed (planning OR coding),
                         # falling back to the session's planning model.
+                        _model = (getattr(_agent_exc, "model", "") or "") or getattr(
+                            self._llm, "planning_model", ""
+                        ) or ""
+                        if _rate_limited:
+                            # Distinct code so cowork-server can render a
+                            # wait-and-retry card instead of the out-of-credits
+                            # one. Never say "incident": nothing is broken, and
+                            # never imply credits — buying more cannot raise a
+                            # per-minute ceiling (ENG-1537).
+                            raise ProviderOverloadedError(
+                                "Too many requests too quickly — the rate limit didn't "
+                                "clear in time. Waiting a moment and continuing should work; "
+                                "this isn't a credits problem.",
+                                provider=getattr(_agent_exc, "provider", "") or "",
+                                model=_model,
+                                code="rate_limited",
+                                retry_after=getattr(_agent_exc, "retry_after", None),
+                            ) from _agent_exc
                         raise ProviderOverloadedError(
                             f"{_agent_exc.provider or 'The model provider'} is experiencing an "
                             "incident and didn't recover in time.",
                             provider=getattr(_agent_exc, "provider", "") or "",
-                            model=(getattr(_agent_exc, "model", "") or "")
-                            or getattr(self._llm, "planning_model", "") or "",
+                            model=_model,
                         ) from _agent_exc
 
                     _retry_count += 1
@@ -3412,6 +3846,12 @@ class ChatSession:
         # task isn't actually done yet.
         continuation = 0
         _max_rounds_hit = False
+        # Set when the per-turn spend ceiling stopped the turn (ENG-1286). Like
+        # `_max_rounds_hit` it also suppresses verification: the turn is already
+        # ending on an honest "I stopped, shall I continue?", and a verdict call
+        # would both cost more of the budget we just declared spent and risk
+        # forcing a continuation past it.
+        _spend_ceiling_hit = False
         # Set per verification-loop iteration (see below): tells the post-loop
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
@@ -3476,6 +3916,45 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds"
+                    ):
+                        yield event
+                    break
+
+                # Spend ceiling (ENG-1286). Checked per round rather than only at
+                # the continuation gate: the measured runaway shape is 13-26
+                # CONSECUTIVE scratchpad calls inside one tool loop, which reaches
+                # the round cap having triggered no continuation at all — a
+                # continuation-gate-only check never sees it. Ordered after the
+                # round cap so a turn that breaches both still reports
+                # `round_cap`, leaving that path's behaviour untouched.
+                if self._spend_ceiling_stops_the_tool_loop():
+                    _spend_ceiling_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "spend_ceiling"
+                    logger.info(
+                        "spend ceiling reached: tokens=%d ceiling=%d gate=%d "
+                        "tool_round=%d continuation=%d — pausing to ask the user",
+                        self._turn_cost.total_tokens if self._turn_cost else 0,
+                        self._max_turn_tokens, self._spend_ceiling_gate(),
+                        tool_round, continuation,
+                    )
+                    self._append_history(
+                        {"role": "assistant", "content": llm_response.content or ""}
+                    )
+                    self._append_history(
+                        {"role": "user", "content": self._spend_ceiling_notice()}
+                    )
+                    # Same ENG-1155 capture the other four hand-back sites need:
+                    # the reply above is already in history, so without this the
+                    # post-loop fallback appends it again and the message the user
+                    # actually read is lost.
+                    _reply_persisted = True
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's token budget — checking in with you...",
+                    )
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="spend-ceiling"
                     ):
                         yield event
                     break
@@ -3554,6 +4033,9 @@ class ChatSession:
                     # drives the error streak instead of text matching
                     # (ENG-1276). None = unmigrated handler → legacy fallback.
                     tool_ok: bool | None = None
+                    # ENG-1276 populated this and nothing ever read it; ENG-1492
+                    # is what reads it.
+                    tool_reason: str = ""
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
@@ -3561,6 +4043,7 @@ class ChatSession:
                             if isinstance(prep, ToolOutcome):
                                 result_text = prep.content
                                 tool_ok = prep.ok
+                                tool_reason = prep.reason
                             else:
                                 (
                                     pad,
@@ -3615,6 +4098,15 @@ class ChatSession:
                                 # success nor failure (ENG-1276).
                                 if cell is not None:
                                     tool_ok = not (cell.error or "").strip()
+                                    # Same source `tool_handlers` uses for its
+                                    # ToolOutcome: the traceback's LAST line is
+                                    # the cause, and it is the runtime's own
+                                    # output rather than anything the model
+                                    # wrote (ENG-1492).
+                                    _cell_err = (cell.error or "").strip()
+                                    tool_reason = (
+                                        _cell_err.splitlines()[-1][:160] if _cell_err else ""
+                                    )
                                 if cell is not None:
                                     self._record_cell_explainability(
                                         pad_name=tc.input.get("name", ""),
@@ -3680,6 +4172,7 @@ class ChatSession:
                                     yield self.emitter.get_nowait()
                                 result_text = _outcome.content
                                 tool_ok = _outcome.ok
+                                tool_reason = _outcome.reason
                             finally:
                                 if self.escape_watcher:
                                     self.escape_watcher.resume()
@@ -3734,6 +4227,7 @@ class ChatSession:
                                     yield self.emitter.get_nowait()
                                 result_text = _outcome.content
                                 tool_ok = _outcome.ok
+                                tool_reason = _outcome.reason
                             except Exception as exc:
                                 # Caught locally ONLY so the tool_done marker
                                 # below can still be yielded from ordinary
@@ -3787,6 +4281,7 @@ class ChatSession:
                         # A raise is a definitive failure verdict (ENG-1276).
                         result_text = f"Tool '{tc.name}' failed: {exc}"
                         tool_ok = False
+                        tool_reason = type(exc).__name__
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
@@ -3842,6 +4337,7 @@ class ChatSession:
                             tool=tc.name,
                         )
                     result_text = scrub_credentials(result_text)
+                    self._record_root_cause(tool_ok, tool_reason, result_text)
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,
                         ok=tool_ok,
@@ -3960,7 +4456,7 @@ class ChatSession:
             # Skip when too few tool rounds were used (pure Q&A always skips at
             # tool_round==0; raising verify_min_tool_rounds also skips trivial
             # single-round turns) or when we hit the max-rounds hard stop.
-            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit:
+            if tool_round < self._verify_min_tool_rounds or _max_rounds_hit or _spend_ceiling_hit:
                 break
 
             # Append the assistant's final text so the verifier can see it.
@@ -4028,14 +4524,25 @@ class ChatSession:
                 self._verifier_latch_skips += 1
                 if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
                     _verifier_log.info(
-                        "completion-verifier skipped — latched after %d hard "
-                        "failures with no successful verdict between them "
+                        "completion-verifier skipped — latched (%s) "
                         "(skip %d/%d before re-probe); "
                         "continuation=%d/%d tool_rounds=%d",
-                        self._verifier_hard_failures, self._verifier_latch_skips,
+                        "deterministic denial: billing or model access"
+                        if self._verifier_latch_reason == "denied"
+                        else f"{self._verifier_hard_failures} hard failures "
+                        "with no successful verdict between them",
+                        self._verifier_latch_skips,
                         _VERIFIER_LATCH_REPROBE_TURNS, continuation,
                         self._max_continuations, tool_round,
                     )
+                    # Stamp the books: this turn books ended_by="completed"
+                    # but was NOT verified — without the flag it is
+                    # byte-identical in analytics to a verified pass and
+                    # silently joins the honest-stop denominator (ENG-1632
+                    # review). Stamped here, never read from latch state at
+                    # emit (late finalizers would see a later turn's state).
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
                     break
                 _verifier_log.info(
                     "completion-verifier re-probing after %d skipped verifications",
@@ -4080,6 +4587,17 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except _DENIED_VERDICT_ERRORS as exc:
+                    # Deterministic denial — see _DENIED_VERDICT_ERRORS (and the
+                    # ordering note there: this clause must stay ahead of the
+                    # transient tuple). Retrying, diagnosing, or telling the
+                    # user buys nothing: handled below by latching silently.
+                    verdict_failure = "denied"
+                    _verifier_log.info(
+                        "completion-verifier verdict=DENIED budget=%d error=%s",
+                        budget, _safe_error_detail(exc),
+                    )
+                    break
                 except _TRANSIENT_VERDICT_ERRORS as exc:
                     # Explicitly NOT a latch candidate. The latch is for a model
                     # that cannot produce a verdict at all (kimi-K3 rejecting the
@@ -4114,9 +4632,44 @@ class ChatSession:
                 # is no longer failing.
                 self._verifier_hard_failures = 0
                 self._verifier_latched = False
+                self._verifier_latch_reason = ""
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
+                if verdict_failure == "denied":
+                    # A denied verdict recurs every turn by construction, so
+                    # don't wait for a second sample: latch NOW and end the
+                    # turn quietly on the reply that already streamed. No
+                    # history injection, no diagnosis stream — the work
+                    # succeeded and the user must not be told an "internal
+                    # error" occurred (ENG-1632). Deliberately silent rather
+                    # than auto-upgrading to the planning model: a missing
+                    # check beats a surprise bill. The periodic re-probe still
+                    # runs; a re-probe denied again lands back here and stays
+                    # latched, so adding credits self-heals within
+                    # _VERIFIER_LATCH_REPROBE_TURNS turns.
+                    #
+                    # Scope note: the latch is ChatSession state, and Cowork
+                    # rebuilds the session PER MESSAGE — there it only spans
+                    # one message's continuations, the steady-state cost of a
+                    # persistent denial is one silent verdict call per
+                    # message, and top-up recovery is simply the next message.
+                    # The re-probe window above is long-session (CLI)
+                    # behaviour. The cross-message fix is server-side model
+                    # resolution (cowork-server, same ticket); this branch is
+                    # the guarantee the user is never told the turn failed.
+                    self._verifier_latched = True
+                    self._verifier_latch_reason = "denied"
+                    _verifier_log.info(
+                        "completion-verifier latched after a deterministic "
+                        "denial (billing or model access) — skipping further "
+                        "verification this session; turn ends on the "
+                        "already-streamed reply"
+                    )
+                    # Unverified turn — see the latched-skip stamp above.
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
+                    break
                 if verdict_failure == "hard":
                     self._verifier_hard_failures += 1
                     if self._verifier_latched:
@@ -4128,6 +4681,9 @@ class ChatSession:
                         _verifier_log.info(
                             "completion-verifier re-probe failed — staying latched"
                         )
+                        # Unverified turn — see the latched-skip stamp above.
+                        if self._turn_cost is not None:
+                            self._turn_cost.verification_skipped = True
                         break
                     if self._verifier_hard_failures >= 2:
                         # Second hard failure in a row: the first could have been
@@ -4150,12 +4706,16 @@ class ChatSession:
                         # produce one, and a truncation in between is no evidence
                         # that it can (review: pnewsam on #299).
                         self._verifier_latched = True
+                        self._verifier_latch_reason = "hard"
                         _verifier_log.info(
                             "completion-verifier latched after %d hard failures with "
                             "no successful verdict between them — skipping further "
                             "verification this session",
                             self._verifier_hard_failures,
                         )
+                        # Unverified turn — see the latched-skip stamp above.
+                        if self._turn_cost is not None:
+                            self._turn_cost.verification_skipped = True
                         break
                 # The verifier call failed on every budget it was given —
                 # truncated past the last retry, an unusable tool call, or a
@@ -4236,7 +4796,47 @@ class ChatSession:
                     yield event
                 break
 
-            # INCOMPLETE — continue working
+            # INCOMPLETE — continue working, unless the budget for this turn is
+            # already gone.
+            #
+            # NOT because the per-round check misses continuation spend: an
+            # earlier version of this comment said the round counter resets so
+            # each pass "looks cheap", which is wrong — `TurnCost` is built once
+            # per turn and `add()` accumulates, so the per-round check always
+            # sees the turn's full running total. Deleting this gate on the
+            # strength of disproving that rationale would still be a regression.
+            #
+            # The real reason: a continuation whose planning call returns a TEXT
+            # reply never enters the tool loop, so the per-round check is never
+            # reached and the turn would end `completed` with no hand-back at
+            # all, however much it had spent (ENG-1286).
+            if self._spend_ceiling_reached():
+                _spend_ceiling_hit = True
+                if self._turn_cost is not None:
+                    self._turn_cost.ended_by = "spend_ceiling"
+                logger.info(
+                    "spend ceiling reached at the continuation gate: tokens=%d "
+                    "ceiling=%d continuation=%d — pausing to ask the user",
+                    self._turn_cost.total_tokens if self._turn_cost else 0,
+                    self._max_turn_tokens, continuation,
+                )
+                self._append_history(
+                    {"role": "user", "content": self._spend_ceiling_notice()}
+                )
+                # `_reply_persisted` is already True here — the verification block
+                # appends the assistant reply before requesting a verdict — so the
+                # post-loop fallback is already suppressed and only the diagnosis
+                # needs capturing.
+                yield StreamTaskProgress(
+                    phase="analyzing",
+                    message="Reached this task's token budget — checking in with you...",
+                )
+                async for event in self._stream_handback_diagnosis(
+                    system=system, label="spend-ceiling"
+                ):
+                    yield event
+                break
+
             continuation += 1
             if self._turn_cost is not None:
                 self._turn_cost.continuations = continuation

@@ -20,6 +20,7 @@ from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
     StreamTextDelta,
+    TokenLimitExceeded,
     ToolCall,
     Usage,
 )
@@ -365,6 +366,46 @@ async def test_verifier_failure_reports_handback_verifier_failure(workspace):
     assert _ended_by(send) == "handback_verifier_failure"
 
 
+async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
+    # ENG-1632: a deterministic denial (wallet 402 → TokenLimitExceeded)
+    # latches silently — the turn's work succeeded and the user saw a normal
+    # reply, so the terminal is "completed", NOT handback_verifier_failure.
+    # This is a deliberate taxonomy decision: `group by ended_by` error-rate
+    # queries must not count a priced-out completion check as a broken turn,
+    # and the denied probe stays countable from the gateway-side ERROR trace
+    # in Langfuse, so no signal is lost by booking the turn as completed.
+    mock_llm = _verdict_llm("COMPLETE")
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=TokenLimitExceeded(
+            "402: Your wallet has no balance to cover the model 'haiku'."
+        )
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "completed"
+    # ...but never byte-identical to a verified pass: the flag is what lets
+    # honest-stop denominators exclude unverified turns without a
+    # per-conversation Langfuse hop (ENG-1632 review).
+    assert send.call_args.kwargs["verification_skipped"] == "true"
+
+
+async def test_verified_turn_reports_verification_not_skipped(workspace):
+    # The control for the flag above: a turn whose verdict actually ran
+    # (COMPLETE) books verification_skipped="false".
+    session = ChatSession(
+        ChatSessionConfig(llm_client=_verdict_llm("COMPLETE"), workspace=workspace)
+    )
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "completed"
+    assert send.call_args.kwargs["verification_skipped"] == "false"
+
+
 async def test_callers_already_handled_exception_is_not_reported_as_error(workspace):
     """`sys.exc_info()` returns whatever the thread is handling — including an
     exception the CALLER already caught. Asking the interpreter instead of
@@ -500,3 +541,78 @@ async def test_host_supplied_turn_id_is_what_the_event_reports(workspace):
     assert send.call_args.kwargs["turn_index"] == "4242", (
         "the event must report the host's turn_id, not the internal counter"
     )
+
+
+async def test_latched_skip_turns_also_stamp_verification_skipped(workspace):
+    # The steady-state site: after the denied latch fires (turn 1), every
+    # later turn in the session takes the LATCHED-SKIP path — a different
+    # stamp site three lines long and visually identical to the tested one,
+    # which is exactly the shape that ships unpinned (review on #357; same
+    # pattern as anton#348's legacy guard and anton#339's PROGRESS_MARKER
+    # writer). Two turns, one session: turn 2's event must carry the flag.
+    mock_llm = _verdict_llm("COMPLETE", tool_rounds=1)
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=TokenLimitExceeded(
+            "402: Your wallet has no balance to cover the model 'haiku'."
+        )
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    _stub_tools(session)
+    rows = []
+    with patch("anton.analytics.send_event") as send:
+        for i in range(2):
+            # _verdict_llm's plan list is consumed by turn 1; re-arm per turn.
+            plans = [
+                _Iter([StreamComplete(response=_tool_call(1))]),
+                _Iter([StreamComplete(response=_text("reply"))]),
+            ]
+            mock_llm.plan_stream = MagicMock(
+                side_effect=lambda **kw: plans.pop(0) if plans else _Iter(
+                    [StreamComplete(response=_text("reply again"))]
+                )
+            )
+            async for _ in session.turn_stream(f"step {i}"):
+                pass
+            k = send.call_args.kwargs
+            rows.append((k["ended_by"], k["verification_skipped"]))
+    # Turn 1 = the denied-latch site; turn 2 = the latched-skip site.
+    assert rows == [("completed", "true"), ("completed", "true")]
+
+
+async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipped(workspace):
+    # The remaining two stamp sites: the second-hard-failure latch (turn 2)
+    # and the failed re-probe (the turn after _VERIFIER_LATCH_REPROBE_TURNS
+    # skips). Turn 1 hands back (ended_by=handback_verifier_failure — its
+    # terminal already distinguishes it, no flag needed); everything after
+    # books "completed" without a verdict and must carry the flag.
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = _verdict_llm("COMPLETE", tool_rounds=1)
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=RuntimeError("400 tool_choice not supported")
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    _stub_tools(session)
+    rows = []
+    with patch("anton.analytics.send_event") as send:
+        for i in range(_VERIFIER_LATCH_REPROBE_TURNS + 2):
+            plans = [
+                _Iter([StreamComplete(response=_tool_call(1))]),
+                _Iter([StreamComplete(response=_text("reply"))]),
+            ]
+            mock_llm.plan_stream = MagicMock(
+                side_effect=lambda **kw: plans.pop(0) if plans else _Iter(
+                    [StreamComplete(response=_text("diagnosis or reply"))]
+                )
+            )
+            async for _ in session.turn_stream(f"step {i}"):
+                pass
+            k = send.call_args.kwargs
+            rows.append((k["ended_by"], k["verification_skipped"]))
+    # Turn 1: honest diagnosis, distinguished by its own terminal.
+    assert rows[0] == ("handback_verifier_failure", "false")
+    # Turn 2: the second-hard-failure latch site.
+    assert rows[1] == ("completed", "true")
+    # Every later turn — the latched skips AND the failed re-probe that falls
+    # inside this window — books completed and must carry the flag.
+    assert all(r == ("completed", "true") for r in rows[2:]), rows[2:]

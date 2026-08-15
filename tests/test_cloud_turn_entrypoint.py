@@ -12,11 +12,16 @@ import json
 import logging
 
 from anton.cloud_turn.contract import TurnRequestV1
-from anton.cloud_turn.__main__ import stream_turn
+from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
 from anton.core.llm.provider import (
+    LLMResponse,
+    StreamComplete,
+    StreamContextCompacted,
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StreamToolUseDelta,
+    StreamToolUseEnd,
     StreamToolUseStart,
 )
 
@@ -109,10 +114,86 @@ def test_text_only_no_deltas_still_completes():
     assert events == [{"kind": "turn_completed"}]
 
 
+def test_step_events_go_on_the_wire():
+    """Tool/progress/round events are emitted as structured wire events so the
+    cowork step UI can render them; tool args accumulate pod-side and ship once
+    on tool_end."""
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamToolUseStart(id="t1", name="scratchpad")
+            yield StreamToolUseDelta(id="t1", json_delta='{"code":')
+            yield StreamToolUseDelta(id="t1", json_delta='"1+1"}')
+            yield StreamToolUseEnd(id="t1")
+            yield StreamTaskProgress(phase="scratchpad_done", message="ran",
+                                     eta_seconds=1.5, id="t1", ok=True)
+            yield StreamToolResult(name="scratchpad", content="2", action="exec", id="t1")
+            yield StreamContextCompacted(message="squeezed")
+            yield StreamComplete(response=LLMResponse(content="", stop_reason="end_turn"))
+            yield StreamTextDelta(text="done")
+
+    events = _drive(_S())
+    assert {"kind": "tool_start", "id": "t1", "name": "scratchpad"} in events
+    assert {"kind": "tool_end", "id": "t1", "args": '{"code":"1+1"}'} in events
+    assert {"kind": "progress", "phase": "scratchpad_done", "message": "ran",
+            "eta_seconds": 1.5, "id": "t1", "ok": True} in events
+    assert {"kind": "tool_result", "id": "t1", "name": "scratchpad",
+            "action": "exec", "content": "2"} in events
+    assert {"kind": "compacted", "message": "squeezed"} in events
+    assert {"kind": "round_end", "stop_reason": "end_turn",
+            "had_tool_calls": False} in events
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_result_clip_preserves_error_verdict():
+    """A long failed cell must still classify as failed downstream: the clip
+    shrinks bulky fields but keeps the JSON and its error field intact."""
+    cell = {"code": "x", "stdout": "s" * 70_000, "error": "boom"}
+    clipped = _clip_result_content(json.dumps(cell))
+    assert len(clipped) <= 65536
+    parsed = json.loads(clipped)
+    assert parsed["error"] == "boom"
+    assert "truncated" in parsed["stdout"]
+
+
+def test_result_clip_non_json_keeps_tail():
+    text = "a" * 70_000 + "TAIL-ERROR"
+    clipped = _clip_result_content(text)
+    assert len(clipped) <= 65536
+    assert clipped.endswith("TAIL-ERROR")
+
+
+def test_progress_flood_is_rate_limited_but_step_phases_pass():
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamTaskProgress(phase="scratchpad_start", message="s", id="t1")
+            for i in range(50):
+                yield StreamTaskProgress(phase="progress", message=f"m{i}")
+            yield StreamTaskProgress(phase="scratchpad_done", message="d", id="t1")
+
+    events = _drive(_S())
+    progress = [e for e in events if e.get("kind") == "progress"]
+    phases = [e["phase"] for e in progress]
+    assert "scratchpad_start" in phases and "scratchpad_done" in phases
+    assert len(progress) < 10  # the 50-call flood collapses on the wire
+
+
+def test_tool_args_accumulation_is_bounded():
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamToolUseStart(id="t1", name="scratchpad")
+            for _ in range(20):
+                yield StreamToolUseDelta(id="t1", json_delta="x" * 10_000)
+            yield StreamToolUseEnd(id="t1")
+
+    events = _drive(_S())
+    end = next(e for e in events if e.get("kind") == "tool_end")
+    assert len(end["args"]) <= 65536
+
+
 def test_action_events_are_logged(caplog):
     """Discrete turn actions (tool calls, progress, results) are narrated to the
-    logs so the pod's activity is observable in the controller; text deltas are
-    NOT logged (they are emitted, not narrated)."""
+    logs so the pod's activity is observable in the controller, in addition to
+    the structured wire events; text deltas are NOT logged (emitted only)."""
     class _S(_FakeSession):
         async def turn_stream(self, user_input, **kwargs):
             yield StreamToolUseStart(id="t1", name="scratchpad")

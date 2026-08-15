@@ -1393,6 +1393,9 @@ async def _chat_loop(
         console=console,
         history_store=history_store,
         session_id=current_session_id,
+        # ENG-1495: see the note on the same field in chat_session.py — an unset
+        # `harness` is indistinguishable from a host that forgot to set one.
+        harness="cli",
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
