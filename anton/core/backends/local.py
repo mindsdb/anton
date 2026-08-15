@@ -317,27 +317,79 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if venv_path.is_dir():
             self._nuke_venv()
 
+        # ENG-1646: `uv venv` normally symlinks bin/python straight to the
+        # base interpreter, but on some hosts (observed reliably when this
+        # process is a descendant of a packaged/signed desktop app) it
+        # instead writes a freshly-copied, merely ad-hoc-signed launcher
+        # that's missing its own libpythonX.Y.dylib — macOS's AMFI then
+        # kills it outright ("Unrecoverable CT signature issue"), and every
+        # retry of the *same* uv invocation fails identically since it's not
+        # a transient condition. So retries escalate strategy instead of
+        # repeating the same doomed call: last attempt bypasses uv entirely
+        # and uses stdlib venv.create(symlinks=True), which has proven
+        # reliable in every environment we've seen this fail in.
         last_error: Exception | None = None
         for attempt in range(1, self._MAX_VENV_RETRIES + 1):
+            force_stdlib = attempt == self._MAX_VENV_RETRIES
             try:
-                self._create_venv()
+                self._create_venv(force_stdlib=force_stdlib)
                 if self._verify_venv_python():
                     self._setup_parent_site_packages()
                     self._save_python_version()
                     return
-                detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
+                detail = self._diagnose_broken_interpreter()
                 raise RuntimeError(
                     f"venv Python binary at {self._venv_python} is not functional{detail}"
                 )
             except Exception as exc:
                 last_error = exc
-                self._nuke_venv()
+                # Keep the last attempt's directory around so it can be
+                # inspected instead of erasing the only evidence of what
+                # went wrong.
+                if attempt < self._MAX_VENV_RETRIES:
+                    self._nuke_venv()
 
         raise RuntimeError(
             f"Failed to create a working Python venv after {self._MAX_VENV_RETRIES} "
-            f"attempts. Last error: {last_error}. "
+            f"attempts (including a stdlib venv.create fallback). Last error: {last_error}. "
+            f"The broken venv was left at {venv_path} for inspection. "
             f"Try running: python3 -c 'print(\"ok\")' to verify your Python installation."
         )
+
+    def _diagnose_broken_interpreter(self) -> str:
+        """Best-effort detail for a failed `_verify_venv_python()`, beyond
+        the bare exit code/exception `_last_verify_error` already holds —
+        specifically, whether bin/python is a symlink or a copy, and its
+        code-signing status. Never raises; returns "" if nothing useful
+        could be gathered (e.g. the path doesn't exist at all)."""
+        base = f" ({self._last_verify_error})" if self._last_verify_error else ""
+        py = self._venv_python
+        if not py or not os.path.exists(py):
+            return base
+        try:
+            is_link = os.path.islink(py)
+            size = os.path.getsize(py)
+            extra = f"is_symlink={is_link}, size={size}"
+            if not is_link and sys.platform == "darwin":
+                import subprocess as _sp
+
+                try:
+                    result = _sp.run(
+                        ["codesign", "-dv", py],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    sig = (result.stderr or result.stdout or b"").decode(
+                        "utf-8", errors="replace"
+                    ).strip().splitlines()
+                    sig_line = next((l for l in sig if "flags=" in l or "Signature=" in l), "")
+                    if sig_line:
+                        extra += f", {sig_line}"
+                except Exception:
+                    pass
+            return f"{base} [{extra}]" if base else f" [{extra}]"
+        except OSError:
+            return base
 
     @staticmethod
     def _find_uv() -> str | None:
@@ -368,13 +420,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 return candidate
         return None
 
-    def _create_venv(self) -> None:
+    def _create_venv(self, *, force_stdlib: bool = False) -> None:
         import subprocess as _sp
 
         self._venv_dir = str(self._venvs_base / self.name)
         os.makedirs(self._venv_dir, exist_ok=True)
 
-        uv = self._find_uv()
+        uv = None if force_stdlib else self._find_uv()
         if uv:
             try:
                 _sp.run(
@@ -417,6 +469,31 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         else:
             bin_dir = os.path.join(self._venv_dir, "bin")
             self._venv_python = os.path.join(bin_dir, "python")
+            if uv:
+                self._repair_copied_launcher(bin_dir)
+
+    def _repair_copied_launcher(self, bin_dir: str) -> None:
+        """ENG-1646: uv is supposed to symlink bin/python straight to the base
+        interpreter, but has been observed writing a freshly-copied, merely
+        ad-hoc-signed launcher instead — one macOS's AMFI then refuses to
+        execute, and which is also missing its own libpythonX.Y.dylib. A
+        plain symlink to the same interpreter has been reliable in every
+        case we've seen, so if uv didn't produce one, force it. Best-effort:
+        any failure here just leaves the (already broken) file in place for
+        `_verify_venv_python()` to catch downstream.
+        """
+        target = os.path.realpath(sys.executable)
+        for name in ("python", f"python{sys.version_info.major}", f"python{sys.version_info.major}.{sys.version_info.minor}"):
+            link_path = os.path.join(bin_dir, name)
+            try:
+                if os.path.islink(link_path):
+                    continue
+                if not os.path.exists(link_path):
+                    continue
+                os.remove(link_path)
+                os.symlink(target, link_path)
+            except OSError:
+                pass
 
     def venv_python(self) -> str | None:
         """Public accessor for the scratchpad's Python interpreter path.
