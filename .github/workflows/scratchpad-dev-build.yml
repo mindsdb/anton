@@ -30,7 +30,7 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - uses: mindsdb/github-actions/setup-env@main
       - id: build
         uses: mindsdb/github-actions/build-push-ecr@main
