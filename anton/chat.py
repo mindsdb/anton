@@ -20,7 +20,7 @@ from anton.clipboard import (
     replace_at_image_paths,
     save_clipboard_image,
 )
-from anton.core.session import ChatSession, ChatSessionConfig
+from anton.core.session import ChatSession, ChatSessionConfig, _is_provider_auth_error
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.core.llm.provider import (
     EndpointConfigurationError,
@@ -1279,6 +1279,24 @@ def _desktop_greeting(console: Console, settings) -> None:
 
 
 
+def _default_turn_error_action(exc: BaseException) -> str:
+    """Which action the turn-failure prompt should default to.
+
+    ModelUnavailableError (plan/kill-switch gate) and EndpointConfigurationError
+    (wrong base URL / route) are deterministic for the identical request —
+    retrying re-sends a doomed call — so the default steers to "setup" (switch
+    model / provider / fix endpoint). A provider-auth 401 (ENG-1310) is
+    equally deterministic — see `_is_provider_auth_error` — and is included
+    here for the same reason: three past PRs (#236, #247, #288) flagged that a
+    bare ConnectionError defaults to "retry" even when the failure can't
+    possibly be fixed by retrying (review feedback on ENG-1310). Any other
+    ConnectionError (transient) keeps "retry" as the default.
+    """
+    if isinstance(exc, (ModelUnavailableError, EndpointConfigurationError)) or _is_provider_auth_error(exc):
+        return "setup"
+    return "retry" if isinstance(exc, ConnectionError) else "setup"
+
+
 def run_chat(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
@@ -1375,6 +1393,9 @@ async def _chat_loop(
         console=console,
         history_store=history_store,
         session_id=current_session_id,
+        # ENG-1495: see the note on the same field in chat_session.py — an unset
+        # `harness` is indistinguishable from a host that forgot to set one.
+        harness="cli",
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
@@ -2017,17 +2038,7 @@ async def _chat_loop(
                     "  (anton) Switch LLM provider, update API key, or retry?",
                     choices=["setup", "retry", "s", "r"],
                     choices_display="setup/retry",
-                    # ModelUnavailableError (plan/kill-switch gate) and
-                    # EndpointConfigurationError (wrong base URL / route) are both
-                    # deterministic for the identical request — retrying re-sends a
-                    # doomed call — so steer the default to "setup" (switch model /
-                    # provider / fix endpoint). Other ConnectionErrors (transient)
-                    # keep retry as the default.
-                    default=(
-                        "setup"
-                        if isinstance(exc, (ModelUnavailableError, EndpointConfigurationError))
-                        else ("retry" if isinstance(exc, ConnectionError) else "setup")
-                    ),
+                    default=_default_turn_error_action(exc),
                 )
                 if choice in ("setup", "s"):
                     session = await handle_setup_models(

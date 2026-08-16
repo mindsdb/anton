@@ -14,9 +14,11 @@ real-world facts (ENG-381 lesson): the transcript is the input, the expected
 status is the label.
 
 Gating: requires ``MINDSHUB_API_KEY`` in the environment (or repo-root
-``.env``) — the whole module auto-skips without it, so the default CI unit run
-is unaffected. ``.github/workflows/verifier-eval.yml`` runs it on PRs that
-touch ``anton/core/session.py``.
+``.env``). Without it the module auto-skips, so the default CI unit run is
+unaffected — **unless** ``VERIFIER_EVAL_REQUIRE_LIVE=1``, which turns a missing
+key into a hard collection error. ``.github/workflows/verifier-eval.yml`` sets
+that for first-party PRs, so the gate can no longer report success without
+executing (ENG-1334). Fork PRs cannot receive the secret, so they still skip.
 
 Model matrix: one first-party alias (``haiku`` — enforces the forced
 ``tool_choice`` structurally) and one narrating alias (``mindshub_air`` —
@@ -24,9 +26,12 @@ narrates into ``content`` before the tool call). ENG-1081 measured a clean
 9-vs-3 split between those populations; an eval that only ran on haiku would
 have missed the entire ENG-1081 incident class.
 
-Non-determinism policy (decided up front, per the ticket): every case asserts
-N-of-N identical verdicts — a case that can't produce the same verdict N times
-in a row is not a regression guard, it's a coin flip. N defaults to 3; the
+Non-determinism policy (decided up front, per the ticket): every run of a case
+must land inside that case's acceptable set — for the four single-valued cases
+that is N-of-N identical verdicts, because a case that can't produce the same
+verdict N times in a row is not a regression guard, it's a coin flip. One case
+accepts two verdicts, because its originating incident is prevented by either;
+see ``Case.acceptable``. Widening a set is pinned by tests/test_verifier_eval_gate.py. N defaults to 3; the
 STUCK case runs 6, because its base rate under the pre-ENG-836 rubric was
 measured at ~1-in-5 (Kiranam session: 4 COMPLETE / 4 INCOMPLETE / 1 STUCK on
 one blocker), so a single run passes ~20% of the time by luck. The STUCK case
@@ -41,6 +46,7 @@ Deselect with ``-k "not verdict_live"`` or unset the key to skip.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +64,7 @@ except Exception:
 
 from anton.config.settings import AntonSettings
 from anton.core.llm.client import LLMClient
-from anton.core.llm.provider import StructuredOutputError
+from anton.core.llm.provider import StructuredOutputError, TokenLimitExceeded
 from anton.core.session import (
     _VERIFIER_TOKEN_BUDGETS,
     _VerifierVerdict,
@@ -68,9 +74,136 @@ from anton.core.session import (
 _KEY = os.environ.get("MINDSHUB_API_KEY")
 _BASE = os.environ.get("MINDSHUB_BASE_URL", "https://api.mindshub.ai")
 
+# Two different callers want opposite things from a missing key, and conflating
+# them is what let this suite report success while testing nothing (ENG-1334).
+#
+#   A developer running `pytest tests/` wants it to skip. They have no key, they
+#   are not testing the verifier, and failing their whole run would be rude.
+#
+#   CI wants it to FAIL. A gate that goes green when it cannot run is worse than
+#   no gate: the board looks guarded. Measured 2026-08-10 — eight consecutive
+#   green `verdict-eval` runs, 13-24s each, every one the skip path, while a real
+#   run takes ~4 minutes. Eight PRs merged past a check that asserted nothing.
+#
+# So the skip stays the default and CI opts out of it explicitly. Raising at
+# import time fails collection, which surfaces as a red job with this message
+# rather than a green one with a skip note nobody reads.
+_REQUIRE_LIVE = os.environ.get("VERIFIER_EVAL_REQUIRE_LIVE") == "1"
+
+if _REQUIRE_LIVE and not _KEY:
+    raise RuntimeError(
+        "VERIFIER_EVAL_REQUIRE_LIVE=1 but MINDSHUB_API_KEY is empty, so this "
+        "eval would skip every case and report success. Refusing to pass "
+        "without running. Either provide the key or stop requiring live mode. "
+        "See ENG-1334."
+    )
+
 pytestmark = pytest.mark.skipif(
     not _KEY, reason="MINDSHUB_API_KEY not set — live verdict eval skipped"
 )
+
+# Marker the CI guard greps for in the junit report, to tell "the key ran out of
+# money" apart from every other reason a case did not run. The string is a
+# contract with .github/workflows/verifier-eval.yml; tests/test_verifier_eval_gate.py
+# asserts the two match, so drift fails the suite rather than relying on this
+# comment. If it ever did drift, it fails SAFE — an unrecognised marker falls to
+# the guard's red branch, never to a false green.
+_GATEWAY_UNAVAILABLE = "GATEWAY_UNAVAILABLE"
+
+# Fallback pause before the single throttle retry, used only when the gateway
+# gave no Retry-After. Overridable so tests can set it to 0.
+_THROTTLE_RETRY_SLEEP_S = float(os.environ.get("VERIFIER_EVAL_THROTTLE_RETRY_SLEEP_S", "20"))
+
+# Never sleep longer than this even if Retry-After asks for more — a job that
+# naps for ten minutes is indistinguishable from a hung one.
+_THROTTLE_RETRY_CAP_S = 60.0
+
+# Total throttle retries allowed across the whole session, not per call.
+#
+# The per-call retry alone was not enough: `_verdicts` invokes `_verdict` 18
+# times per model (4 cases x 3 runs + STUCK x 6), so 37 calls per session, each
+# entitled to its own pause. Under a SUSTAINED throttle that is 12 minutes at
+# the default and 37 at the cap — and it still ends green with zero cases
+# executed. The retry fixed the common case (a short window that clears) while
+# turning the pathological one from a fast wrong answer into a slow one.
+#
+# A session budget keeps the retry that does the work and bounds the rest: once
+# spent, later throttles skip immediately. Caught in review on #328.
+_THROTTLE_RETRY_BUDGET = int(os.environ.get("VERIFIER_EVAL_THROTTLE_RETRY_BUDGET", "5"))
+
+# Module-level on purpose: the budget is per pytest session, shared across every
+# case and both models, which is the scope the runaway lives at.
+_throttle_retries_used = 0
+
+# The gateway distinguishes its denials and says which is which
+# (mindshub_inference/minds/inference/errors.py):
+#
+#   rate_limited                   429 + Retry-After          velocity; RETRY
+#   included_allowance_exhausted   429 + X-MindsHub-Reset-At   waits for reset
+#   wallet_empty                   402 + X-MindsHub-Recovery-Url  needs credit
+#
+# `rate_limited`'s own docstring: "the caller should slow down and retry after
+# retry_after seconds, NOT wait for an allowance reset or add credits."
+#
+# anton collapses all three into TokenLimitExceeded (llm/openai.py: the generic
+# 429-with-detail branch fires before the wallet-code check), so the distinction
+# has to be recovered from the chained SDK error. Worth recovering: retrying a
+# dead wallet wastes the pause, and not honouring Retry-After ignores the one
+# number the server volunteered.
+_STARVED_REASONS = frozenset({"wallet_empty", "included_allowance_exhausted"})
+_THROTTLED_REASON = "rate_limited"
+
+
+def _gateway_denial(exc: BaseException) -> tuple[str, float | None]:
+    """Classify a TokenLimitExceeded as ``starved`` / ``throttled`` / ``unknown``.
+
+    Reads the reason off ``exc.__cause__`` — the original SDK error, chained by
+    ``raise ... from exc``. Body unwrapping mirrors ``llm/openai.py`` exactly
+    (the SDK peels the ``error`` envelope, some proxies re-wrap it, Gemini sends
+    a single-element list), because a shape this module guessed at independently
+    would be a second place to get it wrong.
+
+    Everything is defensive: an unrecognised or unreachable reason returns
+    ``unknown``, whose caller retries once — the conservative direction, since
+    the alternative is skipping a case that would have run.
+    """
+    cause = exc.__cause__
+
+    raw_body = getattr(cause, "body", None)
+    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
+        raw_body = raw_body[0]
+    body = raw_body if isinstance(raw_body, dict) else {}
+    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+    code = body.get("code") or envelope.get("code") or ""
+
+    reason = ""
+    retry_after: float | None = None
+    headers = getattr(getattr(cause, "response", None), "headers", None)
+    if headers is not None:
+        try:
+            reason = headers.get("x-mindshub-reason") or ""
+            raw_hint = headers.get("retry-after")
+            # Retry-After may be an HTTP-date rather than seconds; only the
+            # numeric form is useful here, and a bad parse must not mask the
+            # denial we are trying to classify.
+            if raw_hint is not None and str(raw_hint).strip().isdigit():
+                retry_after = float(str(raw_hint).strip())
+        except Exception:
+            pass
+
+    for candidate in (code, reason):
+        if candidate in _STARVED_REASONS:
+            return "starved", None
+        if candidate == _THROTTLED_REASON:
+            return "throttled", retry_after
+    return "unknown", retry_after
+
+
+def _throttle_pause(retry_after: float | None) -> float:
+    """How long to wait before the one retry — the server's hint, capped."""
+    if retry_after is None:
+        return _THROTTLE_RETRY_SLEEP_S
+    return max(0.0, min(retry_after, _THROTTLE_RETRY_CAP_S))
 
 # One structural-tool_choice alias and one narrating alias — the two behaviour
 # populations ENG-1081 measured. Overridable for one-off runs against other
@@ -113,17 +246,70 @@ async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:
     first budget, retry once on truncation with the bigger one (ENG-1081).
     Anything else propagates — a hard failure here is a test failure, which is
     the point.
+
+    Except running out of money, which is not a test failure. See
+    ``_GATEWAY_UNAVAILABLE`` below.
     """
     system, messages = _build_verify_request(case.history, case.user_message)
-    for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
+    retried_after_throttle = False
+    attempt = 0
+    while attempt < len(_VERIFIER_TOKEN_BUDGETS):
+        budget = _VERIFIER_TOKEN_BUDGETS[attempt]
         try:
             return await llm.generate_object_code(
                 _VerifierVerdict, system=system, messages=messages, max_tokens=budget
             )
         except StructuredOutputError as exc:
             if exc.truncated and attempt + 1 < len(_VERIFIER_TOKEN_BUDGETS):
+                attempt += 1
                 continue
             raise
+        except TokenLimitExceeded as exc:
+            # TokenLimitExceeded conflates two situations that need OPPOSITE
+            # handling, and the type cannot tell them apart:
+            #
+            #   a TPM velocity throttle  — transient, clears in seconds
+            #   a dead wallet / exhausted allowance — permanent for this run
+            #
+            # llm/openai.py maps ANY 429 carrying a string `detail` to this type
+            # (`if exc.status_code == 429 and isinstance(detail, str)`), and that
+            # branch sits BEFORE the wallet-code check — and the gateway's own
+            # 429 dialect is FastAPI-style `{"detail": ...}`. So a throttle
+            # arrives here indistinguishable from an empty wallet.
+            #
+            # Skipping immediately on the first one was wrong: the next case
+            # fires straight into the same throttle window, so the whole matrix
+            # skips and the job goes GREEN having executed nothing — the exact
+            # outcome ENG-1334 exists to make impossible, rebuilt by its own
+            # escape hatch. Caught in review on #328.
+            #
+            # The gateway already tells us which of the three it was, so ask it
+            # rather than using elapsed time as a proxy (see _gateway_denial).
+            #
+            # Deliberately NOT catching ConnectionError, which anton also raises
+            # for a 401 invalid key — a misconfiguration somebody must fix, so
+            # that has to stay red.
+            global _throttle_retries_used
+
+            kind, retry_after = _gateway_denial(exc)
+            if kind == "starved":
+                # An empty wallet or a spent allowance will not clear inside
+                # this run. Retrying just adds a pause before the same answer.
+                pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
+            if (
+                not retried_after_throttle
+                and _throttle_retries_used < _THROTTLE_RETRY_BUDGET
+            ):
+                # `throttled` (velocity) or `unknown` (be generous). One retry
+                # per call, and only while the session budget lasts — otherwise
+                # a sustained throttle sleeps for half an hour and still reports
+                # nothing tested. Same token budget: a retry, not an ENG-1081
+                # truncation escalation.
+                retried_after_throttle = True
+                _throttle_retries_used += 1
+                await asyncio.sleep(_throttle_pause(retry_after))
+                continue
+            pytest.skip(f"{_GATEWAY_UNAVAILABLE}: {exc}")
     raise AssertionError("unreachable: budget loop exhausted without raising")
 
 
@@ -168,8 +354,23 @@ class Case:
     name: str
     user_message: str
     history: list[dict]
-    expected: str
+    expected: str | tuple[str, ...]
     source: str
+
+    @property
+    def acceptable(self) -> tuple[str, ...]:
+        """Verdicts that satisfy this case's originating incident.
+
+        Usually one. But each fixture exists to stop a specific incident
+        recurring, and for one of them TWO verdicts prevent it equally well —
+        so pinning a single label there asserts a proxy rather than the
+        requirement, and fails on a defensible answer. See
+        ``_IMPLIED_SUCCESS`` for the reasoning, and note the file's rule still
+        holds: this is not a *looser* assertion, it is the actual invariant.
+        For a single-valued case the behaviour is unchanged — every run must
+        return that exact status.
+        """
+        return (self.expected,) if isinstance(self.expected, str) else self.expected
 
 
 # --- 1. Tool errored early, model recovered another way → COMPLETE ----------
@@ -177,13 +378,42 @@ class Case:
 # search errored, the model got the data elsewhere, the final answer is
 # correct and complete — and the pre-ENG-1134 rubric still forced a redundant
 # continuation because *an* errored tool result existed in the transcript.
+#
+# NOT verbatim from that incident: the user message was disambiguated (see the
+# comment on `user_message`), because the original phrasing let the verifier
+# fairly disagree about whether the answer was responsive, which flaked this
+# case ~1 run in 6. The tool-error-then-recovery mechanic this case exists to
+# guard is unchanged, and so is the assistant's answer.
 _RECOVERED = Case(
     name="recovered_tool_error",
-    user_message="How much total funding did SpaceX raise compared to Tesla before Tesla's IPO?",
+    # Phrased as two explicit asks. The original single-clause wording — "how
+    # much did SpaceX raise compared to Tesla before Tesla's IPO" — was
+    # genuinely ambiguous about whether "before Tesla's IPO" bounded BOTH
+    # figures, and the answer below reads it as bounding only Tesla's (it says
+    # "to date" for SpaceX and "pre-IPO" for Tesla). Both readings are
+    # defensible, so the verifier split: ~1 run in 6 returned INCOMPLETE with
+    # "the two timeframes are incomparable and the user's actual question
+    # remains unanswered", which is a fair judgement of the ambiguity.
+    #
+    # This case exists to prove a RECOVERED tool error does not force a
+    # continuation (ENG-1134). The ambiguity smuggled in a second, unintended
+    # assertion about answer-responsiveness, and that second one is what was
+    # flaking. Disambiguating the question keeps the case testing its stated
+    # subject; it does not weaken it, and the answer text is untouched.
+    user_message=(
+        "How much total funding has SpaceX raised to date, and how much had "
+        "Tesla raised before its IPO?"
+    ),
     history=[
         {
             "role": "user",
-            "content": "How much total funding did SpaceX raise compared to Tesla before Tesla's IPO?",
+            # Must stay byte-identical to `user_message` above: the verifier
+            # reads the transcript, so a stale copy here would keep feeding it
+            # the ambiguous phrasing the fix removes.
+            "content": (
+                "How much total funding has SpaceX raised to date, and how much "
+                "had Tesla raised before its IPO?"
+            ),
         },
         _tool_call("web_search", "toolu_01", query="SpaceX total funding raised"),
         _tool_result(
@@ -271,7 +501,17 @@ _IMPLIED_SUCCESS = Case(
             ),
         },
     ],
-    expected="INCOMPLETE",
+    # ENG-1134's requirement is "do NOT accept a hallucinated success as done".
+    # INCOMPLETE (keep working) and STUCK (stop and explain the blocker) both
+    # satisfy it — neither ships the invented figure, and both are reasonable
+    # products. Pinning INCOMPLETE alone asserted a proxy for the requirement
+    # and flaked ~1 run in 3 on a defensible STUCK, whose reasoning was
+    # correct: "the database connection failed, the assistant provided a
+    # specific revenue figure without recovering the data".
+    #
+    # What still MUST hold is that COMPLETE and WAITING never appear — that is
+    # the safeguard. So this stays a real guard, not a looser one.
+    expected=("INCOMPLETE", "STUCK"),
     source="ENG-1134 (hallucinated-success safeguard)",
 )
 
@@ -481,9 +721,16 @@ async def test_verdict(model: str, case: Case):
     # "why did the rubric flip" — so surface them in the failure message
     # instead of just the statuses.
     detail = "; ".join(f"{v.status}: {v.reason}" for v in verdicts)
-    assert statuses == [case.expected] * n, (
-        f"{case.name} on {model}: expected {case.expected} x{n} "
-        f"(source: {case.source}), got [{detail}]"
+    # Every run must land inside the case's acceptable set. For the four
+    # single-valued cases that is identical to the previous
+    # `statuses == [expected] * n` — all N runs, that exact status. For the one
+    # case with two acceptable verdicts it asserts the incident's actual
+    # invariant instead of a proxy for it (see Case.acceptable).
+    wrong = [s for s in statuses if s not in case.acceptable]
+    assert not wrong, (
+        f"{case.name} on {model}: every one of {n} runs must be in "
+        f"{list(case.acceptable)} (source: {case.source}), "
+        f"but got {wrong} — full verdicts [{detail}]"
     )
 
 

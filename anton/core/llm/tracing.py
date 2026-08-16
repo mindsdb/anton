@@ -18,8 +18,9 @@ Gemini) ignore the context entirely.
 
 from __future__ import annotations
 
+import contextlib
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -57,3 +58,40 @@ def set_trace_context(ctx: TraceContext | None) -> Token:
 def reset_trace_context(token: Token) -> None:
     """Restore the previous trace context. Pass the token returned by `set_trace_context`."""
     _trace_ctx.reset(token)
+
+
+@contextlib.contextmanager
+def tagged_trace(*tags: str):
+    """Append `tags` to the active trace for the duration of the block (ENG-1390).
+
+    For isolating ONE call site among the many that share an `LLMClient` entry
+    point. Tags ride the ``Langfuse-Tags`` header, and tags are one of the few
+    dimensions the Langfuse metrics API can group by — so a tagged call stays
+    countable without reading trace payloads, which matters while ENG-1392 is
+    redacting them.
+
+    Deliberately a no-op rather than an error when there is nothing to annotate:
+    no turn in flight (the CLI `turn()` path never installs a context), or a
+    provider that ignores trace context entirely (anything but the
+    MindsHub-routed OpenAI provider — a BYOK user on direct Anthropic has no
+    gateway trace to tag in the first place). Callers can therefore annotate
+    unconditionally without branching on either condition.
+    """
+    ctx = _trace_ctx.get()
+    if ctx is None or not tags:
+        yield
+        return
+    token = _trace_ctx.set(replace(ctx, tags=ctx.tags + tuple(tags)))
+    try:
+        yield
+    finally:
+        try:
+            _trace_ctx.reset(token)
+        except ValueError:
+            # Cross-context teardown: when an abandoned async generator is
+            # finalized, the cleanup can run in a COPIED context, where resetting
+            # a token created elsewhere raises. `ChatSession.turn_stream` already
+            # carries this exact guard (#309 review), where an unguarded reset
+            # aborted a `finally` and dropped the whole turn's books. The copy
+            # dies with the context, so there is nothing to restore.
+            pass

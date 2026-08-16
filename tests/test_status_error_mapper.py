@@ -36,6 +36,7 @@ from anton.core.llm.provider import (
     classify_transient,
     wallet_denial_code,
 )
+from anton.core.session import _is_provider_auth_error
 
 
 def _sdk_error(status_code, json_body=None, text_body=None, headers=None):
@@ -98,6 +99,11 @@ def test_401_maps_to_invalid_key_connection_error():
     # cowork-server's provider_auth detection keys on this exact phrase.
     assert "Invalid API key" in str(err.value)
     assert not isinstance(err.value, ModelUnavailableError)
+    # session.py's own re-raise checks (ENG-1310) key on this predicate, not
+    # the raw text — pin against the REAL mapper output so an edit to this
+    # copy that drops "invalid api key" fails here too, not just silently in
+    # production (review feedback on ENG-1310).
+    assert _is_provider_auth_error(err.value)
 
 
 def test_401_html_body_maps_to_invalid_key():
@@ -106,6 +112,7 @@ def test_401_html_body_maps_to_invalid_key():
     with pytest.raises(ConnectionError) as err:
         _raise_for_status_error(exc, "sonnet")
     assert "Invalid API key" in str(err.value)
+    assert _is_provider_auth_error(err.value)
 
 
 # ── 429 (quota) ───────────────────────────────────────────────────────
@@ -131,15 +138,42 @@ def test_429_enveloped_detail_also_maps_to_token_limit():
     assert "Monthly limit exceeded" in str(err.value)
 
 
-def test_bare_429_is_transient_fail_fast():
-    # ENG-673: a plain 429 (no quota detail) is a retryable rate-limit, but the
-    # SDK already retried it at request time → fail fast (no session backoff).
-    # Replaces the old test_bare_429_stays_generic — this path is now typed.
-    exc = _sdk_error(429, json_body={})
+def test_bare_429_is_transient_and_backs_off_in_session():
+    # ENG-673 typed this path; ENG-1537 made it wait. A plain 429 is a velocity
+    # limit — the one request-time status where the session must spend its
+    # budget, because the SDK's retries fire seconds apart and the ceiling is
+    # per-minute. Was session_backoff=False, which sent it down the count-based
+    # path and re-issued the request twice with no delay.
+    exc = _sdk_error(429, json_body={"code": "rate_limited"})
     with pytest.raises(TransientProviderError) as err:
         _raise_for_status_error(exc, "sonnet")
-    assert err.value.session_backoff is False
+    assert err.value.session_backoff is True
+    assert err.value.code == "rate_limited"
     assert "rate-limiting" in str(err.value).lower()
+
+
+def test_bare_429_reads_retry_after_off_the_response():
+    # ENG-1537: nothing in anton read this header before. The gateway sends it
+    # on every velocity 429 as integer seconds; without it the session falls
+    # back to a guessed curve instead of the interval the server named.
+    exc = _sdk_error(429, json_body={}, headers={
+        "Retry-After": "42", "X-MindsHub-Reason": "rate_limited",
+    })
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.retry_after == 42.0
+
+
+def test_retry_after_http_date_form_is_ignored_not_misparsed():
+    # The date form is legal but nothing in use emits it, and reading it as a
+    # number would produce an absurd delay. Absent hint → jittered curve.
+    exc = _sdk_error(429, json_body={}, headers={
+        "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT",
+        "X-MindsHub-Reason": "rate_limited",
+    })
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.retry_after is None
 
 
 def _openai_quota_429():
@@ -498,6 +532,20 @@ def test_wallet_denial_code_reads_both_dialects():
 
 # ── the anthropic twin (ENG-1169) ─────────────────────────────────────
 
+def test_anthropic_401_maps_to_invalid_key_connection_error():
+    # No real-SDK 401 coverage existed for the anthropic mapper before this
+    # (review feedback on ENG-1310) — only openai's 401 was pinned against
+    # actual SDK output; anthropic's own "Invalid API key — …" copy was
+    # untested except via a hand-built ConnectionError.
+    exc = _anthropic_sdk_error(401, json_body={"type": "error", "error": {
+        "type": "authentication_error",
+        "message": "invalid x-api-key",
+    }})
+    with pytest.raises(ConnectionError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert "Invalid API key" in str(err.value)
+    assert _is_provider_auth_error(err.value)
+
 def _anthropic_sdk_error(status_code, json_body=None, headers=None):
     """Real `anthropic.APIStatusError` from the pinned SDK — the anthropic
     twin of `_sdk_error`. The anthropic SDK does NOT unwrap the error
@@ -596,3 +644,32 @@ def test_unhashable_code_never_crashes_the_classifier():
         _raise_for_status_error(exc, "sonnet")
     assert not isinstance(err.value, TokenLimitExceeded)
     assert classify_transient(429, {"code": ["wallet_empty"]}) is not None  # plain-429 path intact
+
+
+def test_anthropic_mapper_also_reads_retry_after_and_the_velocity_signal():
+    # ENG-1537 review finding 6: the anthropic twin's `retry_after=` passthrough
+    # had no coverage — deleting it left all 87 mapper tests green, while the
+    # same deletion in openai.py correctly reddened. The two mappers are meant
+    # to be twins, so the untested one is where they drift.
+    from anton.core.llm.anthropic import _raise_for_status_error as anthropic_mapper
+
+    exc = _anthropic_sdk_error(429, json_body={"error": {"code": "rate_limited"}},
+                               headers={"Retry-After": "42"})
+    with pytest.raises(TransientProviderError) as err:
+        anthropic_mapper(exc, provider="Anthropic", model="sonnet")
+    assert err.value.retry_after == 42.0
+    assert err.value.session_backoff is True
+    assert err.value.code == "rate_limited"
+
+
+def test_anthropic_mapper_does_not_wait_on_an_unconfirmed_429():
+    # The twin must apply the same positive-signal rule, or the Gemini-dialect
+    # quota hole exists on one door and not the other.
+    from anton.core.llm.anthropic import _raise_for_status_error as anthropic_mapper
+
+    exc = _anthropic_sdk_error(429, json_body={"error": {"code": 429}},
+                               headers={"Retry-After": "42"})
+    with pytest.raises(TransientProviderError) as err:
+        anthropic_mapper(exc, provider="Anthropic", model="sonnet")
+    assert err.value.session_backoff is False
+    assert err.value.retry_after is None

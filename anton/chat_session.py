@@ -116,6 +116,11 @@ def rebuild_session(
         console=console,
         history_store=history_store,
         session_id=session_id,
+        # ENG-1495: identify the host explicitly. Left unset, `harness` reached
+        # telemetry as "" — which meant BOTH "this is the CLI" and "the host
+        # didn't identify itself", so the two could never be told apart and the
+        # ambiguity got worse with every new host.
+        harness="cli",
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,

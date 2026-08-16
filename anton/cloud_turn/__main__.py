@@ -21,11 +21,53 @@ import json
 import logging
 import os
 import sys
+import time
 
 from anton.cloud_turn.contract import TurnRequestV1
-from anton.cloud_turn.session import build_cloud_chat_session
+from anton.cloud_turn.session import build_cloud_chat_session, drain_pending_memory
 
 logger = logging.getLogger(__name__)
+
+#: Bound step-event payloads (tool args / results) on the wire. Matches the
+#: cap cowork's SSE formatter applies to the same content.
+MAX_STEP_CHARS = 65536
+MAX_PROGRESS_CHARS = 2000
+#: Per-string-field cap when shrinking a cell-result JSON to fit the wire.
+RESULT_FIELD_CAP = 16384
+#: Rate limit for repeat progress events on the wire — agent code can call
+#: progress() in a tight loop; step-creating/closing phases are never dropped.
+#: Matches cowork's SSE-side PROGRESS_THROTTLE.
+PROGRESS_WIRE_INTERVAL = 0.25
+
+_TRUNCATION_MARKER = "\n[… truncated …]\n"
+
+
+def _clip_result_content(content: str, cap: int = MAX_STEP_CHARS) -> str:
+    """Bound a tool result without losing its verdict.
+
+    Exec results are cell JSON whose `error` field decides ok/timeout/error
+    downstream (cowork's classify_cell_status parses it structurally), so
+    shrink the bulky fields and keep the JSON — and `error` — intact. A blind
+    prefix cut made long failed cells render as successful. Non-JSON content
+    falls back to a middle clip so trailing error text still survives."""
+    if len(content) <= cap:
+        return content
+    try:
+        cell = json.loads(content)
+    except (ValueError, TypeError):
+        cell = None
+    if isinstance(cell, dict):
+        for key, val in cell.items():
+            if key != "error" and isinstance(val, str) and len(val) > RESULT_FIELD_CAP:
+                keep = RESULT_FIELD_CAP // 2
+                cell[key] = val[:keep] + _TRUNCATION_MARKER + val[-keep:]
+        clipped = json.dumps(cell)
+        if len(clipped) <= cap:
+            return clipped
+        content = clipped
+    head = cap * 3 // 4
+    tail = cap - head - len(_TRUNCATION_MARKER)
+    return content[:head] + _TRUNCATION_MARKER + content[-tail:]
 
 #: Bound the single request line so a malformed/huge stdin can't exhaust memory.
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
@@ -87,6 +129,18 @@ async def _close(session) -> None:
         logger.warning("cloud session close failed (non-fatal)", exc_info=True)
 
 
+async def _settle_memory(session) -> None:
+    """Await memory encoding the session registered. Optional like ``close``, and
+    best-effort: a lost memory must never cost the turn its reply."""
+    settle = getattr(session, "settle_memory_writes", None)
+    if settle is None:
+        return
+    try:
+        await settle()
+    except Exception:
+        logger.warning("memory settle failed (non-fatal)", exc_info=True)
+
+
 async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
@@ -106,6 +160,8 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         StreamTaskProgress,
         StreamTextDelta,
         StreamToolResult,
+        StreamToolUseDelta,
+        StreamToolUseEnd,
         StreamToolUseStart,
     )
 
@@ -125,24 +181,78 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     try:
         req = TurnRequestV1.from_json(raw_line)
         session = builder(req)
+        # Tool-call args accumulate here and ship once on tool_end, so the
+        # wire carries one event per call instead of one per args token.
+        # Accumulation stops at the wire cap — a runaway call can't grow
+        # pod memory with args that would be clipped anyway.
+        tool_args: dict[str, list[str]] = {}
+        tool_args_len: dict[str, int] = {}
+        seen_tool_progress: set[str] = set()
+        last_progress_wire = 0.0
         async for event in session.turn_stream(req.input):
             if isinstance(event, StreamTextDelta):
                 emit({"kind": "delta", "text": event.text or ""})
-            # Narrate the discrete actions to stderr so the turn is observable
-            # in the controller logs (per-token deltas/reasoning are skipped to
-            # keep it readable). The turn loop itself logs nothing.
+            # Step events go on the wire for cowork's thinking/steps UI;
+            # stderr keeps the controller-log narration.
             elif isinstance(event, StreamToolUseStart):
                 logger.info("tool call: %s", event.name)
+                tool_args[event.id] = []
+                emit({"kind": "tool_start", "id": event.id, "name": event.name})
+            elif isinstance(event, StreamToolUseDelta):
+                parts = tool_args.get(event.id)
+                if parts is not None and tool_args_len.get(event.id, 0) < MAX_STEP_CHARS:
+                    parts.append(event.json_delta)
+                    tool_args_len[event.id] = (
+                        tool_args_len.get(event.id, 0) + len(event.json_delta)
+                    )
+            elif isinstance(event, StreamToolUseEnd):
+                args = "".join(tool_args.pop(event.id, []))
+                tool_args_len.pop(event.id, None)
+                emit({"kind": "tool_end", "id": event.id,
+                      "args": args[:MAX_STEP_CHARS]})
             elif isinstance(event, StreamTaskProgress):
                 logger.info("progress [%s]: %s", event.phase, event.message)
+                phase = event.phase or ""
+                first_progress = (phase == "tool_progress" and event.id
+                                  and event.id not in seen_tool_progress)
+                if first_progress:
+                    seen_tool_progress.add(event.id)
+                # Step-creating/closing phases and the first tool_progress per
+                # id must never be dropped (they open/close renderer steps);
+                # the rest is rate-limited.
+                always = bool(first_progress) or phase in (
+                    "scratchpad_start", "scratchpad_done", "tool_done")
+                now = time.monotonic()
+                if always or now - last_progress_wire >= PROGRESS_WIRE_INTERVAL:
+                    if not always:
+                        last_progress_wire = now
+                    emit({"kind": "progress", "phase": phase,
+                          "message": (event.message or "")[:MAX_PROGRESS_CHARS],
+                          "eta_seconds": event.eta_seconds,
+                          "id": event.id, "ok": event.ok})
             elif isinstance(event, StreamToolResult):
                 action = f" action={event.action}" if event.action else ""
                 logger.info("tool result: %s%s (%d chars)",
                             event.name, action, len(event.content or ""))
+                emit({"kind": "tool_result", "id": event.id, "name": event.name,
+                      "action": event.action,
+                      "content": _clip_result_content(event.content or "")})
             elif isinstance(event, StreamContextCompacted):
                 logger.info("context compacted: %s", event.message)
+                emit({"kind": "compacted", "message": event.message})
             elif isinstance(event, StreamComplete):
                 logger.info("model response complete")
+                # Round boundary: cowork's formatter separates rounds with a
+                # paragraph break unless the round was truncated mid-sentence.
+                emit({"kind": "round_end",
+                      "stop_reason": event.response.stop_reason,
+                      "had_tool_calls": bool(event.response.tool_calls)})
+        await _settle_memory(session)
+        entries = drain_pending_memory(session)
+        if entries:
+            # Before the terminal event: cowork persists on this, then stops reading.
+            logger.info("emitting %d memory entr(ies)", len(entries))
+            emit({"kind": "memory", "entries": entries})
         logger.info("cloud turn completed")
         emit({"kind": "turn_completed"})
     except Exception as exc:
