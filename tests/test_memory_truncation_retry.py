@@ -315,6 +315,32 @@ def _truncated_mid_json(budget: int) -> LLMResponse:
     )
 
 
+def _repaired_mid_json(payload: dict):
+    """The silent twin of `_truncated_mid_json` (ENG-695).
+
+    The budget ran out inside the arguments again, but here the repair pass
+    closed the open bracket and the result parsed — so `parse_error` is None and
+    the partial dict validates against the schema. An int array is the most
+    repairable payload there is: `'{"keep": [1, 2, … 11, 12, 1'` comes back as a
+    complete-looking answer naming 13 of an intended 78 entries.
+
+    `payload` must be VALID for the schema under test, or the ladder raises on
+    validation instead and the test passes whether the guard is there or not.
+    """
+
+    def _response(budget: int) -> LLMResponse:
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id="tc_1", name="_Repaired", input=payload, repaired=True)
+            ],
+            usage=Usage(input_tokens=100, output_tokens=budget),
+            stop_reason="length",
+        )
+
+    return _response
+
+
 def _ladder_over(*responses) -> tuple[LLMClient, AsyncMock]:
     provider = MagicMock()
     calls = iter(responses)
@@ -381,6 +407,44 @@ async def test_the_two_truncations_are_distinguishable_in_the_log(caplog):
     await _run_ladder(payload, caplog)
 
     assert first != caplog.text
+
+
+async def test_a_repaired_payload_is_a_truncation_not_an_answer(caplog):
+    """A dict that only parsed because repair closed its bracket is not an
+    answer. Without this the ladder accepts it, and with an index schema that
+    means every entry the model had not yet named is deleted."""
+    answers_the_probe = _repaired_mid_json({"value": "partial"})
+    client, _ = _ladder_over(answers_the_probe, answers_the_probe)
+    exc = await _run_ladder(client, caplog)
+
+    assert exc.truncated is True
+    assert exc.reached_tool_call is True
+    assert "TRUNCATED_INSIDE_CALL" in caplog.text
+
+
+async def test_a_repaired_compaction_answer_does_not_delete_the_rest(tmp_path, caplog):
+    """The consequence at the call site: the file survives instead of shrinking
+    to whatever the model managed to emit before the budget ran out."""
+    from anton.core.memory.hippocampus import Hippocampus
+
+    hc = Hippocampus(tmp_path / "global")
+    for i in range(10):
+        hc.encode_lesson(f"Fact number {i}", topic=f"t{i}")
+    before = hc._lessons_path.read_text()
+
+    names_2_of_10 = _repaired_mid_json({"keep": [1, 2]})
+    client, _ = _ladder_over(names_2_of_10, names_2_of_10)
+    cortex = Cortex(
+        global_hc=hc,
+        project_hc=Hippocampus(tmp_path / "project"),
+        llm_client=client,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await cortex._compact_file(hc, hc._lessons_path, "lesson")
+
+    assert hc._lessons_path.read_text() == before
+    assert "memory-compaction failed" in caplog.text
 
 
 async def test_the_verdict_never_leaks_the_model_text(caplog):
