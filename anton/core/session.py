@@ -27,6 +27,7 @@ from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
+from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
@@ -903,6 +904,9 @@ class ChatSession:
             root=getattr(s, "skills_root", None),
             extra_roots=getattr(s, "skills_extra_roots", None),
         )
+        # Where `create_skill_draft` stages skills the agent builds. None means
+        # the host stages none, and the tool is not registered at all.
+        self._skill_drafts_root = getattr(s, "skill_drafts_root", None)
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
@@ -1665,6 +1669,12 @@ class ChatSession:
 
         # Procedural memory retrieval — always available, no-op if no skills.
         self.tool_registry.register_tool(RECALL_SKILL_TOOL)
+
+        # Procedural memory authoring. Gated on the host giving us somewhere to
+        # stage drafts, so a host with its own equivalent tool (cowork desktop)
+        # doesn't end up with two registrations of this name shadowing.
+        if self._skill_drafts_root is not None:
+            self.tool_registry.register_tool(CREATE_SKILL_DRAFT_TOOL)
 
         # Handler-dispatched web tools — registered only when the LLM provider
         # does NOT execute them natively. On Anthropic / OpenAI BYOK / mdb.ai

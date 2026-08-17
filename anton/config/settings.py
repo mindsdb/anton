@@ -104,6 +104,12 @@ class AntonSettings(CoreSettings):
     # Read-only skill roots the host ships alongside its own tools (ENG-764).
     # Take precedence over anton's built-ins; user skills still shadow them.
     skills_extra_roots: list[Path] | None = None
+    # Staging area for skills the agent builds, drained by the host at end of
+    # turn. Unset means the agent gets no skill-authoring tool:
+    # - a host with no drafts area has nowhere to put a built skill
+    # - a host that stages drafts its own way registers its own tool instead,
+    #   and two tools of one name would silently shadow each other
+    skill_drafts_root: Path | None = None
 
     memory_enabled: bool = True
     # TODO: Calling this memory_dir is a bit misleading, because there are other directories that live here

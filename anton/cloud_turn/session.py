@@ -52,6 +52,11 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # some builtins, so stripping the tool would point the model at a
         # missing tool. Only writes a stats counter in the discarded staging dir.
         "recall_skill",
+        # Safe to list only because `skill_drafts_root` is always set below —
+        # core registers the tool with one, and an allowlist name matching no
+        # tool is fatal. Writes only into this conversation's drafts dir; the
+        # tenant's skill store is never touched from the pod.
+        "create_skill_draft",
     }
 )
 
@@ -274,6 +279,13 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     # persist — and cells could read — anything under it). Builtins resolve via
     # SkillStore's package root regardless.
     settings.skills_root = _stage_skills(request.skills)
+    # Skills the agent builds stage here instead of the store, and the entrypoint
+    # reports them for cowork to surface. ON the workspace, unlike everything
+    # staged above — editing a skill spans turns, and the workspace PVC is the
+    # only per-conversation storage that outlives the pod. Same layout as the
+    # desktop harness (`<project>/.anton/skill_drafts`).
+    settings.skill_drafts_root = base / settings.memory_dir / "skill_drafts"
+    settings.skill_drafts_root.mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(base, settings=settings)
     workspace.initialize()

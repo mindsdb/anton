@@ -340,6 +340,15 @@ class SkillStore:
 
     # ── reading ─────────────────────────────────────────────────────
 
+    def dir_for(self, label: str) -> Path | None:
+        """The user-root directory holding `label`, or None.
+
+        Built-ins and `extra_roots` are deliberately not searched: this exists
+        for callers that copy a skill's files to edit them, and those roots are
+        read-only.
+        """
+        return self._find_dir(label)
+
     def load(self, label: str) -> Skill | None:
         """Read a single skill by label. Returns None if absent or unreadable.
 
