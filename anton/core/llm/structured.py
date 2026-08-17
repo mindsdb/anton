@@ -161,6 +161,32 @@ def looks_truncated(response, budget: int) -> bool:
     )
 
 
+def usable_tool_call(response) -> bool:
+    """True when `response` carries tool calls and every one of them is intact.
+
+    A tool call is what lets a round that hit the output cap still be worth
+    using — but only if nothing it emitted was cut:
+
+    - ``repaired`` marks arguments the repair pass patched back into valid JSON,
+      which means the model's own body ended mid-value. It closes an open string
+      or brace; it cannot invent the argument that never arrived.
+    - ``parse_error`` marks a body it could not salvage at all.
+
+    One damaged call makes the whole round unfinished, even alongside intact
+    ones: using the intact half acts on part of what the model was still in the
+    middle of asking for.
+
+    Lives here rather than in the session because the reason it exists is
+    shared: a repaired dict whose missing field happens to be optional
+    validates cleanly, so no amount of schema validation downstream can catch
+    it. The structured-output paths (`LLMClient.generate_object` and its sync
+    twin) test `repaired` alone — a `parse_error` there is left to the
+    validation branch, which classifies it only when the budget ran out.
+    """
+    calls = getattr(response, "tool_calls", None)
+    return bool(calls) and not any(tc.parse_error or tc.repaired for tc in calls)
+
+
 def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoReturn:
     """Raise `StructuredOutputError` explaining *why* the tool call is unusable.
 

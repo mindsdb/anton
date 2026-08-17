@@ -22,6 +22,14 @@ class ToolCall:
     # the handler run with `input={}` and produce a confusing
     # "missing required field" trail. See `safe_parse_tool_input`.
     parse_error: str | None = None
+    # True when the arguments JSON was malformed but the repair pass in
+    # `safe_parse_tool_input` salvaged a parseable dict, so `parse_error` is
+    # None and the handler *would* run. The dict is syntactically valid and
+    # semantically unfinished: the repair closes an open string or brace, it
+    # cannot invent the argument the model never emitted. Read in two places —
+    # `usable_tool_call`, to retry a round the output cap cut off, and
+    # `damaged_tool_call_result`, which refuses the call outright.
+    repaired: bool = False
 
 
 @dataclass
@@ -219,8 +227,14 @@ def _try_repair_tool_json(raw: str):
       • Close any unterminated string with a `"`.
       • Append `]` / `}` to balance open `[` / `{`.
 
-    Returns the parsed dict on success, or None if even the repaired
-    string is unparseable. Never raises.
+    Returns ``(parsed_dict, was_truncated)`` on success, or None if even
+    the repaired string is unparseable. Never raises. The two recovery
+    branches mean different things to the caller:
+
+    - synthetic closers → the body ended mid-value, so an argument the
+      model meant to send is missing or cut short (``was_truncated``).
+    - trailing junk after a balanced top-level object → every argument
+      arrived; only the tail is garbage.
     """
     if not raw:
         return None
@@ -261,21 +275,25 @@ def _try_repair_tool_json(raw: str):
                 return None
 
     # Try the simplest repair first: close the open string + open
-    # containers in reverse order, drop a stray trailing comma.
-    repaired = s
-    if in_string:
-        repaired += '"'
-    # Strip trailing comma just before the synthetic closers, which is
-    # the most common shape of "model was cut off after a comma".
-    repaired = repaired.rstrip().rstrip(",")
-    for opener in reversed(stack):
-        repaired += "}" if opener == "{" else "]"
+    # containers in reverse order, drop a stray trailing comma. Only
+    # attempt it when something was actually left open — with nothing to
+    # close, the body is a complete value plus junk, which belongs to the
+    # `last_safe` branch below and is not a truncation.
+    if in_string or stack:
+        repaired = s
+        if in_string:
+            repaired += '"'
+        # Strip trailing comma just before the synthetic closers, which is
+        # the most common shape of "model was cut off after a comma".
+        repaired = repaired.rstrip().rstrip(",")
+        for opener in reversed(stack):
+            repaired += "}" if opener == "{" else "]"
 
-    try:
-        parsed = _json.loads(repaired)
-        return parsed if isinstance(parsed, dict) else None
-    except _json.JSONDecodeError:
-        pass
+        try:
+            parsed = _json.loads(repaired)
+            return (parsed, True) if isinstance(parsed, dict) else None
+        except _json.JSONDecodeError:
+            pass
 
     # Fall back to "everything up to the last fully-balanced close" —
     # works when the model emitted a complete top-level object plus
@@ -283,13 +301,13 @@ def _try_repair_tool_json(raw: str):
     if last_safe > 0:
         try:
             parsed = _json.loads(s[:last_safe])
-            return parsed if isinstance(parsed, dict) else None
+            return (parsed, False) if isinstance(parsed, dict) else None
         except _json.JSONDecodeError:
             pass
     return None
 
 
-def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None]:
+def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     """Parse the JSON body of a streamed `tool_use` call without
     crashing the turn when the assembled body is malformed.
 
@@ -311,14 +329,22 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None]:
          commas. Catches the common "cut off mid-token" shape.
       3. Empty dict + `parse_error` populated.
 
-    Returns ``(parsed_dict, parse_error_or_None)``. The session
-    dispatcher reads ``parse_error`` to decide whether to invoke the
-    tool handler (parse_error is None) or short-circuit with a
-    structured tool_result that asks the LLM to re-emit the call
-    (parse_error is set). Either way this function never raises.
+    Returns ``(parsed_dict, parse_error_or_None, was_repaired)``. The
+    session dispatcher reads ``parse_error`` to decide whether to
+    invoke the tool handler (parse_error is None) or short-circuit
+    with a structured tool_result that asks the LLM to re-emit the
+    call (parse_error is set). ``was_repaired`` marks the truncating
+    half of step 2 — a body that ended mid-value, as opposed to a
+    complete object with junk after it, which parses to every argument
+    the model sent and stays dispatchable. The dict is then parseable
+    but built from an incomplete body, so a caller that
+    knows *why* the body was cut — the session, which can see the
+    round hit its output cap — can retry the round instead of running
+    a handler on arguments the model never finished. Either way this
+    function never raises.
     """
     if not raw_json:
-        return {}, None
+        return {}, None, False
     import json as _json
     import logging as _logging
 
@@ -326,27 +352,68 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None]:
         parsed = _json.loads(raw_json)
     except _json.JSONDecodeError as exc:
         # Try the repair pass before giving up entirely.
-        repaired = _try_repair_tool_json(raw_json)
-        if repaired is not None:
+        repair = _try_repair_tool_json(raw_json)
+        if repair is not None:
+            repaired, truncated = repair
             _logging.getLogger(__name__).info(
                 "Tool-use input JSON was malformed (%s) but repaired "
-                "successfully. Raw bytes: %d.",
-                exc, len(raw_json),
+                "successfully. Raw bytes: %d, truncated: %s.",
+                exc, len(raw_json), truncated,
             )
-            return repaired, None
+            return repaired, None, truncated
         _logging.getLogger(__name__).warning(
             "Tool-use input JSON was malformed and unrecoverable (%s). "
             "Raw bytes: %d, head: %r",
             exc, len(raw_json), raw_json[:160],
         )
-        return {}, str(exc)
+        return {}, str(exc), False
     # Anthropic occasionally emits a top-level scalar (e.g. a string
     # for a single-arg tool); coerce to a dict so callers always see
     # the same shape. Treat as a parse error so the dispatcher asks
     # for a re-emit instead of running the handler with an empty dict.
     if not isinstance(parsed, dict):
-        return {}, f"tool input was not a JSON object (got {type(parsed).__name__})"
-    return parsed, None
+        return {}, f"tool input was not a JSON object (got {type(parsed).__name__})", False
+    return parsed, None, False
+
+
+def damaged_tool_call_result(tc: ToolCall) -> dict | None:
+    """The `tool_result` to answer an unfinished tool call with, or None.
+
+    None means the call is intact and may be dispatched. Two shapes are not:
+
+    - ``parse_error`` — the arguments couldn't be parsed at all (a cut
+      mid-string, a missing comma).
+    - ``repaired`` — they parsed only after the repair pass closed an open
+      string or brace, so the dict is valid JSON built from a body the model
+      never finished. It cannot contain the argument that never arrived, and
+      running a handler on it acts on half a request.
+
+    Answering with a `tool_result` keeps the recovery inside the tool_use /
+    tool_result protocol the model already understands, so no caller needs a
+    retry of its own. Lives next to `safe_parse_tool_input`, which produces the
+    two flags, and is shared by every tool loop — the session's streaming and
+    non-streaming ones, and `agentic_loop` in the scratchpad subprocess — so a
+    damaged call is refused identically whichever one runs.
+    """
+    if not (tc.parse_error or tc.repaired):
+        return None
+    reason = (
+        f"failed to parse: {tc.parse_error}"
+        if tc.parse_error
+        else "arrived incomplete — the body ended mid-value and was only closed "
+             "off by a repair pass, so at least one argument is missing or cut short"
+    )
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": (
+            f"Tool call arguments {reason}. This is most often a token-cap "
+            "truncation mid-call. Re-emit this call with a complete, valid JSON "
+            "body; if an argument was large, make it smaller or split the work "
+            "across several calls."
+        ),
+        "is_error": True,
+    }
 
 
 _CONTEXT_WINDOWS: list[tuple[str, int]] = [
