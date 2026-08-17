@@ -580,6 +580,27 @@ def test_a_draft_survives_into_the_next_turn(tmp_path, monkeypatch, skills_tmp):
     assert carried.read_text() == "turn 1 work"
 
 
+def test_a_skill_the_agent_builds_comes_back_out(tmp_path, monkeypatch, skills_tmp):
+    """The whole point of the feature, end to end on a REAL session: the tool
+    claims a folder, the agent writes into it, and the drain reports it."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from anton.cloud_turn.session import drain_pending_skills
+    from anton.core.tools.skill_draft import handle_create_skill_draft
+
+    session = _real_cloud_session(tmp_path, monkeypatch)
+    claimed = json.loads(asyncio.run(
+        handle_create_skill_draft(session, {"name": "Competitive Analysis"})
+    ))
+    Path(claimed["skill_file"]).write_text("---\nname: competitive-analysis\n---\nsteps")
+
+    entries = drain_pending_skills(session)
+    assert [e["slug"] for e in entries] == ["competitive-analysis"]
+    assert "steps" in entries[0]["files"]["SKILL.md"]
+
+
 def test_recall_skill_survives_the_real_tool_build(tmp_path, monkeypatch, skills_tmp):
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     session._build_tools()
