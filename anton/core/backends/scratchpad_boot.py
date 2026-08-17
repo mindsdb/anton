@@ -822,6 +822,8 @@ import threading
 
 from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
+    INSTALL_END_MARKER,
+    INSTALL_START_MARKER,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
 )
@@ -840,6 +842,19 @@ try:
     )
 except ValueError:
     _HEARTBEAT_INTERVAL = 10.0
+
+# Budget for the in-cell auto-installer. The parent resolves
+# CoreSettings.cell_install_timeout and passes it through at spawn (see
+# LocalScratchpadRuntime.start), so the installer and the parent's kill
+# windows run off one number instead of two constants that can drift apart
+# (ENG-1275); the fallback mirrors that setting's default. Same
+# malformed-override guard as the heartbeat interval above.
+try:
+    _INSTALL_TIMEOUT = float(os.environ.get("ANTON_CELL_INSTALL_TIMEOUT", "120"))
+except ValueError:
+    _INSTALL_TIMEOUT = 120.0
+if _INSTALL_TIMEOUT <= 0:
+    _INSTALL_TIMEOUT = 120.0
 
 # Per-tick cap on salvage chunk size: bounds a single wire line even when a
 # cell floods stdout between ticks; the remainder ships on later ticks.
@@ -1191,26 +1206,54 @@ while True:
                 sys.stdout = _real_stdout
                 sys.stderr = sys.__stderr__
                 _cell_log_handler.buf = None
+                # The parent turns this marker into the visible "Installing
+                # X..." progress line and defers its kill windows to the
+                # install budget while the install runs (ENG-1275).
                 with _wire_lock:
-                    _real_stdout.write(
-                        PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n"
-                    )
+                    _real_stdout.write(INSTALL_START_MARKER + " " + _missing + "\n")
                     _real_stdout.flush()
                 import subprocess as _sp
 
                 _uv_path = os.environ.get("ANTON_UV_PATH", "")
-                if _uv_path:
-                    _pip = _sp.run(
-                        [_uv_path, "pip", "install", "--python", sys.executable, _missing],
-                        capture_output=True,
-                        timeout=120,
+                _pip = None
+                _install_error = None
+                try:
+                    if _uv_path:
+                        _pip = _sp.run(
+                            [_uv_path, "pip", "install", "--python", sys.executable, _missing],
+                            capture_output=True,
+                            timeout=_INSTALL_TIMEOUT,
+                        )
+                    else:
+                        _pip = _sp.run(
+                            [sys.executable, "-m", "pip", "install", _missing],
+                            capture_output=True,
+                            timeout=_INSTALL_TIMEOUT,
+                        )
+                except _sp.TimeoutExpired:
+                    # An uncaught raise here used to take down the whole
+                    # worker, and the parent reported a generic process death
+                    # with no mention of the install (ENG-1275).
+                    _install_error = (
+                        f"ModuleNotFoundError: No module named '{_missing}'\n"
+                        f"Auto-install of '{_missing}' was killed after "
+                        f"{_INSTALL_TIMEOUT:.0f}s (cell_install_timeout) without "
+                        "finishing — the package is not installed. Retrying may "
+                        "complete it (downloads are cached); for a large package, "
+                        "run the scratchpad's install action first."
                     )
-                else:
-                    _pip = _sp.run(
-                        [sys.executable, "-m", "pip", "install", _missing],
-                        capture_output=True,
-                        timeout=120,
+                except OSError as _exc:
+                    _install_error = (
+                        f"ModuleNotFoundError: No module named '{_missing}'\n"
+                        f"Auto-install of '{_missing}' could not run: {_exc}"
                     )
+                # Deliberately not in a finally: if the install failed in a
+                # way not handled above the worker is going down, and the
+                # missing end marker is what lets the parent name the install
+                # in the death report.
+                with _wire_lock:
+                    _real_stdout.write(INSTALL_END_MARKER + " " + _missing + "\n")
+                    _real_stdout.flush()
                 # Reset buffers and retry
                 out_buf = io.StringIO()
                 err_buf = io.StringIO()
@@ -1222,12 +1265,14 @@ while True:
                 _cell_log_handler.buf = log_buf
                 sys.stdout = out_buf
                 sys.stderr = err_buf
-                if _pip.returncode == 0:
+                if _pip is not None and _pip.returncode == 0:
                     _auto_installed.append(_missing)
                     try:
                         exec(compiled, namespace)
                     except Exception:
                         error = traceback.format_exc()
+                elif _install_error is not None:
+                    error = _install_error
                 else:
                     error = (
                         f"ModuleNotFoundError: No module named '{_missing}'\n"

@@ -27,6 +27,7 @@ from .provider import (
     Usage,
     classify_404,
     classify_transient,
+    retry_after_seconds,
     compute_context_pressure,
     wallet_denial_code,
     raise_on_empty_response,
@@ -106,11 +107,26 @@ def _raise_for_status_error(
             error_type=envelope.get("type"),
         ) from exc
 
-    transient = classify_transient(exc.status_code, body, provider=provider, model=model)
+    # Body `code` in both dialects — the SDK may deliver the wire envelope
+    # unmodified, unlike the openai client which peels it.
+    _env = body.get("error") if isinstance(body.get("error"), dict) else {}
+    _body_code = body.get("code") or _env.get("code")
+    # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
+    # our gateway names it on the reason header and in the body code. Anything
+    # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
+    # old fail-fast path rather than burning the budget on a limit that may not
+    # clear.
+    _velocity = gate_reason == "rate_limited" or _body_code == "rate_limited"
+    transient = classify_transient(
+        exc.status_code, body, provider=provider, model=model,
+        retry_after=retry_after_seconds(exc),
+        velocity_confirmed=_velocity,
+    )
     if transient is not None:
         logger.warning(
-            "transient provider error (%s): status=%s body=%s",
-            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+            "transient provider error (%s): status=%s retry_after=%s body=%s",
+            transient.code, exc.status_code, transient.retry_after,
+            scrub_credentials(str(exc.body))[:500],
         )
         raise transient from exc
 

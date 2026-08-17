@@ -220,3 +220,7 @@ evals/results/
 
 # junit report from the verifier eval (--junitxml), CI artifact only
 eval-junit.xml
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, review
+# packages) — process artifacts, not source.
+.superpowers/

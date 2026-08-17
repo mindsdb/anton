@@ -443,11 +443,24 @@ SCRATCHPAD_STUCK_NUDGE = (
     "signalling liveness — the process died or a native call is stuck holding "
     "it below Python. This is NOT a size problem: do not shrink the batch or "
     "split the loop; deliberate sleeps and blocking calls are kept alive "
-    "automatically. Reset the scratchpad and retry the same cell. Pass "
+    "automatically. Just retry the same cell — the scratchpad restarts "
+    "automatically, so there is no need to reset first. Pass "
     "estimated_execution_time_seconds so the total budget fits, and call "
     "progress() to narrate long phases. If the same code wedges again, a "
     "native call may be hanging — give that call its own timeout. Reuse the "
     "SAME scratchpad; do not rename it."
+)
+# An install failure is neither a size nor a liveness problem — shrinking the
+# cell cannot make a package install, and a reset throws away a venv that may
+# already hold most of the download (ENG-1275). Routed on "auto-install" in
+# the error text, ahead of the other scratchpad branches.
+SCRATCHPAD_INSTALL_NUDGE = (
+    "\n\nSYSTEM: This scratchpad cell keeps failing on a package install, not "
+    "on its logic. Do not shrink or split the cell — that cannot make a "
+    "package install. Install the package explicitly with the scratchpad's "
+    "install action (double-check the PyPI name), then rerun the same cell. "
+    "If the explicit install also fails or times out, tell the user instead "
+    "of retrying."
 )
 # A budget kill with zero output is ambiguous — a stuck call and silent heavy
 # work look identical from outside. Say so, rather than confidently claiming

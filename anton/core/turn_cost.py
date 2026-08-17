@@ -105,6 +105,18 @@ class TurnCost:
     # specific exit; ``_emit_turn_cost`` overrides with cancelled/error when
     # the turn didn't end on its own terms.
     ended_by: str = "completed"
+    # The completion verifier was applicable but produced no verdict this turn
+    # (denied by billing/model access, or suppressed by the verifier latch —
+    # ENG-1632). Such turns deliberately book ended_by="completed" (the work
+    # succeeded; a priced-out check is not a broken turn), so WITHOUT this flag
+    # they are byte-identical in analytics to turns that were verified and
+    # passed — silently joining the honest-stop denominator, concentrated in
+    # exactly the wallet-locked cohort a measurement would want to isolate.
+    # Stamped at the skip/deny sites, never read from live session state at
+    # emit (late finalizers would read a later turn's latch state — see the
+    # note below on stamped-at-open fields). Handback terminals don't need it:
+    # their ended_by already distinguishes them.
+    verification_skipped: bool = False
     started_monotonic: float = field(default_factory=time.monotonic)
     # Set when these books have been reported. Replaces "the shared slot is
     # None" as the double-emit guard, because a late finalizer now emits the

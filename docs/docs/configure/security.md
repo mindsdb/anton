@@ -46,8 +46,10 @@ Three things, and only three:
 1. **Prompts to your LLM provider.** Whatever you type, plus the context
    Anton assembles, goes to the provider you configured (Anthropic, OpenAI,
    Minds, or your own endpoint) and is governed by that provider's terms.
-2. **Anonymous analytics.** Event names and timestamps only — no query
-   content, no personal data. Opt out any time: see
+2. **Anonymous analytics**, to MindsDB and to PostHog Inc. (a US analytics
+   processor). Event names, timestamps, and for some events anonymous
+   measurements of the action — token counts, model names, durations, opaque
+   ids. Never query content and never personal data. Opt out any time: see
    [Analytics](/configure/analytics).
 3. **Whatever you ask Anton to send.** Emails, API calls, published
    dashboards — actions you request.

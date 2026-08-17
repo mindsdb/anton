@@ -11,9 +11,11 @@ import asyncio
 
 import pytest
 
+from anton.core.backends import local as local_backend
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
+    SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SILENT_TIMEOUT_NUDGE,
     SCRATCHPAD_STUCK_NUDGE,
     SCRATCHPAD_TIMEOUT_NUDGE,
@@ -169,6 +171,194 @@ class TestLivenessHeartbeat:
             await pad.close()
 
 
+class TestQuietCellNotice:
+    """The heartbeat is unconditional liveness, not progress — but a cell
+    silent past the notice threshold should surface that to the user instead
+    of staying silent until it either finishes or hits cell_total_max
+    (ENG-1324)."""
+
+    async def test_quiet_cell_gets_rate_limited_notice(self, monkeypatch):
+        """A cell producing no stdout past the notice threshold gets a
+        periodic 'still running' notice, rate-limited rather than once per
+        heartbeat."""
+        shrink_timers(monkeypatch, heartbeat="0.2")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.3)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.5)
+        pad = make_pad()
+        await pad.start()
+        try:
+            messages: list[str] = []
+            async for item in pad.execute_streaming(
+                "import time; time.sleep(1.8); print('done')"
+            ):
+                if isinstance(item, str):
+                    messages.append(item)
+            notices = [m for m in messages if m.startswith("still running")]
+            # ~9 heartbeats fire over 1.8s of silence at a 0.2s interval, but
+            # notifying only every 0.5s (after a 0.3s threshold) should
+            # produce a handful, not one per beat.
+            assert 1 <= len(notices) <= 4
+        finally:
+            await pad.close()
+
+    async def test_chatty_cell_never_gets_a_quiet_notice(self, monkeypatch):
+        """The gate is keyed to time since the last output, not time since the
+        cell started (ENG-1324): a cell printing on a cadence longer than the
+        heartbeat but shorter than the notice threshold must never see one,
+        even once total elapsed time alone would clear the threshold."""
+        shrink_timers(monkeypatch, heartbeat="0.2")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.7)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.1)
+        pad = make_pad()
+        await pad.start()
+        try:
+            messages: list[str] = []
+            code = (
+                "import time\n"
+                "for _ in range(6):\n"
+                "    print('tick')\n"
+                "    time.sleep(0.4)\n"
+            )
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    messages.append(item)
+            assert not any(m.startswith("still running") for m in messages)
+        finally:
+            await pad.close()
+
+    async def test_quiet_notice_during_install_names_the_install(
+        self, monkeypatch, tmp_path
+    ):
+        """A notice firing mid-install must name the install (ENG-1275's span
+        temporarily inflates the budget the notice quotes, so a bare 'still
+        running' would read as the cell's own progress instead of the
+        install's)."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.3)
+        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.1)
+        fake_mod = tmp_path / "eng1324_fake_mod.py"
+        stub = tmp_path / "slow_ok_uv.sh"
+        stub.write_text(
+            f"#!/bin/sh\nsleep 1\necho 'VALUE = 1' > '{fake_mod}'\nexit 0\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            messages: list[str] = []
+            code = (
+                f"import sys\nsys.path.insert(0, {str(tmp_path)!r})\n"
+                "import eng1324_fake_mod\nprint(eng1324_fake_mod.VALUE)\n"
+            )
+            async for item in pad.execute_streaming(code):
+                if isinstance(item, str):
+                    messages.append(item)
+            notices = [m for m in messages if m.startswith("still running")]
+            assert notices, "expected a quiet notice during the slow install"
+            assert all("eng1324_fake_mod" in m for m in notices)
+        finally:
+            await pad.close()
+
+
+class TestAutoInstallBudget:
+    """ENG-1275: the in-cell auto-installer must run under a budget derived
+    from CoreSettings.cell_install_timeout (one number, both sides), fail with
+    an error naming the install as the cause, and never take the pad down."""
+
+    async def test_install_past_install_timeout_fails_named_and_pad_survives(
+        self, monkeypatch, tmp_path
+    ):
+        """An install running past cell_install_timeout must produce a cell
+        error naming the auto-install and the module — and the worker must
+        survive it (no crash, next cell runs)."""
+        shrink_timers(monkeypatch)
+        monkeypatch.setenv("ANTON_CELL_INSTALL_TIMEOUT", "1")
+        stub = tmp_path / "hung_uv.sh"
+        stub.write_text("#!/bin/sh\nexec sleep 5\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute("import module_that_installs_slowly_eng1275")
+            assert cell.error is not None
+            low = cell.error.lower()
+            assert "auto-install" in low
+            assert "module_that_installs_slowly_eng1275" in cell.error
+            assert "liveness" not in low
+            follow_up = await pad.execute("print('pad-still-alive')")
+            assert follow_up.error is None
+            assert "pad-still-alive" in follow_up.stdout
+        finally:
+            await pad.close()
+
+    async def test_install_outlasting_total_budget_completes(
+        self, monkeypatch, tmp_path
+    ):
+        """The `import torch` shape: an install longer than the cell's total
+        budget must not be killed — the budget defers to the install's own
+        allowance while it runs, and the retried cell completes."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        fake_mod = tmp_path / "eng1275_fake_mod.py"
+        stub = tmp_path / "slow_ok_uv.sh"
+        stub.write_text(
+            f"#!/bin/sh\nsleep 3\necho 'VALUE = 42' > '{fake_mod}'\nexit 0\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                f"import sys\nsys.path.insert(0, {str(tmp_path)!r})\n"
+                "import eng1275_fake_mod\nprint(eng1275_fake_mod.VALUE)\n"
+            )
+            assert cell.error is None
+            assert "42" in cell.stdout
+        finally:
+            await pad.close()
+
+    async def test_worker_death_mid_install_names_install(
+        self, monkeypatch, tmp_path
+    ):
+        """A worker that dies while installing must not report the generic
+        'Process exited unexpectedly.' — the error names the install."""
+        shrink_timers(monkeypatch)
+        stub = tmp_path / "killer_uv.sh"
+        stub.write_text("#!/bin/sh\nkill -9 $PPID\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
+        monkeypatch.setattr(
+            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
+        )
+        pad = make_pad()
+        await pad.start()
+        try:
+            cell = await pad.execute("import module_whose_install_crashes_eng1275")
+            assert cell.error is not None
+            assert "auto-install" in cell.error.lower()
+            assert "module_whose_install_crashes_eng1275" in cell.error
+        finally:
+            await pad.close()
+
+
 class TestPartialStdoutSalvage:
     async def test_killed_cell_reports_partial_stdout(self, monkeypatch):
         """Prints from completed iterations survive a kill. Uses a
@@ -268,6 +458,172 @@ class TestKillMessages:
         finally:
             await pad.close()
 
+    async def test_kill_message_says_state_is_restored_not_lost(self, tmp_path, monkeypatch):
+        """ENG-1273: the old message ("state lost. Use reset to restart.")
+        pointed the agent at the one recovery path that destroys the state
+        ENG-1124 saved. With persistence actually configured, it must now
+        say the state is being restored."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = LocalScratchpadRuntime(
+            name="kill-msg-restored", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute("import time; time.sleep(30)")
+            assert cell.error is not None
+            low = cell.error.lower()
+            assert "state lost" not in low
+            assert "restore" in low
+            # Still names reset, but as the deliberate-wipe option, not the
+            # only path back.
+            assert "reset" in low
+            # The routing-critical phrase must still be intact (Global
+            # Constraints) — this is a regression guard for THIS test file,
+            # duplicating (deliberately) the check TestNudgeRouting already
+            # makes on the routing function itself.
+            assert "timed out" in low
+        finally:
+            await pad.cleanup()
+
+    async def test_kill_message_is_honest_without_persistence_configured(self, monkeypatch):
+        """ENG-1273 final-review finding: without a session id (bare CLI /
+        this test's default pad — no snapshot is even possible), the kill
+        message must NOT promise a restoration that cannot happen."""
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = make_pad()  # no session_id -> no snapshot possible
+        await pad.start()
+        try:
+            cell = await pad.execute("import time; time.sleep(30)")
+            assert cell.error is not None
+            low = cell.error.lower()
+            assert "already saved to disk" not in low
+            assert "restores it automatically" not in low
+            assert "timed out" in low
+        finally:
+            await pad.close()
+
+
+class TestResumeAfterKill:
+    """ENG-1273: a watchdog-killed cell must cost only itself, not the pad's
+    accumulated state — resume() (not reset) is the recovery path."""
+
+    async def test_watchdog_kill_auto_resumes_and_restores_last_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = LocalScratchpadRuntime(
+            name="eng1273", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
+        await pad.start()
+        try:
+            cell1 = await pad.execute("x = 42\nprint('set')")
+            assert cell1.error is None, cell1.error
+
+            # Cell 2: the watchdog kills it (silent, past both the
+            # inactivity and total budget).
+            cell2 = await pad.execute("import time; time.sleep(30)")
+            assert cell2.error is not None
+            assert "timed out" in cell2.error.lower()
+
+            # Cell 3: the pad is dead; execute() must auto-resume — reloading
+            # the namespace as of cell 1 — and run normally, with no
+            # explicit reset call in between.
+            cell3 = await pad.execute("print(x)")
+            assert cell3.error is None, cell3.error
+            assert cell3.stdout.strip() == "42"
+            # The counter proved itself and reset back to zero.
+            assert pad._consecutive_deaths == 0
+        finally:
+            await pad.cleanup()
+
+    async def test_repeated_kills_fall_back_to_reset_and_say_so(self, tmp_path, monkeypatch):
+        """A pad that dies on every resume (e.g. a corrupt reloaded snapshot)
+        must not loop — it falls back to a real reset and tells the agent."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        pad = LocalScratchpadRuntime(
+            name="looping", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
+        await pad.start()
+        try:
+            await pad.execute("kept = 'first turn'")
+
+            real_resume = pad.resume
+
+            async def _resume_then_die():
+                await real_resume()
+                pad._proc.kill()
+                await pad._proc.wait()
+
+            monkeypatch.setattr(pad, "resume", _resume_then_die)
+
+            # Kill the process to seed "dead" state, then let it die on
+            # every resume attempt for exactly `cap` calls — each of those
+            # uses up one of the allowed plain-resume attempts (the check in
+            # _auto_resume is `consecutive_deaths >= cap`, tested BEFORE
+            # incrementing, so it takes `cap` failed resumes to reach it).
+            pad._proc.kill()
+            await pad._proc.wait()
+            for _ in range(pad._MAX_CONSECUTIVE_AUTO_RESUMES):
+                cell = await pad.execute("print('should not run')")
+                assert cell.error is not None  # still dead going into the next call
+
+            # This call crosses the cap: falls back to a real reset() and
+            # actually runs, but 'kept' is gone and the agent is told why.
+            cell = await pad.execute("print('kept' in dir())")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "False"
+            assert "fully reset" in (cell.logs or "").lower()
+        finally:
+            await pad.cleanup()
+
+    async def test_legitimate_consecutive_kills_do_not_wipe_state(self, tmp_path, monkeypatch):
+        """ENG-1273 final-review finding: resume() succeeding (proven by the
+        process accepting and running a cell) must not count toward the
+        death cap just because that cell itself later gets killed for
+        running long — only resume() FAILING to produce a working process
+        should count. Otherwise a batch of several genuinely slow cells in
+        a row would trip the fallback and wipe state for a reason unrelated
+        to resume() at all."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+        pad = LocalScratchpadRuntime(
+            name="legit-kills", _venvs_base=tmp_path / "venvs", session_id="conv", **_DEFAULTS
+        )
+        await pad.start()
+        try:
+            cell1 = await pad.execute("precious = 'still here'\nprint('set')")
+            assert cell1.error is None, cell1.error
+
+            # Three cells in a row, each individually killed for running
+            # over budget — resume() succeeds each time (the process comes
+            # back and actually runs the next cell), so this must NOT trip
+            # the fallback-reset cap.
+            for _ in range(3):
+                cell = await pad.execute("import time; time.sleep(30)")
+                assert cell.error is not None
+                assert "timed out" in cell.error.lower()
+
+            cell_final = await pad.execute("print(precious)")
+            assert cell_final.error is None, cell_final.error
+            assert cell_final.stdout.strip() == "still here"
+            assert "fully reset" not in (cell_final.logs or "").lower()
+        finally:
+            await pad.cleanup()
+
 
 class TestNudgeRouting:
     """Pure string routing, no LLM: the post-kill nudge must name the right
@@ -314,6 +670,39 @@ class TestNudgeRouting:
             == RESILIENCE_NUDGE
         )
 
+    def test_install_timeout_error_routes_to_install_nudge(self):
+        """An install that ran out of its budget is neither a size nor a
+        liveness problem — 'make the cell smaller' cannot make a package
+        install (ENG-1275)."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "ModuleNotFoundError: No module named 'torch'\n"
+            "Auto-install of 'torch' was killed after 120s (cell_install_timeout) "
+            "without finishing — the package is not installed.",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
+        assert "too heavy" not in nudge
+        assert "smaller" not in nudge
+
+    def test_install_failure_routes_to_install_nudge(self):
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "ModuleNotFoundError: No module named 'torhc'\n"
+            "Auto-install failed:\nERROR: No matching distribution found for torhc",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
+
+    def test_kill_during_install_routes_to_install_nudge(self):
+        """The kill wording also contains 'liveness' — the install cause must
+        win over the stuck diagnosis."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "Cell killed during auto-install of 'torch' — no liveness signal "
+            "for 150s: the worker process died or the installer is wedged; "
+            "the package is likely not installed",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
+
 
 from anton.core.memory.acc import Event, detect_kill_loop
 
@@ -341,7 +730,11 @@ class TestKillLoopLesson:
         assert lesson is not None
         low = lesson.rule.lower()
         assert "smaller" not in low
-        assert "reset" in low
+        # ENG-1273: a liveness kill auto-resumes now — the durable lesson
+        # must not tell the agent to reset (that destroys the state
+        # resume() would otherwise have kept).
+        assert "reset" not in low
+        assert "retry" in low
 
     def test_budget_kills_still_teach_smaller(self):
         events = [
@@ -398,6 +791,67 @@ class TestKillLoopLesson:
         ]
         assert detect_kill_loop(events) is None
 
+    def test_install_kills_write_no_rule(self):
+        """A kill during a package install says nothing about the cell's size
+        or the worker's health — no durable rule beats a wrong one (ENG-1275)."""
+        events = [
+            _kill_event(
+                "Cell killed during auto-install of 'torch' — the install ran "
+                "past its 120s budget and grace window without reporting a result",
+                round_idx=1,
+            ),
+            _kill_event(
+                "Cell killed during auto-install of 'torch' — no liveness signal "
+                "for 150s: the worker process died or the installer is wedged",
+                round_idx=2,
+            ),
+        ]
+        assert detect_kill_loop(events) is None
+
+
+class TestBeatingWedgeTotalBudgetStop:
+    """The behavioural counterpart to TestKillLoopLesson's string-level
+    tests: cell_total_max is the ONLY thing that ends a beating-but-wedged
+    cell now that the liveness heartbeat keeps it alive through the
+    inactivity window (ENG-578). Proves the stop path still works, and pins
+    down the lesson it teaches — 'heavy' ('make cells smaller'), never
+    'liveness' ('retry unchanged') — for the case that actually matters: a
+    cell that already produced partial output (looks like real progress)
+    before wedging on a later step, the exact shape of a throttled batch
+    that hangs partway through (ENG-1324)."""
+
+    async def test_beating_wedge_dies_at_total_budget_as_heavy_kill(self, monkeypatch):
+        shrink_timers(monkeypatch)  # heartbeat stays on (0.2s default)
+        monkeypatch.setenv("ANTON_CELL_TOTAL_MAX", "2")
+        pad = make_pad()
+        await pad.start()
+        try:
+            # A tight CPU loop still beats: CPython periodically drops the
+            # GIL even inside `while True: pass`, so the worker's heartbeat
+            # thread keeps running — this is the "beats happily" case the
+            # ticket describes, not a genuinely dead worker.
+            cell = await pad.execute(
+                "print('sent 1/50', flush=True)\nwhile True:\n    pass\n"
+            )
+            assert cell.error is not None
+            assert "timed out" in cell.error.lower()
+            assert "liveness" not in cell.error[:120].lower()
+            # Salvage present -> the message must NOT read as an ambiguous
+            # silent kill (that's the already-covered zero-output case).
+            assert "without producing any output" not in cell.error[:120].lower()
+
+            events = [
+                _kill_event(cell.error, round_idx=1),
+                _kill_event(cell.error, round_idx=2),
+            ]
+            lesson = detect_kill_loop(events)
+            assert lesson is not None
+            low = lesson.rule.lower()
+            assert "smaller" in low
+            assert "reset" not in low
+        finally:
+            await pad.close()
+
 
 class TestToolContractText:
     def test_description_does_not_claim_progress_is_survival_critical(self):
@@ -410,6 +864,17 @@ class TestToolContractText:
         assert "kept alive automatically" in desc
         assert "inactivity timeout" not in desc
         assert "reset the timer" not in desc
+
+    def test_description_says_kill_recovery_is_automatic(self):
+        """ENG-1273: the agent should not have to guess that reset is now
+        optional after a kill — the tool contract says so directly."""
+        from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+
+        desc = SCRATCHPAD_TOOL.description.lower()
+        assert "restarts and restores everything else automatically" in desc
+        assert "you do not need to reset" in desc
+        # Must not regress the ENG-578 contract text this paragraph already carries.
+        assert "kept alive automatically" in desc
 
     def test_system_prompt_does_not_mandate_splitting_cells(self):
         # The system prompt was a fourth author of the wrong lesson: "hard

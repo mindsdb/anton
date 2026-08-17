@@ -1,17 +1,67 @@
 name: Create staging to main release PR
+
+# Fires at freeze time AND after every staging pipeline, so the release PR is a
+# live view of what is queued for production rather than a Friday-only snapshot.
+# The reusable opens it as a DRAFT and marks it ready for review when the freeze
+# window opens, so an always-open staging -> main PR is never a merge button
+# sitting next to production mid-week.
+#
+# `workflow_run` rather than `push: staging`, deliberately: a second workflow on
+# `push: staging` would be a second disconnected run tree, which is exactly what
+# the shared workflow lint forbids. `workflow_run` is its own event, so this stays
+# one entry point.
+
 on:
   workflow_run:
-    workflows: ["Staging Freeze"]
+    workflows: ["Staging Freeze", "Staging pre-release and publish to PyPI"]
     types: [completed]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Serialised because two runs can overlap: the Friday freeze and a staging merge
+# in the same minute both trigger this. The reusable reads "is there an open
+# release PR" and then creates or edits one, which is not atomic, so two runs race
+# on the same PR. GitHub rejects the losing `gh pr create` with a 422, and under
+# `set -euo pipefail` that fails the job, which now posts a red "release PR
+# pipeline failed" for a PR that exists and is fine.
+#
+# `cancel-in-progress: false` because the body is a commit list: the later run has
+# the newer list and must not be dropped, it just has to wait.
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
 jobs:
   create-pr:
+    # Both sources spelled out, rather than leaning on a `!=` that lets anything
+    # through. A failed FREEZE means staging was never locked, so opening the
+    # release PR would be premature. A failed staging PIPELINE says nothing about
+    # what is queued — the PR body is a commit list, not a health report — so the
+    # refresh still runs, and the red-branch sweep is what reports the pipeline.
+    #
+    # The staging pipeline is checked for `head_branch` because it can also be
+    # started by hand on another ref, and a refresh triggered by an unrelated
+    # branch's run is at best a wasted run and at worst opens the release PR at a
+    # moment nobody expected. The freeze cannot be checked the same way: it runs on
+    # `schedule`, which GitHub attributes to the DEFAULT branch, so its
+    # `head_branch` is `main`.
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
-    uses: mindsdb/github-actions/.github/workflows/release-pr.yml@75df118f3b003625052c4f14e7b90817fb8b2784 # v1
+      (github.event.workflow_run.name == 'Staging Freeze' &&
+       github.event.workflow_run.conclusion == 'success') ||
+      (github.event.workflow_run.name == 'Staging pre-release and publish to PyPI' &&
+       github.event.workflow_run.head_branch == 'staging')
+    permissions:
+      contents: read
+      # Turns the "recovered" message on, and it is the ONLY thing that does. The
+      # reusable declares no `permissions:` block of its own, so its job inherits
+      # exactly what is granted here; a block there would cap the token instead and
+      # the lookup would be refused however much this granted. The default workflow
+      # token carries contents + packages read only, and without the grant the
+      # lookup is refused, logs why, and stays quiet — a missing recovery message
+      # rather than a broken run.
+      actions: read
+    uses: mindsdb/github-actions/.github/workflows/release-pr.yml@main
     secrets: inherit
