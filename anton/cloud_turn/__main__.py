@@ -24,7 +24,11 @@ import sys
 import time
 
 from anton.cloud_turn.contract import TurnRequestV1
-from anton.cloud_turn.session import build_cloud_chat_session, drain_pending_memory
+from anton.cloud_turn.session import (
+    build_cloud_chat_session,
+    drain_pending_memory,
+    drain_pending_skills,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +257,13 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             # Before the terminal event: cowork persists on this, then stops reading.
             logger.info("emitting %d memory entr(ies)", len(entries))
             emit({"kind": "memory", "entries": entries})
+        drafts = drain_pending_skills(session)
+        if drafts:
+            # Pre-terminal for the same reason as memory. Staged only — cowork
+            # surfaces a card the user saves; nothing reaches their skill store.
+            logger.info("emitting %d skill draft(s): %s",
+                        len(drafts), ", ".join(d["slug"] for d in drafts))
+            emit({"kind": "skill", "entries": drafts})
         logger.info("cloud turn completed")
         emit({"kind": "turn_completed"})
     except Exception as exc:
