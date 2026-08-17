@@ -622,6 +622,47 @@ class TestOpenAIBYOKResponsesAPIPath:
             assert result.tool_calls[0].id == "call_xyz"
             assert result.tool_calls[0].name == "do_thing"
             assert result.tool_calls[0].input == {"foo": 42}
+            assert result.tool_calls[0].parse_error is None
+            assert result.tool_calls[0].repaired is False
+
+    async def test_a_call_cut_mid_arguments_is_reported_as_damaged(self):
+        """A body the output cap cut open must not look like a complete call.
+
+        This transport used to swallow the decode error into `input={}`, which
+        is indistinguishable from a call the model deliberately sent with no
+        arguments — so the session dispatched a handler on arguments that were
+        never finished. The flags are what let it refuse instead.
+        """
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+
+            fc_item = MagicMock()
+            fc_item.type = "function_call"
+            fc_item.call_id = "call_cut"
+            fc_item.name = "scratchpad"
+            # Cut inside the `code` value — the repair pass can close the string
+            # and the brace, but the code itself is gone.
+            fc_item.arguments = '{"action": "exec", "name": "main", "code": "import pand'
+
+            response = MagicMock()
+            response.output = [fc_item]
+            response.status = "completed"
+            response.usage = MagicMock(input_tokens=1, output_tokens=8192)
+            mock_client.responses.create = AsyncMock(return_value=response)
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+            result = await provider.complete(
+                model="gpt-5",
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[{"name": "scratchpad", "description": "x", "input_schema": {}}],
+            )
+
+            assert result.tool_calls[0].repaired is True
+            assert result.tool_calls[0].parse_error is None, (
+                "the repair pass salvaged a dict, so this is the silent shape"
+            )
 
 
 class TestOpenAICompatibleFlavorResolution:
@@ -731,6 +772,51 @@ class TestResponsesAPIReasoningSummary:
         assert [e for e in yielded if isinstance(e, StreamTextDelta)] == [
             StreamTextDelta(text="The real answer.")
         ]
+
+    async def test_streamed_arguments_cut_mid_json_do_not_tear_down_the_turn(self):
+        """A bare `json.loads` here raised out of the generator.
+
+        The caller saw a JSONDecodeError from the middle of a stream rather than
+        a response, so the turn died instead of recovering. Now the same shared
+        parse as every other transport runs, and the damage rides on the call.
+        """
+        from anton.core.llm.provider import StreamComplete
+
+        events = [
+            SimpleNamespace(
+                type="response.output_item.added",
+                output_index=0,
+                item=SimpleNamespace(type="function_call", call_id="call_cut", name="scratchpad"),
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                output_index=0,
+                delta='{"action": "exec", "code": "import pand',
+            ),
+            SimpleNamespace(type="response.function_call_arguments.done", output_index=0),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(usage=None, status="completed"),
+            ),
+        ]
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.responses.create = AsyncMock(return_value=_fake_async_iter(events))
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI)
+            yielded = [
+                e async for e in provider.stream(
+                    model="gpt-5", system="s", messages=[{"role": "user", "content": "hi"}],
+                    tools=[{"name": "scratchpad", "description": "x", "input_schema": {}}],
+                )
+            ]
+
+        completed = [e for e in yielded if isinstance(e, StreamComplete)]
+        assert completed, "the stream must finish, not raise"
+        call = completed[-1].response.tool_calls[0]
+        assert call.repaired is True
+        assert call.parse_error is None
 
 
 class TestChatCompletionsReasoningContent:
