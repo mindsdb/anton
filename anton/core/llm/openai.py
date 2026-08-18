@@ -14,12 +14,14 @@ from anton.utils.datasources import scrub_credentials
 from .provider import safe_parse_tool_input
 from .provider import (
     ContextOverflowError,
+    EndpointConfigurationError,
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolUseDelta,
     StreamToolUseEnd,
@@ -28,8 +30,12 @@ from .provider import (
     ToolCall,
     TransientProviderError,
     Usage,
+    classify_404,
     classify_transient,
+    retry_after_seconds,
     compute_context_pressure,
+    wallet_denial_code,
+    raise_on_empty_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +60,9 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
       - 429 with a quota detail → TokenLimitExceeded, checked first so a body
         carrying both ``detail`` and a structured code stays token_limit
         (quota keeps its own card downstream).
+      - 402/429 with an M3 gate wallet code (``wallet_empty`` /
+        ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
+        → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
       - anything else → the generic "temporarily unavailable" ConnectionError.
 
     Body-shape tolerance (ENG-747): the OpenAI SDK UNWRAPS the error
@@ -72,17 +81,26 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     Known limits, on purpose: a wire body carrying BOTH a top-level
     ``detail`` and an ``error`` envelope loses the detail inside the SDK
     (the unwrap discards siblings of ``error``) — unrecoverable from
-    ``exc.body``, and no real dialect emits that shape. And a 429 whose
-    envelope carries only ``message`` (OpenAI's own quota dialect, e.g.
-    ``insufficient_quota``) stays generic: classifying arbitrary provider
-    messages as MindsHub quota would put an upsell CTA on BYOK errors.
+    ``exc.body``, and no real dialect emits that shape. OpenAI's own quota
+    dialect (429 + ``insufficient_quota`` code) maps to TokenLimitExceeded
+    with BYOK copy (OpenAI billing link, no MindsHub CTA) — detection is
+    code-exact so arbitrary provider messages never get quota treatment.
     """
     if exc.status_code == 401:
         raise ConnectionError(
             "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
-    body = exc.body if isinstance(exc.body, dict) else {}
+    # Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-
+    # element ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare
+    # object; the SDK stores whatever it parsed. Unwrap the list here or every
+    # structured check below (auth / quota / model) silently misses on Gemini
+    # and the error falls through to the generic "temporarily unavailable"
+    # message — the exact reason ENG-1145 surfaced as an opaque 404.
+    raw_body = exc.body
+    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
+        raw_body = raw_body[0]
+    body = raw_body if isinstance(raw_body, dict) else {}
     envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
@@ -93,6 +111,47 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         raise TokenLimitExceeded(msg) from exc
 
     code = body.get("code") or envelope.get("code")
+    etype = body.get("type") or envelope.get("type")
+    # OpenAI's own quota dialect (BYOK): permanent for the identical request, so
+    # retrying it as a rate limit just burns the session's backoff budget and
+    # surfaces a misleading "provider overloaded". No MindsHub CTA — the remedy
+    # is the user's OpenAI billing, not an upgrade.
+    if exc.status_code == 429 and "insufficient_quota" in (code, etype):
+        raise TokenLimitExceeded(
+            "Server returned 429 — your OpenAI quota is exhausted. Check your plan "
+            "and billing at https://platform.openai.com."
+        ) from exc
+
+    # MindsHub M3 wallet taxonomy (ENG-1169): the authorization gate denies
+    # out-of-credits as 402 ``wallet_empty`` and a spent free allowance as 429
+    # ``included_allowance_exhausted`` — the latter carries NO FastAPI
+    # ``detail``, so the legacy 429 branch above never sees it. Both are
+    # permanent for the identical request: without this branch the 402 fell
+    # to the generic "temporarily unavailable" ConnectionError, got auto-
+    # retried, and was finally rendered as assistant prose — the out-of-
+    # credits card never showed and the user had no path to refill.
+    # TokenLimitExceeded fails fast (the session re-raises it unretried) and
+    # cowork-server maps it to the ``token_limit`` card. The X-MindsHub-Reason
+    # header is the fallback discriminator for a body that lost its code
+    # (e.g. an anthropic-dialect proxy); detection stays code/reason-exact so
+    # BYOK 402s fall through to the generic copy, never the credits card.
+    gate_reason = ""
+    if getattr(exc, "response", None) is not None:
+        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    wallet_code = wallet_denial_code(raw_body) or (
+        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+    )
+    if exc.status_code in (402, 429) and wallet_code:
+        what = (
+            "your MindsHub credits are used up."
+            if wallet_code == "wallet_empty"
+            else "your included token allowance is exhausted."
+        )
+        raise TokenLimitExceeded(
+            f"Server returned {exc.status_code} — {what} Add credits at "
+            "https://console.mindshub.ai/settings/organization/billing to continue."
+        ) from exc
+
     if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
         if code == "model_access_denied":
             msg = (
@@ -110,14 +169,36 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             )
         raise ModelUnavailableError(msg, code=code, model=model) from exc
 
+    # A 404 needs care: this mapper is shared by direct OpenAI, Gemini, MindsHub,
+    # Azure, and arbitrary OpenAI-compatible endpoints, so a bare 404 does NOT by
+    # itself mean the model is missing. `classify_404` (shared with the Anthropic
+    # mapper, ENG-1139) decides model-not-found vs. endpoint-misconfiguration.
+    if exc.status_code == 404:
+        provider_msg = envelope.get("message") or body.get("message")
+        status_str = str(body.get("status") or envelope.get("status") or "")
+        raise classify_404(
+            model, message=provider_msg, code=code, status=status_str,
+        ) from exc
+
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
     # session loop rather than surfacing an instant, misleading failure (ENG-673).
-    transient = classify_transient(exc.status_code, body, provider="The model provider", model=model)
+    # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
+    # our gateway names it on the reason header and in the body code. Anything
+    # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
+    # old fail-fast path rather than burning the budget on a limit that may not
+    # clear.
+    _velocity = gate_reason == "rate_limited" or code == "rate_limited"
+    transient = classify_transient(
+        exc.status_code, body, provider="The model provider", model=model,
+        retry_after=retry_after_seconds(exc),
+        velocity_confirmed=_velocity,
+    )
     if transient is not None:
         logger.warning(
-            "transient provider error (%s): status=%s body=%s",
-            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+            "transient provider error (%s): status=%s retry_after=%s body=%s",
+            transient.code, exc.status_code, transient.retry_after,
+            scrub_credentials(str(exc.body))[:500],
         )
         raise transient from exc
 
@@ -611,6 +692,53 @@ def build_chat_completion_kwargs(
     return kwargs
 
 
+def _split_cached_input(usage) -> tuple[int, int, int]:
+    """Return (fresh_input, cache_read, cache_write) from an OpenAI-shaped usage.
+
+    OpenAI-dialect prompt counts are INCLUSIVE of cache activity, unlike
+    Anthropic's which excludes it — subtract both cached buckets out so
+    ``Usage`` components mean the same thing on every provider (ENG-1288).
+
+    Both cache buckets are real on our own gateway: mindshub_inference
+    publishes ``prompt_tokens_details.{cached_tokens, cache_write_tokens}``
+    and composes ``prompt_tokens = fresh + reads + writes``
+    (``minds/schemas/chat.py``, ``minds/inference/types.py``). Reading only
+    ``cached_tokens`` left the write share misfiled as fresh input and
+    reported ``cache_creation_tokens`` as a constant 0 on the majority
+    production surface — which breaks per-component dollar weighting (writes
+    bill at a premium) and any "is caching working" query (#309 review).
+
+    Handles both naming schemes: chat.completions (``prompt_tokens`` +
+    ``prompt_tokens_details``) and the Responses API (``input_tokens`` +
+    ``input_tokens_details``). A third-party endpoint that omits the write
+    field simply reports 0 for it.
+    """
+    if usage is None:
+        return 0, 0, 0
+
+    def _as_int(value) -> int:
+        # Gateways and test doubles put non-numeric junk in usage fields;
+        # anything that isn't a real number counts as 0, never a crash.
+        return value if isinstance(value, int) else 0
+
+    total = _as_int(getattr(usage, "prompt_tokens", None)) or _as_int(
+        getattr(usage, "input_tokens", None)
+    )
+    details = (
+        getattr(usage, "prompt_tokens_details", None)
+        or getattr(usage, "input_tokens_details", None)
+    )
+    read = _as_int(getattr(details, "cached_tokens", None)) if details is not None else 0
+    write = (
+        _as_int(getattr(details, "cache_write_tokens", None)) if details is not None else 0
+    )
+    # Clamp jointly: a malformed payload must never yield negative fresh input.
+    if read + write > total:
+        read = min(read, total)
+        write = max(0, total - read)
+    return total - read - write, read, write
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -770,6 +898,16 @@ class OpenAIProvider(LLMProvider):
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:
             extra["harness"] = ctx.harness
+        # Our own build (ENG-1279). The router lifts this onto the trace's
+        # native `version` field, the only form the Langfuse metrics API can
+        # group by — so "did this fix change behaviour in production?" becomes
+        # a query instead of a guess about release dates. Set here rather than
+        # by the host so it is also correct for anton standalone (CLI, hub
+        # instances, evals) and so it wins over a host that reports a stale
+        # value: only anton knows which anton is running.
+        from anton import __version__ as _anton_version
+
+        extra["anton_version"] = _anton_version
         if extra:
             headers["Langfuse-Metadata"] = json.dumps(extra)
         return headers or None
@@ -846,30 +984,41 @@ class OpenAIProvider(LLMProvider):
 
         if message.tool_calls:
             for tc in message.tool_calls:
-                # safe_parse_tool_input returns (parsed_dict,
-                # parse_error). parse_error is forwarded to the
-                # session dispatcher so the tool_use/tool_result
-                # protocol can carry the recovery — see the streaming
-                # path in this file for the same pattern.
-                parsed_input, parse_error = safe_parse_tool_input(tc.function.arguments or "")
+                # Both flags ride on the ToolCall for the session to act
+                # on. See `safe_parse_tool_input`.
+                parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
                         input=parsed_input,
                         parse_error=parse_error,
+                        repaired=repaired,
                     )
                 )
 
+        raise_on_empty_response(
+            content=content_text, tool_calls=tool_calls,
+            stop_reason=choice.finish_reason, model=model,
+        )
+
         usage_obj = response.usage
-        input_tokens = usage_obj.prompt_tokens if usage_obj else 0
+        input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(
+            usage_obj
+        )
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
             usage=Usage(
                 input_tokens=input_tokens,
                 output_tokens=usage_obj.completion_tokens if usage_obj else 0,
-                context_pressure=compute_context_pressure(model, input_tokens),
+                # All prompt-side tokens, exactly as before this split existed
+                # (the OpenAI dialect's prompt_tokens is cache-inclusive).
+                context_pressure=compute_context_pressure(
+                    model, input_tokens + cache_read_tokens + cache_creation_tokens
+                ),
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
             ),
             stop_reason=choice.finish_reason,
         )
@@ -920,6 +1069,8 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         stop_reason: str | None = None
 
         # Track tool call deltas by index
@@ -936,7 +1087,11 @@ class OpenAIProvider(LLMProvider):
             stream_started = True
             async for chunk in stream:
                 if chunk.usage:
-                    input_tokens = chunk.usage.prompt_tokens
+                    (
+                        input_tokens,
+                        cache_read_tokens,
+                        cache_creation_tokens,
+                    ) = _split_cached_input(chunk.usage)
                     output_tokens = chunk.usage.completion_tokens
 
                 if not chunk.choices:
@@ -952,6 +1107,17 @@ class OpenAIProvider(LLMProvider):
                 if delta.content:
                     content_text += delta.content
                     yield StreamTextDelta(text=delta.content)
+
+                # Reasoning content — chat.completions has no first-party
+                # reasoning-summary field (that's Responses-API-only), but
+                # `reasoning_content` is the de facto convention several
+                # OpenAI-compatible reasoning gateways use (DeepSeek, vLLM's
+                # reasoning parser, and possibly the mdb.ai passthrough for
+                # non-Anthropic reasoning models). Read defensively via
+                # getattr since the SDK's Delta model doesn't declare it.
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    yield StreamReasoningDelta(text=reasoning_delta)
 
                 # Tool call deltas
                 if delta.tool_calls:
@@ -1014,6 +1180,24 @@ class OpenAIProvider(LLMProvider):
             # must classify it here or it surfaces as an opaque generic error on
             # the OpenAI/MindsHub path (ENG-673, Sam's review). Body type sits at
             # the top level (SDK-unwrapped); classify_transient handles that shape.
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1039,10 +1223,10 @@ class OpenAIProvider(LLMProvider):
         for idx in sorted(tc_state):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
-            parsed, parse_error = safe_parse_tool_input(raw_json)
+            parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
             tool_calls.append(ToolCall(
                 id=info["id"], name=info["name"], input=parsed,
-                parse_error=parse_error,
+                parse_error=parse_error, repaired=repaired,
             ))
             yield StreamToolUseEnd(id=info["id"])
 
@@ -1079,7 +1263,11 @@ class OpenAIProvider(LLMProvider):
                 usage=Usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
+                    context_pressure=compute_context_pressure(
+                        model, input_tokens + cache_read_tokens + cache_creation_tokens
+                    ),
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
             )
@@ -1112,7 +1300,14 @@ class OpenAIProvider(LLMProvider):
         if system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
-            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            # "summary": "auto" asks the Responses API to also stream a
+            # natural-language summary of the reasoning itself (as
+            # response.reasoning_summary_text.delta events) — without it,
+            # reasoning happens server-side but is never surfaced to us at
+            # all. Safe to always pair with effort: only sent when effort
+            # is already set, which is itself gated to reasoning-capable
+            # models by the caller (see AntonSettings.planning_reasoning_effort).
+            kwargs["reasoning"] = {"effort": self._reasoning_effort, "summary": "auto"}
 
         merged_tools: list[dict] = []
         if tools:
@@ -1191,6 +1386,8 @@ class OpenAIProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         stop_reason: str | None = None
 
         # Map output_index → in-flight function-call state. Responses API uses
@@ -1213,6 +1410,14 @@ class OpenAIProvider(LLMProvider):
                     if delta:
                         content_text += delta
                         yield StreamTextDelta(text=delta)
+
+                # The model's own reasoning summary — not the final answer.
+                # Only arrives when `reasoning.summary` was requested (see
+                # _build_responses_kwargs, gated on self._reasoning_effort).
+                elif etype == "response.reasoning_summary_text.delta":
+                    delta = getattr(event, "delta", "")
+                    if delta:
+                        yield StreamReasoningDelta(text=delta)
 
                 # New output item (could be a function_call, server-tool call,
                 # or message). We only need to react when a function_call
@@ -1250,10 +1455,14 @@ class OpenAIProvider(LLMProvider):
                     raw_json = "".join(info["args_parts"]) or getattr(
                         event, "arguments", ""
                     )
-                    parsed = json.loads(raw_json) if raw_json else {}
+                    # Parsed through the shared helper rather than `json.loads`:
+                    # a body cut mid-JSON must not raise out of this generator,
+                    # and the flags are what let the session refuse the call.
+                    parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
                     tool_calls.append(
                         ToolCall(
-                            id=info["call_id"], name=info["name"], input=parsed
+                            id=info["call_id"], name=info["name"], input=parsed,
+                            parse_error=parse_error, repaired=repaired,
                         )
                     )
                     if info["call_id"]:
@@ -1268,7 +1477,11 @@ class OpenAIProvider(LLMProvider):
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
                         if usage is not None:
-                            input_tokens = getattr(usage, "input_tokens", 0) or 0
+                            (
+                                input_tokens,
+                                cache_read_tokens,
+                                cache_creation_tokens,
+                            ) = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
                         stop_reason = getattr(final_response, "status", None)
         except openai.BadRequestError as exc:
@@ -1293,6 +1506,24 @@ class OpenAIProvider(LLMProvider):
             # Bare mid-stream SSE error (no status_code) — not an APIStatusError,
             # so it slips past the handlers above; the SDK already consumed the
             # 200 and never retried it → the session must back off (ENG-673).
+            # Out-of-credits smuggled into an open stream (defensive — the M3
+            # gate denies pre-stream today): permanent, so it must fail fast
+            # onto the credits card, not enter the 30s stream_error backoff
+            # and surface as a misleading "provider overloaded" (ENG-1169).
+            # Checked BEFORE the transient classifier — permanent-first, the
+            # same policy as the request-time mapper — so a wallet denial that
+            # also carries a transient-looking `type` still fails fast.
+            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            if wallet_code:
+                what = (
+                    "Your MindsHub credits are used up"
+                    if wallet_code == "wallet_empty"
+                    else "Your included token allowance is exhausted"
+                )
+                raise TokenLimitExceeded(
+                    f"{what} — add credits at "
+                    "https://console.mindshub.ai/settings/organization/billing to continue."
+                ) from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1316,7 +1547,11 @@ class OpenAIProvider(LLMProvider):
                 usage=Usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    context_pressure=compute_context_pressure(model, input_tokens),
+                    context_pressure=compute_context_pressure(
+                        model, input_tokens + cache_read_tokens + cache_creation_tokens
+                    ),
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
             )
@@ -1345,11 +1580,14 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
             name = getattr(item, "name", "") or ""
             args_str = getattr(item, "arguments", "") or ""
-            try:
-                parsed = json.loads(args_str) if args_str else {}
-            except json.JSONDecodeError:
-                parsed = {}
-            tool_calls.append(ToolCall(id=call_id, name=name, input=parsed))
+            # Shared parse, not a bare `json.loads` with the error swallowed
+            # into `{}`: an empty dict cannot be told apart from a call the
+            # model deliberately sent with no arguments.
+            parsed, parse_error, repaired = safe_parse_tool_input(args_str)
+            tool_calls.append(ToolCall(
+                id=call_id, name=name, input=parsed,
+                parse_error=parse_error, repaired=repaired,
+            ))
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 
@@ -1357,8 +1595,13 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     # `or 0` guards an explicit None (the attr is present but null) — the
     # Responses API returns usage.input_tokens=None on web-search responses,
     # which a bare getattr default does NOT catch. Mirrors the streaming path.
-    input_tokens = (getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
+
+    status = getattr(response, "status", None)
+    raise_on_empty_response(
+        content=content_text, tool_calls=tool_calls, stop_reason=status, model=model,
+    )
 
     return LLMResponse(
         content=content_text,
@@ -1366,7 +1609,11 @@ def _parse_response_object(response, model: str) -> LLMResponse:
         usage=Usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            context_pressure=compute_context_pressure(model, input_tokens),
+            context_pressure=compute_context_pressure(
+                model, input_tokens + cache_read_tokens + cache_creation_tokens
+            ),
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
         ),
-        stop_reason=getattr(response, "status", None),
+        stop_reason=status,
     )

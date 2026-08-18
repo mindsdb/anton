@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
+from anton.core.tools.registry import ToolOutcome
+from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -76,34 +79,36 @@ def _artifact_store(session: "ChatSession"):
     return ArtifactStore(workspace.artifacts_dir)
 
 
-async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
+async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Create a fresh artifact folder + metadata.json + README.md.
 
-    Returns a JSON-shaped string the LLM can parse into the artifact
-    path. The agent is expected to write its output files under
-    `<path>/...` after this call returns.
+    Returns a `SideEffectResult` whose `message` carries the artifact path the
+    agent writes output files under (`<path>/...`) after this call returns.
     """
-    import json
-
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
+        )
 
     name = (tc_input.get("name") or "").strip()
     description = (tc_input.get("description") or "").strip()
     artifact_type = (tc_input.get("type") or "").strip()
     primary = tc_input.get("primary")
     if not name:
-        return "Error: `name` is required."
+        return SideEffectResult.failed("Error: `name` is required.", reason="missing_name")
     if not description:
-        return "Error: `description` is required."
+        return SideEffectResult.failed(
+            "Error: `description` is required.", reason="missing_description"
+        )
 
     from anton.core.artifacts.models import ARTIFACT_TYPES
 
     if artifact_type not in ARTIFACT_TYPES:
-        return (
-            f"Error: `type` must be one of {ARTIFACT_TYPES}. "
-            f"Got: {artifact_type!r}."
+        return SideEffectResult.failed(
+            f"Error: `type` must be one of {ARTIFACT_TYPES}. Got: {artifact_type!r}.",
+            reason="invalid_type",
         )
 
     artifact = store.create(  # type: ignore[arg-type]
@@ -113,17 +118,27 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
         primary=primary if isinstance(primary, str) else None,
     )
     folder = store.folder_for(artifact.slug)
-    return json.dumps({
-        "id": artifact.id,
-        "slug": artifact.slug,
-        "name": artifact.name,
-        "type": artifact.type,
-        "primary": artifact.primary,
-        "path": str(folder),
-    }, indent=2)
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Created artifact `{artifact.slug}` ({artifact.type}). "
+            f"Write output files under: {folder}"
+            + (f" (primary: {artifact.primary})" if artifact.primary else "")
+        ),
+        resource_id=artifact.slug,
+        idempotency_key=artifact.slug,
+        committed_at=now_iso(),
+        details={
+            "slug": artifact.slug,
+            "path": str(folder),
+            "name": artifact.name,
+            "type": artifact.type,
+            "primary": artifact.primary,
+        },
+    ).to_outcome()
 
 
-async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> str:
+async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Update mutable metadata fields on an existing artifact.
 
     Only fields present in the input are modified. Supports:
@@ -132,15 +147,16 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
     """
-    import json
-
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
+        )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        return SideEffectResult.failed("Error: `slug` is required.", reason="missing_slug")
 
     kwargs: dict = {}
     if "primary" in tc_input:
@@ -149,7 +165,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         try:
             kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
         except (TypeError, ValueError):
-            return "Error: `port` must be a number."
+            return SideEffectResult.failed("Error: `port` must be a number.", reason="invalid_port")
 
     if "datasources" in tc_input:
         from anton.core.artifacts.models import DatasourceRef
@@ -157,7 +173,10 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
 
         raw_list = tc_input.get("datasources") or []
         if not isinstance(raw_list, list):
-            return "Error: `datasources` must be a list of slug strings."
+            return SideEffectResult.failed(
+                "Error: `datasources` must be a list of slug strings.",
+                reason="invalid_datasources",
+            )
 
         vault = session._data_vault or LocalDataVault()
         known = {f"{c['engine']}-{c['name']}": (c["engine"], c["name"])
@@ -167,7 +186,10 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         unknown: list[str] = []
         for item in raw_list:
             if not isinstance(item, str):
-                return "Error: each entry in `datasources` must be a slug string."
+                return SideEffectResult.failed(
+                    "Error: each entry in `datasources` must be a slug string.",
+                    reason="invalid_datasources",
+                )
             ref_slug = item.strip()
             if not ref_slug:
                 continue
@@ -177,25 +199,40 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             engine, name = known[ref_slug]
             refs.append(DatasourceRef(engine=engine, name=name))
         if unknown:
-            return (
+            return SideEffectResult.failed(
                 f"Error: unknown datasource slug(s): {', '.join(unknown)}. "
                 f"Each slug must match an existing vault connection "
-                f"(format: `<engine>-<name>`)."
+                f"(format: `<engine>-<name>`).",
+                reason="unknown_datasource",
             )
         kwargs["datasources"] = refs
 
     artifact = store.update(slug, **kwargs)
     if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
-    return json.dumps({
-        "slug": artifact.slug,
-        "primary": artifact.primary,
-        "port": artifact.port,
-        "datasources": [d.slug for d in artifact.datasources],
-    }, indent=2)
+        return SideEffectResult.failed(
+            f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+        )
+    datasources = [d.slug for d in artifact.datasources]
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Updated artifact `{artifact.slug}` "
+            f"(primary={artifact.primary}, port={artifact.port}, "
+            f"datasources={datasources})."
+        ),
+        resource_id=artifact.slug,
+        idempotency_key=artifact.slug,
+        committed_at=now_iso(),
+        details={
+            "slug": artifact.slug,
+            "primary": artifact.primary,
+            "port": artifact.port,
+            "datasources": datasources,
+        },
+    ).to_outcome()
 
 
-async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
+async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Launch the artifact's backend script as a standalone subprocess.
 
     Thin wrapper over `launch_artifact_backend`: validates tool-call shape,
@@ -208,20 +245,23 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     `anton.core.artifacts.backend_launcher.launch_artifact_backend` so
     other entry points (e.g. cowork's auto-relaunch) can reuse it.
     """
-    import json
-
     from anton.core.artifacts.backend_launcher import launch_artifact_backend
 
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
+        )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        return SideEffectResult.failed("Error: `slug` is required.", reason="missing_slug")
     artifact = store.open(slug)
     if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
+        return SideEffectResult.failed(
+            f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+        )
 
     rel_path = (tc_input.get("path") or "backend.py").strip()
     extra_args = tc_input.get("extra_args") or []
@@ -229,7 +269,9 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     try:
         health_timeout = float(tc_input.get("health_timeout", 10))
     except (TypeError, ValueError):
-        return "Error: `health_timeout` must be a number."
+        return SideEffectResult.failed(
+            "Error: `health_timeout` must be a number.", reason="invalid_health_timeout"
+        )
 
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:
@@ -246,14 +288,31 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
         health_path=health_path,
         health_timeout=health_timeout,
     )
+    # The launcher rolls back on failure (kills the process, never tracks it),
+    # so a string result means nothing committed.
     if isinstance(result, str):
-        return result
+        return SideEffectResult.failed(result, reason="launch_failed")
 
     store.update(slug, port=result["port"])
-    return json.dumps(
-        {k: v for k, v in result.items() if k != "proc"},
-        indent=2,
-    )
+    url = result.get("url", "")
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Backend for `{slug}` is running at {url} "
+            f"(pid {result.get('pid')}, port {result.get('port')}, "
+            f"log {result.get('log_path')})."
+        ),
+        resource_id=slug,
+        external_url=url or None,
+        idempotency_key=slug,
+        committed_at=now_iso(),
+        details={
+            "slug": slug,
+            "port": result.get("port"),
+            "pid": result.get("pid"),
+            "log_path": result.get("log_path"),
+        },
+    ).to_outcome()
 
 
 async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
@@ -391,19 +450,34 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
         except Exception:
             pass  # Best-effort; don't disrupt the conversation
 
-    asyncio.create_task(_encode_bg(session._cortex, engrams))
+    # Tracked so a host that tears down at end of turn can await it.
+    session._track_memory_write(asyncio.create_task(_encode_bg(session._cortex, engrams)))
 
     descriptions = [f"Encoded {e.kind}: {e.text}" for e in engrams]
     return "Memory updated: " + "; ".join(descriptions)
 
 
-async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
-    """Dispatch a scratchpad tool call by action."""
+async def handle_scratchpad(
+    session: ChatSession, tc_input: dict
+) -> str | ToolOutcome:
+    """Dispatch a scratchpad tool call by action.
+
+    The exec path returns a ``ToolOutcome`` carrying the runtime's own
+    failure verdict, so the error streak doesn't re-classify the result by
+    reading it (ENG-1276). The other actions still return plain strings
+    (legacy substring classification).
+    """
     action = tc_input.get("action", "")
     name = tc_input.get("name", "")
 
     if not name:
-        return "Scratchpad name is required."
+        # Explicit failure: this text has no legacy marker phrase, so the
+        # substring fallback used to RESET the streak on it (ENG-1276).
+        return ToolOutcome(
+            content="Scratchpad name is required.",
+            ok=False,
+            reason="scratchpad_missing_name",
+        )
 
     # ACC emit helper: use the session's safe wrapper if it exists,
     # otherwise no-op. Defined as a local closure so each emit site
@@ -421,7 +495,7 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         # paths. A str return is a message the call should not run past
         # (empty code, single-scratchpad challenge, or install failure).
         result = await prepare_scratchpad_exec(session, tc_input)
-        if isinstance(result, str):
+        if isinstance(result, ToolOutcome):
             return result
         pad, code, description, estimated_time, estimated_seconds = result
 
@@ -453,13 +527,27 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
-        return format_cell_result(cell)
+        # The runtime's verdict: a raised error/timeout/kill is a failure;
+        # stderr-only output (warnings) is not, and stdout containing words
+        # like "failed" is not either — the streak reads this flag, never the
+        # text (ENG-1276). The reason is the traceback's LAST line (the cause),
+        # the machine-comparable key ENG-1286's thrash breaker will consume.
+        error = (cell.error or "").strip() if cell is not None else ""
+        return ToolOutcome(
+            content=format_cell_result(cell),
+            ok=not error,
+            reason=error.splitlines()[-1][:160] if error else "",
+        )
 
     elif action == "view":
         # get_or_create: new ChatSession has empty _pads but replayed cells on the
         # manager — same hydration path as exec so view works on the first tool call.
         pad = await session._scratchpads.get_or_create(name)
-        return pad.view()
+        # ok=True: viewing succeeded even when the notebook being viewed
+        # contains old "[error]" cells — the substring fallback used to count
+        # a successful view of a failed cell as a fresh tool failure
+        # (ENG-1276 false positive).
+        return ToolOutcome(content=pad.view(), ok=True)
 
     elif action == "reset":
         pad = session._scratchpads.pads.get(name)
@@ -480,7 +568,9 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
         # get_or_create: dump must materialize the runtime from replayed cells when this
         # is the first scratchpad call in a new session (pads.get would miss every time).
         pad = await session._scratchpads.get_or_create(name)
-        return pad.render_notebook()
+        # ok=True for the same reason as view: rendering a notebook whose
+        # cells include past "[error]" output is a success, not a failure.
+        return ToolOutcome(content=pad.render_notebook(), ok=True)
 
     elif action == "install":
         packages = tc_input.get("packages", [])
@@ -669,31 +759,57 @@ def _collect_selection_candidates(tc_input: dict, root: "Path", kind: str) -> "l
 
 
 def _selection_option(path: "Path", root: "Path"):
-    """Build a display option for *path* (label = path relative to the root)."""
-    from anton.core.interaction.selection import SelectionOption
+    """One picker entry for *path*, labelled relative to the project root."""
+    from anton.core.interaction.elicit import AskOption
 
     try:
         label = str(path.relative_to(root))
     except ValueError:
         label = str(path)
-    return SelectionOption(
+    return AskOption(
         value=str(path),
         label=label,
         kind="folder" if path.is_dir() else "file",
     )
 
 
-def _resolve_selection_elicitor(session: "ChatSession"):
-    """The host-injected elicitor, falling back to a terminal picker on the CLI."""
-    elicitor = getattr(session, "selection_elicitor", None)
-    if elicitor is not None:
-        return elicitor
-    console = getattr(session, "_console", None)
-    if console is None:
+def _chosen_path(answer) -> "str | None":
+    """The single path an ``AskAnswer`` carries, or None if there is none."""
+    if answer.status != "answered":
         return None
-    from anton.core.interaction.cli import CLISelectionElicitor
+    if answer.values:
+        return answer.values[0]
+    return (answer.text or "").strip() or None
 
-    return CLISelectionElicitor(console)
+
+def _path_answer_failure(answer) -> "str | None":
+    """Map a non-``answered`` outcome onto ``select_path``'s own status, or None.
+
+    Collapsing every failure into ``cancelled`` would tell the model "the user
+    dismissed the picker" when the user was never asked — the per-turn question
+    budget was spent, the question timed out, or no host could render it. The
+    model's documented reaction to ``cancelled`` is to ask how to proceed, so a
+    false ``cancelled`` costs a turn on a question nobody ever saw.
+    """
+    if answer.status == "answered":
+        return None
+    if answer.status == "cancelled":
+        return _status(
+            "cancelled",
+            "The user dismissed the picker without choosing. Ask how they would like to proceed.",
+        )
+    if answer.status == "unavailable":
+        return _status(
+            "picker_unavailable",
+            "An interactive picker is unavailable here; ask the user for the path in plain text.",
+        )
+    if answer.status == "limit":
+        return _status(
+            "error",
+            "Too many questions this turn; choose a path yourself and state which you picked, "
+            "or ask in plain text.",
+        )
+    return _status("error", f"The picker did not return a selection ({answer.status}).")
 
 
 def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
@@ -711,15 +827,6 @@ def _browse_start_dir(tc_input: dict, root: "Path") -> "Path":
 def _status(status: str, message: str = "", **extra) -> str:
     """Serialize a select_path tool result, omitting an empty message."""
     return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
-
-
-async def _run_elicitor(elicitor, request):
-    """Run the elicitor, returning (chosen, error_json). error_json is None on success."""
-    try:
-        return await elicitor.elicit(request), None
-    except Exception as exc:
-        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
-        return None, _status("error", f"Selection failed: {exc}")
 
 
 def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
@@ -745,7 +852,11 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
 
     * **browse** — no ``candidates``/``pattern`` given: the location is unknown,
       so the user navigates a picker to locate it. Use this instead of asking
-      the user to type or paste a path.
+      the user to type or paste a path. **Host-gated:** only reachable where an
+      elicitor supports ``kind="path"``. Elsewhere — every cowork session today
+      — it returns ``picker_unavailable`` pointing at attachment, and the model
+      is not offered browse at all, because ``session.py`` registers
+      ``SELECT_PATH_TOOL_PICK_ONLY`` there (ENG-1357).
     * **pick** — ``candidates`` or ``pattern`` given: disambiguate concrete
       matches within the project. Auto-resolves a single match and reports
       "no matches" for none, so the picker appears only for a genuine (≥2)
@@ -754,7 +865,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     The result is fed back as the tool result, so the agent continues without a
     separate user message.
     """
-    from anton.core.interaction.selection import SelectionRequest
+    from anton.core.interaction.elicit import AskRequest, elicit
 
     prompt = (tc_input.get("prompt") or "Select a file or folder.").strip()
     kind = (tc_input.get("kind") or "any").strip().lower()
@@ -762,34 +873,75 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         kind = "any"
 
     root = _selection_root(session)
-    elicitor = _resolve_selection_elicitor(session)
+    elicitor = getattr(session, "elicitor", None)
+    # Early-out only: elicit() re-checks kind support itself and answers
+    # "unavailable" (mapped to picker_unavailable below) if this check were
+    # ever removed or bypassed, so this is not the sole guard.
+    can_pick = elicitor is not None and "path" in getattr(elicitor, "supported_kinds", ())
+    timeout_s = getattr(elicitor, "timeout_s", None)
     has_candidates = isinstance(tc_input.get("candidates"), list) and bool(tc_input.get("candidates"))
     has_pattern = bool((tc_input.get("pattern") or "").strip())
 
     # ── browse — locate an unspecified path ──────────────────────────────
     if not has_candidates and not has_pattern:
-        if elicitor is None:
+        if not can_pick:
+            # NOT "ask for the path in plain text" (ENG-1357). Browse means the
+            # file's location is unknown, so it is very likely outside the
+            # project — and every host that lands here forbids reading files
+            # that are neither in the project nor attached, so a typed path is
+            # unusable even when the user supplies it. Naming the one route
+            # that works matters: with no legitimate exit offered, the model
+            # fabricated the user's data instead of asking.
             return _status(
                 "picker_unavailable",
-                "An interactive picker is unavailable here; ask the user for the path in plain text.",
+                "This host cannot render a file browser. Ask the user to attach the "
+                "file to the conversation — that is how they grant you access to a "
+                "file outside the project. Do not ask them to type or paste a path, "
+                "and do not proceed with invented or example data in its place.",
             )
-        request = SelectionRequest(
-            prompt=prompt, kind=kind, mode="browse", root=str(_browse_start_dir(tc_input, root))
+        request = AskRequest(
+            prompt=prompt,
+            kind="path",
+            timeout_s=timeout_s,
+            path_kind=kind,
+            path_mode="browse",
+            root=str(_browse_start_dir(tc_input, root)),
         )
-        chosen, error = await _run_elicitor(elicitor, request)
+        try:
+            answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+        except Exception as exc:  # noqa: BLE001 — the picker is host code
+            _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+            return _status("error", f"Selection failed: {exc}")
+        failure = _path_answer_failure(answer)
+        if failure is not None:
+            return failure
         browse_root = Path(request.root) if request.root else root
-        return error or _finalize_browse_choice(chosen, kind, browse_root)
+        return _finalize_browse_choice(_chosen_path(answer), kind, browse_root)
 
     # ── pick — disambiguate concrete candidates within the project ───────
     candidates = _collect_selection_candidates(tc_input, root, kind)
     if not candidates:
+        # The browse suggestion is only honest where browse can actually run —
+        # on a host without a path elicitor it leads straight to
+        # picker_unavailable, and "ask in plain text" is unusable for a file
+        # outside the project (ENG-1357).
         return _status(
             "no_matches",
-            "No match found. Refine the pattern, omit candidates/pattern to let the user browse, or ask in plain text.",
+            (
+                "No match found. Refine the pattern, omit candidates/pattern to let "
+                "the user browse, or ask in plain text."
+            )
+            if can_pick
+            else (
+                "No match found in the project. Refine the pattern, or — if the file "
+                "is not in the project at all — ask the user to attach it to the "
+                "conversation. This host has no file browser, and you cannot read a "
+                "path the user types."
+            ),
         )
     if len(candidates) == 1:
         return _status("resolved", auto_resolved=True, path=str(candidates[0]))
-    if elicitor is None:
+    if not can_pick:
         return _status(
             "picker_unavailable",
             "An interactive picker is unavailable here; ask the user which of these paths they meant.",
@@ -797,11 +949,157 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         )
 
     options = tuple(_selection_option(p, root) for p in candidates)
-    chosen, error = await _run_elicitor(elicitor, SelectionRequest(prompt=prompt, options=options, kind=kind))
-    if error:
-        return error
-    if chosen is None:
-        return _status("cancelled", "The user dismissed the picker without choosing. Ask how they would like to proceed.")
+    request = AskRequest(
+        prompt=prompt,
+        kind="path",
+        timeout_s=timeout_s,
+        options=options,
+        path_kind=kind,
+    )
+    try:
+        answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("select_path elicitor failed: %s", exc, exc_info=True)
+        return _status("error", f"Selection failed: {exc}")
+    failure = _path_answer_failure(answer)
+    if failure is not None:
+        return failure
+    chosen = _chosen_path(answer)
     if chosen not in {option.value for option in options}:
         return _status("invalid", "The returned selection was not one of the offered options.")
     return _status("resolved", path=chosen)
+
+
+# ---------------------------------------------------------------------------
+# ask_user — a multiple-choice question answered inside the current turn
+# ---------------------------------------------------------------------------
+
+
+def build_ask_request(tc_input: dict, timeout_s: "int | None"):
+    """Parse the tool input into an ``AskRequest``, or None if it is junk.
+
+    Parsing only — the well-formedness rules (option count, uniqueness) live
+    in ``validate_request`` so the orchestrator, which builds requests in
+    Python and never comes through here, gets them too.
+    """
+    from anton.core.interaction.elicit import AskOption, AskRequest
+
+    question = (tc_input.get("question") or "").strip()
+    if not question:
+        return None
+
+    raw_options = tc_input.get("options")
+    if not isinstance(raw_options, list) or not raw_options:
+        return None
+    options = []
+    for raw in raw_options:
+        if not isinstance(raw, dict):
+            return None
+        value = (raw.get("value") or "").strip()
+        if not value:
+            return None
+        options.append(
+            AskOption(
+                value=value,
+                label=(raw.get("label") or value).strip(),
+                detail=(raw.get("detail") or "").strip(),
+            )
+        )
+
+    select = (tc_input.get("select") or "one").strip().lower()
+    if select not in ("one", "many"):
+        return None
+
+    allow_custom = tc_input.get("allow_custom")
+    return AskRequest(
+        prompt=question,
+        kind="choice",
+        timeout_s=timeout_s,
+        options=tuple(options),
+        select=select,
+        allow_custom=True if allow_custom is None else bool(allow_custom),
+    )
+
+
+_ASK_USER_UNAVAILABLE = (
+    "Interactive questions are unavailable here, or the question was malformed "
+    "(it needs 2-10 options with unique values). Ask in plain text instead and "
+    "end your turn."
+)
+_ASK_USER_LIMIT = (
+    "Question limit reached for this turn; proceed on a stated assumption "
+    "instead of asking again."
+)
+
+
+def _ask_user_telemetry_settings(session: "ChatSession"):
+    """Best-effort settings object for `send_event`, mirroring the pattern
+    already used at every other call site (see `anton/tools.py`)."""
+    settings = getattr(session, "_settings", None)
+    if settings is not None:
+        return settings
+    try:
+        from anton.config.settings import AntonSettings
+
+        return AntonSettings()
+    except Exception:
+        return None
+
+
+def _send_ask_user_event(session: "ChatSession", action: str, props: dict) -> None:
+    """Fire one telemetry event. Never raises — analytics must not break a turn."""
+    try:
+        settings = _ask_user_telemetry_settings(session)
+        if not settings:
+            return
+        from anton.analytics import send_event
+
+        send_event(settings, action, **props)
+    except Exception:
+        pass
+
+
+async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
+    """Ask the user to choose, and return the answer as the tool result."""
+    from anton.core.interaction.elicit import elicit
+
+    elicitor = getattr(session, "elicitor", None)
+    request = build_ask_request(
+        tc_input, timeout_s=getattr(elicitor, "timeout_s", None)
+    )
+    if request is None:
+        return _status("error", _ASK_USER_UNAVAILABLE)
+
+    # send_event only accepts string extras (see every existing call site).
+    props = {"select": request.select, "options": str(len(request.options))}
+    _send_ask_user_event(session, "ask_user_asked", props)
+
+    # The question id doubles as the correlation key the host echoes back
+    # with the answer. The originating tool_use.id is not visible here
+    # (dispatch_tool passes only name + input), so mint one.
+    question_id = f"ask:{uuid.uuid4().hex}"
+    answer = await elicit(session, question_id, request)
+    _send_ask_user_event(session, f"ask_user_{answer.status}", props)
+
+    if answer.status == "limit":
+        return _status("error", _ASK_USER_LIMIT)
+    if answer.status == "unavailable":
+        return _status("error", _ASK_USER_UNAVAILABLE)
+    if answer.status in ("cancelled", "timeout"):
+        return _status(answer.status)
+
+    if answer.status == "answered":
+        extra: dict = {}
+        if answer.values:
+            extra["values"] = list(answer.values)
+        if answer.text:
+            extra["text"] = answer.text
+        return _status("answered", **extra)
+
+    # Explicit rather than a fall-through to "answered": `Elicitor` is a
+    # structural Protocol implemented out of tree, so an unlisted status (a
+    # host-side typo, a future status) is reachable without touching this
+    # repo — and telling the LLM the user answered and chose nothing is the
+    # worst failure shape a decision tool has. Same shape as
+    # `_path_answer_failure`.
+    return _status("error", f"The question did not return an answer ({answer.status}).")

@@ -1,0 +1,46 @@
+# Alert when a deploy pipeline concluded WITHOUT EVER STARTING.
+#
+# The panic-alert job in each pipeline is a job inside that pipeline, so it covers
+# every failure where the run exists. It cannot cover
+# `conclusion: startup_failure` — GitHub rejecting the run at load time, with zero
+# jobs — because there is no job to put the alert in. The run appears in the
+# Actions tab and nowhere else, and the branch is not deployed.
+#
+# It is not hypothetical. In mindsdb/auth a caller job granted narrower
+# `permissions:` than a called workflow's jobs declared, two pushes to `staging`
+# were rejected before scheduling, and staging served the previous image for ten
+# hours with nothing said. The shared `workflow-lint.yml` gate stops that
+# particular cause reaching a deploy branch; this watchdog notices the next one,
+# whatever it is.
+#
+# Alerts repeat by design — roughly three per failing push at this cadence and
+# window, then silence. A stateless sweep cannot be exactly-once, and a missed
+# alert is the failure being fixed.
+#
+# Note it only runs once merged to `main`: GitHub runs `schedule` triggers from the
+# default branch alone. `workflow_dispatch` is how to prove it before then, and
+# widening the window on a dispatch replays a past incident.
+
+name: Pipeline watchdog
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      lookback-minutes:
+        description: "Widen to replay a past incident"
+        type: number
+        default: 90
+
+jobs:
+  startup-failures:
+    permissions:
+      contents: read
+      actions: read # run + job history for the sweep
+    uses: mindsdb/github-actions/.github/workflows/notify-startup-failure.yml@main
+    with:
+      branches: "main staging"
+      lookback-minutes: ${{ inputs.lookback-minutes && fromJson(inputs.lookback-minutes) || 90 }}
+      runs-on: ubuntu-latest
+    secrets: inherit

@@ -214,3 +214,13 @@ __marimo__/
 # Anton
 .anton/
 .DS_Store
+
+# Eval run artifacts — output, not source (accidentally swept into #330).
+evals/results/
+
+# junit report from the verifier eval (--junitxml), CI artifact only
+eval-junit.xml
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, review
+# packages) — process artifacts, not source.
+.superpowers/

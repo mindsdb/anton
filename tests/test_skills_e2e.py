@@ -122,7 +122,6 @@ async def test_full_skills_loop(console, store_root):
     builder = ChatSystemPromptBuilder()
     prompt = builder.build(
         conversation_started="2026-04-10T12:00:00+00:00",
-        current_datetime="2026-04-10T13:00:00+00:00",
         system_prompt_context=SystemPromptContext(runtime_context="test"),
         proactive_dashboards=False,
         output_dir="",
@@ -137,9 +136,9 @@ async def test_full_skills_loop(console, store_root):
     registry.register_tool(RECALL_SKILL_TOOL)
     fresh_session = SimpleNamespace(_skill_store=fresh_store)
 
-    result = await registry.dispatch_tool(
+    result = (await registry.dispatch_tool(
         fresh_session, "recall_skill", {"label": "csv-summary"}
-    )
+    )).content
 
     assert "CSV Summary" in result
     assert "pandas.read_csv" in result
@@ -153,9 +152,9 @@ async def test_full_skills_loop(console, store_root):
     assert after_recall_1.stats.stage_1.last_used  # ISO timestamp present
 
     # ── Step 4: Recall again with a typo — closest_match recovers ───────
-    typo_result = await registry.dispatch_tool(
+    typo_result = (await registry.dispatch_tool(
         fresh_session, "recall_skill", {"label": "csv_sumary"}  # missing 'm'
-    )
+    )).content
     assert "⚠" in typo_result
     assert "csv-summary" in typo_result
     assert "pandas.read_csv" in typo_result  # full procedure still returned

@@ -4,6 +4,9 @@ session-side routing decision (native vs handler-dispatched).
 
 from __future__ import annotations
 
+import logging
+import socket
+import ssl
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -269,14 +272,220 @@ class TestWebFetchFallback:
         assert "404" in out
 
     async def test_handles_timeout(self):
+        calls = {"n": 0}
+
         async def _get(self, url, headers=None):
+            calls["n"] += 1
             raise httpx.TimeoutException("slow")
 
-        with patch.object(httpx.AsyncClient, "get", new=_get):
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
             out = await handle_web_fetch_fallback(
                 None, {"url": "https://example.com"}
             )
+        # Timeout is transient → retried up to the attempt cap before giving up.
+        assert calls["n"] == 2
         assert "timed out" in out.lower()
+
+
+class TestWebFetchRetry:
+    """Narrow retry: transient failures are retried with backoff; permanent ones
+    (4xx, NXDOMAIN, SSL) fail fast on the first attempt."""
+
+    async def test_retries_5xx_then_succeeds(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return httpx.Response(
+                    503, text="busy", request=httpx.Request("GET", url)
+                )
+            return httpx.Response(
+                200,
+                text="<p>ok</p>",
+                headers={"content-type": "text/html"},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "ok" in out
+
+    async def test_5xx_exhausts_retries(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            return httpx.Response(500, text="boom", request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "500" in out and "gave up" in out
+
+    async def test_does_not_retry_non_retryable_5xx(self):
+        # 511 Network Authentication Required is a permanent 5xx → no retry.
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            return httpx.Response(511, text="portal", request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "511" in out
+
+    async def test_does_not_retry_4xx(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            return httpx.Response(404, text="nope", request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "404" in out
+
+    async def test_retries_connect_error(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            raise httpx.ConnectError("all connection attempts failed")
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "gave up" in out
+
+    async def test_does_not_retry_ssl_error(self):
+        calls = {"n": 0}
+
+        async def _get(self, url, headers=None):
+            calls["n"] += 1
+            raise httpx.ConnectError("cert fail") from ssl.SSLCertVerificationError(
+                "bad cert"
+            )
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "cert fail" in out
+
+    async def test_retries_transient_dns(self):
+        # EAI_AGAIN from the SSRF preflight's getaddrinfo → transient → retried.
+        calls = {"n": 0}
+
+        def _gai(host, *args, **kwargs):
+            calls["n"] += 1
+            raise socket.gaierror(
+                socket.EAI_AGAIN, "Temporary failure in name resolution"
+            )
+
+        with patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo", new=_gai
+        ), patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 2
+        assert "gave up" in out
+
+    async def test_does_not_retry_nxdomain(self):
+        # EAI_NONAME → permanent NXDOMAIN → single attempt, no retry.
+        calls = {"n": 0}
+
+        def _gai(host, *args, **kwargs):
+            calls["n"] += 1
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        with patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo", new=_gai
+        ), patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0):
+            out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+        assert calls["n"] == 1
+        assert "Could not resolve" in out
+
+
+class TestWebFetchLogging:
+    """Exactly one structured audit line per web_fetch call."""
+
+    _LOGGER = "anton.core.tools.web_tools"
+
+    async def test_success_logs_single_info_line(self, caplog):
+        async def _get(self, url, headers=None):
+            return httpx.Response(
+                200,
+                text="<p>hi</p>",
+                headers={"content-type": "text/html"},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), caplog.at_level(
+            logging.INFO, logger=self._LOGGER
+        ):
+            await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+
+        recs = [r for r in caplog.records if r.name == self._LOGGER]
+        assert len(recs) == 1
+        assert recs[0].levelno == logging.INFO
+        msg = recs[0].getMessage()
+        assert "method=GET" in msg
+        assert "status=200" in msg
+        assert "attempts=1" in msg
+        assert "bytes=" in msg and "elapsed_ms=" in msg
+
+    async def test_url_query_string_is_redacted_in_log(self, caplog):
+        async def _get(self, url, headers=None):
+            return httpx.Response(
+                200,
+                text="ok",
+                headers={"content-type": "text/plain"},
+                request=httpx.Request("GET", url),
+            )
+
+        secret_url = "https://user:pass@example.com/data?api_key=SECRET123&x=1"
+        with patch.object(httpx.AsyncClient, "get", new=_get), caplog.at_level(
+            logging.INFO, logger=self._LOGGER
+        ):
+            await handle_web_fetch_fallback(None, {"url": secret_url})
+
+        msg = next(r for r in caplog.records if r.name == self._LOGGER).getMessage()
+        assert "SECRET123" not in msg
+        assert "api_key" not in msg
+        assert "pass" not in msg  # userinfo credentials stripped too
+        assert "url=https://example.com/data?<redacted>" in msg
+
+    async def test_giveup_logs_single_warning_line(self, caplog):
+        async def _get(self, url, headers=None):
+            raise httpx.ConnectError("all connection attempts failed")
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ), caplog.at_level(logging.INFO, logger=self._LOGGER):
+            await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+
+        recs = [r for r in caplog.records if r.name == self._LOGGER]
+        assert len(recs) == 1
+        assert recs[0].levelno == logging.WARNING
+        msg = recs[0].getMessage()
+        assert "status=transient_giveup" in msg
+        assert "attempts=2" in msg
 
 
 class TestStripHtml:
@@ -330,6 +539,11 @@ class TestSessionWebToolResolution:
         cfg = ChatSessionConfig(llm_client=mock_llm, **(cfg_kwargs or {}))
         return ChatSession(cfg)
 
+    def _settings_with_credential(self):
+        from anton.config.settings import AntonSettings
+
+        return AntonSettings(external_search_provider="exa", exa_api_key="k")
+
     def test_anthropic_style_native_provider_uses_no_fallback(self):
         session = self._build_session(provider_native={"web_search", "web_fetch"})
         assert session._native_web_tools == {"web_search", "web_fetch"}
@@ -350,11 +564,25 @@ class TestSessionWebToolResolution:
         assert "web_fetch" in session._native_web_tools
 
     def test_fallback_toolDefs_registered_when_provider_lacks_native(self):
-        session = self._build_session(provider_native=set())
-        # Trigger lazy build of the registry.
+        # web_search additionally needs a usable Exa/Brave credential; without
+        # one it must not be registered even though the provider isn't native.
+        session = self._build_session(
+            provider_native=set(),
+            cfg_kwargs={"settings": self._settings_with_credential()},
+        )
         tools = session._build_tools()
         names = {t["name"] for t in tools}
         assert "web_search" in names
+        assert "web_fetch" in names
+
+    def test_fallback_web_search_not_registered_without_credential(self):
+        # A model offered a tool that can only fail (no Exa/Brave key
+        # configured) will call it anyway — don't register it at all.
+        session = self._build_session(provider_native=set())
+        tools = session._build_tools()
+        names = {t["name"] for t in tools}
+        assert "web_search" not in names
+        # web_fetch needs no credential, so it's unaffected.
         assert "web_fetch" in names
 
     def test_fallback_toolDefs_not_registered_when_provider_is_native(self):

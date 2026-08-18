@@ -127,7 +127,6 @@ class ChatSystemPromptBuilder:
         self,
         *,
         conversation_started: str,
-        current_datetime: str,
         system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
         output_dir: str,
@@ -138,6 +137,7 @@ class ChatSystemPromptBuilder:
         self_awareness_context: str = "",
         datasource_context: str = "",
         skill_store: "SkillStore | None" = None,
+        workspace_context: str = "",
     ) -> str:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
@@ -188,17 +188,23 @@ class ChatSystemPromptBuilder:
         if suffix:
             prompt += f"\n\n{suffix}"
 
-        # Volatile tail — LAST so everything above can be cached. The live
-        # clock and the relevance-filtered memory snapshot both change every
-        # turn, so they sit after the cache-stable prefix and never invalidate
-        # it. (The prefix carries only the fixed "conversation started" stamp.)
+        # Static note (cache-stable): the current time is no longer in the
+        # system prompt — each message carries its send time as a bracketed
+        # prefix, so the model reads "now" from the latest message. Keeping the
+        # clock out of the prefix lets it stay byte-identical across turns.
         prompt += (
-            f"\n\nCurrent date and time: {current_datetime}\n"
-            "(Earlier messages are prefixed with the time they were sent; that "
+            "\n\n(Messages are prefixed with the time they were sent; that "
             "bracketed timestamp is metadata, not part of the message text.)"
         )
+
+        # Volatile tail — LAST so everything above can be cached. Only the
+        # relevance-filtered memory snapshot remains here; it changes every turn.
         if memory_context:
             prompt += memory_context
+        # Workspace discovery (ENG-578) is volatile too — pads and files
+        # change between turns, so it must never sit in the cached prefix.
+        if workspace_context:
+            prompt += workspace_context
 
         return prompt
 

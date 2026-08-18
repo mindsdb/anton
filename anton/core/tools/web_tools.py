@@ -25,10 +25,15 @@ unconfigured users — the swap is local to ``handle_web_fetch_fallback``.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import ipaddress
+import logging
 import os
 import socket
+import ssl
+import time
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -40,6 +45,8 @@ from anton.core.tools.tool_defs import ToolDef
 if TYPE_CHECKING:
     from anton.core.session import ChatSession
 
+logger = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # External search provider adapters
@@ -49,6 +56,52 @@ EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search"
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 _HTTP_TIMEOUT = 30.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retry policy (transient failures only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# web_fetch is GET-only, so retries are always idempotent. We retry ONLY
+# transient failures and fail fast on permanent ones:
+# - retry:    transient DNS (EAI_AGAIN), connect/read errors, timeouts, HTTP 5xx
+# - no retry: NXDOMAIN, SSL/certificate errors, HTTP 4xx
+# 2 attempts (1 retry): a transient blip almost always clears on the first
+# retry, and a second retry mostly adds latency — up to _HTTP_TIMEOUT per extra
+# attempt on a hang. Only ~6/42 observed failures were transient at all.
+_MAX_FETCH_ATTEMPTS = 2
+_FETCH_BACKOFF_BASE_S = 0.5  # single 0.5s pause before the retry
+
+# Only these 5xx codes are transient. Others (501 Not Implemented, 505 HTTP
+# Version Not Supported, 511 Network Authentication Required, ...) are permanent
+# and must fail fast — retrying them just adds latency.
+_RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+
+# glibc EAI_AGAIN ("Temporary failure in name resolution") is a transient DNS
+# error worth retrying; EAI_NONAME ("Name or service not known") is a permanent
+# NXDOMAIN and must fail fast. getattr keeps import safe on platforms lacking it.
+_TRANSIENT_GAI_ERRNOS = {getattr(socket, "EAI_AGAIN", -3)}
+
+
+class _TransientFetchError(Exception):
+    """Retryable fetch failure: transient DNS, connect/read error, timeout, or 5xx.
+
+    The message is caller-facing — it is surfaced verbatim once retries are
+    exhausted, so it must read as a normal ``web_fetch`` error string.
+    """
+
+
+@dataclass(frozen=True)
+class _FetchResult:
+    """Result of a single ``_fetch_once`` attempt, carrying audit metadata.
+
+    ``status`` is the HTTP status code for any received response, or a short
+    label ("blocked", "transport_error") for failures that never got one.
+    """
+
+    text: str  # caller-facing content or error message
+    status: int | str
+    num_bytes: int = 0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SSRF guard
@@ -103,6 +156,10 @@ def _check_url_ssrf(url: str) -> str | None:
         try:
             infos = socket.getaddrinfo(host, None)
         except socket.gaierror as exc:
+            if exc.errno in _TRANSIENT_GAI_ERRNOS:
+                raise _TransientFetchError(
+                    f"DNS temporarily failed for {host!r}: {exc}"
+                ) from exc
             return f"Could not resolve host {host!r}: {exc}"
 
         addrs = {info[4][0] for info in infos}
@@ -114,6 +171,8 @@ def _check_url_ssrf(url: str) -> str | None:
                     "Set ANTON_ALLOW_PRIVATE_FETCH=1 to allow fetching from "
                     "private/LAN addresses (self-hosted deployments only)."
                 )
+    except _TransientFetchError:
+        raise  # let the retry loop handle transient DNS failures
     except Exception as exc:
         return f"SSRF pre-flight check failed for {url!r}: {exc}"
 
@@ -232,11 +291,16 @@ def _strip_html(body: str) -> str:
     return parser.text()
 
 
-async def _fetch_url(url: str, max_chars: int) -> str:
-    """GET a URL and return its text content, truncated to ``max_chars``."""
+async def _fetch_once(url: str, max_chars: int) -> _FetchResult:
+    """One fetch attempt.
+
+    Raises ``_TransientFetchError`` on retryable failures (transient DNS,
+    connect/read errors, timeouts, HTTP 5xx); returns a ``_FetchResult`` on
+    success or on any permanent failure (SSRF block, NXDOMAIN, SSL, HTTP 4xx).
+    """
     # SSRF guard: resolve the initial URL before opening any connection.
     if err := _check_url_ssrf(url):
-        return err
+        return _FetchResult(err, status="blocked")
 
     try:
         # follow_redirects=False so we can inspect each redirect target before
@@ -255,16 +319,30 @@ async def _fetch_url(url: str, max_chars: int) -> str:
                 # Resolve relative redirects against the current URL.
                 next_url = str(resp.next_request.url) if resp.next_request else location
                 if err := _check_url_ssrf(next_url):
-                    return err
+                    return _FetchResult(err, status="blocked")
                 resp = await client.send(resp.next_request)
                 hops += 1
-    except httpx.TimeoutException:
-        return f"Fetch timed out after {_HTTP_TIMEOUT}s for {url}"
+    except httpx.TimeoutException as exc:
+        raise _TransientFetchError(
+            f"Fetch timed out after {_HTTP_TIMEOUT}s for {url}"
+        ) from exc
     except httpx.HTTPError as exc:
-        return f"Fetch failed for {url}: {exc}"
+        # A ConnectError wrapping an SSL/certificate failure is a permanent
+        # config problem; every other transport error is a transient network
+        # blip worth retrying.
+        is_ssl = isinstance(exc, httpx.ConnectError) and isinstance(
+            exc.__cause__, ssl.SSLError
+        )
+        if isinstance(exc, httpx.TransportError) and not is_ssl:
+            raise _TransientFetchError(f"Fetch failed for {url}: {exc}") from exc
+        return _FetchResult(f"Fetch failed for {url}: {exc}", status="transport_error")
 
+    if resp.status_code in _RETRYABLE_STATUS:
+        raise _TransientFetchError(f"Fetch returned HTTP {resp.status_code} for {url}")
     if resp.status_code >= 400:
-        return f"Fetch returned HTTP {resp.status_code} for {url}"
+        return _FetchResult(
+            f"Fetch returned HTTP {resp.status_code} for {url}", status=resp.status_code
+        )
 
     content_type = (resp.headers.get("content-type") or "").lower()
     body = resp.text
@@ -279,9 +357,81 @@ async def _fetch_url(url: str, max_chars: int) -> str:
         text = text[:max_chars]
         truncated = True
 
-    header = f"Fetched {url} (HTTP {resp.status_code}, {len(resp.content)} bytes)"
+    num_bytes = len(resp.content)
+    header = f"Fetched {url} (HTTP {resp.status_code}, {num_bytes} bytes)"
     suffix = "\n... [truncated]" if truncated else ""
-    return f"{header}\n\n{text}{suffix}"
+    return _FetchResult(
+        f"{header}\n\n{text}{suffix}",
+        status=resp.status_code,
+        num_bytes=num_bytes,
+    )
+
+
+def _redact_url(url: str) -> str:
+    """Reduce a URL to scheme://host[:port]/path for logging.
+
+    A model-supplied URL can carry credentials in the query (``?api_key=…``) or
+    in userinfo (``user:pass@host``); dropping both — plus the fragment — keeps
+    the audit line useful without leaking them.
+    """
+    try:
+        parts = urlparse(url)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+    except ValueError:
+        return "<unparseable-url>"
+    base = f"{parts.scheme}://{host}{parts.path}"
+    return f"{base}?<redacted>" if parts.query else base
+
+
+def _log_fetch(
+    url: str,
+    status: object,
+    num_bytes: int,
+    attempts: int,
+    started: float,
+    *,
+    level: int,
+) -> None:
+    """Emit one structured audit line per web_fetch call."""
+    logger.log(
+        level,
+        "web_fetch url=%s method=GET status=%s bytes=%d attempts=%d elapsed_ms=%d",
+        _redact_url(url),
+        status,
+        num_bytes,
+        attempts,
+        int((time.monotonic() - started) * 1000),
+    )
+
+
+async def _fetch_url(url: str, max_chars: int) -> str:
+    """GET a URL with bounded retry on transient failures; return text content.
+
+    GET is idempotent, so retrying is safe. Permanent failures (4xx, NXDOMAIN,
+    SSL) short-circuit inside ``_fetch_once`` and never reach a second attempt.
+    Emits exactly one structured log line per call, whatever the outcome.
+    """
+    started = time.monotonic()
+    last_error = ""
+    for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
+        try:
+            outcome = await _fetch_once(url, max_chars)
+        except _TransientFetchError as exc:
+            last_error = str(exc)
+            if attempt < _MAX_FETCH_ATTEMPTS:
+                await asyncio.sleep(_FETCH_BACKOFF_BASE_S * 2 ** (attempt - 1))
+            continue
+        _log_fetch(
+            url, outcome.status, outcome.num_bytes, attempt, started, level=logging.INFO
+        )
+        return outcome.text
+
+    _log_fetch(
+        url, "transient_giveup", 0, _MAX_FETCH_ATTEMPTS, started, level=logging.WARNING
+    )
+    return f"{last_error} (gave up after {_MAX_FETCH_ATTEMPTS} attempts)"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -290,9 +440,25 @@ async def _fetch_url(url: str, max_chars: int) -> str:
 
 
 _NO_PROVIDER_MSG = (
-    "No search provider configured for this LLM endpoint. "
-    "Run `anton setup search` to configure Exa.ai or Brave Search."
+    "No search provider configured for this LLM endpoint. Web search is "
+    "unavailable in this session; if you're running the anton CLI standalone, "
+    "run `anton setup search` to configure Exa.ai or Brave Search."
 )
+
+
+def has_search_credential(settings: object) -> bool:
+    """Whether ``settings`` has a usable Exa/Brave key for the fallback handler.
+
+    Shared by the registration gate (``ChatSession.__init__`` skips registering
+    ``WEB_SEARCH_FALLBACK_TOOL`` when this is False) and the handler itself, so
+    the two can't drift out of sync.
+    """
+    provider = (getattr(settings, "external_search_provider", None) or "").lower()
+    if provider == "exa":
+        return bool(getattr(settings, "exa_api_key", None))
+    if provider == "brave":
+        return bool(getattr(settings, "brave_api_key", None))
+    return False
 
 
 async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> str:
@@ -303,19 +469,14 @@ async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> 
     max_results = max(1, min(max_results, 20))
 
     settings = session._settings
+    if not has_search_credential(settings):
+        return _NO_PROVIDER_MSG
+
     provider = (getattr(settings, "external_search_provider", None) or "").lower()
-
     if provider == "exa":
-        key = getattr(settings, "exa_api_key", None)
-        if not key:
-            return _NO_PROVIDER_MSG
-        return await _search_exa(query, key, max_results)
+        return await _search_exa(query, settings.exa_api_key, max_results)
     if provider == "brave":
-        key = getattr(settings, "brave_api_key", None)
-        if not key:
-            return _NO_PROVIDER_MSG
-        return await _search_brave(query, key, max_results)
-
+        return await _search_brave(query, settings.brave_api_key, max_results)
     return _NO_PROVIDER_MSG
 
 

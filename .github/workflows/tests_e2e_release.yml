@@ -30,4 +30,4 @@ jobs:
           ANTON_CODING_PROVIDER: openai
           ANTON_PLANNING_MODEL: gpt-4.1-mini
           ANTON_CODING_MODEL: gpt-4.1-mini
-        run: uv run --extra dev pytest tests/e2e/ --live -v
+        run: uv run --group dev pytest tests/e2e/ --live -v

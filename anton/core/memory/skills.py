@@ -102,7 +102,7 @@ class Skill:
     description: str
     declarative_md: str
     created_at: str
-    provenance: str  # "manual" | "consolidator" | "builtin"
+    provenance: str  # "manual" | "consolidator" | "builtin" | "host"
     when_to_use: str = ""
     stage_1_present: bool = True
     stage_2_present: bool = False
@@ -283,12 +283,21 @@ class SkillStore:
         self,
         root: Path | None = None,
         builtin_root: Path | None = None,
+        extra_roots: list[Path] | None = None,
     ) -> None:
         self.root = Path(root) if root is not None else _DEFAULT_SKILLS_ROOT
         # Resolved at construction so tests can monkeypatch the module default.
         self.builtin_root = (
             Path(builtin_root) if builtin_root is not None else _BUILTIN_SKILLS_ROOT
         )
+        # Read-only skill roots supplied by the host (e.g. cowork-server ships
+        # skills for its own tools). Take precedence over anton's packaged
+        # built-ins; user skills under `root` still shadow everything.
+        self.extra_roots: list[Path] = [Path(p) for p in extra_roots or []]
+
+    def _readonly_roots(self) -> list[Path]:
+        """Host roots first (they win on label collisions), then built-ins."""
+        return [*self.extra_roots, self.builtin_root]
 
     # ── internal helpers ─────────────────────────────────────────────
 
@@ -365,13 +374,20 @@ class SkillStore:
         return self._load_builtin(label)
 
     def _load_builtin(self, label: str) -> Skill | None:
-        d = self.builtin_root / label.replace("_", "-")
-        if not d.is_dir():
-            return None
-        skill = self._skill_from_dir(d)
-        if skill is not None:
-            skill.provenance = "builtin"
-        return skill
+        norm = label.replace("_", "-")
+        for base in self._readonly_roots():
+            d = base / norm
+            if not d.is_dir():
+                continue
+            skill = self._skill_from_dir(d)
+            if skill is None:
+                continue
+            # Only anton's own root is force-labelled "builtin"; host roots
+            # keep whatever provenance their SKILL.md declares.
+            if base == self.builtin_root:
+                skill.provenance = "builtin"
+            return skill
+        return None
 
     def _load_stats(self, label: str) -> SkillStats:
         path = self._skill_dir(label) / "stats.json"
@@ -419,13 +435,22 @@ class SkillStore:
         out.sort(key=lambda s: s["label"])
         return out
 
-    def _builtin_dirs(self) -> list[Path]:
-        if not self.builtin_root.is_dir():
-            return []
-        return sorted(
-            d for d in self.builtin_root.iterdir()
-            if d.is_dir() and (d / "SKILL.md").is_file()
-        )
+    def _readonly_dirs(self) -> list[Path]:
+        """All read-only skill dirs (host roots + built-ins), deduped by name.
+
+        Host roots are walked first, so a host skill shadows an anton built-in
+        sharing its label — matching `_load_builtin`'s precedence.
+        """
+        dirs: list[Path] = []
+        seen: set[str] = set()
+        for base in self._readonly_roots():
+            if not base.is_dir():
+                continue
+            for d in sorted(base.iterdir()):
+                if d.is_dir() and (d / "SKILL.md").is_file() and d.name not in seen:
+                    dirs.append(d)
+                    seen.add(d.name)
+        return dirs
 
     def _iter_skill_dirs(self) -> list[Path]:
         """User skill dirs (migrated) plus built-in dirs not shadowed by one.
@@ -447,7 +472,7 @@ class SkillStore:
                     continue
                 dirs.append(child)
                 seen.add(child.name)
-        dirs.extend(d for d in self._builtin_dirs() if d.name not in seen)
+        dirs.extend(d for d in self._readonly_dirs() if d.name not in seen)
         return dirs
 
     # ── writing ─────────────────────────────────────────────────────

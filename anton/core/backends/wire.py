@@ -8,6 +8,13 @@ CELL_DELIM = "__ANTON_CELL_END__"
 RESULT_START = "__ANTON_RESULT__"
 RESULT_END = "__ANTON_RESULT_END__"
 PROGRESS_MARKER = "__ANTON_PROGRESS__"
+HEARTBEAT_MARKER = "__ANTON_HEARTBEAT__"
+STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
+# In-cell auto-install span (ENG-1275): the worker brackets its pip/uv run
+# with these so the parent can defer its kill windows to the install budget
+# and name the install if the cell dies anyway. Payload is the package name.
+INSTALL_START_MARKER = "__ANTON_INSTALL_START__"
+INSTALL_END_MARKER = "__ANTON_INSTALL_END__"
 
 
 def heal_surrogate_source(code: str) -> str:

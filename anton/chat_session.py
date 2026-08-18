@@ -89,6 +89,7 @@ def rebuild_session(
     from anton.core.llm.client import LLMClient
     from anton.chat import ChatSession
     from anton.core.session import ChatSessionConfig
+    from anton.tools import DEFAULT_SESSION_TOOLS
 
     state["llm_client"] = LLMClient.from_settings(settings)
 
@@ -115,9 +116,18 @@ def rebuild_session(
         console=console,
         history_store=history_store,
         session_id=session_id,
+        # ENG-1495: identify the host explicitly. Left unset, `harness` reached
+        # telemetry as "" — which meant BOTH "this is the CLI" and "the host
+        # didn't identify itself", so the two could never be told apart and the
+        # ambiguity got worse with every new host.
+        harness="cli",
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
+        # ENG-1166: without this, resumed / post-settings-change sessions
+        # register only core tools and silently lose publish_or_preview +
+        # connect_new_datasource. Mirror the fresh-session builder (chat.py).
+        tools=list(DEFAULT_SESSION_TOOLS),
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,
     ))

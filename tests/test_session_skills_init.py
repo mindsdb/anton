@@ -66,7 +66,6 @@ class TestPromptBuilderReceivesStore:
         builder = ChatSystemPromptBuilder()
         prompt = builder.build(
             conversation_started="2026-04-10T12:00:00+00:00",
-            current_datetime="2026-04-10",
             system_prompt_context=SystemPromptContext(runtime_context="test"),
             proactive_dashboards=False,
             output_dir="",
@@ -79,7 +78,6 @@ class TestPromptBuilderReceivesStore:
         builder = ChatSystemPromptBuilder()
         prompt = builder.build(
             conversation_started="2026-04-10T12:00:00+00:00",
-            current_datetime="2026-04-10",
             system_prompt_context=SystemPromptContext(runtime_context="test"),
             proactive_dashboards=False,
             output_dir="",
@@ -100,9 +98,9 @@ class TestDispatchRoundtrip:
         # Minimal session-like object — only `_skill_store` is read by the handler.
         session = SimpleNamespace(_skill_store=store_with_one_skill)
 
-        result = await registry.dispatch_tool(
+        result = (await registry.dispatch_tool(
             session, "recall_skill", {"label": "csv_summary"}
-        )
+        )).content
 
         assert "CSV Summary" in result
         assert "Load CSV" in result
@@ -118,9 +116,9 @@ class TestDispatchRoundtrip:
         registry.register_tool(RECALL_SKILL_TOOL)
         session = SimpleNamespace(_skill_store=store_with_one_skill)
 
-        result = await registry.dispatch_tool(
+        result = (await registry.dispatch_tool(
             session, "recall_skill", {"label": "nonexistent_xyz"}
-        )
+        )).content
 
         assert "NO MATCH" in result
         # Counter should NOT have moved

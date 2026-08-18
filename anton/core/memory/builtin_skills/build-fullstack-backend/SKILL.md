@@ -206,14 +206,14 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
   - NEVER hardcode an absolute URL in the source — no `fetch('http://localhost:PORT/...')`, no `fetch('https://api.example.com/...')`, no `const API_BASE = 'http://...'`. The meta tag is the ONLY place the base URL is configured.
 
 6. LAUNCH THE BACKEND: Call the `launch_backend` tool with the artifact's slug:
-  - `launch_backend(slug=<slug>)` — the tool picks a free port, spawns `python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, waits for readiness, writes the port into `metadata.json`, and returns `{slug, port, pid, url, log_path}` as JSON.
+  - `launch_backend(slug=<slug>)` — the tool picks a free port, spawns `python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, waits for readiness, writes the port into `metadata.json`, and returns a JSON envelope: the URL in `external_url` and `{slug, port, pid, log_path}` under `details`.
   - Uses the scratchpad named `<slug>` — created automatically on first call. If `<artifact_path>/requirements.txt` exists, its packages are installed into that scratchpad's venv before spawn (install output is appended to `backend.log` with a banner). An install failure aborts the launch and is returned as an error string — fix `requirements.txt` and retry.
   - Backend stdout/stderr stream to `<artifact_path>/backend.log` — read it if the launch fails or the API misbehaves.
   - Do NOT call `update_artifact(port=...)` manually — `launch_backend` does it.
   - The launched process outlives the scratchpad cell and is reaped automatically when the Anton session ends.
   - Calling `launch_backend` again for the same slug terminates the previous process and starts a fresh one — use this for hot reloads after code changes.
 
-7. PREVIEW THE APPLICATION: Direct the user to the `url` returned by `launch_backend` (e.g. http://127.0.0.1:54321):
+7. PREVIEW THE APPLICATION: Direct the user to the `external_url` returned by `launch_backend` (e.g. http://127.0.0.1:54321):
   - CRITICAL: Open that URL, NOT the HTML file from disk (file://...). The backend serves the frontend at `/`, so opening the URL loads the page and its `fetch()` calls land on the same origin.
   - If the user opens the HTML file directly from disk, `fetch()` calls fail due to browser CORS/file:// restrictions.
 
@@ -225,5 +225,5 @@ DEPLOYMENT NOTES:
 - The local backend process shuts down when the Anton CLI session ends (per MVP constraints).
 
 PUBLISH OR SHARE:
-- After building, offer to preview the frontend by directing the user to the URL returned by `launch_backend`
+- After building, offer to preview the frontend by directing the user to the `external_url` returned by `launch_backend`
 - The backend must be running for the frontend to work

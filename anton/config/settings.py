@@ -101,6 +101,9 @@ class AntonSettings(CoreSettings):
     brave_api_key: str | None = None
 
     skills_root: Path | None = None
+    # Read-only skill roots the host ships alongside its own tools (ENG-764).
+    # Take precedence over anton's built-ins; user skills still shadow them.
+    skills_extra_roots: list[Path] | None = None
 
     memory_enabled: bool = True
     # TODO: Calling this memory_dir is a bit misleading, because there are other directories that live here
@@ -137,6 +140,25 @@ class AntonSettings(CoreSettings):
     # Analytics — anonymous usage events (set ANTON_ANALYTICS_ENABLED=false to opt out)
     analytics_enabled: bool = True
     analytics_url: str = "https://x6nik28qi6.execute-api.us-east-2.amazonaws.com/default/zoomInfoCollector"
+
+    # PostHog direct sink. Events named in `analytics._POSTHOG_EVENTS` post here;
+    # everything else goes through `analytics_url`. The routing rule and each
+    # sink's behaviour are documented in one place — `anton/analytics.py` — and
+    # deliberately not repeated here, so a change of collector cannot leave a
+    # stale description of one behind in the settings file.
+    #
+    # `posthog_key` is a PostHog *project* token, not a credential in the usual
+    # sense: it is write-only (it can send events and cannot read a single row)
+    # and is already served publicly in the console's JavaScript bundle, so
+    # carrying it here discloses nothing new.
+    #
+    # Baked rather than env-only on purpose. anton runs inside cowork-server on
+    # machines we do not configure, so requiring a host to supply the key would
+    # make the sink fail the exact way this change exists to prevent: silently,
+    # with nothing reporting it. Set `ANTON_POSTHOG_KEY` to re-point it, or to
+    # "" to disable the direct sink.
+    posthog_host: str = "https://us.i.posthog.com"
+    posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
 
     # Minds datasource integration
     minds_enabled: bool = True  # use Minds server as LLM provider

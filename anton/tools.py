@@ -190,6 +190,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
                     conn_name = uuid.uuid4().hex[:8]
                     while vault.load(engine_def.engine, conn_name) is not None:
                         conn_name = uuid.uuid4().hex[:8]
+                    from anton.utils.datasources import default_user_label, ensure_unique_user_label
+                    requested_label = tc_input.get("user_label") or default_user_label(vault, engine_def.engine)
+                    test_credentials["_user_label"] = ensure_unique_user_label(vault, requested_label)
                 existing = vault.load(engine_def.engine, conn_name) or {}
                 merged = {**existing, **test_credentials}
                 slug = save_connection(vault, engine_def, conn_name, merged)
@@ -225,8 +228,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
                         "variables in scratchpad code — never embed raw values."
                     )
                     return _msg
+                label = merged.get("_user_label", "")
                 return (
-                    f"Saved connection `{slug}` to vault with fields: "
+                    f"Saved connection `{slug}` (label \"{label}\") to vault with fields: "
                     f"{', '.join(sorted(test_credentials.keys()))}. "
                     f"Future turns can reference this connection by its slug. "
                     f"Access credentials via DS_<FIELD> environment variables "
@@ -240,7 +244,10 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
 
     from anton.commands.datasource import handle_connect_datasource
 
-    before = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
+    # Track (engine, name) pairs rather than joined slugs: engine names may
+    # contain a dash (custom engines are free-form), so a joined string
+    # cannot be split back into its parts reliably.
+    before = {(c["engine"], c["name"]) for c in vault.list_connections()}
 
     # Clear any stale status from a previous run
     setattr(session, "_pending_connect_redirect", None)
@@ -254,20 +261,25 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         known_variables=known_variables or None,
         from_tool_call=True,
         vault=vault,
+        prefill_label=tc_input.get("user_label"),
     )
 
     # Check if a new connection was actually added
-    after = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
+    after = {(c["engine"], c["name"]) for c in vault.list_connections()}
     new_connections = after - before
 
     if new_connections:
-        slug = next(iter(new_connections))
+        engine_saved, name_saved = sorted(new_connections)[0]
+        slug = f"{engine_saved}-{name_saved}"
+        saved_fields = vault.load(engine_saved, name_saved) or {}
+        saved_label = saved_fields.get("_user_label", "")
         # ── Telemetry: connection succeeded ──────────────────────────
         if _settings:
             send_event(_settings, "ds_connect_success", engine=engine)
         return (
-            f"Successfully connected '{slug}'. The datasource is now available. "
-            f"Continue helping the user with their original request using this data source."
+            f"Successfully connected '{slug}' (label \"{saved_label}\"). The datasource is "
+            f"now available. Continue helping the user with their original request using "
+            f"this data source."
         )
 
     # Did the flow record a mid-flow redirect? Read it from the session
@@ -368,6 +380,15 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
                     "user actually mentioned — never invent values."
                 ),
                 "additionalProperties": {"type": "string"},
+            },
+            "user_label": {
+                "type": "string",
+                "description": (
+                    "Optional human-readable label for this connection (e.g. 'prod-db'). "
+                    "If the user mentioned a name for it in chat, pass it here. If omitted, "
+                    "a default based on the engine is used (e.g. 'postgres', 'postgres 2' "
+                    "for a second connection to the same engine)."
+                ),
             },
         },
         "required": ["engine"],
@@ -674,3 +695,12 @@ PUBLISH_TOOL = ToolDef(
         "(no need to ask again)."
     ),
 )
+
+
+# Extra (non-core) tools every interactive anton session registers. Kept as a
+# single source so the fresh-session builder (chat.py) and the resume/settings
+# rebuild builder (chat_session.py::rebuild_session) can't drift — ENG-1166,
+# where rebuild_session omitted these and every resumed session silently lost
+# publish_or_preview + connect_new_datasource. Callers pass list(...) so each
+# session gets its own copy rather than sharing this module-level list.
+DEFAULT_SESSION_TOOLS = [CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL]

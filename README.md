@@ -28,8 +28,8 @@ Anton is the default agent in **MindsHub Cowork**, the unified workspace with da
 ### MindsHub Cowork app
 
 - **Web** — nothing to install: open **[console.mindshub.ai](https://console.mindshub.ai/?utm_source=github&utm_medium=repo-readme&utm_campaign=anton-readme)**.
-- **macOS** — [download the desktop app](https://downloads.mindsdb.com/mindshub-cowork/mac/mindshub-cowork-latest.pkg) (`.pkg`).
-- **Windows** — [download the desktop app](https://downloads.mindsdb.com/mindshub-cowork/windows/mindshub-cowork-latest.exe) (`.exe`).
+- **macOS** — [download the desktop app](https://downloads.mindshub.ai/mindshub-cowork/mac/mindshub-cowork-latest.pkg) (`.pkg`).
+- **Windows** — [download the desktop app](https://downloads.mindshub.ai/mindshub-cowork/windows/mindshub-cowork-latest.exe) (`.exe`).
 
 ### Anton CLI (standalone)
 
@@ -286,9 +286,9 @@ Anton versions follow a calendar-derived scheme:
 
 **Rules**
 
-- Always write all 5 components in [`anton/__init__.py`](anton/__init__.py) (`__version__ = "2.26.4.30.0"`). PyPI may canonicalize a trailing `.0` away — that's fine.
-- The version bump happens on the `staging → main` promotion (see [Dev guidelines](#dev-guidelines)). The version *is* the actual ship date.
-- Hotfix back-merges to `dev`/`staging` carry the fix only — never the `__version__` bump.
+- The package version is **derived from the release git tag**, not written by hand. `pyproject.toml` sets `[tool.hatch.version] source = "vcs"`, so hatch-vcs reads the version off the tag at build time; [`anton/__init__.py`](anton/__init__.py) re-exports it at runtime via `importlib.metadata`. There is no `__version__` literal to edit.
+- The tag is minted automatically on release — you never push it or bump a version file. The release workflows fill `YY`/`MONTH`/`DAY` from the ship date and derive `PATCH`; the version *is* the actual ship date.
+- Hotfix back-merges to `dev`/`staging` carry the fix only — there's no version file for them to touch.
 
 **Worked example**
 
@@ -306,22 +306,31 @@ hotfix       3.26.7.15.1     ← patches the 3.26.7.15.0 release
 
 ## Releasing
 
-Anton uses an automated release flow. The single source of truth for the package version is [`anton/__init__.py`](anton/__init__.py) (`__version__`); the format is documented in [Versioning](#versioning).
+Anton uses an automated release flow with two publish streams — **stable** from `main` and **release candidates** from `staging`. The package version is derived from the git tag by hatch-vcs (see [Versioning](#versioning)), so there is nothing to bump by hand.
 
 ### How to ship a new version
 
-1. On the scheduled `staging → main` promotion, bump `__version__` in [`anton/__init__.py`](anton/__init__.py) to today's date (see [Versioning](#versioning) for the format).
-2. Get it reviewed and merge to `main`.
-3. That's it. On merge, [`.github/workflows/release.yml`](.github/workflows/release.yml) automatically:
-   - Creates the matching git tag (`v2.0.5`).
+1. Merge the scheduled `staging → main` promotion (reviewed as usual). No version file to touch — the tag carries the version.
+2. That's it. On merge, [`.github/workflows/release.yml`](.github/workflows/release.yml) automatically:
+   - Computes today's CalVer version and creates the matching git tag (e.g. `v2.26.7.24.1`).
+   - Builds the wheel (hatch-vcs derives the version from that tag) and publishes it to PyPI.
    - Publishes a GitHub release with auto-generated notes.
    - Triggers [`tests_e2e_release.yml`](.github/workflows/tests_e2e_release.yml) to run live e2e tests against the released version.
+
+The version computation, tag push, and release creation are shared with the other
+service repos through the `calver-release.yml` reusable workflow in
+[mindsdb/github-actions](https://github.com/mindsdb/github-actions); this repo's
+workflow supplies the major component and consumes the resulting `tag`/`version` outputs.
+
+### Staging release candidates
+
+Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so cowork-server staging installs an immutable, versioned Anton instead of a mutable branch or hand-pinned commit (ENG-1159). These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
 
 ### What you should NOT do
 
 - **Don't create GitHub releases manually.** The `v*` tag namespace is locked via a repo ruleset — only the release workflow can create them. Manual attempts will be rejected by GitHub.
 - **Don't push `v*` tags directly.** Same protection applies.
-- **Don't edit `__version__` outside a dedicated bump PR.** Keep version bumps small and reviewable so the auto-release diff is easy to audit.
+- **Don't hand-edit a version.** There's no version file to bump — the tag is the source of truth, and both publishers derive the wheel version from it.
 
 ### Editing CI / workflows
 

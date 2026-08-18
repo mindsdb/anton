@@ -62,6 +62,7 @@ async def build_chat_session(
     model: Optional[str] = None,
     extra_tools: Optional[Sequence[Any]] = None,
     system_prompt_suffix: Optional[str] = None,
+    harness: Optional[str] = None,
 ):
     """Build a ChatSession scoped to one workspace.
 
@@ -82,6 +83,12 @@ async def build_chat_session(
     system_prompt_suffix
         Free-form text appended to the system prompt. Hosts use this to nudge tone or
         describe their UI affordances. None → no suffix.
+    harness
+        Identifier for the host driving this session, forwarded to telemetry and to
+        Langfuse tags/metadata. Hosts should set it — leaving it None is
+        what made "which host produced this trace?" unanswerable, since an unset
+        value could not be told apart from a host that simply never bothered. See
+        `ChatSessionConfig.harness` for the values already in use.
 
     Returns
     -------
@@ -184,6 +191,7 @@ async def build_chat_session(
         initial_history=initial_history,
         history_store=history_store,
         session_id=session_id,
+        harness=harness,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         tools=list(extra_tools) if extra_tools else [],

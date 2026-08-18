@@ -1,0 +1,68 @@
+# Dependabot configuration (ENG-1234).
+#
+# NOTE ON `target-branch` — deliberately absent.
+#
+# PRs in this repo normally branch from `staging` and target `staging`, so
+# pointing Dependabot at `staging` looks like the obvious thing to do. It is not:
+# Dependabot *security* updates only run against the default branch, and GitHub's
+# docs state that for security updates "you should not specify a target-branch".
+# Setting it would silence the security PRs this repo actually relies on (7 open
+# alerts when this file was written).
+#
+# The consequence is that security PRs arrive based on `main`. Merge them into
+# `main` and let the weekly sync carry them into `staging` — do NOT retarget them
+# at `staging`. Retargeting is what caused anton#293, where a postcss bump in
+# /docs reverted merged verifier code in `anton/core/session.py`: the branch came
+# from `main`, `staging` had moved on, and the resulting conflict was resolved by
+# keeping both sides.
+#
+# This file does not prevent that on its own — the CI scope guard in ENG-1234
+# does. What it buys is explicit ecosystems, grouping, PR limits and labels
+# instead of defaults.
+#
+# Python is intentionally not listed. `uv` is not a valid package-ecosystem
+# value, and running `pip` against a uv.lock project risks PRs that edit
+# pyproject.toml without regenerating the lock. Tracked in ENG-1234.
+version: 2
+updates:
+  # Docs site (Docusaurus). Dev-only — these packages are not shipped in the
+  # anton wheel, which is why the blast radius of anton#293 was zero.
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - javascript
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    # One PR per batch of routine bumps rather than one per package. Security
+    # updates are unaffected by grouping and still arrive individually.
+    groups:
+      docs-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Workflow actions. Pinned action versions rot quietly and are a supply-chain
+  # surface, so keep them current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
