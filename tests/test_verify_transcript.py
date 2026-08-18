@@ -306,3 +306,24 @@ def test_no_conversational_text_is_ever_clipped_without_a_marker():
     # Neither original survives whole here, so the marker must be present.
     assert long_user not in out and long_reply not in out
     assert out.count("chars elided") == 2
+
+
+def test_a_trailing_image_block_does_not_steal_the_judged_budget():
+    # One assistant message contributes one entry per content block, so "the
+    # last assistant entry" is not necessarily the reply: a trailing image
+    # placeholder would take `final_cap` and drop the reply back to `text_cap`,
+    # which is the flat-cap behaviour this function exists to avoid. Caught in
+    # self-review on #364 — anton itself never builds this shape, but a host can
+    # supply it through `initial_history` / a cloud-turn request.
+    reply = "IMG_HEAD. " + "The answer body continues here. " * 100 + "IMG_TAIL."
+    assert 2000 < len(reply) < 12000
+    history = [
+        {"role": "user", "content": "describe the chart and answer"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": reply}, {"type": "image"}],
+        },
+    ]
+    out = _render_verify_transcript(history)
+    assert reply in out
+    assert "chars elided" not in out

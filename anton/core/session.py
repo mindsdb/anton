@@ -513,6 +513,12 @@ def _render_tool_result_content(content, cap: int) -> str:
     return _clip_keep_cause(str(content), cap)
 
 
+# Stands in for a multimodal block in the verify transcript. Named because
+# the judged-entry selection below has to be able to tell it apart from a
+# real reply.
+_IMAGE_PLACEHOLDER = "[image]"
+
+
 def _render_verify_transcript(
     history: list[dict],
     *,
@@ -601,31 +607,39 @@ def _render_verify_transcript(
                     else:
                         convo.append((i, speaker, text))
                 elif btype in ("image", "image_url"):
-                    convo.append((i, speaker, "[image]"))
+                    convo.append((i, speaker, _IMAGE_PLACEHOLDER))
                 elif btype == "tool_use":
                     tools.append((i, f"ASSISTANT called tool: {block.get('name')}"))
                 elif btype == "tool_result":
                     rendered = _render_tool_result_content(block.get("content"), tool_cap)
                     tools.append((i, f"TOOL RESULT: {rendered}"))
 
-    # The reply under judgment is the most recent ASSISTANT entry in the
-    # conversational budget — the only one that gets ``final_cap``. Computed
-    # over the whole list rather than the kept tail because it is at or near the
-    # end by construction, so the ``max_convo`` slice below never drops it.
+    # Budget only what survives, and pick the judged entry from that same
+    # window — chosen over the full list, ``final_cap`` could land on an entry
+    # the slice then discards. Slicing first also stops us clipping entries that
+    # are about to be thrown away.
+    kept_convo = convo[-max_convo:]
+    # The reply under judgment is the most recent ASSISTANT *text* entry. One
+    # message contributes one entry per content block, so an image placeholder
+    # trailing the reply would otherwise be picked as "the last assistant
+    # entry", silently dropping the reply itself back to ``text_cap`` — the flat
+    # cap this function exists to avoid (caught in self-review on #364).
     judged = max(
-        (n for n, (_, speaker, _) in enumerate(convo) if speaker == "ASSISTANT"),
+        (
+            n
+            for n, (_, speaker, text) in enumerate(kept_convo)
+            if speaker == "ASSISTANT" and text != _IMAGE_PLACEHOLDER
+        ),
         default=-1,
     )
-    convo_lines = [
+    kept = [
         (
             i,
             f"{speaker}: "
             f"{_clip_keep_cause(text, final_cap if n == judged else text_cap)}",
         )
-        for n, (i, speaker, text) in enumerate(convo)
-    ]
-
-    kept = convo_lines[-max_convo:] + tools[-max_tool:]
+        for n, (i, speaker, text) in enumerate(kept_convo)
+    ] + tools[-max_tool:]
     kept.sort(key=lambda entry: entry[0])
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
