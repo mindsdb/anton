@@ -312,9 +312,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
-    # Skills come from the request, staged outside the workspace (the PVC would
-    # persist — and cells could read — anything under it). Builtins resolve via
-    # SkillStore's package root regardless.
+    # Mounted (_SKILLS_ROOT_ENV set): the organization's own live skills tree,
+    # owned by cowork-server, read directly. Unmounted (desktop, CI): the
+    # request's skills are staged outside the workspace instead, since that PVC
+    # outlives the turn and cells could read anything left under it. Builtins
+    # resolve via SkillStore's package root regardless.
     settings.skills_root = _stage_skills(request.skills)
 
     workspace = Workspace(base, settings=settings)

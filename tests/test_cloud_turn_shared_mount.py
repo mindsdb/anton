@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from anton.cloud_turn import session as cloud_session
 
 
@@ -23,7 +21,7 @@ def test_skills_fall_back_to_tmp_staging_without_env(monkeypatch, tmp_path):
 
     root = cloud_session._stage_skills({"my-skill": {"files": {"SKILL.md": "x"}}})
 
-    assert root != Path("/mnt/cowork-shared/skills")
+    assert root.name.startswith(cloud_session._SKILLS_DIR_PREFIX)
     assert (root / "my-skill" / "SKILL.md").read_text() == "x"
 
 
