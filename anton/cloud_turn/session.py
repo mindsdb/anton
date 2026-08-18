@@ -56,17 +56,30 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
 )
 
 #: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land
-#: as files. Not the workspace — its PVC outlives the turn and cells can read it.
+#: as files. Used only as a fallback when no shared mount is configured (desktop,
+#: CI); see _MEMORY_GLOBAL_ROOT_ENV below for the mounted, cross-turn-persistent path.
 _MEMORY_DIR = Path(tempfile.gettempdir()) / "anton-cloud-memory"
 
 #: Wire slot name -> the filename Hippocampus reads. Unknown slots are ignored.
 _MEMORY_SLOT_FILES = {"profile": "profile.md", "rules": "rules.md", "lessons": "lessons.md"}
 
+#: Pod-side mount of this (org, user)'s global memory. When set, global memory
+#: slots are read straight off the mount and the wire payload's `global` block is
+#: ignored: cowork-server owns that tree and the pod sees the live copy, not a
+#: per-turn snapshot. Writes still go out as `turn_memory` events regardless;
+#: cowork-server remains the trust boundary for what gets persisted.
+_MEMORY_GLOBAL_ROOT_ENV = "ANTON_CLOUD_MEMORY_GLOBAL_ROOT"
+
 #: Per-turn skills staging: a FRESH mkdtemp each turn (unlike _MEMORY_DIR).
 #: Skills carry no cross-turn state, and the unpredictable path stops prior-turn
-#: cell code planting a symlink or two turns wiping each other's tree. Still in
-#: pod tmp, never the workspace mount (PVC outlives the turn, cells can read it).
+#: cell code planting a symlink or two turns wiping each other's tree. Used only
+#: as a fallback when no shared mount is configured; see _SKILLS_ROOT_ENV below.
 _SKILLS_DIR_PREFIX = "anton-cloud-skills-"
+
+#: Pod-side mount of the org's skills tree. When set, skills are read from it
+#: directly and the wire payload's `skills` block is ignored: cowork-server owns
+#: that tree and the pod sees the live copy, not a per-turn snapshot.
+_SKILLS_ROOT_ENV = "ANTON_CLOUD_SKILLS_ROOT"
 
 
 def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
@@ -85,13 +98,24 @@ def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
 
 
 def _stage_skills(skills: dict | None) -> Path:
-    """Materialize the request's skills into a fresh per-turn dir for
-    SkillStore to read; returns that dir (the session's skills_root).
+    """The session's skills_root.
 
-    Wire data is untrusted (like memory): bad slugs and escaping paths are
-    dropped, no single bad entry fails the turn. Builtins resolve via SkillStore
+    With the org tree mounted (_SKILLS_ROOT_ENV set), this is the mount itself
+    and nothing is staged: cowork-server owns that tree and the pod reads it
+    live, so the wire payload's `skills` block is ignored entirely.
+
+    Without a mount (desktop, CI), the request's skills are materialized into a
+    fresh per-turn dir for SkillStore to read, as before. Wire data is
+    untrusted (like memory): bad slugs and escaping paths are dropped, no
+    single bad entry fails the turn. Builtins resolve via SkillStore
     regardless; a wire skill shadowing one is logged (the prompt mandates some).
     """
+    mounted = os.environ.get(_SKILLS_ROOT_ENV, "").strip()
+    if mounted:
+        root = Path(mounted)
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     from anton.core.memory import skills as skills_memory
     from anton.core.tools.skill_format import validate_name
 
@@ -175,16 +199,34 @@ def _cloud_cortex_class():
     return _CloudCortex
 
 
+def _global_memory_dir(memory: dict | None) -> Path:
+    """Directory Hippocampus reads global slots from.
+
+    With the org+user tree mounted (_MEMORY_GLOBAL_ROOT_ENV set), this is that
+    mount, read live; the wire payload's `global` block is ignored. Without a
+    mount (desktop, CI), the per-turn tmp staging dir is written from the wire,
+    as before.
+    """
+    mounted = os.environ.get(_MEMORY_GLOBAL_ROOT_ENV, "").strip()
+    if mounted:
+        root = Path(mounted)
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    global_dir = _MEMORY_DIR / "global"
+    _write_memory_slots(global_dir, (memory or {}).get("global"))
+    return global_dir
+
+
 def _build_cortex(memory: dict | None, llm_client):
     """Cortex over cowork's memory. Built even for an empty store, or an org could
-    never record its first memory — core only registers `memorize` with a cortex."""
+    never record its first memory: core only registers `memorize` with a cortex."""
     from anton.core.memory.hippocampus import Hippocampus
 
     memory = memory if isinstance(memory, dict) else {}
 
-    global_dir = _MEMORY_DIR / "global"
+    global_dir = _global_memory_dir(memory)
     project_dir = _MEMORY_DIR / "project"
-    _write_memory_slots(global_dir, memory.get("global"))
     _write_memory_slots(project_dir, memory.get("project"))
     # Not "off", or `memorize` refuses to encode; the automatic passes that mode
     # also unlocks are disabled via `background_memory`.
