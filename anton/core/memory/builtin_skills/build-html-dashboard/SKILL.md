@@ -17,7 +17,7 @@ This is a checklist, not a brief — no narrative prose, no design discussion.
 
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
-Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="dashboard.html")` and use the returned `<artifact_path>` for every file you write (the HTML, any sibling data files, images, etc.). All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with ALL data, CSS, and JS inlined. Do NOT reference external local files (like data.js) — browsers block local file:// cross-references for security reasons and the dashboard will silently fail to load data.
+Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="dashboard.html")` and use the returned `<artifact_path>` for every file you write (the HTML, any sibling data files, images, etc.). All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, and JS inlined, with exactly two exceptions, both covered below: an oversized JSON payload, and binary assets such as an image the user uploaded. Both live as sibling files in the SAME directory as the HTML. Never reference a local file OUTSIDE `<artifact_path>` — browsers block local file:// cross-references across directories, and the publisher will not bundle it.
 
   REROUND DISCIPLINE (critical — most "round-cap exhaustion" failures we've seen on real dashboards come from drifting off one or more of these):
   1. ONE scratchpad, ONE name. Pick a name on the first cell (e.g. `dash`) and reuse it for the entire build. Switching names (`build_pres` → `write_html` → `pres1` …) creates *separate isolated environments* — variables in one don't exist in another — and burns rounds on recovery.
@@ -43,7 +43,34 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   Combine: `html = html_body.replace('</body>', f'<script>{data_js}{js_charts}</script></body>')` or similar.
 
   SELF-CONTAINED OUTPUT (critical):
-  Prefer inlining everything — CSS in `<style>`, JS in `<script>`, data as JS variables. A single .html file is the most portable and publishable format. If the dataset is very large (>100KB of JSON), you may write it to a separate .js file in the SAME directory and reference it with a relative `<script src="dashboard_data.js">` tag. The publisher will auto-bundle sibling files referenced in the HTML. Never reference files outside the output directory.
+  Prefer inlining everything — CSS in `<style>`, JS in `<script>`, data as JS variables. A single .html file is the most portable and publishable format. Anything larger than 100KB is the exception: write it to a separate file in the SAME directory and reference it with a relative path — a JSON dataset as `<script src="dashboard_data.js">`, a binary asset as `<img src="screenshot.png">`. The publisher auto-bundles sibling files referenced in the HTML, so both keep working after /publish. Never reference files outside the output directory.
+
+  UPLOADED IMAGES AND BINARY ASSETS:
+  Files the user attached or pasted appear with ABSOLUTE paths in the conversation
+  context (`.cowork/files/<uuid>/<name>` in the app, `.anton/uploads/clipboard_*.png`
+  for a CLI paste). Use the path you were given — never guess one or scan directories.
+  If the user refers to a file whose path you cannot see, ask them for it.
+
+  Never point the HTML at that original path: it sits outside `<artifact_path>`, and
+  only relative references to files INSIDE that folder are bundled on publish, so the
+  artifact would render locally and break once published. Bring the file in instead —
+  one scratchpad cell, branching on the 100KB rule above:
+
+      import base64, mimetypes, os, shutil
+      from pathlib import Path
+      name = Path(src).name
+      if os.path.getsize(src) < 100_000:
+          mime = mimetypes.guess_type(src)[0] or "application/octet-stream"
+          b64 = base64.b64encode(Path(src).read_bytes()).decode()
+          img_src = f"data:{mime};base64,{b64}"
+      else:
+          shutil.copy(src, Path(artifact_path) / name)
+          img_src = name
+
+  A copied sibling MUST be referenced as a literal `src="<name>"` in the HTML. A path
+  assembled in JS at runtime is invisible to the publisher and will not be bundled.
+  For uploaded DATA files (CSV/JSON) do not use a data: URI — read them in CELL 1 and
+  inline the result as a JS variable like any other dataset.
 
   WHY: (1) Browsers block local file:// cross-references across directories. (2) Splitting the build across cells catches JS/CSS errors early — if a cell has a syntax issue in a string, you'll see it before the final assembly. (3) Large datasets in single cells timeout. (4) Self-contained files can be published to the web via /publish without missing assets.
 
