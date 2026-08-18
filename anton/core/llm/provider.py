@@ -576,6 +576,26 @@ _WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"
 
 # Hosts that ARE the MindsHub gateway. Only a response from one of these may
 # select a billing verdict — see :func:`origin_is_known_third_party` (ENG-1693).
+#
+# VERIFIED COMPLETE for every host that can serve a gateway billing denial
+# (review question on #363, checked 2026-08-18 against the terraform host
+# inventory, which is the source of truth for zones and certs). Two apexes cover
+# it because every environment and vanity host is a subdomain of one of them:
+# prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
+# per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
+# `llm.mdb.ai`, `llm.staging.mdb.ai`, `writer.mdb.ai`, `terabase.dev.mdb.ai`,
+# `view.mindshub.ai`. Terraform declares no other apex zone, and the wildcards
+# `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
+# positive cases are pinned in tests/test_status_error_mapper.py so this
+# paragraph cannot quietly go stale.
+#
+# `4nton.ai` is a real production zone and is DELIBERATELY absent: it serves
+# agent provisioning and per-instance hosts (`sp_<hash>.4nton.ai`,
+# `cw-<id>.4nton.ai`) plus artifact publishing, never LLM inference. If an
+# inference endpoint is ever routed onto it, it MUST be added here — otherwise a
+# genuine out-of-credits denial from that host silently degrades to generic copy
+# and reopens ENG-1169's user-visible bug. Failing closed is the right default;
+# this note exists so the cost of that default is not discovered in production.
 _MINDSHUB_HOSTS = ("mindshub.ai", "mdb.ai")
 
 
@@ -611,9 +631,28 @@ def response_origin_host(exc: BaseException) -> str | None:
     """
     resp = getattr(exc, "response", None)
     try:
-        url = getattr(resp, "url", None) if resp is not None else None
-        if url is None and resp is not None:
-            url = getattr(getattr(resp, "request", None), "url", None)
+        url = None
+        if resp is not None:
+            # BOTH `httpx.Response.url` and `httpx.Response.request` are
+            # properties that RAISE RuntimeError when no request is attached, and
+            # `getattr(resp, name, None)` does NOT rescue that — getattr's
+            # default only covers AttributeError. Either one reaching the outer
+            # handler returned None, i.e. "origin unknown", a state this gate
+            # deliberately TRUSTS — so a request-less response shadowed a
+            # foreign host sitting on `exc.request`. Each read is contained
+            # individually so the next fallback stays reachable.
+            #
+            # The review nit on #363 named `.url`; `.request` has the identical
+            # trap, and guarding only `.url` still failed the test below.
+            try:
+                url = resp.url
+            except Exception:
+                url = None
+            if url is None:
+                try:
+                    url = resp.request.url
+                except Exception:
+                    url = None
         if url is None:
             url = getattr(getattr(exc, "request", None), "url", None)
         if url is None:

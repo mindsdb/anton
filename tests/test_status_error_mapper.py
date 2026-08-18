@@ -904,3 +904,78 @@ def test_a_relayed_gateway_rate_limit_still_earns_the_session_wait():
     with pytest.raises(Exception) as err2:
         _raise_for_status_error(wallet, "sonnet")
     assert not isinstance(err2.value, TokenLimitExceeded)
+
+
+# ---------------------------------------------------------------------------
+# Review nits on #363 (ENG-1693).
+# ---------------------------------------------------------------------------
+
+
+def test_a_request_less_response_does_not_shadow_a_foreign_host():
+    """`httpx.Response.url` RAISES when no request is attached, and
+    `getattr(resp, "url", None)` does NOT rescue it — getattr's default only
+    covers AttributeError. That RuntimeError reached the outer handler, which
+    returned None ("origin unknown"), a state this gate deliberately TRUSTS —
+    so a request-less response shadowed a foreign host sitting on `exc.request`
+    and the attacker got the credits card back.
+
+    The function's own docstring already claimed it could not be a bare getattr
+    chain; this pins the behaviour to the claim.
+    """
+    from anton.core.llm.provider import origin_is_known_third_party, response_origin_host
+
+    # Confirm the premise rather than assuming it: this must raise, not return None.
+    bare = httpx.Response(402)
+    with pytest.raises(RuntimeError):
+        _ = bare.url
+
+    exc = openai.APIError(
+        "boom",
+        request=httpx.Request("POST", "https://evil.example.com/v1/chat/completions"),
+        body={"code": "wallet_empty"},
+    )
+    # A response IS present, carries no request, and its `.url` raises.
+    exc.response = bare
+
+    assert response_origin_host(exc) == "evil.example.com"
+    assert origin_is_known_third_party(exc) is True
+
+
+# Every environment and vanity host that can serve a real gateway billing
+# denial, from the terraform host inventory (review question on #363). These all
+# resolve as ours today; the test exists so that narrowing `_MINDSHUB_HOSTS`, or
+# adding an apex the allowlist misses, fails here instead of silently degrading
+# a genuine out-of-credits denial to generic copy (ENG-1169's user-visible bug).
+@pytest.mark.parametrize("host", [
+    "api.mindshub.ai",              # prod inference
+    "api.staging.mindshub.ai",      # staging
+    "api.dev.mindshub.ai",          # dev
+    "api-pr123.dev.mindshub.ai",    # ephemeral per-PR env
+    "llm.mdb.ai",                   # legacy vanity gateway
+    "llm.staging.mdb.ai",
+    "writer.mdb.ai",                # white-label surfaces
+    "terabase.dev.mdb.ai",
+    "view.mindshub.ai",
+])
+def test_every_real_gateway_host_is_trusted(host):
+    from anton.core.llm.provider import is_mindshub_host
+
+    assert is_mindshub_host(host) is True, (
+        f"{host} is a real MindsHub host but the allowlist rejects it — a genuine "
+        f"out-of-credits denial from it would lose the credits card (ENG-1169)"
+    )
+
+
+def test_the_agent_instance_zone_is_deliberately_untrusted():
+    """`4nton.ai` is a real production zone that serves agent provisioning and
+    per-instance hosts, never inference — so it must NOT be able to select a
+    billing verdict. If inference is ever routed onto it, this test is the
+    tripwire: it will still pass, but the comment on `_MINDSHUB_HOSTS` says the
+    host has to be added, and `test_every_real_gateway_host_is_trusted` is where
+    it goes.
+    """
+    from anton.core.llm.provider import is_mindshub_host
+
+    assert is_mindshub_host("sp_abc123.4nton.ai") is False
+    assert is_mindshub_host("cw-9a9e789c.4nton.ai") is False
+    assert is_mindshub_host("4nton.ai") is False
