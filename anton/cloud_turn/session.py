@@ -237,9 +237,16 @@ def _snapshot_skill_drafts(root: Path) -> dict[str, str]:
         for f in sorted(child.iterdir()):
             if f.is_symlink() or not f.is_file():
                 continue
-            digest.update(f.name.encode("utf-8", "replace"))
+            # Length-prefixed: concatenating name and body unseparated makes
+            # {"ab": "c"} and {"a": "bc"} hash the same, so a rename plus a
+            # compensating edit would read as "unchanged".
+            name = f.name.encode("utf-8", "replace")
+            digest.update(f"{len(name)}:".encode())
+            digest.update(name)
             with contextlib.suppress(OSError):
-                digest.update(f.read_bytes())
+                body = f.read_bytes()
+                digest.update(f"{len(body)}:".encode())
+                digest.update(body)
         snapshot[child.name] = digest.hexdigest()
     return snapshot
 
@@ -344,10 +351,15 @@ def drain_pending_skills(session) -> list[dict]:
     """Skill drafts this turn created or changed, as ``[{"slug", "files"}]``.
 
     Raw file text rather than a parsed skill: cowork is the trust boundary and
-    validates slugs, paths and sizes itself. Advances the baseline as it reads,
-    so a second call reports nothing — the drafts folder survives the turn, and
-    re-reporting an untouched draft every turn would re-raise a card the user
-    already dismissed. Best-effort: a lost draft must not cost the turn its reply.
+    re-validates slugs and paths. Sizes are bounded here, at the producer, since
+    the reply stream is what an unbounded payload would flood.
+
+    The baseline advances only for drafts actually returned, so a second call
+    reports nothing (the folder survives the turn, and re-reporting an untouched
+    draft would re-raise a card the user already dismissed) while anything the
+    caps held back stays pending and goes out next turn instead of being
+    silently dropped forever. Best-effort: a lost draft must not cost the turn
+    its reply.
     """
     root = getattr(session, "_skill_drafts_root", None)
     if not root:
@@ -358,16 +370,15 @@ def drain_pending_skills(session) -> list[dict]:
     except OSError:
         logger.warning("skill drafts: could not diff the staging dir", exc_info=True)
         return []
-    session._skill_drafts_before = after
-
     changed = sorted(slug for slug, digest in after.items() if before.get(slug) != digest)
-    if len(changed) > _MAX_DRAFTS_PER_TURN:
-        logger.warning("skill drafts: %d changed, reporting the first %d",
-                       len(changed), _MAX_DRAFTS_PER_TURN)
-        changed = changed[:_MAX_DRAFTS_PER_TURN]
+    this_turn = changed[:_MAX_DRAFTS_PER_TURN]
+    if len(changed) > len(this_turn):
+        logger.warning("skill drafts: %d changed, reporting %d this turn, the rest next",
+                       len(changed), len(this_turn))
 
     entries: list[dict] = []
-    for slug in changed:
+    delivered: dict[str, str] = {}
+    for slug in this_turn:
         try:
             files = _draft_files(Path(root) / slug)
         except OSError:
@@ -375,6 +386,14 @@ def drain_pending_skills(session) -> list[dict]:
             continue
         if files is not None:
             entries.append({"slug": slug, "files": files})
+            delivered[slug] = after[slug]
+
+    # Unchanged drafts keep their hash; changed ones advance ONLY if they went
+    # out. A draft held back by the per-turn cap, or unreadable this time, keeps
+    # its old hash and so is still "changed" next turn.
+    session._skill_drafts_before = {
+        slug: digest for slug, digest in after.items() if slug not in changed
+    } | delivered
     return entries
 
 
