@@ -168,6 +168,11 @@ _DRAFT_FILE_MAX = 200_000
 #: Drafts reported per turn. A prompt-confused agent looping over
 #: `create_skill_draft` must not flood the wire; the excess is logged, not silent.
 _MAX_DRAFTS_PER_TURN = 20
+#: Whole-draft budget. The per-file cap alone bounds nothing: a skill may carry
+#: any number of siblings, so 20 drafts x N files x 200 KB is unbounded on the
+#: reply stream. SKILL.md is read first and always fits, so exhausting the budget
+#: costs siblings, never the procedure itself.
+_DRAFT_TOTAL_MAX = 1_000_000
 
 
 def _draft_files(folder: Path) -> dict[str, str] | None:
@@ -181,7 +186,9 @@ def _draft_files(folder: Path) -> dict[str, str] | None:
         return None
     resolved = folder.resolve()
     files: dict[str, str] = {}
-    for child in sorted(folder.iterdir()):
+    budget = _DRAFT_TOTAL_MAX
+    # SKILL.md first so the procedure is never the thing the budget squeezes out.
+    for child in sorted(folder.iterdir(), key=lambda p: p.name != SKILL_FILE):
         if child.is_symlink() or not child.is_file():
             continue
         if child.resolve().parent != resolved:
@@ -192,13 +199,19 @@ def _draft_files(folder: Path) -> dict[str, str] | None:
         except (OSError, UnicodeDecodeError):
             logger.warning("skill drafts: %r skipping unreadable file %r", folder.name, child.name)
             continue
-        if len(text.encode("utf-8", "replace")) > _DRAFT_FILE_MAX:
+        size = len(text.encode("utf-8", "replace"))
+        if size > _DRAFT_FILE_MAX:
             if child.name == SKILL_FILE:
                 logger.warning("skill drafts: dropping %r (SKILL.md over %d bytes)",
                                folder.name, _DRAFT_FILE_MAX)
                 return None
             logger.warning("skill drafts: %r skipping oversized file %r", folder.name, child.name)
             continue
+        if size > budget:
+            logger.warning("skill drafts: %r over the %d-byte draft budget, dropping %r "
+                           "and every later sibling", folder.name, _DRAFT_TOTAL_MAX, child.name)
+            break
+        budget -= size
         files[child.name] = text
     # A draft is its SKILL.md — siblings alone are a folder, not a procedure.
     # Checked on the collected files, not on disk: SKILL.md can exist and still
