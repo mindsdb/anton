@@ -577,10 +577,12 @@ _WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"
 # Hosts that ARE the MindsHub gateway. Only a response from one of these may
 # select a billing verdict — see :func:`origin_is_known_third_party` (ENG-1693).
 #
-# VERIFIED COMPLETE for every host that can serve a gateway billing denial
-# (review question on #363, checked 2026-08-18 against the terraform host
-# inventory, which is the source of truth for zones and certs). Two apexes cover
-# it because every environment and vanity host is a subdomain of one of them:
+# VERIFIED COMPLETE for every host MindsHub ITSELF serves (review question on
+# #363, checked 2026-08-18 against the terraform host inventory, which is the
+# source of truth for zones and certs). Deliberately not the broader claim
+# "every host that can serve a gateway billing denial" — see the relay note
+# below, where that is false by design. Two apexes cover the served set because
+# every environment and vanity host is a subdomain of one of them:
 # prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
 # per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
 # `llm.mdb.ai`, `llm.staging.mdb.ai`, `writer.mdb.ai`, `terabase.dev.mdb.ai`,
@@ -588,6 +590,16 @@ _WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"
 # `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
 # positive cases are pinned in tests/test_status_error_mapper.py so this
 # paragraph cannot quietly go stale.
+#
+# A RELAY in front of MindsHub is the known, accepted exception: a corporate
+# proxy that forwards our denials resolves its own host, so a GENUINE
+# out-of-credits denial arriving through one loses the credits card and
+# ENG-1169's symptom returns for that shape. That is a decision, not an
+# oversight — a spoofed billing card asks the user for money, a spoofed wait
+# does not, which is why `_velocity` is ungated and this is not. Recorded on
+# ENG-1693 under "Accepted tradeoff". If relayed MindsHub ever becomes a
+# supported deployment the remedy is a CONFIGURABLE trusted-host list, never a
+# looser match here.
 #
 # `4nton.ai` is a real production zone and is DELIBERATELY absent: it serves
 # agent provisioning and per-instance hosts (`sp_<hash>.4nton.ai`,

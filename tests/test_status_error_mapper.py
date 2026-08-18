@@ -969,10 +969,12 @@ def test_every_real_gateway_host_is_trusted(host):
 def test_the_agent_instance_zone_is_deliberately_untrusted():
     """`4nton.ai` is a real production zone that serves agent provisioning and
     per-instance hosts, never inference — so it must NOT be able to select a
-    billing verdict. If inference is ever routed onto it, this test is the
-    tripwire: it will still pass, but the comment on `_MINDSHUB_HOSTS` says the
-    host has to be added, and `test_every_real_gateway_host_is_trusted` is where
-    it goes.
+    billing verdict, and this pins that.
+
+    It is an assertion about today, NOT a tripwire: if inference is ever routed
+    onto `4nton.ai` this test still passes while the card silently degrades to
+    generic copy. The comment on `_MINDSHUB_HOSTS` is what carries that warning,
+    and `test_every_real_gateway_host_is_trusted` is where the host would go.
     """
     from anton.core.llm.provider import is_mindshub_host
 
