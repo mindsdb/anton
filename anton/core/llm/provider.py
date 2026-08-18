@@ -471,12 +471,21 @@ class TokenLimitExceeded(Exception):
 class StructuredOutputError(ValueError):
     """Raised when a forced-tool-call structured-output call yields no usable call.
 
-    ``truncated`` says whether a retry can help: ``True`` means the model spent
-    the ``max_tokens`` budget narrating before it reached the tool call (the
-    narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``, ``qwen`` — do
-    this deterministically under a tight budget, ENG-1081); ``False`` means the
-    provider errored, refused, or returned nothing, and a bigger budget won't
-    fix it. See `structured.looks_truncated` for how that's decided.
+    ``truncated`` says whether a retry can help: ``True`` means the
+    ``max_tokens`` budget ran out before a usable call existed; ``False`` means
+    the provider errored, refused, or returned nothing, and a bigger budget
+    won't fix it. See `structured.looks_truncated` for how that's decided.
+
+    ``reached_tool_call`` splits the truncated case into the two cures, which
+    otherwise look identical in a log and pull in opposite directions:
+
+    - ``False`` — the model narrated in plain ``content`` and never got to the
+      call (the narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``,
+      ``qwen`` — do this deterministically under a tight budget, ENG-1081).
+      The cure is a bigger budget.
+    - ``True`` — the call started and the budget ran out inside its JSON
+      arguments. A bigger budget only helps until the payload grows again; the
+      cure is a smaller response (ENG-1523).
 
     Subclasses ``ValueError`` so call sites catching the documented ``ValueError``
     from ``generate_object``/``generate_object_code`` keep working.
@@ -490,12 +499,14 @@ class StructuredOutputError(ValueError):
         output_tokens: int = 0,
         max_tokens: int = 0,
         stop_reason: str | None = None,
+        reached_tool_call: bool = False,
     ):
         super().__init__(message)
         self.truncated = truncated
         self.output_tokens = output_tokens
         self.max_tokens = max_tokens
         self.stop_reason = stop_reason
+        self.reached_tool_call = reached_tool_call
 
 
 class TransientProviderError(ConnectionError):

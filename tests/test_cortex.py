@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from anton.core.memory.cortex import Cortex
+from anton.core.memory.cortex import Cortex, _CompactionResult
 from anton.core.memory.hippocampus import Engram, Hippocampus
 
 
@@ -522,3 +523,253 @@ class TestRuleRetrievalObservability:
         out = await self._run(cortex, llm, small)
         assert llm.calls == 0 and captured_events == []
         assert out == small
+
+
+
+class _CompactionLLM:
+    """Stands in for the coding model, capturing what compaction asked it."""
+
+    def __init__(self, keep: list[int]) -> None:
+        self._keep = keep
+        self.prompt = ""
+        self.answer: _CompactionResult | None = None
+
+    async def generate_object_code(self, schema, *, system, messages, max_tokens):
+        self.prompt = messages[0]["content"]
+        self.answer = _CompactionResult(keep=self._keep)
+        return self.answer
+
+
+class TestCompactFile:
+    """Compaction selects entries by index; the file is rebuilt from disk.
+
+    Driven through `_compact_file` rather than a helper, because the defect
+    worth guarding is a mismatch between the numbering the model is shown and
+    the numbering applied to the result — an off-by-one there deletes the wrong
+    memory, and no test of the selection alone can see it.
+    """
+
+    @staticmethod
+    def _lessons(dirs, count: int) -> Hippocampus:
+        hc = Hippocampus(dirs[0])
+        for i in range(count):
+            hc.encode_lesson(f"Fact number {i}", topic=f"t{i}")
+        return hc
+
+    def _entries(self, hc: Hippocampus) -> list[str]:
+        return [
+            ln for ln in hc._lessons_path.read_text().splitlines() if ln.startswith("- ")
+        ]
+
+    async def _compact(self, dirs, hc, keep: list[int]) -> _CompactionLLM:
+        llm = _CompactionLLM(keep)
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=llm
+        )
+        await cortex._compact_file(hc, hc._lessons_path, "lesson")
+        return llm
+
+    async def test_numbering_shown_matches_the_numbering_applied(self, dirs):
+        """The index→entry mapping must survive the round trip."""
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        llm = await self._compact(dirs, hc, keep=[4])
+        assert llm.prompt.splitlines()[3].startswith("4. Fact number 3")
+        assert self._entries(hc) == [before[3]]
+
+    async def test_survivors_are_byte_identical_including_metadata(self, dirs):
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        await self._compact(dirs, hc, keep=[1, 5, 10])
+        assert self._entries(hc) == [before[0], before[4], before[9]]
+
+    async def test_output_follows_file_order_not_the_models_order(self, dirs):
+        """File position is the recency signal budget-limited recall reads."""
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        await self._compact(dirs, hc, keep=[9, 2, 5])
+        assert self._entries(hc) == [before[1], before[4], before[8]]
+
+    async def test_invented_and_duplicate_indices_cost_nothing(self, dirs):
+        hc = self._lessons(dirs, 10)
+        before = self._entries(hc)
+        await self._compact(dirs, hc, keep=[2, 2, 0, -1, 11, 9999])
+        assert self._entries(hc) == [before[1]]
+
+    @staticmethod
+    def _with_hand_written_note(hc: Hippocampus) -> str:
+        """Seed a line the rebuild does not preserve, and return the file.
+
+        The rebuild keeps `- ` entries and nothing else, so on an already
+        canonical file "returned early" and "rewrote every entry" produce the
+        same bytes — a test on such a file cannot tell a working guard from a
+        missing one. A hand-written note makes the two outcomes differ.
+        """
+        note = "A note the user typed here by hand.\n"
+        hc._lessons_path.write_text(hc._lessons_path.read_text() + note)
+        return hc._lessons_path.read_text()
+
+    async def test_empty_answer_leaves_the_file_untouched(self, dirs):
+        """A model that names nothing gets to skip compaction, not to wipe it."""
+        hc = self._lessons(dirs, 10)
+        before = self._with_hand_written_note(hc)
+        await self._compact(dirs, hc, keep=[])
+        assert hc._lessons_path.read_text() == before
+
+    async def test_llm_failure_leaves_the_file_untouched(self, dirs):
+        hc = self._lessons(dirs, 10)
+        before = self._with_hand_written_note(hc)
+        llm = AsyncMock()
+        llm.generate_object_code.side_effect = RuntimeError("gateway down")
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=llm
+        )
+        await cortex._compact_file(hc, hc._lessons_path, "lesson")
+        assert hc._lessons_path.read_text() == before
+
+    async def test_short_file_is_not_sent_to_the_model(self, dirs):
+        hc = self._lessons(dirs, 7)
+        llm = await self._compact(dirs, hc, keep=[1])
+        assert llm.prompt == ""
+        assert len(self._entries(hc)) == 7
+
+    _LOGGER = "anton.core.memory.cortex"
+
+    async def test_a_rewrite_reports_how_much_it_deleted(self, dirs, caplog):
+        """Over-pruning is silent and, by index, cheaper than keeping.
+
+        The exact message is asserted so entry text cannot start riding along:
+        these files hold user content.
+        """
+        hc = self._lessons(dirs, 10)
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            await self._compact(dirs, hc, keep=[1, 5, 10])
+        recs = [r for r in caplog.records if r.name == self._LOGGER]
+        assert len(recs) == 1
+        assert recs[0].getMessage() == "memory-compaction: lessons.md kept 3 of 10 entries"
+
+    async def test_a_skipped_rewrite_reports_nothing(self, dirs, caplog):
+        """The line means "the file changed", so it must sit past the guard."""
+        hc = self._lessons(dirs, 10)
+        with caplog.at_level(logging.INFO, logger=self._LOGGER):
+            await self._compact(dirs, hc, keep=[])
+        assert [r for r in caplog.records if r.name == self._LOGGER] == []
+
+    async def test_the_answer_fits_the_budget_at_the_size_that_broke_it(self, dirs):
+        """Rebuild the shape of the file that produced the bug report.
+
+        Echoing survivors back cost 5,272 output tokens on that file and blew
+        both rungs of the (4096, 8192) ladder. Every other test here runs 10
+        short entries, where an echo-back answer still fits — so only a fixture
+        at the real size can tell a schema that scales from one that does not.
+        """
+        hc = Hippocampus(dirs[0])
+        for i in range(78):
+            hc.encode_lesson(f"Fact number {i}: " + "detail " * 40, topic=f"t{i}")
+
+        llm = await self._compact(dirs, hc, keep=list(range(1, 79)))
+
+        assert len(self._entries(hc)) == 78
+        # Guards the fixture itself: a shrunken file would pass the budget
+        # assertion below for the wrong reason.
+        assert len(llm.prompt) > 20_000
+        # ~4 chars/token, the same convention `_filter_by_token_budget` uses.
+        assert len(llm.answer.model_dump_json()) / 4 < 4096
+
+    async def test_survivors_reparse_as_engrams(self, dirs):
+        """Metadata must survive intact, or recall loses topic and recency."""
+        hc = self._lessons(dirs, 10)
+        await self._compact(dirs, hc, keep=[3, 7])
+        engrams = hc.get_lessons()
+        assert [e.text for e in engrams] == ["Fact number 2", "Fact number 6"]
+        assert [e.topic for e in engrams] == ["t2", "t6"]
+        assert all(e.updated_at is not None for e in engrams)
+
+
+class TestCompactRulesFile:
+    """The rules rebuild must round-trip each entry's section, not guess it.
+
+    `rules.md` differs from `lessons.md` in a way that matters: its rewrite is
+    not a no-op, so a bug here can grow or misfile the file the agent reads as
+    its own behavioural gates.
+    """
+
+    @staticmethod
+    def _rules(dirs, count: int) -> Hippocampus:
+        hc = Hippocampus(dirs[0])
+        for i in range(count):
+            # "when ... always ..." matches two of the old keyword buckets at
+            # once — the shape that got written twice.
+            hc.encode_rule(
+                f"When condition {i} holds, always prefer option {i}",
+                kind="when", confidence="high", source="user",
+            )
+        hc.encode_rule("Use httpx", kind="always", confidence="high", source="user")
+        hc.encode_rule("Never log secrets", kind="never", confidence="high", source="user")
+        return hc
+
+    async def _compact(self, dirs, hc, keep: list[int]) -> None:
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=_CompactionLLM(keep)
+        )
+        await cortex._compact_file(hc, hc._rules_path, "rules")
+
+    async def test_keeping_everything_is_idempotent(self, dirs):
+        """A rule matching two headings' keywords must still be written once."""
+        hc = self._rules(dirs, 8)
+        before = hc.get_rules()
+        await self._compact(dirs, hc, keep=list(range(1, 11)))
+        after = hc.get_rules()
+        assert [(e.kind, e.text) for e in after] == [(e.kind, e.text) for e in before]
+        assert len(after) == 10
+
+    async def test_entries_stay_under_their_original_heading(self, dirs):
+        # File order is by section, not by insertion: 1 always, 2 never, 3+ when.
+        hc = self._rules(dirs, 8)
+        await self._compact(dirs, hc, keep=[1, 2, 3])
+        by_kind = {e.kind: e.text for e in hc.get_rules()}
+        assert by_kind["always"] == "Use httpx"
+        assert by_kind["never"] == "Never log secrets"
+        assert by_kind["when"].startswith("When condition 0 holds")
+
+    async def test_empty_answer_does_not_rewrite_the_rules_file(self, dirs):
+        """Same guard as on the lessons path, checked on the file that matters."""
+        hc = self._rules(dirs, 8)
+        hc._rules_path.write_text(
+            hc._rules_path.read_text() + "\nA note the user typed here by hand.\n"
+        )
+        before = hc._rules_path.read_text()
+        await self._compact(dirs, hc, keep=[])
+        assert hc._rules_path.read_text() == before
+
+    async def test_an_emptied_section_keeps_its_heading(self, dirs):
+        """`get_rules` needs the heading to assign a kind to later entries."""
+        hc = self._rules(dirs, 8)
+        await self._compact(dirs, hc, keep=[3])  # one "when" rule, nothing else
+        content = hc._rules_path.read_text()
+        assert "## Always" in content and "## Never" in content and "## When" in content
+        hc.encode_rule("Added later", kind="never", confidence="high", source="user")
+        assert {e.kind for e in hc.get_rules()} == {"never", "when"}
+
+    async def test_entries_above_the_first_heading_are_not_lost(self, dirs):
+        """Hand-edited files exist; a stray rule must survive, not vanish."""
+        hc = self._rules(dirs, 8)
+        hc._rules_path.write_text(
+            "# Rules\n- Stray hand-added rule <!-- confidence:high source:user ts:2026-01-01 -->\n"
+            + hc._rules_path.read_text().removeprefix("# Rules\n")
+        )
+        await self._compact(dirs, hc, keep=list(range(1, 12)))
+        assert "Stray hand-added rule" in hc._rules_path.read_text()
+        assert len(hc.get_rules()) == 11
+
+    async def test_entries_under_an_unknown_heading_are_not_lost(self, dirs):
+        """`save_rules` only writes three headings, so a fourth must be folded
+        into one of them rather than silently dropped on rebuild."""
+        hc = self._rules(dirs, 8)
+        hc._rules_path.write_text(
+            hc._rules_path.read_text()
+            + "\n## Notes\n- Hand-added note <!-- confidence:high source:user ts:2026-01-01 -->\n"
+        )
+        await self._compact(dirs, hc, keep=list(range(1, 12)))
+        assert "Hand-added note" in hc._rules_path.read_text()
+        assert len(hc.get_rules()) == 11
