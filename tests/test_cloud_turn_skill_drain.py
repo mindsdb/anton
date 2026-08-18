@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from anton.cloud_turn.session import (
+    _DRAFT_TOTAL_MAX,
     _DRAFT_FILE_MAX,
     _MAX_DRAFTS_PER_TURN,
     _snapshot_skill_drafts,
@@ -144,3 +145,55 @@ def test_the_per_turn_cap_bounds_what_goes_on_the_wire(tmp_path):
 
 def test_no_drafts_root_is_not_an_error(tmp_path):
     assert drain_pending_skills(SimpleNamespace(_skill_drafts_root=None)) == []
+
+
+def test_drafts_over_the_cap_go_out_next_turn(tmp_path):
+    """The cap is backpressure, not a shredder: the baseline may only advance for
+    drafts actually returned, or the excess is lost for good."""
+    session = _session(tmp_path)
+    total = _MAX_DRAFTS_PER_TURN + 3
+    for i in range(total):
+        _write(tmp_path, f"skill-{i:02d}")
+
+    first = drain_pending_skills(session)
+    assert len(first) == _MAX_DRAFTS_PER_TURN
+
+    second = drain_pending_skills(session)
+    assert [e["slug"] for e in second] == [f"skill-{i:02d}" for i in range(_MAX_DRAFTS_PER_TURN, total)]
+    assert drain_pending_skills(session) == []          # and then it settles
+
+
+def test_an_undelivered_draft_is_retried_not_baselined(tmp_path):
+    """A draft dropped by the size caps must stay pending, so fixing it reports
+    it — rather than its hash being recorded as already sent."""
+    session = _session(tmp_path)
+    _write(tmp_path, "my-skill", skill_md="x" * (_DRAFT_FILE_MAX + 1))
+    assert drain_pending_skills(session) == []
+
+    _write(tmp_path, "my-skill", skill_md=SKILL_MD)      # author trims it
+    assert [e["slug"] for e in drain_pending_skills(session)] == ["my-skill"]
+
+
+def test_a_draft_is_bounded_in_total_not_just_per_file(tmp_path):
+    """Per-file caps bound nothing on their own — a skill may carry any number
+    of siblings, and every draft rides the same reply stream."""
+    session = _session(tmp_path)
+    siblings = {f"ref-{i:02d}.md": "x" * 150_000 for i in range(20)}   # 3 MB unbounded
+    _write(tmp_path, "my-skill", **siblings)
+
+    files = drain_pending_skills(session)[0]["files"]
+    wire = sum(len(t.encode()) for t in files.values())
+    assert wire <= _DRAFT_TOTAL_MAX
+    assert files["SKILL.md"] == SKILL_MD                 # the procedure survives
+    assert len(files) < len(siblings) + 1                # siblings are what gave way
+
+
+def test_a_rename_plus_compensating_edit_still_counts_as_a_change(tmp_path):
+    """Hashing name and body unseparated would make these two states identical."""
+    folder = _write(tmp_path, "my-skill")
+    (folder / "ab").write_text("c")
+    session = _session(tmp_path)
+
+    (folder / "ab").unlink()
+    (folder / "a").write_text("bc")
+    assert [e["slug"] for e in drain_pending_skills(session)] == ["my-skill"]
