@@ -52,7 +52,10 @@ def _sdk_error(status_code, json_body=None, text_body=None, headers=None):
         )
 
     client = openai.OpenAI(
-        base_url="http://gateway.test/v1",
+        # A real MindsHub host: since ENG-1693 the ORIGIN decides whether a
+        # billing verdict is trusted, so a placeholder host would make every
+        # "gateway" test below silently exercise the third-party path.
+        base_url="https://api.mindshub.ai/v1",
         api_key="test-key",
         max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
@@ -557,7 +560,7 @@ def _anthropic_sdk_error(status_code, json_body=None, headers=None):
         )
 
     client = anthropic.Anthropic(
-        base_url="http://gateway.test",
+        base_url="https://api.mindshub.ai",  # see the note in _sdk_error (ENG-1693)
         api_key="test-key",
         max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
@@ -673,3 +676,81 @@ def test_anthropic_mapper_does_not_wait_on_an_unconfirmed_429():
         anthropic_mapper(exc, provider="Anthropic", model="sonnet")
     assert err.value.session_backoff is False
     assert err.value.retry_after is None
+
+
+# ── Only OUR gateway may select a billing verdict (ENG-1693) ───────────────
+# cowork-server gates its own copies of these carriers (ENG-1537, ENG-1686),
+# but that is too late: anton converts a wallet denial into a typed
+# TokenLimitExceeded, which cowork-server matches at the TOP of its ladder,
+# above all origin logic. So the check has to happen in these mappers.
+
+def _byok_error(host, reason=None, json_body=None, status=402):
+    """A real SDK error from an arbitrary OPENAI_COMPATIBLE endpoint."""
+    import httpx
+
+    def handler(request):
+        headers = {"X-MindsHub-Reason": reason} if reason else {}
+        return httpx.Response(status, json=json_body or {}, headers=headers)
+
+    client = openai.OpenAI(
+        base_url=f"https://{host}/v1", api_key="k", max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        client.chat.completions.create(
+            model="m", max_tokens=1, messages=[{"role": "user", "content": "hi"}])
+    except openai.APIStatusError as exc:
+        return exc
+    raise AssertionError("the SDK did not raise")
+
+
+@pytest.mark.parametrize("host", [
+    "openrouter.ai",
+    "api.openai.com",
+    "mindshub.ai.evil.com",   # lookalike: the substring idiom used elsewhere accepts this
+    "notmindshub.ai",
+])
+@pytest.mark.parametrize("carrier", ["header", "body"])
+def test_a_third_party_cannot_conjure_the_credits_card(host, carrier):
+    kwargs = ({"reason": "wallet_empty"} if carrier == "header"
+              else {"json_body": {"code": "wallet_empty"}})
+    exc = _byok_error(host, **kwargs)
+    with pytest.raises(Exception) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded), (
+        f"{host} via {carrier} produced the out-of-credits card"
+    )
+
+
+@pytest.mark.parametrize("host", ["api.mindshub.ai", "mindshub.ai", "api.mdb.ai"])
+@pytest.mark.parametrize("carrier", ["header", "body"])
+def test_the_real_gateway_still_gets_the_credits_card(host, carrier):
+    # ENG-1169 must not reopen: a genuine denial still fails fast onto the card.
+    kwargs = ({"reason": "wallet_empty"} if carrier == "header"
+              else {"json_body": {"code": "wallet_empty"}})
+    with pytest.raises(TokenLimitExceeded):
+        _raise_for_status_error(_byok_error(host, **kwargs), "sonnet")
+
+
+def test_an_unknown_origin_still_maps():
+    # Three-valued, mirroring cowork-server's gate: only a PROVABLE third party
+    # is refused. A synthetic error carries no response, so the host is unknown
+    # and behaviour is unchanged — which is what keeps the mid-stream wallet
+    # paths working.
+    from anton.core.llm.provider import origin_is_known_third_party
+
+    assert origin_is_known_third_party(Exception("synthetic")) is False
+
+
+def test_the_host_match_is_not_a_substring_test():
+    # The idiom used elsewhere in this package for flavour detection
+    # (`"mindshub.ai" in base_url`) accepts an attacker-registered lookalike.
+    # A trust decision cannot use it.
+    from anton.core.llm.provider import is_mindshub_host
+
+    assert is_mindshub_host("api.mindshub.ai") is True
+    assert is_mindshub_host("mdb.ai") is True
+    assert is_mindshub_host("API.MINDSHUB.AI.") is True      # case + trailing dot
+    assert is_mindshub_host("mindshub.ai.evil.com") is False
+    assert is_mindshub_host("notmindshub.ai") is False
+    assert is_mindshub_host(None) is False

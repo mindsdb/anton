@@ -29,6 +29,7 @@ from .provider import (
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
+    origin_is_known_third_party,
     wallet_denial_code,
     raise_on_empty_response,
 )
@@ -76,11 +77,18 @@ def _raise_for_status_error(
     # them — but a wallet denial that DOES arrive here must hit the credits
     # card, not the generic copy. Code/reason-exact: a BYOK Anthropic billing
     # error carries neither and stays generic.
+    # ENG-1693 — see the openai twin for the full reasoning. Both carriers are
+    # third-party controlled on a BYOK endpoint, and cowork-server's own gates
+    # run too late because anton converts a wallet denial into a typed error
+    # that is matched above all origin logic.
+    _foreign = origin_is_known_third_party(exc)
     gate_reason = ""
-    if getattr(exc, "response", None) is not None:
+    if not _foreign and getattr(exc, "response", None) is not None:
         gate_reason = exc.response.headers.get("x-mindshub-reason", "")
-    wallet_code = wallet_denial_code(body) or (
-        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+    wallet_code = None if _foreign else (
+        wallet_denial_code(body) or (
+            gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+        )
     )
     if exc.status_code in (402, 429) and wallet_code:
         what = (

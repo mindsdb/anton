@@ -574,6 +574,75 @@ _TRANSIENT_ERROR_TYPES = frozenset(
 _WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
 
 
+# Hosts that ARE the MindsHub gateway. Only a response from one of these may
+# select a billing verdict — see :func:`origin_is_known_third_party` (ENG-1693).
+_MINDSHUB_HOSTS = ("mindshub.ai", "mdb.ai")
+
+
+def is_mindshub_host(host: str | None) -> bool:
+    """Whether ``host`` is the MindsHub gateway or one of its subdomains.
+
+    Deliberately NOT the ``"mindshub.ai" in base_url`` substring test used
+    elsewhere in this package for flavour detection and trace-header opt-in.
+    That form is fine for choosing an API dialect and unfit for a trust
+    decision: ``mindshub.ai.evil.com`` satisfies it. This matches the exact
+    domain or a dot-delimited subdomain of it, so an attacker cannot buy a
+    name that merely contains ours.
+    """
+    if not host:
+        return False
+    h = str(host).strip().lower().rstrip(".")
+    return any(h == d or h.endswith("." + d) for d in _MINDSHUB_HOSTS)
+
+
+def response_origin_host(exc: BaseException) -> str | None:
+    """Hostname the failing request was sent to, or ``None`` if unknowable.
+
+    ``httpx.Response.url`` is a property that RAISES when no request is
+    attached, so this cannot be a bare ``getattr`` chain.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    try:
+        url = getattr(resp, "url", None)
+        if url is None:
+            url = getattr(getattr(resp, "request", None), "url", None)
+        if url is None:
+            return None
+        host = getattr(url, "host", None)
+        if not host:
+            from urllib.parse import urlparse
+
+            host = urlparse(str(url)).hostname
+    except Exception:
+        return None
+    return str(host).lower() if host else None
+
+
+def origin_is_known_third_party(exc: BaseException) -> bool:
+    """Whether this failure provably came from somewhere that is NOT our gateway.
+
+    Three-valued on purpose, mirroring cowork-server's gate (ENG-1686): it
+    answers "do we KNOW it was someone else", so an unknown origin stays
+    trusted rather than being treated as hostile. A real SDK error always
+    carries its request, so every genuine HTTP response resolves a host;
+    unknown origin means a synthetic or mid-stream error, which no remote
+    server can choose.
+
+    Used to stop a BYOK endpoint selecting a MindsHub billing verdict by
+    echoing our private ``X-MindsHub-Reason`` header or wallet ``code``
+    (ENG-1693). NOT used in :func:`classify_transient`'s wallet check — see
+    the comment there.
+    """
+    return origin_is_known_third_party_host(response_origin_host(exc))
+
+
+def origin_is_known_third_party_host(host: str | None) -> bool:
+    """Host-level form of :func:`origin_is_known_third_party`."""
+    return host is not None and not is_mindshub_host(host)
+
+
 def wallet_denial_code(body: Any) -> str | None:
     """The M3 gate's out-of-credits code carried in an error body, if any.
 
@@ -692,6 +761,11 @@ def classify_transient(
         if etype == "insufficient_quota":
             return None
         if wallet_denial_code(b):
+            # Deliberately NOT origin-gated (ENG-1693). This guard suppresses
+            # RETRIES, and being conservative is right no matter who sent it:
+            # retrying a third party's quota denial is wasteful and cannot
+            # succeed either. Gating here would make a hostile wallet code
+            # RETRYABLE, which is worse than the card it would deny.
             return None
         # session_backoff=True, unlike every other request-time status here
         # (ENG-1537). The flag means "should the SESSION spend its budget on

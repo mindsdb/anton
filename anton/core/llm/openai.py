@@ -34,6 +34,7 @@ from .provider import (
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
+    origin_is_known_third_party,
     wallet_denial_code,
     raise_on_empty_response,
 )
@@ -135,11 +136,29 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # header is the fallback discriminator for a body that lost its code
     # (e.g. an anthropic-dialect proxy); detection stays code/reason-exact so
     # BYOK 402s fall through to the generic copy, never the credits card.
+    # ENG-1693: BOTH carriers are origin-checked. On a BYOK OPENAI_COMPATIBLE
+    # provider the whole response — header and body — is third-party
+    # controlled, so without this any endpoint could return 402 +
+    # `X-MindsHub-Reason: wallet_empty` (or the same `code` in the body) and
+    # put our out-of-credits card, with its top-up CTA, in front of a user
+    # whose MindsHub wallet is fine.
+    #
+    # cowork-server gates its own copies of these reads (ENG-1537, ENG-1686),
+    # but that is too late: anton converts a wallet denial into a typed
+    # TokenLimitExceeded, which cowork-server matches at the TOP of its ladder,
+    # above all origin logic. So the check has to happen here or not at all.
+    #
+    # Three-valued: only a PROVABLE third party is refused. An unknown origin
+    # stays trusted, because a real SDK error always carries its request, so
+    # only synthetic/mid-stream errors lack a host — nothing a remote can pick.
+    _foreign = origin_is_known_third_party(exc)
     gate_reason = ""
-    if getattr(exc, "response", None) is not None:
+    if not _foreign and getattr(exc, "response", None) is not None:
         gate_reason = exc.response.headers.get("x-mindshub-reason", "")
-    wallet_code = wallet_denial_code(raw_body) or (
-        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+    wallet_code = None if _foreign else (
+        wallet_denial_code(raw_body) or (
+            gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+        )
     )
     if exc.status_code in (402, 429) and wallet_code:
         what = (
@@ -1187,7 +1206,13 @@ class OpenAIProvider(LLMProvider):
             # Checked BEFORE the transient classifier — permanent-first, the
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
-            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            # Origin-checked like the request-time mapper (ENG-1693). Almost
+            # always a no-op here: a mid-stream error carries no response, so
+            # the host is unknown and the three-valued rule keeps it trusted.
+            wallet_code = (
+                None if origin_is_known_third_party(exc)
+                else wallet_denial_code(getattr(exc, "body", None))
+            )
             if wallet_code:
                 what = (
                     "Your MindsHub credits are used up"
@@ -1513,7 +1538,13 @@ class OpenAIProvider(LLMProvider):
             # Checked BEFORE the transient classifier — permanent-first, the
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
-            wallet_code = wallet_denial_code(getattr(exc, "body", None))
+            # Origin-checked like the request-time mapper (ENG-1693). Almost
+            # always a no-op here: a mid-stream error carries no response, so
+            # the host is unknown and the three-valued rule keeps it trusted.
+            wallet_code = (
+                None if origin_is_known_third_party(exc)
+                else wallet_denial_code(getattr(exc, "body", None))
+            )
             if wallet_code:
                 what = (
                     "Your MindsHub credits are used up"
