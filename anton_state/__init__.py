@@ -9,6 +9,7 @@ from anton_state.errors import (
     StateThrottled,
     StateUnavailable,
     StateValidationError,
+    pop_last_state_error,
 )
 from anton_state.factory import from_backend_state, open_store
 from anton_state.odm import Collection

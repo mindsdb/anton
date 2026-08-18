@@ -1,6 +1,16 @@
 import pytest
-from anton_state import StateSchema, Attr, ConditionalCheckFailed, StateThrottled, StateUnavailable
+from anton_state import (
+    StateSchema, Attr, ConditionalCheckFailed, StateThrottled, StateUnavailable,
+    pop_last_state_error,
+)
 from anton_state.http_driver import HTTPDriver, _WireError
+
+
+@pytest.fixture(autouse=True)
+def _clear_slot():
+    pop_last_state_error()
+    yield
+    pop_last_state_error()
 
 _S = StateSchema(pk=Attr(name="pk"), sk=Attr(name="sk"), ttl_attribute="exp")
 
@@ -51,6 +61,8 @@ def test_conditional_error_mapped(monkeypatch):
     d = _drv(monkeypatch, responder)
     with pytest.raises(ConditionalCheckFailed):
         d.put({"pk": "p", "sk": "s"}, if_not_exists=True, if_version=None)
+    # Artifact's own logic (lost a race), not a state-plane outage.
+    assert pop_last_state_error() is None
 
 
 def test_mutation_not_retried_on_unavailable(monkeypatch):
@@ -64,6 +76,7 @@ def test_mutation_not_retried_on_unavailable(monkeypatch):
     with pytest.raises(StateUnavailable):
         d.put({"pk": "p", "sk": "s"}, if_not_exists=False, if_version=None)
     assert calls["n"] == 1  # no retry on mutation
+    assert pop_last_state_error() == "StateUnavailable"
 
 
 def test_read_retried_on_unavailable(monkeypatch):
@@ -78,6 +91,18 @@ def test_read_retried_on_unavailable(monkeypatch):
     d = _drv(monkeypatch, responder)
     assert d.get("p", "s", consistent=True) is None
     assert calls["n"] == 2  # retried once
+    # Recovered on retry — the transient failure never reached _map_and_record.
+    assert pop_last_state_error() is None
+
+
+def test_throttled_error_mapped(monkeypatch):
+    def responder(op, payload):
+        raise _WireError(429, "throttled", "slow down")
+
+    d = _drv(monkeypatch, responder)
+    with pytest.raises(StateThrottled):
+        d.put({"pk": "p", "sk": "s"}, if_not_exists=False, if_version=None)
+    assert pop_last_state_error() == "StateThrottled"
 
 
 def test_unauthorized_not_treated_as_unavailable(monkeypatch):
@@ -88,3 +113,5 @@ def test_unauthorized_not_treated_as_unavailable(monkeypatch):
     with pytest.raises(Exception) as ei:
         d.get("p", "s", consistent=True)
     assert not isinstance(ei.value, StateUnavailable)  # definitely-not-applied, clearer error
+    # A config/clock problem, not a state-plane outage.
+    assert pop_last_state_error() is None

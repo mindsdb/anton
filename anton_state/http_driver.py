@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from . import errors
 from .base import Driver  # noqa: F401  (documents intent; Protocol is structural)
 from .errors import (
     ConditionalCheckFailed,
@@ -45,6 +46,15 @@ def _map_wire(e: _WireError) -> Exception:
         # dress it up as "outcome unknown" like a 5xx.
         return StateValidationError(f"state broker rejected the token: {e.message}")
     return StateUnavailable(e.message)
+
+
+def _map_and_record(e: _WireError) -> Exception:
+    """_map_wire, plus recording runner-visible outages (errors.py) so
+    artifact_runner can surface them even when this exception never reaches
+    Lambda as a FunctionError — see errors._RUNNER_VISIBLE_ERRORS."""
+    exc = _map_wire(e)
+    errors._record(exc)
+    return exc
 
 
 class HTTPDriver:
@@ -86,8 +96,8 @@ class HTTPDriver:
                 # Only retry reads on transient (5xx/unavailable); never mutations.
                 if op in _READ_OPS and (e.status >= 500 or e.code == "unavailable"):
                     continue
-                raise _map_wire(e)
-        raise _map_wire(last)  # type: ignore[arg-type]
+                raise _map_and_record(e)
+        raise _map_and_record(last)  # type: ignore[arg-type]
 
     # --- Driver protocol ---
     def get(self, pk: str, sk: str | None, *, consistent: bool) -> dict | None:
