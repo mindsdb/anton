@@ -984,18 +984,16 @@ class OpenAIProvider(LLMProvider):
 
         if message.tool_calls:
             for tc in message.tool_calls:
-                # safe_parse_tool_input returns (parsed_dict,
-                # parse_error). parse_error is forwarded to the
-                # session dispatcher so the tool_use/tool_result
-                # protocol can carry the recovery — see the streaming
-                # path in this file for the same pattern.
-                parsed_input, parse_error = safe_parse_tool_input(tc.function.arguments or "")
+                # Both flags ride on the ToolCall for the session to act
+                # on. See `safe_parse_tool_input`.
+                parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
                         input=parsed_input,
                         parse_error=parse_error,
+                        repaired=repaired,
                     )
                 )
 
@@ -1225,10 +1223,10 @@ class OpenAIProvider(LLMProvider):
         for idx in sorted(tc_state):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
-            parsed, parse_error = safe_parse_tool_input(raw_json)
+            parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
             tool_calls.append(ToolCall(
                 id=info["id"], name=info["name"], input=parsed,
-                parse_error=parse_error,
+                parse_error=parse_error, repaired=repaired,
             ))
             yield StreamToolUseEnd(id=info["id"])
 
@@ -1457,10 +1455,14 @@ class OpenAIProvider(LLMProvider):
                     raw_json = "".join(info["args_parts"]) or getattr(
                         event, "arguments", ""
                     )
-                    parsed = json.loads(raw_json) if raw_json else {}
+                    # Parsed through the shared helper rather than `json.loads`:
+                    # a body cut mid-JSON must not raise out of this generator,
+                    # and the flags are what let the session refuse the call.
+                    parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
                     tool_calls.append(
                         ToolCall(
-                            id=info["call_id"], name=info["name"], input=parsed
+                            id=info["call_id"], name=info["name"], input=parsed,
+                            parse_error=parse_error, repaired=repaired,
                         )
                     )
                     if info["call_id"]:
@@ -1578,11 +1580,14 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
             name = getattr(item, "name", "") or ""
             args_str = getattr(item, "arguments", "") or ""
-            try:
-                parsed = json.loads(args_str) if args_str else {}
-            except json.JSONDecodeError:
-                parsed = {}
-            tool_calls.append(ToolCall(id=call_id, name=name, input=parsed))
+            # Shared parse, not a bare `json.loads` with the error swallowed
+            # into `{}`: an empty dict cannot be told apart from a call the
+            # model deliberately sent with no arguments.
+            parsed, parse_error, repaired = safe_parse_tool_input(args_str)
+            tool_calls.append(ToolCall(
+                id=call_id, name=name, input=parsed,
+                parse_error=parse_error, repaired=repaired,
+            ))
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 

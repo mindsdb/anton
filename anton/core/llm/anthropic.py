@@ -253,6 +253,13 @@ class AnthropicProvider(LLMProvider):
                     ToolCall(id=block.id, name=block.name, input=block.input)
                 )
 
+        # The SDK hands back an already-parsed `input`, so unlike the streaming
+        # path there is no raw JSON to check: `stop_reason` is the only evidence
+        # that the last call's arguments (blocks arrive in order) are unfinished.
+        if response.stop_reason == "max_tokens" and tool_calls:
+            tool_calls[-1].repaired = True
+
+
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
             stop_reason=response.stop_reason, provider="Anthropic", model=model,
@@ -371,20 +378,14 @@ class AnthropicProvider(LLMProvider):
                         info = blocks.get(idx, {})
                         if info.get("type") == "tool_use":
                             raw_json = "".join(info["json_parts"])
-                            # safe_parse_tool_input never raises. It
-                            # returns (parsed_dict, parse_error). When
-                            # parse_error is set, the session
-                            # dispatcher short-circuits with a tool
-                            # result asking the LLM to re-emit a clean
-                            # call — that recovery happens via the
-                            # tool_use/tool_result protocol the LLM
-                            # already understands, so it doesn't need
-                            # to escalate to a session-level retry.
-                            parsed_input, parse_error = safe_parse_tool_input(raw_json)
+                            # Never raises; the two flags it returns tell
+                            # the session what the body was missing. See
+                            # `safe_parse_tool_input`.
+                            parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
                             tool_calls.append(
                                 ToolCall(
                                     id=info["id"], name=info["name"], input=parsed_input,
-                                    parse_error=parse_error,
+                                    parse_error=parse_error, repaired=repaired,
                                 )
                             )
                             yield StreamToolUseEnd(id=info["id"])

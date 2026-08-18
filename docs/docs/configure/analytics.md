@@ -34,6 +34,13 @@ Anton and a failure to send is never surfaced to you. Failures on the
 measurement events are recorded in Anton's own debug log; failures on the other
 events are discarded without a trace.
 
+The one exception is exit. If a send is still in flight when Anton is closing,
+it is given up to one second to finish before Anton exits anyway. In an
+interactive session there is normally nothing left to wait for, so this costs
+nothing; it matters for short-lived commands that would otherwise exit before
+the event left the machine. Turning analytics off removes the wait along with
+the send.
+
 ## Where it goes
 
 Two transports, depending on the event:

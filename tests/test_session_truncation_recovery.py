@@ -22,6 +22,9 @@ What must hold now:
 4. If the retry also dies silently, the user sees an explicit failure notice —
    a turn must never end silently.
 5. Completions that finish inside the budget are untouched.
+6. A tool call the cap opened up does not count as "finished": the
+   repair pass makes such a call parseable, so without this the round looked
+   complete and its handler ran on arguments the model never emitted.
 """
 
 from __future__ import annotations
@@ -36,13 +39,18 @@ from tests.conftest import make_mock_llm
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
+    StreamTaskProgress,
     StreamTextDelta,
+    StreamToolResult,
     ToolCall,
     Usage,
 )
 from anton.core.session import (
     _TRUNCATED_CONTINUE_NUDGE,
+    _TRUNCATED_LEAD,
     _TRUNCATED_SILENT_NUDGE,
+    _TRUNCATED_TOOL_CALL_NUDGE,
+    _TRUNCATED_TOOL_CALL_TAIL,
     _TRUNCATION_FAILURE_NOTICE,
     ChatSession,
     ChatSessionConfig,
@@ -326,10 +334,9 @@ async def test_completion_inside_the_budget_is_not_retried(workspace):
 
 
 async def test_at_cap_with_a_tool_call_is_not_intercepted(workspace):
-    """A response that hit the cap but still delivered a usable tool call
-    proceeds into the tool loop — the recovery only owns the no-tool-call
-    case. (Damaged tool-call JSON is the structured-output path's job,
-    ENG-1081.)"""
+    """A response that hit the cap but still delivered an *intact* tool call
+    proceeds into the tool loop — the cut landed after the call, so there is
+    nothing to recover. (The damaged-call case is below.)"""
     tool_call = ToolCall(
         id="tc_1",
         name="scratchpad",
@@ -361,3 +368,306 @@ async def test_at_cap_with_a_tool_call_is_not_intercepted(workspace):
     assert _TRUNCATED_SILENT_NUDGE not in "\n".join(
         _user_texts(script.calls[1]["messages"])
     )
+
+
+# --------------------------------------------------------------------------
+# 6. A tool call cut open at the cap is not a usable tool call.
+# --------------------------------------------------------------------------
+
+
+async def test_repaired_tool_call_at_the_cap_is_retried_not_dispatched(workspace):
+    """The shape measured in prod: the budget ran out *inside* the arguments.
+
+    ``safe_parse_tool_input``'s repair pass closes the open brace, so the call
+    arrives parseable with ``parse_error`` unset — the round therefore looked
+    complete, and the handler ran on arguments the model never finished (in the
+    trace, a ``scratchpad exec`` whose ``code`` was simply gone). It has to take
+    the truncation retry instead.
+    """
+    cut_call = ToolCall(
+        id="tc_cut",
+        name="scratchpad",
+        # What the repair pass returns for
+        # '{"action": "exec", "name": "main", "estimated_execution_time_seconds": 15'
+        input={"action": "exec", "name": "main", "estimated_execution_time_seconds": 15},
+        repaired=True,
+    )
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut_call]),
+            _response("Re-issued the call in smaller parts. Done.", output_tokens=30),
+        ],
+        workspace,
+    )
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 2, "a cut-open tool call must be retried, not dispatched"
+    retry = script.calls[1]
+    assert retry.get("max_tokens") == BUDGET * 2
+    retry_user_texts = "\n".join(_user_texts(retry["messages"]))
+    assert _TRUNCATED_TOOL_CALL_NUDGE in retry_user_texts, (
+        "the nudge must name the real failure — a cut tool call, not silence"
+    )
+
+
+async def test_unparseable_tool_call_at_the_cap_is_retried_with_more_budget(workspace):
+    """Same round, worse damage: the body could not be salvaged at all.
+
+    The dispatcher's ``parse_error`` short-circuit asks the model to re-emit
+    over the tool protocol, but at the same budget that just ran out — so when
+    the cap is the cause, the raised-budget retry is the recovery that can
+    actually succeed.
+    """
+    broken_call = ToolCall(
+        id="tc_broken",
+        name="scratchpad",
+        input={},
+        parse_error="Unterminated string starting at: line 1 column 42",
+    )
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="length", tool_calls=[broken_call]),
+            _response("Recovered.", output_tokens=20),
+        ],
+        workspace,
+    )
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 2
+    assert script.calls[1].get("max_tokens") == BUDGET * 2
+
+
+async def test_cut_open_tool_call_in_a_continuation_round_is_also_retried(workspace):
+    """The same rule has to hold on the *second* gate, inside the tool loop.
+
+    That is where the shape is most likely: history is at its longest by then,
+    so the output budget is what runs out first. The gate is duplicated in the
+    session (pre-loop and in-loop), and fixing only the first one leaves every
+    round after the first tool call dispatching half a call.
+    """
+    intact = ToolCall(id="tc_1", name="scratchpad", input={"action": "exec", "name": "main", "code": "print(1)"})
+    cut = ToolCall(id="tc_2", name="scratchpad", input={"action": "exec", "name": "main"}, repaired=True)
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=40, stop_reason="tool_use", tool_calls=[intact]),
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut]),
+            _response("Split the cell up — done.", output_tokens=30),
+        ],
+        workspace,
+    )
+    session._llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="done")
+    )
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 3, "the continuation round's cut call must be retried"
+    assert script.calls[2].get("max_tokens") == BUDGET * 2
+
+
+async def test_a_repaired_call_below_the_cap_is_never_dispatched(workspace):
+    """The dispatcher backstop: no handler ever runs on repaired arguments.
+
+    Here the round finished well inside its budget, so neither truncation gate
+    fires — the repair had some other cause (a dropped connection, a model
+    glitch). The arguments are still a body the model never finished, so the
+    call has to come back as an is_error tool_result asking for a re-emit
+    rather than reaching `prepare_scratchpad_exec` with no `code`. This is also
+    what protects the one path the gates can't see: a truncation retry that
+    itself came back cut.
+    """
+    cut = ToolCall(
+        id="tc_net",
+        name="scratchpad",
+        input={"action": "exec", "name": "main"},
+        repaired=True,
+    )
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=120, stop_reason="tool_use", tool_calls=[cut]),
+            _response("Re-issued it with the code inline. Done.", output_tokens=30),
+        ],
+        workspace,
+    )
+    session._llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="done")
+    )
+
+    await _run_turn(session)
+
+    # No truncation retry (the round was nowhere near the cap) — the follow-up
+    # round carries the error tool_result instead.
+    assert script.calls[1].get("max_tokens") is None
+    results = [
+        block
+        for message in script.calls[1]["messages"]
+        for block in (message.get("content") if isinstance(message.get("content"), list) else [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert results, "the cut call must produce a tool_result, not a handler run"
+    assert results[0]["is_error"] is True
+    assert "arrived incomplete" in results[0]["content"]
+
+
+async def test_a_discarded_call_closes_its_ui_step(workspace):
+    """The step is already open downstream when the call is refused.
+
+    `StreamToolUseStart` is emitted while the arguments are still streaming, so
+    a consumer has drawn a running step before anything knows the call is
+    unusable — and only the dispatch path's phase markers close one. Refusing
+    the call without sending its marker leaves that step spinning next to the
+    retry's real one for the rest of the turn, and replaying the turn shows the
+    same thing.
+    """
+    cut = ToolCall(id="tc_cut", name="scratchpad", input={"action": "exec"}, repaired=True)
+    session, _ = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut]),
+            _response("Re-issued it, smaller. Done.", output_tokens=30),
+        ],
+        workspace,
+    )
+
+    events = await _run_turn(session)
+
+    closers = [
+        e for e in events
+        if isinstance(e, StreamTaskProgress) and e.id == "tc_cut"
+    ]
+    assert closers, "the refused call's step must be closed, not left running"
+    assert closers[-1].phase == "scratchpad_done", (
+        "scratchpad steps are keyed on the scratchpad phases, not the generic one"
+    )
+    assert closers[-1].ok is False, "a discarded call must not render as a success"
+
+    # The phase marker alone leaves the cell looking complete: consumers read a
+    # cell's outcome from its result text, so the result has to arrive too, and
+    # it has to carry a marker their classifier recognises ("[error]" /
+    # "exec failed"). Otherwise the discarded cell renders as a success.
+    results = [
+        e for e in events
+        if isinstance(e, StreamToolResult) and e.id == "tc_cut"
+    ]
+    assert results, "a discarded cell needs a result, or it reads as succeeded"
+    assert "exec failed" in results[0].content
+    assert "cut off mid-arguments" in results[0].content
+    # Marker before result, as the dispatch path orders them: a consumer that
+    # marks the step complete on the marker has to see the failing result after
+    # it, or the cell ends up green again.
+    assert events.index(closers[-1]) < events.index(results[0])
+
+
+async def test_a_round_that_lost_text_and_a_tool_call_gets_both_instructions(workspace):
+    """Both halves can go at once, and both have to be asked for.
+
+    Paragraphs were already streamed to the user and appended to history, and
+    then the tool call was cut open. Telling the model only to re-issue the call
+    leaves it free to rewrite the answer from the top, which puts two copies of
+    it in history; telling it only to continue leaves the call unmade.
+    """
+    partial = "## Forecast method per account\n1. Revenue: run-rate…"
+    cut = ToolCall(id="tc_cut", name="scratchpad", input={"action": "exec"}, repaired=True)
+    session, script = _make_session(
+        [
+            _response(content=partial, output_tokens=BUDGET, stop_reason="stop", tool_calls=[cut]),
+            _response("…2. COGS: seasonal average.", output_tokens=30),
+        ],
+        workspace,
+    )
+
+    await _run_turn(session)
+
+    retry_user_texts = "\n".join(_user_texts(script.calls[1]["messages"]))
+    assert _TRUNCATED_CONTINUE_NUDGE in retry_user_texts, "the text has to be continued"
+    assert _TRUNCATED_TOOL_CALL_TAIL in retry_user_texts, "the call has to be re-issued"
+    assert retry_user_texts.count(_TRUNCATED_LEAD) == 1, (
+        "one message, not two nudges stapled together"
+    )
+    assert any(
+        m.get("role") == "assistant" and partial in str(m.get("content"))
+        for m in script.calls[1]["messages"]
+    ), "the partial answer must stay in history for the continuation"
+
+
+async def test_the_non_streaming_turn_also_refuses_a_cut_open_call(workspace):
+    """`turn()` is the sibling caller, and it dispatches the same tool calls.
+
+    It has no truncation retry of its own, so the refusal *is* the recovery
+    here: the handler must not run, and the model must get an is_error
+    tool_result it can answer by re-emitting the call. Without this the loop
+    reaches `dispatch_tool` with arguments the model never finished, on a path
+    the streaming gates never see.
+    """
+    cut = ToolCall(
+        id="tc_cut",
+        name="scratchpad",
+        input={"action": "exec", "name": "main"},
+        repaired=True,
+    )
+    mock_llm = make_mock_llm()
+    mock_llm.max_tokens = BUDGET
+    mock_llm.plan = AsyncMock(side_effect=[
+        _response(content="", output_tokens=BUDGET, stop_reason="tool_use", tool_calls=[cut]),
+        _response("Re-issued it in smaller parts. Done.", output_tokens=30),
+    ])
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session.tool_registry.dispatch_tool = AsyncMock()
+
+    try:
+        await session.turn("build the forecast workbook")
+    finally:
+        await session.close()
+
+    session.tool_registry.dispatch_tool.assert_not_called()
+    results = [
+        block
+        for message in session.history
+        for block in (message.get("content") if isinstance(message.get("content"), list) else [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert results, "the cut call must be answered, not executed"
+    assert results[0]["is_error"] is True
+    assert "arrived incomplete" in results[0]["content"]
+
+
+async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
+    """Dispatching the intact half of a cut-open round runs part of what the
+    model was still in the middle of asking for."""
+    intact = ToolCall(id="tc_ok", name="memorize", input={"content": "prefers weekly reports"})
+    cut = ToolCall(id="tc_cut", name="scratchpad", input={"action": "exec"}, repaired=True)
+    session, script = _make_session(
+        [
+            _response(content="", output_tokens=BUDGET, stop_reason="stop", tool_calls=[intact, cut]),
+            _response("Done.", output_tokens=15),
+        ],
+        workspace,
+    )
+
+    events = await _run_turn(session)
+
+    assert len(script.calls) == 2
+    assert script.calls[1].get("max_tokens") == BUDGET * 2
+
+    # Both steps close, and each closes the way its own phase is consumed.
+    closers = {
+        e.id: e for e in events
+        if isinstance(e, StreamTaskProgress) and e.id in ("tc_ok", "tc_cut")
+    }
+    assert set(closers) == {"tc_ok", "tc_cut"}
+    assert closers["tc_cut"].phase == "scratchpad_done"
+    assert closers["tc_ok"].phase == "tool_done", "memorize is not a scratchpad step"
+    assert all(e.ok is False for e in closers.values())
+
+    # `tool_done.message` is the tool's NAME, not prose: the CLI closes an
+    # activity by matching `act.name == message` (chat_ui), so a sentence there
+    # matches nothing and leaves the activity open. The reason travels on the
+    # scratchpad phase instead, which carries a description by contract.
+    assert closers["tc_ok"].message == "memorize"
+    assert "cut off mid-arguments" in closers["tc_cut"].message
+    # The intact call went down with the round rather than being cut itself —
+    # its result must not claim otherwise.
+    assert not [
+        e for e in events if isinstance(e, StreamToolResult) and e.id == "tc_ok"
+    ], "a non-scratchpad call has no cell to fail"

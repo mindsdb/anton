@@ -571,8 +571,11 @@ if _scratchpad_model:
                     max_tokens=max_tokens,
                 )
 
-                if not response.tool_calls:
-                    # Same classification as the async path (ENG-1081).
+                if not response.tool_calls or any(
+                    tc.repaired for tc in response.tool_calls
+                ):
+                    # Same classification as the async path (ENG-1081), and the
+                    # same reason `parse_error` is left to the validation branch.
                     # Nothing retries here, but the message reaches the model as
                     # a traceback, so "you ran out of budget" is actionable
                     # where "did not return structured output" was not.
@@ -616,6 +619,8 @@ if _scratchpad_model:
             Returns:
                 The final text response from the LLM.
             """
+            from anton.core.llm.provider import damaged_tool_call_result
+
             llm = get_llm()
             messages = [{"role": "user", "content": user_message}]
 
@@ -649,6 +654,14 @@ if _scratchpad_model:
                 # Execute each tool and collect results
                 tool_results = []
                 for tc in response.tool_calls:
+                    # Arguments the model never finished are answered, not
+                    # executed — same refusal as the session's tool loops, via
+                    # the same shared builder.
+                    damaged = damaged_tool_call_result(tc)
+                    if damaged is not None:
+                        tool_results.append(damaged)
+                        continue
+
                     try:
                         result = handle_tool(tc.name, tc.input)
                     except Exception as exc:
