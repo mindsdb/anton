@@ -93,12 +93,19 @@ def _anthropic_provider(handler) -> AnthropicProvider:
     return prov
 
 
-def _openai_provider(handler) -> OpenAIProvider:
+def _openai_provider(handler, host: str = "api.mindshub.ai") -> OpenAIProvider:
     # Default flavor is openai-compatible-generic → the chat.completions path
     # (the MindsHub-passthrough dialect), which is what MindsHub routing uses.
-    prov = OpenAIProvider(api_key="test", base_url="http://mock/v1")
+    #
+    # Host defaults to a REAL MindsHub one (ENG-1693): the origin now decides
+    # whether a wallet code may mint the credits card, so the previous
+    # `http://mock/v1` placeholder meant every midstream wallet test below was
+    # silently exercising the third-party path. Pass a foreign host explicitly
+    # to test that direction.
+    base = f"https://{host}/v1"
+    prov = OpenAIProvider(api_key="test", base_url=base)
     prov._client = openai.AsyncOpenAI(
-        api_key="test", base_url="http://mock/v1",
+        api_key="test", base_url=base,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     return prov
@@ -219,6 +226,24 @@ async def test_e2e_openai_midstream_wallet_denial_is_token_limit():
         await _drain(prov)
     assert "credit" in str(ei.value).lower()
     assert "billing" in str(ei.value)
+
+
+async def test_e2e_openai_midstream_wallet_denial_from_a_foreign_host_is_not_the_card():
+    """ENG-1693 review: the mid-stream lane was the one the origin gate missed.
+
+    Answering HTTP 200 and smuggling the wallet code into an SSE frame is the
+    remote's choice, and it produced a bare `openai.APIError` with no
+    `.response` — so the guard, which read only `.response`, saw no host and
+    trusted it. This is the end-to-end proof that a hostile BYOK endpoint can
+    no longer conjure the out-of-credits card, and the companion to the three
+    tests above (which now correctly run against a MindsHub host).
+    """
+    prov = _openai_provider(_static(_OAI_MIDSTREAM_WALLET), host="evil.example.com")
+    with pytest.raises(Exception) as ei:
+        await _drain(prov)
+    assert not isinstance(ei.value, TokenLimitExceeded), "a foreign host minted the credits card"
+    assert "billing" not in str(ei.value)
+    assert "console.mindshub.ai" not in str(ei.value)
 
 
 async def test_e2e_openai_midstream_wallet_beats_transient_type():

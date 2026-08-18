@@ -65,8 +65,20 @@ def _raise_for_status_error(
         ) from exc
 
     body = exc.body if isinstance(exc.body, dict) else {}
-    if exc.status_code == 429 and body.get("detail"):
-        msg = f"Server returned 429 — {body['detail']}"
+
+    # Computed once, up front: several branches below can mint a MindsHub
+    # billing verdict and each must refuse a provably foreign origin (ENG-1693).
+    _foreign = origin_is_known_third_party(exc)
+
+    # Origin-gated, and `str`-guarded to match the openai twin. Two bugs the
+    # twin already avoided and this one did not: an unguarded `detail` lets a
+    # FastAPI validation error (whose `detail` is a LIST) render as a Python
+    # repr next to our billing link, and an ungated one lets any BYOK endpoint
+    # mint the credits card from a single JSON key with attacker-authored prose
+    # in it.
+    _detail = body.get("detail")
+    if not _foreign and exc.status_code == 429 and isinstance(_detail, str) and _detail:
+        msg = f"Server returned 429 — {_detail}"
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
@@ -81,10 +93,12 @@ def _raise_for_status_error(
     # third-party controlled on a BYOK endpoint, and cowork-server's own gates
     # run too late because anton converts a wallet denial into a typed error
     # that is matched above all origin logic.
-    _foreign = origin_is_known_third_party(exc)
-    gate_reason = ""
-    if not _foreign and getattr(exc, "response", None) is not None:
-        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    # Read once, UNGATED, then used two different ways below.
+    raw_gate_reason = ""
+    if getattr(exc, "response", None) is not None:
+        raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    # Gated form — only this one may pick a BILLING verdict.
+    gate_reason = "" if _foreign else raw_gate_reason
     wallet_code = None if _foreign else (
         wallet_denial_code(body) or (
             gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
@@ -124,7 +138,8 @@ def _raise_for_status_error(
     # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
     # old fail-fast path rather than burning the budget on a limit that may not
     # clear.
-    _velocity = gate_reason == "rate_limited" or _body_code == "rate_limited"
+    # Ungated — see the openai twin: velocity is not a billing verdict.
+    _velocity = raw_gate_reason == "rate_limited" or _body_code == "rate_limited"
     transient = classify_transient(
         exc.status_code, body, provider=provider, model=model,
         retry_after=retry_after_seconds(exc),

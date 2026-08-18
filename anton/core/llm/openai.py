@@ -87,6 +87,10 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     with BYOK copy (OpenAI billing link, no MindsHub CTA) — detection is
     code-exact so arbitrary provider messages never get quota treatment.
     """
+    # Computed once, up front: several branches below can mint a MindsHub
+    # billing verdict and each must refuse a provably foreign origin (ENG-1693).
+    _foreign = origin_is_known_third_party(exc)
+
     if exc.status_code == 401:
         raise ConnectionError(
             "Invalid API key — check your OpenAI API key configuration."
@@ -106,7 +110,13 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
     # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
-    if exc.status_code == 429 and isinstance(detail, str) and detail:
+    # ENG-1693: origin-gated like every other branch that can mint a MindsHub
+    # billing verdict. This one is the cheapest to abuse — a single `detail`
+    # key on a 429, no header required — and it is the ONLY one whose copy is
+    # partly attacker-authored, since `detail` is interpolated into the message
+    # next to our console.mindshub.ai link. A foreign 429 falls through to
+    # classify_transient's honest rate-limit mapping instead.
+    if not _foreign and exc.status_code == 429 and isinstance(detail, str) and detail:
         msg = f"Server returned 429 — {detail}"
         msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
         raise TokenLimitExceeded(msg) from exc
@@ -151,10 +161,12 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # Three-valued: only a PROVABLE third party is refused. An unknown origin
     # stays trusted, because a real SDK error always carries its request, so
     # only synthetic/mid-stream errors lack a host — nothing a remote can pick.
-    _foreign = origin_is_known_third_party(exc)
-    gate_reason = ""
-    if not _foreign and getattr(exc, "response", None) is not None:
-        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    # Read once, UNGATED, then used two different ways below.
+    raw_gate_reason = ""
+    if getattr(exc, "response", None) is not None:
+        raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    # Gated form — only this one may pick a BILLING verdict.
+    gate_reason = "" if _foreign else raw_gate_reason
     wallet_code = None if _foreign else (
         wallet_denial_code(raw_body) or (
             gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
@@ -171,7 +183,11 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             "https://console.mindshub.ai/settings/organization/billing to continue."
         ) from exc
 
-    if exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
+    # Origin-gated too (ENG-1693 review): this branch's copy names a MindsHub
+    # PLAN and links console.mindshub.ai to upgrade, so it is a billing verdict
+    # by any useful definition. A third party emitting `model_access_denied`
+    # should get the generic message, not our upgrade CTA.
+    if not _foreign and exc.status_code == 403 and code in ("model_access_denied", "model_disabled"):
         if code == "model_access_denied":
             msg = (
                 f"The model '{model}' isn't included in your current MindsHub plan. "
@@ -207,7 +223,14 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
     # old fail-fast path rather than burning the budget on a limit that may not
     # clear.
-    _velocity = gate_reason == "rate_limited" or code == "rate_limited"
+    # Uses the UNGATED read on purpose (ENG-1693 review). A velocity limit is
+    # not a billing verdict — it shows no CTA and asks for no money — so the
+    # origin gate, which exists to stop a third party selling our billing card,
+    # does not apply. Gating it also bought nothing: the body carrier below is
+    # ungated too, so a spoofer would just use that. What it DID cost was a
+    # real regression — a relay or corporate proxy in front of MindsHub
+    # forwarding our 429 and `Retry-After` lost its wait (ENG-1537).
+    _velocity = raw_gate_reason == "rate_limited" or code == "rate_limited"
     transient = classify_transient(
         exc.status_code, body, provider="The model provider", model=model,
         retry_after=retry_after_seconds(exc),
@@ -1206,9 +1229,15 @@ class OpenAIProvider(LLMProvider):
             # Checked BEFORE the transient classifier — permanent-first, the
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
-            # Origin-checked like the request-time mapper (ENG-1693). Almost
-            # always a no-op here: a mid-stream error carries no response, so
-            # the host is unknown and the three-valued rule keeps it trusted.
+            # Origin-checked like the request-time mapper (ENG-1693). NOT a
+            # no-op: an earlier revision claimed a mid-stream error carries no
+            # recoverable host so this was almost always inert, and that was
+            # wrong in the most dangerous direction. The bare `openai.APIError`
+            # raised here has no `.response` but DOES carry `.request` with the
+            # real URL, and answering 200 with the wallet code smuggled into an
+            # SSE frame is the remote's choice — so this is precisely where a
+            # hostile BYOK endpoint would aim. `response_origin_host` now falls
+            # back to `.request`, which is what makes this gate real.
             wallet_code = (
                 None if origin_is_known_third_party(exc)
                 else wallet_denial_code(getattr(exc, "body", None))
@@ -1538,9 +1567,15 @@ class OpenAIProvider(LLMProvider):
             # Checked BEFORE the transient classifier — permanent-first, the
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
-            # Origin-checked like the request-time mapper (ENG-1693). Almost
-            # always a no-op here: a mid-stream error carries no response, so
-            # the host is unknown and the three-valued rule keeps it trusted.
+            # Origin-checked like the request-time mapper (ENG-1693). NOT a
+            # no-op: an earlier revision claimed a mid-stream error carries no
+            # recoverable host so this was almost always inert, and that was
+            # wrong in the most dangerous direction. The bare `openai.APIError`
+            # raised here has no `.response` but DOES carry `.request` with the
+            # real URL, and answering 200 with the wallet code smuggled into an
+            # SSE frame is the remote's choice — so this is precisely where a
+            # hostile BYOK endpoint would aim. `response_origin_host` now falls
+            # back to `.request`, which is what makes this gate real.
             wallet_code = (
                 None if origin_is_known_third_party(exc)
                 else wallet_denial_code(getattr(exc, "body", None))

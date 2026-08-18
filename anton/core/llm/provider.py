@@ -600,14 +600,22 @@ def response_origin_host(exc: BaseException) -> str | None:
 
     ``httpx.Response.url`` is a property that RAISES when no request is
     attached, so this cannot be a bare ``getattr`` chain.
+
+    Falls back to the exception's OWN ``request``, which is what makes this
+    work on the mid-stream lane. A mid-stream failure surfaces as a bare
+    ``openai.APIError`` — constructed as ``APIError(message, request, body=…)``,
+    so it has **no** ``.response`` but does carry ``.request`` with the real
+    URL. Reading only ``.response`` made the gate silently inert exactly where
+    an attacker has the freest hand: answering 200 and smuggling the wallet
+    code into an SSE frame is the remote's choice, not a quirk of our plumbing.
     """
     resp = getattr(exc, "response", None)
-    if resp is None:
-        return None
     try:
-        url = getattr(resp, "url", None)
-        if url is None:
+        url = getattr(resp, "url", None) if resp is not None else None
+        if url is None and resp is not None:
             url = getattr(getattr(resp, "request", None), "url", None)
+        if url is None:
+            url = getattr(getattr(exc, "request", None), "url", None)
         if url is None:
             return None
         host = getattr(url, "host", None)
@@ -761,11 +769,15 @@ def classify_transient(
         if etype == "insufficient_quota":
             return None
         if wallet_denial_code(b):
-            # Deliberately NOT origin-gated (ENG-1693). This guard suppresses
-            # RETRIES, and being conservative is right no matter who sent it:
-            # retrying a third party's quota denial is wasteful and cannot
-            # succeed either. Gating here would make a hostile wallet code
-            # RETRYABLE, which is worse than the card it would deny.
+            # Deliberately NOT origin-gated (ENG-1693), for a plainer reason
+            # than an earlier version of this comment claimed. It said gating
+            # would make a hostile wallet code "retryable"; that is false —
+            # both this branch and the fallthrough reach the same count-based
+            # retry, so retryability is unchanged either way. The real reasons
+            # are that this call site cannot see the origin (it receives only
+            # status + body, never the exception), and that suppressing a
+            # retry is conservative regardless of who sent the code: retrying
+            # a third party's quota denial cannot succeed either.
             return None
         # session_backoff=True, unlike every other request-time status here
         # (ENG-1537). The flag means "should the SESSION spend its budget on

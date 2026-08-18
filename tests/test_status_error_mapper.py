@@ -263,7 +263,9 @@ def _wire_shaped_error(status_code, body):
     anton's pyproject allows ``openai>=1.0`` and proxies exist that re-wrap,
     so the mapper's envelope fallback must stay pinned by a test that the
     MockTransport route physically cannot produce."""
-    request = httpx.Request("POST", "http://gateway.test/v1/chat/completions")
+    # A real MindsHub host — the origin is load-bearing since ENG-1693, and
+    # this fixture stands in for OUR gateway (see the two in _sdk_error).
+    request = httpx.Request("POST", "https://api.mindshub.ai/v1/chat/completions")
     response = httpx.Response(status_code, json=body if isinstance(body, dict) else None, request=request)
     return openai.APIStatusError("wire-shaped", response=response, body=body)
 
@@ -684,12 +686,13 @@ def test_anthropic_mapper_does_not_wait_on_an_unconfirmed_429():
 # TokenLimitExceeded, which cowork-server matches at the TOP of its ladder,
 # above all origin logic. So the check has to happen in these mappers.
 
-def _byok_error(host, reason=None, json_body=None, status=402):
+def _byok_error(host, reason=None, json_body=None, status=402, headers_extra=None):
     """A real SDK error from an arbitrary OPENAI_COMPATIBLE endpoint."""
     import httpx
 
     def handler(request):
         headers = {"X-MindsHub-Reason": reason} if reason else {}
+        headers.update(headers_extra or {})
         return httpx.Response(status, json=json_body or {}, headers=headers)
 
     client = openai.OpenAI(
@@ -754,3 +757,150 @@ def test_the_host_match_is_not_a_substring_test():
     assert is_mindshub_host("mindshub.ai.evil.com") is False
     assert is_mindshub_host("notmindshub.ai") is False
     assert is_mindshub_host(None) is False
+
+
+# ── Every carrier, both mappers, and the mid-stream lane (ENG-1693 review) ──
+# The first cut of this fix gated five sites and tested two. Reverting the
+# anthropic gate or either mid-stream gate left the whole suite green.
+
+@pytest.mark.parametrize("status,body,carrier", [
+    (402, {"code": "wallet_empty"}, "body wallet code"),
+    (429, {"detail": "you are out of credits, top up here"}, "FastAPI detail"),
+    (403, {"error": {"code": "model_access_denied"}}, "403 plan copy"),
+])
+def test_no_carrier_lets_a_third_party_mint_mindshub_billing_copy(status, body, carrier):
+    """Every branch that names MindsHub or links console.mindshub.ai must
+    refuse a provably foreign origin — not just the two the first cut covered.
+
+    The `detail` carrier is the cheapest to abuse (one JSON key, no header) and
+    the only one whose text is partly attacker-authored, since it is
+    interpolated into the message beside our billing link.
+    """
+    exc = _byok_error("openrouter.ai", json_body=body, status=status)
+    with pytest.raises(Exception) as err:
+        _raise_for_status_error(exc, "sonnet")
+    text = str(err.value)
+    assert not isinstance(err.value, TokenLimitExceeded), f"{carrier} minted the credits card"
+    assert "console.mindshub.ai" not in text, f"{carrier} leaked a MindsHub CTA: {text[:120]}"
+    assert "MindsHub plan" not in text, f"{carrier} leaked MindsHub plan copy: {text[:120]}"
+
+
+def test_the_gateway_keeps_all_three_carriers():
+    """The mirror: none of the gates may break a real gateway denial."""
+    with pytest.raises(TokenLimitExceeded):
+        _raise_for_status_error(_byok_error("api.mindshub.ai", json_body={"code": "wallet_empty"}), "s")
+    with pytest.raises(TokenLimitExceeded):
+        _raise_for_status_error(
+            _byok_error("api.mindshub.ai", json_body={"detail": "Monthly limit exceeded"}, status=429), "s")
+    with pytest.raises(ModelUnavailableError):
+        _raise_for_status_error(
+            _byok_error("api.mindshub.ai", json_body={"error": {"code": "model_access_denied"}}, status=403), "s")
+
+
+def _midstream_error(host, code="wallet_empty"):
+    """Drive the REAL streaming path: HTTP 200 carrying an SSE error frame.
+
+    This is the lane the first cut of the gate could not see — the bare
+    `openai.APIError` raised here has no `.response`, only `.request`.
+    """
+    import json as _json
+
+    frame = _json.dumps({"error": {"message": "nope", "type": "x", "code": code}})
+    payload = f"data: {frame}\n\n".encode()
+
+    def handler(request):
+        return httpx.Response(200, content=payload,
+                              headers={"Content-Type": "text/event-stream"})
+
+    client = openai.OpenAI(
+        base_url=f"https://{host}/v1", api_key="k", max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        for _ in client.chat.completions.create(
+            model="m", messages=[{"role": "user", "content": "hi"}], stream=True,
+        ):
+            pass
+    except Exception as exc:
+        return exc
+    raise AssertionError("the stream did not raise")
+
+
+def test_the_midstream_lane_resolves_its_host():
+    """The bug the review caught: `response_origin_host` read only `.response`,
+    so this lane — where the attacker has the freest hand — was ungated."""
+    from anton.core.llm.provider import origin_is_known_third_party, response_origin_host
+
+    hostile = _midstream_error("evil.example.com")
+    assert getattr(hostile, "response", None) is None      # no response…
+    assert getattr(hostile, "request", None) is not None   # …but the host is right here
+    assert response_origin_host(hostile) == "evil.example.com"
+    assert origin_is_known_third_party(hostile) is True
+
+    ours = _midstream_error("api.mindshub.ai")
+    assert response_origin_host(ours) == "api.mindshub.ai"
+    assert origin_is_known_third_party(ours) is False
+
+
+@pytest.mark.parametrize("status,body", [
+    (402, {"code": "wallet_empty"}),
+    (429, {"detail": "out of credits"}),
+])
+def test_the_anthropic_twin_gates_the_same_carriers(status, body):
+    """The twin had NO origin coverage — reverting its gate left the suite
+    green, which is exactly how the two mappers drift apart."""
+    from anton.core.llm.anthropic import _raise_for_status_error as anthropic_mapper
+
+    exc = _anthropic_sdk_error(status, json_body=body)
+    exc.response.request = httpx.Request("POST", "https://openrouter.ai/v1/messages")
+    with pytest.raises(Exception) as err:
+        anthropic_mapper(exc, provider="Anthropic", model="sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert "console.mindshub.ai" not in str(err.value)
+
+
+def test_the_anthropic_twin_still_cards_a_real_gateway_denial():
+    from anton.core.llm.anthropic import _raise_for_status_error as anthropic_mapper
+
+    exc = _anthropic_sdk_error(402, json_body={"code": "wallet_empty"})
+    exc.response.request = httpx.Request("POST", "https://api.mindshub.ai/v1/messages")
+    with pytest.raises(TokenLimitExceeded):
+        anthropic_mapper(exc, provider="Anthropic", model="sonnet")
+
+
+def test_the_anthropic_detail_branch_rejects_a_list():
+    """FastAPI validation errors put a LIST in `detail`; the openai twin has
+    guarded this for a while and the anthropic one did not, so a Python repr
+    could render next to our billing link."""
+    from anton.core.llm.anthropic import _raise_for_status_error as anthropic_mapper
+
+    exc = _anthropic_sdk_error(429, json_body={"detail": [{"loc": ["body"], "msg": "bad"}]})
+    exc.response.request = httpx.Request("POST", "https://api.mindshub.ai/v1/messages")
+    with pytest.raises(Exception) as err:
+        anthropic_mapper(exc, provider="Anthropic", model="sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert "loc" not in str(err.value)
+
+
+def test_a_relayed_gateway_rate_limit_still_earns_the_session_wait():
+    """ENG-1537 must not regress through ENG-1693's gate.
+
+    A velocity limit is not a billing verdict — no CTA, no money — so the
+    origin gate does not apply to it. The first cut of the gate suppressed the
+    header read wholesale, which silently cost a relay or corporate proxy in
+    front of MindsHub its `Retry-After` wait. Nothing caught that: re-gating
+    `_velocity` left the entire suite green.
+    """
+    exc = _byok_error("relay.corp.internal", status=429,
+                      reason="rate_limited", headers_extra={"Retry-After": "42"})
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.code == "rate_limited"
+    assert err.value.session_backoff is True, "the relayed velocity wait was lost"
+    assert err.value.retry_after == 42.0
+
+    # …while the same foreign origin still cannot mint a BILLING verdict.
+    wallet = _byok_error("relay.corp.internal", status=402, reason="wallet_empty")
+    with pytest.raises(Exception) as err2:
+        _raise_for_status_error(wallet, "sonnet")
+    assert not isinstance(err2.value, TokenLimitExceeded)
