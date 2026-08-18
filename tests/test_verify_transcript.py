@@ -186,3 +186,123 @@ def test_system_injections_do_not_consume_budget():
     out = _render_verify_transcript(history, max_convo=3)
     assert "the actual request" in out
     assert "internal note" not in out
+
+
+# ---------------------------------------------------------------------------
+# ENG-1633 — the conversational path used a bare `text[:text_cap]`, so a reply
+# over the cap reached the verifier ending mid-word with nothing saying it had
+# been cut. Every case below fails on that code.
+# ---------------------------------------------------------------------------
+
+
+def test_judged_reply_under_final_cap_reaches_the_verifier_whole():
+    # 3,000 chars: over `text_cap` (2,000), under `final_cap` (12,000). The
+    # reply the verifier is judging must arrive intact — the whole bug is that
+    # it did not. Asserts the CONCLUSION specifically, because that is the
+    # evidence a completion verifier is actually looking for and it is exactly
+    # what a head-slice discards.
+    reply = "OPENING_MARKER. " + "The reconciliation matched every line. " * 74 + "CONCLUSION_MARKER."
+    assert 2000 < len(reply) < 12000
+    history = [
+        {"role": "user", "content": "reconcile the ledger"},
+        {"role": "assistant", "content": reply},
+    ]
+    out = _render_verify_transcript(history)
+    assert reply in out
+    assert "CONCLUSION_MARKER." in out
+    assert "chars elided" not in out
+
+
+def test_oversize_judged_reply_keeps_both_ends_and_marks_the_elision():
+    # Past `final_cap` the reply is clipped, but never silently: the opening,
+    # an explicit marker, and the closing sentence all survive. The last of
+    # those is what stops the verifier reading the clip as the assistant
+    # stopping mid-sentence.
+    reply = "OPENING_MARKER. " + "The reconciliation matched every line. " * 400 + "CONCLUSION_MARKER."
+    assert len(reply) > 12000
+    history = [
+        {"role": "user", "content": "reconcile the ledger"},
+        {"role": "assistant", "content": reply},
+    ]
+    out = _render_verify_transcript(history)
+    assert "OPENING_MARKER." in out
+    assert "chars elided" in out
+    assert "CONCLUSION_MARKER." in out
+    # The rendered reply must not end mid-word — that is the literal trigger
+    # the verifier quoted back ("cuts off mid-sentence").
+    assert out.rstrip().endswith("CONCLUSION_MARKER.")
+
+
+def test_buried_failure_admission_survives_in_the_judged_reply():
+    # The regression guard for the fix that was ALMOST shipped. A flat both-ends
+    # clip at 2,000 elides the middle of this reply, which is where the
+    # assistant admits it could not do step 3 — measured live, that turns the
+    # verdict into a false COMPLETE, i.e. the user is told the email was sent.
+    # Fails on the shipped head-slice too (the admission sits past 2,000).
+    head = "All three done — reconciliation, duplicates, and the summary is on its way.\n\n"
+    filler = "Matched 47 invoices against the bank export, all reconciled. " * 40
+    admission = "\n\nI could NOT send the email — there is no mail tool in this environment.\n\n"
+    appendix = "Appendix: the full register follows, one row per invoice. " * 30
+    reply = head + filler + admission + appendix
+    assert 2000 < len(reply) < 12000
+    history = [
+        {"role": "user", "content": "reconcile, flag duplicates, email finance"},
+        {"role": "assistant", "content": reply},
+    ]
+    out = _render_verify_transcript(history)
+    assert "I could NOT send the email" in out
+
+
+def test_prior_turns_keep_the_smaller_budget():
+    # Only the message under judgment gets `final_cap`. An identically sized
+    # EARLIER reply is still clipped — that asymmetry is what bounds the added
+    # cost to one entry instead of `max_convo` of them.
+    old = "OLD_HEAD. " + "Earlier turn body text goes here. " * 100 + "OLD_TAIL."
+    new = "NEW_HEAD. " + "Current turn body text goes here. " * 100 + "NEW_TAIL."
+    assert 2000 < len(old) < 12000 and 2000 < len(new) < 12000
+    history = [
+        {"role": "user", "content": "first request"},
+        {"role": "assistant", "content": old},
+        {"role": "user", "content": "second request"},
+        {"role": "assistant", "content": new},
+    ]
+    out = _render_verify_transcript(history)
+    assert new in out                 # judged reply: whole
+    assert old not in out             # prior reply: clipped
+    assert "chars elided" in out      # ...but marked, never silently
+    assert "OLD_HEAD." in out and "OLD_TAIL." in out
+
+
+def test_long_user_message_keeps_its_trailing_requirement():
+    # Same bare slice clipped USER messages, so a long pasted request lost its
+    # final requirement and the verifier judged completion against a truncated
+    # ask. Only bites prior turns (the current request is also passed unclipped
+    # in the header), but it is the same line and the same defect.
+    ask = "Please do the following.\n" + "Requirement X must be satisfied. " * 100 + "\nIMPORTANT: finish with a summary."
+    assert len(ask) > 2000
+    history = [
+        {"role": "user", "content": ask},
+        {"role": "assistant", "content": "Working on it."},
+    ]
+    out = _render_verify_transcript(history)
+    assert "IMPORTANT: finish with a summary." in out
+    assert "chars elided" in out
+
+
+def test_no_conversational_text_is_ever_clipped_without_a_marker():
+    # The ticket's headline invariant, asserted directly: for every entry the
+    # renderer shortens, the output says so. A speaker segment that is both
+    # shorter than its source and unmarked is the bug.
+    long_user = "U_HEAD " + "user text " * 400 + "U_TAIL"
+    long_reply = "A_HEAD " + "assistant text " * 2000 + "A_TAIL"
+    history = [
+        {"role": "user", "content": long_user},
+        {"role": "assistant", "content": long_reply},
+    ]
+    out = _render_verify_transcript(history)
+    for source in (long_user, long_reply):
+        if source not in out:
+            assert "chars elided" in out
+    # Neither original survives whole here, so the marker must be present.
+    assert long_user not in out and long_reply not in out
+    assert out.count("chars elided") == 2
