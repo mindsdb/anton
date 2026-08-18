@@ -54,17 +54,20 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   Never point the HTML at that original path: it sits outside `<artifact_path>`, and
   only relative references to files INSIDE that folder are bundled on publish, so the
   artifact would render locally and break once published. Bring the file in instead —
-  one scratchpad cell, branching on the 100KB rule above:
+  one scratchpad cell, branching on the 100KB rule above, into the folder that holds
+  the primary HTML you're writing (`<artifact_path>` for a standalone dashboard,
+  `<artifact_path>/static/` inside a fullstack build):
 
       import base64, mimetypes, os, shutil
       from pathlib import Path
       name = Path(src).name
+      dest_dir = Path(artifact_path)  # or <artifact_path>/static in a fullstack build
       if os.path.getsize(src) < 100_000:
           mime = mimetypes.guess_type(src)[0] or "application/octet-stream"
           b64 = base64.b64encode(Path(src).read_bytes()).decode()
           img_src = f"data:{mime};base64,{b64}"
       else:
-          shutil.copy(src, Path(artifact_path) / name)
+          shutil.copy(src, dest_dir / name)
           img_src = name
 
   A copied sibling MUST be referenced as a literal `src="<name>"` in the HTML. A path
