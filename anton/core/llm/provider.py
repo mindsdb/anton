@@ -574,6 +574,83 @@ _TRANSIENT_ERROR_TYPES = frozenset(
 _WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
 
 
+# Hosts that ARE the MindsHub gateway. Only a response from one of these may
+# select a billing verdict — see :func:`origin_is_known_third_party` (ENG-1693).
+_MINDSHUB_HOSTS = ("mindshub.ai", "mdb.ai")
+
+
+def is_mindshub_host(host: str | None) -> bool:
+    """Whether ``host`` is the MindsHub gateway or one of its subdomains.
+
+    Deliberately NOT the ``"mindshub.ai" in base_url`` substring test used
+    elsewhere in this package for flavour detection and trace-header opt-in.
+    That form is fine for choosing an API dialect and unfit for a trust
+    decision: ``mindshub.ai.evil.com`` satisfies it. This matches the exact
+    domain or a dot-delimited subdomain of it, so an attacker cannot buy a
+    name that merely contains ours.
+    """
+    if not host:
+        return False
+    h = str(host).strip().lower().rstrip(".")
+    return any(h == d or h.endswith("." + d) for d in _MINDSHUB_HOSTS)
+
+
+def response_origin_host(exc: BaseException) -> str | None:
+    """Hostname the failing request was sent to, or ``None`` if unknowable.
+
+    ``httpx.Response.url`` is a property that RAISES when no request is
+    attached, so this cannot be a bare ``getattr`` chain.
+
+    Falls back to the exception's OWN ``request``, which is what makes this
+    work on the mid-stream lane. A mid-stream failure surfaces as a bare
+    ``openai.APIError`` — constructed as ``APIError(message, request, body=…)``,
+    so it has **no** ``.response`` but does carry ``.request`` with the real
+    URL. Reading only ``.response`` made the gate silently inert exactly where
+    an attacker has the freest hand: answering 200 and smuggling the wallet
+    code into an SSE frame is the remote's choice, not a quirk of our plumbing.
+    """
+    resp = getattr(exc, "response", None)
+    try:
+        url = getattr(resp, "url", None) if resp is not None else None
+        if url is None and resp is not None:
+            url = getattr(getattr(resp, "request", None), "url", None)
+        if url is None:
+            url = getattr(getattr(exc, "request", None), "url", None)
+        if url is None:
+            return None
+        host = getattr(url, "host", None)
+        if not host:
+            from urllib.parse import urlparse
+
+            host = urlparse(str(url)).hostname
+    except Exception:
+        return None
+    return str(host).lower() if host else None
+
+
+def origin_is_known_third_party(exc: BaseException) -> bool:
+    """Whether this failure provably came from somewhere that is NOT our gateway.
+
+    Three-valued on purpose, mirroring cowork-server's gate (ENG-1686): it
+    answers "do we KNOW it was someone else", so an unknown origin stays
+    trusted rather than being treated as hostile. A real SDK error always
+    carries its request, so every genuine HTTP response resolves a host;
+    unknown origin means a synthetic or mid-stream error, which no remote
+    server can choose.
+
+    Used to stop a BYOK endpoint selecting a MindsHub billing verdict by
+    echoing our private ``X-MindsHub-Reason`` header or wallet ``code``
+    (ENG-1693). NOT used in :func:`classify_transient`'s wallet check — see
+    the comment there.
+    """
+    return origin_is_known_third_party_host(response_origin_host(exc))
+
+
+def origin_is_known_third_party_host(host: str | None) -> bool:
+    """Host-level form of :func:`origin_is_known_third_party`."""
+    return host is not None and not is_mindshub_host(host)
+
+
 def wallet_denial_code(body: Any) -> str | None:
     """The M3 gate's out-of-credits code carried in an error body, if any.
 
@@ -692,6 +769,15 @@ def classify_transient(
         if etype == "insufficient_quota":
             return None
         if wallet_denial_code(b):
+            # Deliberately NOT origin-gated (ENG-1693), for a plainer reason
+            # than an earlier version of this comment claimed. It said gating
+            # would make a hostile wallet code "retryable"; that is false —
+            # both this branch and the fallthrough reach the same count-based
+            # retry, so retryability is unchanged either way. The real reasons
+            # are that this call site cannot see the origin (it receives only
+            # status + body, never the exception), and that suppressing a
+            # retry is conservative regardless of who sent the code: retrying
+            # a third party's quota denial cannot succeed either.
             return None
         # session_backoff=True, unlike every other request-time status here
         # (ENG-1537). The flag means "should the SESSION spend its budget on
