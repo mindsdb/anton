@@ -233,8 +233,12 @@ def test_oversize_judged_reply_keeps_both_ends_and_marks_the_elision():
     assert out.rstrip().endswith("CONCLUSION_MARKER.")
 
 
-def test_buried_failure_admission_survives_in_the_judged_reply():
-    # The regression guard for the fix that was ALMOST shipped. A flat both-ends
+def test_buried_failure_admission_survives_under_final_cap():
+    # The regression guard for the fix that was ALMOST shipped. Scoped to
+    # UNDER `final_cap` on purpose: above it the middle really is elided and
+    # the admission really is lost — the residual this design accepts, pinned
+    # separately by the oversize case above. This test's job is to red under
+    # both wrong fixes, which it does. A flat both-ends
     # clip at 2,000 elides the middle of this reply, which is where the
     # assistant admits it could not do step 3 — measured live, that turns the
     # verdict into a false COMPLETE, i.e. the user is told the email was sent.
@@ -324,6 +328,31 @@ def test_a_trailing_image_block_does_not_steal_the_judged_budget():
             "content": [{"type": "text", "text": reply}, {"type": "image"}],
         },
     ]
+    out = _render_verify_transcript(history)
+    assert reply in out
+    assert "chars elided" not in out
+
+
+def test_the_judged_reply_survives_a_thread_longer_than_the_convo_budget():
+    # `judged` is an index into the SLICED window, so it has to be computed over
+    # that same window. Computed over the full list it is compared against a
+    # different enumeration, `final_cap` lands on nothing, and the reply drops
+    # back to `text_cap` — the flat-cap behaviour this function exists to avoid.
+    #
+    # Every other case in this file builds ten or fewer conversational entries,
+    # so none of them can see it, and the mutation survived the whole suite.
+    # Long threads are exactly where the oversized replies and the retry loops
+    # live, so this is the population that matters. Caught in review on #364.
+    reply = "LONG_HEAD. " + "The answer body continues here. " * 170 + "LONG_TAIL."
+    assert 2000 < len(reply) < 12000
+    history: list[dict] = []
+    for i in range(8):
+        history.append({"role": "user", "content": f"request number {i}"})
+        history.append({"role": "assistant", "content": f"reply number {i}"})
+    history.append({"role": "user", "content": "final request"})
+    history.append({"role": "assistant", "content": reply})
+    assert len(history) > 10, "must exceed max_convo or this proves nothing"
+
     out = _render_verify_transcript(history)
     assert reply in out
     assert "chars elided" not in out
