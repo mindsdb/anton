@@ -316,6 +316,10 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         "genuine_question": "WAITING",
         "environment_wall": "STUCK",
         "stopped_partway": "INCOMPLETE",
+        # ENG-1633: INCOMPLETE here IS the incident — a complete reply
+        # failed as "truncated" because the TRANSCRIPT was clipped, not
+        # the answer.
+        "long_complete_reply": "COMPLETE",
     }
     for name, verdict in single.items():
         assert by_name[name].acceptable == (verdict,), (
