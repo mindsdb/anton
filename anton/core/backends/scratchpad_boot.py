@@ -91,6 +91,17 @@ def _inject_helper(name: str, fn) -> None:
 # rebind to something picklable is retried rather than excluded forever.
 _UNPICKLABLE: dict = {}
 
+# Byte marker of dill's file-handle reconstructor inside a pickle stream. A pickled
+# file object is stored as a CALL to `dill._dill._create_filehandle(name, mode, …)`,
+# and that call runs `open(name, mode)` at LOAD time — for a `'w'` handle (even an
+# already-closed one, e.g. `f` surviving a `with open(path, 'w') as f:` block) the
+# open() itself truncates the file on disk. In cloud mode the snapshot is reloaded on
+# every turn, so one leftover handle wiped artifact files turn after turn (ENG-1726).
+# Scanning the serialised bytes instead of isinstance-checking the value catches
+# handles nested inside containers too, and leaves harmless io.StringIO/io.BytesIO
+# (which pickle by contents, not by reconstructor) alone.
+_FILEHANDLE_MARKER = b"_create_filehandle"
+
 # Persistence notes for the next cell's `logs`. Deliberately NOT `error` — a snapshot
 # problem must not make the cell look failed, or it would feed the consecutive-error
 # circuit breaker and the resilience nudge.
@@ -169,6 +180,12 @@ def _decode_values(blobs: dict) -> tuple[dict, dict]:
     ns: dict = {}
     dropped: dict = {}
     for name, blob in blobs.items():
+        if _FILEHANDLE_MARKER in blob:
+            # Snapshots written before ENG-1726 can still hold pickled file handles;
+            # materialising one re-opens the file in its original mode, truncating it
+            # when that mode is 'w'. Refuse to load rather than damage workspace files.
+            dropped[name] = "file handle: restoring would re-open (and truncate) the file"
+            continue
         try:
             ns[name] = dill.loads(blob)
         except Exception as exc:
@@ -315,6 +332,14 @@ def _encode_values(payload: dict) -> tuple[dict, list]:
             _UNPICKLABLE[key] = id(value)
             dropped.append(key)
             continue
+        if _FILEHANDLE_MARKER in blob:
+            # File handles pickle without error but must never be persisted: loading
+            # them re-runs open() and truncates 'w'-mode files (ENG-1726). Registered
+            # in _UNPICKLABLE like any live resource, so the warning fires once and a
+            # rebind to real data is retried.
+            _UNPICKLABLE[key] = id(value)
+            dropped.append(key)
+            continue
         total += len(blob)
         if total > SESSION_MAX_BYTES:
             raise _TooBig()
@@ -370,8 +395,8 @@ def _dump_namespace(ns: dict) -> str | None:
             "will be undefined if this scratchpad restarts: "
             + ", ".join(sorted(dropped))
             + ". Objects holding live resources (database connections, sockets, "
-            "generators) cannot be saved — recreate them rather than relying on them "
-            "persisting."
+            "generators, open or closed file handles) cannot be saved — recreate "
+            "them rather than relying on them persisting."
         )
     return None
 
