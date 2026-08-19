@@ -201,3 +201,76 @@ class TestScratchpadOutcomes:
         )
         assert isinstance(outcome, ToolOutcome)
         assert outcome.ok is True
+
+
+def _install_session(pad) -> SimpleNamespace:
+    return SimpleNamespace(
+        _acc_observe=None,
+        _agent_scratchpad_names=set(),
+        _scratchpads=MagicMock(
+            agent_pads=MagicMock(return_value=set()),
+            get_or_create=AsyncMock(return_value=pad),
+        ),
+        _scratchpad_challenged=False,
+        _settings=SimpleNamespace(analytics_enabled=True),
+    )
+
+
+class TestPackageInstallTelemetry:
+    @pytest.mark.asyncio
+    async def test_successful_install_sends_package_name_only(self, monkeypatch):
+        # Visibility into what gets installed — package name, never the cell.
+        sent = []
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **extra: sent.append((action, extra)),
+        )
+        pad = SimpleNamespace(
+            install_packages=AsyncMock(return_value="Successfully installed numpy")
+        )
+        result = await prepare_scratchpad_exec(
+            _install_session(pad),
+            {
+                "action": "exec",
+                "name": "main",
+                "code": "import numpy; print('secret sauce')",
+                "packages": ["numpy"],
+            },
+        )
+        assert not isinstance(result, ToolOutcome)
+        assert sent == [("scratchpad_package_installed", {"package": "numpy"})]
+
+    @pytest.mark.asyncio
+    async def test_already_installed_sends_no_event(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **extra: sent.append((action, extra)),
+        )
+        pad = SimpleNamespace(
+            install_packages=AsyncMock(return_value="All packages already installed.")
+        )
+        await prepare_scratchpad_exec(
+            _install_session(pad),
+            {"action": "exec", "name": "main", "code": "import numpy", "packages": ["numpy"]},
+        )
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_install_action_also_sends_the_event(self, monkeypatch):
+        from anton.core.tools.tool_handlers import handle_scratchpad
+
+        sent = []
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **extra: sent.append((action, extra)),
+        )
+        pad = SimpleNamespace(
+            install_packages=AsyncMock(return_value="Successfully installed cowsay")
+        )
+        session = _install_session(pad)
+        result = await handle_scratchpad(
+            session, {"action": "install", "name": "main", "packages": ["cowsay"]}
+        )
+        assert result == "Successfully installed cowsay"
+        assert sent == [("scratchpad_package_installed", {"package": "cowsay"})]

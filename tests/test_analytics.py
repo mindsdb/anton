@@ -178,6 +178,20 @@ def test_turn_completed_goes_to_posthog_not_the_collector(monkeypatch):
     assert body["event"] == "turn_completed"
 
 
+def test_scratchpad_package_installed_goes_to_posthog_not_the_collector(monkeypatch):
+    """The collector allowlists only five property names — 'package' would be
+    dropped there, so this event must take the direct path to survive."""
+    _clear_ci(monkeypatch)
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(_PosthogSettings(), "scratchpad_package_installed", package="numpy")
+
+    assert len(captured) == 1
+    _, body = captured[0]
+    assert body["event"] == "scratchpad_package_installed"
+    assert body["properties"]["package"] == "numpy"
+
+
 def test_unregistered_events_still_use_the_collector(monkeypatch):
     """Scope guard. Only names in `_POSTHOG_EVENTS` move; nothing else does.
 
