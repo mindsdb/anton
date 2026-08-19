@@ -437,6 +437,19 @@ _CONTEXT_WINDOWS: list[tuple[str, int]] = [
 _DEFAULT_CONTEXT_WINDOW = 128_000
 
 
+def context_window(model: str) -> int:
+    """Return ``model``'s context window in tokens.
+
+    First match wins — the table is ordered specific-first. An unknown model
+    gets the conservative default rather than an error: a low guess only
+    understates pressure, raising would break every turn on a newer model id.
+    """
+    for prefix, size in _CONTEXT_WINDOWS:
+        if model.startswith(prefix):
+            return size
+    return _DEFAULT_CONTEXT_WINDOW
+
+
 def compute_context_pressure(model: str, input_tokens: int | None) -> float:
     """Return input_tokens / context_window as a 0.0–1.0 float.
 
@@ -447,12 +460,7 @@ def compute_context_pressure(model: str, input_tokens: int | None) -> float:
     """
     if not input_tokens:  # None or 0 → no measurable pressure
         return 0.0
-    window = _DEFAULT_CONTEXT_WINDOW
-    for prefix, size in _CONTEXT_WINDOWS:
-        if model.startswith(prefix):
-            window = size
-            break
-    return min(input_tokens / window, 1.0)
+    return min(input_tokens / context_window(model), 1.0)
 
 
 class ContextOverflowError(Exception):

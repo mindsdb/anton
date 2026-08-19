@@ -32,6 +32,9 @@ def make_mock_llm() -> AsyncMock:
         return_value=ProviderConnectionInfo(provider="anthropic", api_key="test")
     )
     mock.coding_model = "claude-sonnet-4-6"
+    # The real client defaults the router role to the coding model; mirror it so
+    # window-derived budgets read a real model id, not a Mock.
+    mock.router_model = "claude-sonnet-4-6"
     mock.planning_provider = MagicMock()
     # Default test posture: no native web tools — fallback tools also off
     # unless a specific test configures otherwise via ChatSessionConfig.

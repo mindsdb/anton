@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from anton.core.session import ChatSession, ChatSessionConfig, _COMPACTED_MARKER
+from anton.core.session import (
+    ChatSession,
+    ChatSessionConfig,
+    _COMPACTED_MARKER,
+    _MIN_SUMMARY_INPUT_CHARS,
+    _summarizer_input_budget,
+)
 from anton.core.llm.provider import LLMResponse, Usage
 from tests.conftest import make_mock_llm
 
@@ -90,6 +96,42 @@ class TestLastCompaction:
         session.hard_truncate_history()
 
         assert session.last_compaction is None
+
+
+class TestSummarizerInputBudget:
+    """ENG-1291: the summariser's input budget and which end survives it."""
+
+    async def test_newest_folded_turn_reaches_the_summarizer(self):
+        """A conversation this size fits the summariser's window whole, so no
+        folded turn may be dropped — the old 8,000-char head-cut kept turn 0 and
+        discarded turn 23, which is where current state lives."""
+        history = [
+            _msg("user" if i % 2 == 0 else "assistant", f"turn-{i} " + "x" * 1200)
+            for i in range(40)
+        ]
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nx"))
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        assert await session._summarize_history() is True
+
+        sent = mock_llm.summarize.await_args.kwargs["messages"][0]["content"]
+        # compacted_count = min(int(40*0.6), 40-4) = 24 → turns 0..23 are folded.
+        assert "turn-0 " in sent
+        assert "turn-23 " in sent
+
+    def test_budget_scales_with_the_window(self):
+        # 200k-token window vs the 128k default for an unknown id.
+        assert _summarizer_input_budget("claude-sonnet-4-6") > _summarizer_input_budget("mystery-1")
+
+    def test_carried_forward_summary_shares_the_budget(self):
+        full = _summarizer_input_budget("claude-sonnet-4-6")
+        assert _summarizer_input_budget("claude-sonnet-4-6", reserved=5000) == full - 5000
+
+    def test_never_budgets_below_the_historical_cap(self):
+        """An oversized carried-forward summary must not squeeze the budget
+        below what the old flat cap already allowed."""
+        assert _summarizer_input_budget("mystery-1", reserved=10**9) == _MIN_SUMMARY_INPUT_CHARS
 
 
 class TestSkipWhenLittleNewMaterial:

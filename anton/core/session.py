@@ -54,6 +54,7 @@ from anton.core.llm.provider import (
     TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
+    context_window,
     damaged_tool_call_result,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
@@ -563,6 +564,29 @@ def _clip_keep_cause(text: str, cap: int) -> str:
     if len(text) <= cap + len(marker):
         return text
     return f"{text[:head]}{marker}{text[-tail:]}"
+
+
+# 25% of a 200k window is ~12x the largest input measured in production (max
+# 17,078 chars), so real conversations pass whole and the clip is a backstop.
+# The old flat 8,000 sat below the median and fired on 81% of compactions.
+_SUMMARY_INPUT_WINDOW_SHARE = 0.25
+# ponytail: rule of thumb, not a tokenizer — only sizes a backstop.
+_CHARS_PER_TOKEN = 4
+# Floor: never budget below the old flat cap, whatever the window.
+_MIN_SUMMARY_INPUT_CHARS = 8_000
+
+
+def _summarizer_input_budget(model: str, reserved: int = 0) -> int:
+    """Char budget for the old turns handed to the history summariser.
+
+    Compaction fires at 70% pressure on the coding model, and the summariser's
+    router role defaults to that same model — so the folded turns already fit
+    its window, and a routine clip only discards readable material.
+
+    ``reserved`` is text sharing the request (the carried-forward summary).
+    """
+    window_chars = int(context_window(model) * _SUMMARY_INPUT_WINDOW_SHARE) * _CHARS_PER_TOKEN
+    return max(window_chars - reserved, _MIN_SUMMARY_INPUT_CHARS)
 
 
 def _render_tool_result_content(content, cap: int) -> str:
@@ -1980,25 +2004,41 @@ class ChatSession:
                 if content.lstrip().startswith(_COMPACTED_MARKER):
                     prior_summary = content
                     continue
-                lines.append(f"[{role}]: {content[:2000]}")
+                lines.append(f"[{role}]: {_clip_keep_cause(content, 2000)}")
             elif isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "text":
-                            lines.append(f"[{role}]: {block['text'][:1000]}")
+                            lines.append(f"[{role}]: {_clip_keep_cause(block['text'], 1000)}")
                         elif block.get("type") == "tool_use":
                             lines.append(
-                                f"[{role}/tool_use]: {block.get('name', '')}({str(block.get('input', ''))[:500]})"
+                                f"[{role}/tool_use]: {block.get('name', '')}"
+                                f"({_clip_keep_cause(str(block.get('input', '')), 500)})"
                             )
                         elif block.get("type") == "tool_result":
                             lines.append(
-                                f"[tool_result]: {str(block.get('content', ''))[:500]}"
+                                f"[tool_result]: "
+                                f"{_clip_keep_cause(str(block.get('content', '')), 500)}"
                             )
 
         old_text = "\n".join(lines)
-        # Cap at ~8000 chars to avoid overloading the summarizer
-        if len(old_text) > 8000:
-            old_text = old_text[:8000] + "\n... (truncated)"
+        # Budgeted off the summariser's own window, clipped tail-biased, logged:
+        # - `lines` is chronological, so `[:N]` dropped the newest folded turns —
+        #   what `## Active state` / `## Blocked` / `## Remaining` are built from
+        # - folded turns are *replaced*, so a clip loses them permanently
+        # - a summary built from part of the turns must be visible as such
+        budget = _summarizer_input_budget(self._llm.router_model, len(prior_summary))
+        clipped = _clip_keep_cause(old_text, budget)
+        if clipped != old_text:
+            logger.warning(
+                "history summarization: input clipped %d -> %d chars "
+                "(budget %d, %d turns folded)",
+                len(old_text),
+                len(clipped),
+                budget,
+                len(old_turns),
+            )
+            old_text = clipped
 
         if prior_summary:
             user_content = (
