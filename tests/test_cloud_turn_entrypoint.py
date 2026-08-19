@@ -322,6 +322,49 @@ def test_failed_turn_emits_no_memory():
     assert kinds == ["turn_failed"]
 
 
+_DRAFT_MD = "---\nname: my-skill\ndescription: d\n---\nsteps"
+
+
+class _DraftSession(_FakeSession):
+    """A session that writes a skill draft mid-turn, like the tool would."""
+
+    def __init__(self, drafts_root, *, write=True, **kwargs):
+        super().__init__(**kwargs)
+        self._skill_drafts_root = drafts_root
+        self._skill_drafts_before = {}
+        self._write = write
+
+    async def turn_stream(self, user_input, **kwargs):
+        if self._write:
+            folder = self._skill_drafts_root / "my-skill"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "SKILL.md").write_text(_DRAFT_MD)
+        async for event in super().turn_stream(user_input, **kwargs):
+            yield event
+
+
+def test_skill_draft_emitted_before_the_terminal_event(tmp_path):
+    """Same reason as memory: cowork stops reading at the terminal reply."""
+    events = _drive(_DraftSession(tmp_path, deltas=["ok"]))
+    assert events == [
+        {"kind": "delta", "text": "ok"},
+        {"kind": "skill", "entries": [{"slug": "my-skill", "files": {"SKILL.md": _DRAFT_MD}}]},
+        {"kind": "turn_completed"},
+    ]
+
+
+def test_no_skill_event_when_no_draft_was_built(tmp_path):
+    events = _drive(_DraftSession(tmp_path, write=False, deltas=["ok"]))
+    assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
+
+
+def test_failed_turn_emits_no_skill_draft(tmp_path):
+    """A turn that raised has no trustworthy result — same rule as memory."""
+    session = _DraftSession(tmp_path, deltas=["ok"])
+    session._raise = RuntimeError("boom")
+    assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
+
+
 def test_untracked_late_write_is_not_awaited():
     """Settling is explicit: only registered writes are awaited, so the entrypoint
     never blocks on unrelated live tasks (scratchpad readers, the heartbeat)."""

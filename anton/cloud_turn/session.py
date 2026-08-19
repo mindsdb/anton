@@ -18,6 +18,7 @@ Safety posture (all internal — nothing here is on the wire):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import tempfile
@@ -25,6 +26,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
     from anton.core.session import ChatSession
@@ -52,6 +54,11 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # some builtins, so stripping the tool would point the model at a
         # missing tool. Only writes a stats counter in the discarded staging dir.
         "recall_skill",
+        # Safe to list only because `skill_drafts_root` is always set below —
+        # core registers the tool with one, and an allowlist name matching no
+        # tool is fatal. Writes only into this conversation's drafts dir; the
+        # tenant's skill store is never touched from the pod.
+        "create_skill_draft",
     }
 )
 
@@ -154,6 +161,98 @@ def _stage_skills(skills: dict | None) -> Path:
     return dest
 
 
+#: Per-file cap on a reported draft. Skills are small text, so the cap only
+#: catches a mispackaged blob before it reaches the reply stream. An oversized
+#: SKILL.md drops the whole draft: a truncated procedure is worse than none.
+_DRAFT_FILE_MAX = 200_000
+#: Drafts reported per turn. A prompt-confused agent looping over
+#: `create_skill_draft` must not flood the wire; the excess is logged, not silent.
+_MAX_DRAFTS_PER_TURN = 20
+#: Whole-draft budget. The per-file cap alone bounds nothing: a skill may carry
+#: any number of siblings, so 20 drafts x N files x 200 KB is unbounded on the
+#: reply stream. SKILL.md is read first and always fits, so exhausting the budget
+#: costs siblings, never the procedure itself.
+_DRAFT_TOTAL_MAX = 1_000_000
+
+
+def _draft_files(folder: Path) -> dict[str, str] | None:
+    """One draft folder as ``{filename: text}``, or None to skip it.
+
+    Top-level text files only, mirroring the desktop draft card (skills are flat
+    text). The drafts path is predictable and cell code can write anywhere in
+    the workspace, so symlinks and anything resolving outside `folder` go.
+    """
+    if folder.is_symlink() or not (folder / SKILL_FILE).is_file():
+        return None
+    resolved = folder.resolve()
+    files: dict[str, str] = {}
+    budget = _DRAFT_TOTAL_MAX
+    # SKILL.md first so the procedure is never the thing the budget squeezes out,
+    # then by name — sorting on the flag alone is stable, so siblings would keep
+    # readdir order and the budget would drop different files on different hosts.
+    for child in sorted(folder.iterdir(), key=lambda p: (p.name != SKILL_FILE, p.name)):
+        if child.is_symlink() or not child.is_file():
+            continue
+        if child.resolve().parent != resolved:
+            logger.warning("skill drafts: %r skipping out-of-tree file %r", folder.name, child.name)
+            continue
+        try:
+            text = child.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            logger.warning("skill drafts: %r skipping unreadable file %r", folder.name, child.name)
+            continue
+        size = len(text.encode("utf-8", "replace"))
+        if size > _DRAFT_FILE_MAX:
+            if child.name == SKILL_FILE:
+                logger.warning("skill drafts: dropping %r (SKILL.md over %d bytes)",
+                               folder.name, _DRAFT_FILE_MAX)
+                return None
+            logger.warning("skill drafts: %r skipping oversized file %r", folder.name, child.name)
+            continue
+        if size > budget:
+            logger.warning("skill drafts: %r over the %d-byte draft budget, dropping %r "
+                           "and every later sibling", folder.name, _DRAFT_TOTAL_MAX, child.name)
+            break
+        budget -= size
+        files[child.name] = text
+    # A draft is its SKILL.md — siblings alone are a folder, not a procedure.
+    # Checked on the collected files, not on disk: SKILL.md can exist and still
+    # be dropped above for being oversized.
+    return files if SKILL_FILE in files else None
+
+
+def _snapshot_skill_drafts(root: Path) -> dict[str, str]:
+    """``slug -> content hash`` for every staged draft, for the end-of-turn diff.
+
+    Keyed on content, not just the folder name: drafts live on the workspace and
+    outlive the turn, so a draft refined in place has to re-report and not only
+    one appearing for the first time. Hashes every top-level file, so a
+    sibling-only edit counts as a change too.
+    """
+    if not root.is_dir():
+        return {}
+    snapshot: dict[str, str] = {}
+    for child in sorted(root.iterdir()):
+        if child.is_symlink() or not child.is_dir():
+            continue
+        digest = hashlib.sha256()
+        for f in sorted(child.iterdir()):
+            if f.is_symlink() or not f.is_file():
+                continue
+            # Length-prefixed: concatenating name and body unseparated makes
+            # {"ab": "c"} and {"a": "bc"} hash the same, so a rename plus a
+            # compensating edit would read as "unchanged".
+            name = f.name.encode("utf-8", "replace")
+            digest.update(f"{len(name)}:".encode())
+            digest.update(name)
+            with contextlib.suppress(OSError):
+                body = f.read_bytes()
+                digest.update(f"{len(body)}:".encode())
+                digest.update(body)
+        snapshot[child.name] = digest.hexdigest()
+    return snapshot
+
+
 def _write_memory_slots(dest: Path, slots: dict | None) -> None:
     """Write `slots` into `dest`, clearing any this turn didn't send — the dir is
     reused across turns, so a server-side deletion must not linger."""
@@ -248,6 +347,56 @@ def drain_pending_memory(session) -> list[dict]:
     drained = list(pending)
     pending.clear()
     return drained
+
+
+def drain_pending_skills(session) -> list[dict]:
+    """Skill drafts this turn created or changed, as ``[{"slug", "files"}]``.
+
+    Raw file text rather than a parsed skill: cowork is the trust boundary and
+    re-validates slugs and paths. Sizes are bounded here, at the producer, since
+    the reply stream is what an unbounded payload would flood.
+
+    The baseline advances only for drafts actually returned, so a second call
+    reports nothing (the folder survives the turn, and re-reporting an untouched
+    draft would re-raise a card the user already dismissed) while anything the
+    caps held back stays pending and goes out next turn instead of being
+    silently dropped forever. Best-effort: a lost draft must not cost the turn
+    its reply.
+    """
+    root = getattr(session, "_skill_drafts_root", None)
+    if not root:
+        return []
+    before = getattr(session, "_skill_drafts_before", None) or {}
+    try:
+        after = _snapshot_skill_drafts(Path(root))
+    except OSError:
+        logger.warning("skill drafts: could not diff the staging dir", exc_info=True)
+        return []
+    changed = sorted(slug for slug, digest in after.items() if before.get(slug) != digest)
+    this_turn = changed[:_MAX_DRAFTS_PER_TURN]
+    if len(changed) > len(this_turn):
+        logger.warning("skill drafts: %d changed, reporting %d this turn, the rest next",
+                       len(changed), len(this_turn))
+
+    entries: list[dict] = []
+    delivered: dict[str, str] = {}
+    for slug in this_turn:
+        try:
+            files = _draft_files(Path(root) / slug)
+        except OSError:
+            logger.warning("skill drafts: could not read %r", slug, exc_info=True)
+            continue
+        if files is not None:
+            entries.append({"slug": slug, "files": files})
+            delivered[slug] = after[slug]
+
+    # Unchanged drafts keep their hash; changed ones advance ONLY if they went
+    # out. A draft held back by the per-turn cap, or unreadable this time, keeps
+    # its old hash and so is still "changed" next turn.
+    session._skill_drafts_before = {
+        slug: digest for slug, digest in after.items() if slug not in changed
+    } | delivered
+    return entries
 
 
 def resolve_trusted_workspace_path() -> Path:
@@ -412,6 +561,13 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     # outlives the turn and cells could read anything left under it. Builtins
     # resolve via SkillStore's package root regardless.
     settings.skills_root = _stage_skills(request.skills)
+    # Skills the agent builds stage here instead of the store, and the entrypoint
+    # reports them for cowork to surface. ON the workspace, unlike everything
+    # staged above — editing a skill spans turns, and the workspace PVC is the
+    # only per-conversation storage that outlives the pod. Same layout as the
+    # desktop harness (`<project>/.anton/skill_drafts`).
+    settings.skill_drafts_root = base / settings.memory_dir / "skill_drafts"
+    settings.skill_drafts_root.mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(base, settings=settings)
     workspace.initialize()
@@ -445,6 +601,10 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     )
 
     session = ChatSession(config)
+    # Baseline for `drain_pending_skills`, taken before the turn runs. Drafts
+    # from earlier turns are already on the workspace, so without this every
+    # turn would re-report all of them.
+    session._skill_drafts_before = _snapshot_skill_drafts(settings.skill_drafts_root)
     logger.info(
         "cloud session built conversation=%s workspace=%s tools=%s",
         request.conversation_id, base, sorted(CLOUD_TOOL_ALLOWLIST),
