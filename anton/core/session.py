@@ -63,6 +63,7 @@ from anton.core.llm.thalamus import (
     gate_turn,
 )
 from anton.core.llm.tracing import (
+    VALID_SURFACES,
     TraceContext,
     reset_trace_context,
     set_trace_context,
@@ -790,6 +791,36 @@ def _build_verify_request(
     return verifier_system, verify_messages
 
 
+def _validated_surface(value: str | None) -> str | None:
+    """Keep only a recognised surface; drop anything else with a warning.
+
+    Hosts supply this string, so it is treated as untrusted (ENG-1459). An
+    unrecognised value is dropped rather than forwarded for two reasons: it
+    would appear as a junk row in every surface breakdown, and a *wrong*
+    surface is worse than an absent one — an absent one is visibly unknown,
+    while a wrong one silently moves a turn into the population it is being
+    compared against.
+
+    Never raises. Telemetry must not be able to fail a turn.
+    """
+    if value is None:
+        return None
+    try:
+        cleaned = str(value).strip().lower()
+    except Exception:  # pragma: no cover - defensive: a pathological __str__
+        return None
+    if not cleaned:
+        return None
+    if cleaned not in VALID_SURFACES:
+        logger.warning(
+            "ignoring unrecognised surface %r (expected one of %s)",
+            value,
+            sorted(VALID_SURFACES),
+        )
+        return None
+    return cleaned
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -819,8 +850,8 @@ class ChatSessionConfig:
     # The values actually in use, which are NOT what this field's name suggests:
     #   "cli"     — anton's own interactive chat (chat_session.py, chat.py)
     #   "anton"   — cowork-server, which passes its *agent harness* id here;
-    #               desktop and hosted web are indistinguishable, both send
-    #               this (ENG-1459 is where that gets split)
+    #               this — see `surface` below, which is how they are now told
+    #               apart (ENG-1459)
     #   "cloud"   — the one-turn-per-pod cloud path
     #   None      — a host that did not identify itself
     #
@@ -828,6 +859,18 @@ class ChatSessionConfig:
     # unset, so "" meant both "CLI" and "unidentified" and nothing could tell
     # them apart.
     harness: str | None = None
+    # WHERE the user was, as opposed to which agent ran: one of
+    # `anton.core.llm.tracing.VALID_SURFACES` (`desktop` / `web` / `cli`), or
+    # None when the host did not say. Surfaced on langfuse traces as the
+    # `surface:<value>` tag plus a `surface` metadata key (ENG-1459).
+    #
+    # Hosts that serve more than one surface must resolve it themselves —
+    # cowork-server derives `web` from org tenancy and `desktop` otherwise,
+    # because only the host knows how it was deployed. An unrecognised value is
+    # dropped with a warning rather than forwarded: it would become a junk row
+    # in every surface breakdown, and a wrong surface is worse than an absent
+    # one.
+    surface: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
     # assumptions inline instead of stopping to ask ("do first, ask later").
@@ -986,6 +1029,7 @@ class ChatSession:
         self._history_store = config.history_store
         self._session_id = config.session_id
         self._harness = config.harness
+        self._surface = _validated_surface(config.surface)
         # Per-turn token cost books (ENG-1288). Created and armed at each
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
@@ -3494,6 +3538,7 @@ class ChatSession:
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                surface=self._surface,
                 tags=tuple(trace_tags or ()),
                 metadata=trace_metadata or None,
             )
