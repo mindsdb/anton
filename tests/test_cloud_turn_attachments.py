@@ -1,13 +1,14 @@
-import io
+import base64
+
+import pytest
 
 from anton.cloud_turn import session as cloud_session
 
-
-def _real_png_bytes() -> bytes:
-    from PIL import Image
-    buf = io.BytesIO()
-    Image.new("RGB", (2, 2), (10, 20, 30)).save(buf, format="PNG")
-    return buf.getvalue()
+# Valid PNG signature + filler. The cloud image path only SNIFFS magic bytes
+# (it never decodes PNG/JPEG/etc), so a real decodable image isn't needed and
+# these tests don't depend on Pillow — which is an optional dep, absent in CI.
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+_FAKE_BMP = b"BM" + b"\x00" * 64          # sniffs as BMP; only a real convert needs Pillow
 
 
 def test_no_attachments_returns_plain_string(tmp_path):
@@ -17,7 +18,7 @@ def test_no_attachments_returns_plain_string(tmp_path):
 def test_image_attachment_becomes_a_vision_block(tmp_path):
     att = tmp_path / "attachments" / "fileid1"
     att.mkdir(parents=True)
-    (att / "shot.png").write_bytes(_real_png_bytes())
+    (att / "shot.png").write_bytes(_PNG)
 
     content = cloud_session.build_turn_content(tmp_path, "do you see the screenshot?")
     assert isinstance(content, list)
@@ -43,23 +44,23 @@ def test_non_image_is_listed_by_path_not_inlined(tmp_path):
 
 def test_oversized_image_is_skipped_not_inlined(tmp_path, monkeypatch):
     import anton.utils.clipboard as clip
-    monkeypatch.setattr(clip, "MAX_IMAGE_BYTES", 8)     # any real image exceeds this
+    monkeypatch.setattr(clip, "MAX_IMAGE_BYTES", 8)     # the fixture exceeds this
     att = tmp_path / "attachments" / "big"
     att.mkdir(parents=True)
-    (att / "huge.png").write_bytes(_real_png_bytes())
+    (att / "huge.png").write_bytes(_PNG)
 
     content = cloud_session.build_turn_content(tmp_path, "look")
     assert isinstance(content, list)
-    assert not [b for b in content if b["type"] == "image"]   # too large → no vision block
+    assert not [b for b in content if b["type"] == "image"]     # too large → no vision block
     assert "could not be shown" in next(b for b in content if b["type"] == "text")["text"]
 
 
 def test_corrupt_image_degrades_to_listing_not_a_broken_block(tmp_path):
-    """A mislabeled/corrupt .png must NOT be inlined (the model would reject it
-    and fail every turn) — it degrades to a path listing line."""
+    """A mislabeled/corrupt .png (no valid signature) must NOT be inlined — the
+    model would reject it and fail the turn — it degrades to a path listing."""
     att = tmp_path / "attachments" / "bad"
     att.mkdir(parents=True)
-    (att / "broken.png").write_bytes(b"\x89PNG\r\n not really a png")
+    (att / "broken.png").write_bytes(b"\x89PNG\r\n not really a png")   # partial sig only
 
     content = cloud_session.build_turn_content(tmp_path, "look")
     assert isinstance(content, list)
@@ -70,7 +71,7 @@ def test_corrupt_image_degrades_to_listing_not_a_broken_block(tmp_path):
 def test_one_bad_image_does_not_drop_the_good_ones(tmp_path):
     att = tmp_path / "attachments"
     (att / "good").mkdir(parents=True)
-    (att / "good" / "ok.png").write_bytes(_real_png_bytes())
+    (att / "good" / "ok.png").write_bytes(_PNG)
     (att / "bad").mkdir(parents=True)
     (att / "bad" / "broken.png").write_bytes(b"nope")
 
@@ -79,37 +80,13 @@ def test_one_bad_image_does_not_drop_the_good_ones(tmp_path):
     assert len(images) == 1        # the good one survives the bad one
 
 
-def _real_bmp_bytes() -> bytes:
-    from PIL import Image
-    buf = io.BytesIO()
-    Image.new("RGB", (2, 2), (1, 2, 3)).save(buf, format="BMP")
-    return buf.getvalue()
-
-
-def test_bmp_bytes_named_png_are_not_shipped_as_png(tmp_path):
-    """Format comes from content, not extension: a BMP named .png must be
-    converted (via Pillow, present here), never shipped as raw BMP labeled png."""
-    att = tmp_path / "attachments" / "id"
-    att.mkdir(parents=True)
-    (att / "scan.png").write_bytes(_real_bmp_bytes())   # BMP bytes, .png name
-
-    content = cloud_session.build_turn_content(tmp_path, "look")
-    images = [b for b in content if b["type"] == "image"]
-    assert len(images) == 1
-    assert images[0]["source"]["media_type"] == "image/png"       # converted, correct type
-    import base64
-    assert base64.standard_b64decode(images[0]["source"]["data"]).startswith(b"\x89PNG")  # real PNG bytes
-
-
 def test_png_works_without_pillow_bmp_degrades(tmp_path, monkeypatch):
     """Pillow is optional in the prod image. PNG/JPEG/etc must inline with no
     Pillow; a BMP (needs Pillow to convert) degrades to a listing line."""
-    png = _real_png_bytes()
-    bmp = _real_bmp_bytes()
     att = tmp_path / "attachments" / "id"
     att.mkdir(parents=True)
-    (att / "a.png").write_bytes(png)
-    (att / "b.bmp").write_bytes(bmp)
+    (att / "a.png").write_bytes(_PNG)
+    (att / "b.bmp").write_bytes(_FAKE_BMP)
 
     import builtins
     real_import = builtins.__import__
@@ -126,3 +103,22 @@ def test_png_works_without_pillow_bmp_degrades(tmp_path, monkeypatch):
     assert images[0]["source"]["media_type"] == "image/png"
     text = next(b for b in content if b["type"] == "text")["text"]
     assert "b.bmp" in text                                         # BMP degraded to listing
+
+
+def test_bmp_bytes_named_png_are_converted_not_shipped_as_raw(tmp_path):
+    """Format is by content, not extension: real BMP bytes named .png must be
+    converted to PNG (needs Pillow), never shipped as raw BMP labeled image/png."""
+    Image = pytest.importorskip("PIL.Image")
+    import io
+    buf = io.BytesIO()
+    Image.new("RGB", (2, 2), (1, 2, 3)).save(buf, format="BMP")
+
+    att = tmp_path / "attachments" / "id"
+    att.mkdir(parents=True)
+    (att / "scan.png").write_bytes(buf.getvalue())     # BMP bytes, .png name
+
+    content = cloud_session.build_turn_content(tmp_path, "look")
+    images = [b for b in content if b["type"] == "image"]
+    assert len(images) == 1
+    assert images[0]["source"]["media_type"] == "image/png"
+    assert base64.standard_b64decode(images[0]["source"]["data"]).startswith(b"\x89PNG")
