@@ -24,7 +24,12 @@ import sys
 import time
 
 from anton.cloud_turn.contract import TurnRequestV1
-from anton.cloud_turn.session import build_cloud_chat_session, drain_pending_memory
+from anton.cloud_turn.session import (
+    build_cloud_chat_session,
+    build_turn_content,
+    drain_pending_memory,
+    resolve_trusted_workspace_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +186,15 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     try:
         req = TurnRequestV1.from_json(raw_line)
         session = builder(req)
+        # Fold in any attachments cowork-server staged into the workspace (read
+        # off the mount, so image bytes never crossed the stdin wire). Plain
+        # string when there are none. Never fail the turn over this — degrade to
+        # the plain input if the workspace can't be resolved or a file is bad.
+        try:
+            turn_content = build_turn_content(resolve_trusted_workspace_path(), req.input)
+        except Exception:
+            logger.warning("cloud turn: attachment augmentation failed; using plain input", exc_info=True)
+            turn_content = req.input
         # Tool-call args accumulate here and ship once on tool_end, so the
         # wire carries one event per call instead of one per args token.
         # Accumulation stops at the wire cap — a runaway call can't grow
@@ -189,7 +203,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         tool_args_len: dict[str, int] = {}
         seen_tool_progress: set[str] = set()
         last_progress_wire = 0.0
-        async for event in session.turn_stream(req.input):
+        async for event in session.turn_stream(turn_content):
             if isinstance(event, StreamTextDelta):
                 emit({"kind": "delta", "text": event.text or ""})
             # Step events go on the wire for cowork's thinking/steps UI;

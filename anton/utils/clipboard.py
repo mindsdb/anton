@@ -224,6 +224,35 @@ def _media_type_for(fmt: str) -> str:
     return "image/png"
 
 
+def image_content_block(raw: bytes, fmt: str, *, oversize: str = "raise") -> dict | None:
+    """A base64 image content block from raw bytes, or None.
+
+    Converts BMP→PNG (the model APIs reject BMP). Over ``MAX_IMAGE_BYTES``:
+    raises ``ImageTooLargeError`` when ``oversize="raise"`` (interactive paths
+    surface it to the user), or returns None when ``oversize="skip"`` (batch /
+    attachment paths that degrade silently). The single source of truth for the
+    image-block shape — reused by the paste path and the cloud attachment path.
+    """
+    if fmt.upper() == "BMP":
+        import io
+
+        from PIL import Image as _PILImage
+
+        buf = io.BytesIO()
+        _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
+        raw = buf.getvalue()
+        fmt = "PNG"
+    if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
+        if oversize == "raise":
+            raise ImageTooLargeError(len(raw))
+        return None
+    b64 = base64.standard_b64encode(raw).decode("ascii")
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": _media_type_for(fmt), "data": b64},
+    }
+
+
 def make_image_paste_bindings(registry: PastedImageRegistry, console: Console):
     """Build a ``KeyBindings`` that swaps image paths in pasted text for [Image #N]."""
     from prompt_toolkit.key_binding import KeyBindings
@@ -377,26 +406,7 @@ def build_image_ref_message(
                 text_buf.append(m.group(0))
             else:
                 flush_text()
-                fmt = item.format
-                # BMP is not supported by OpenAI or Claude APIs — convert to PNG on the fly.
-                if fmt.upper() == "BMP":
-                    import io
-                    from PIL import Image as _PILImage
-                    buf = io.BytesIO()
-                    _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
-                    raw = buf.getvalue()
-                    fmt = "PNG"
-                if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
-                    raise ImageTooLargeError(len(raw))
-                b64 = base64.standard_b64encode(raw).decode("ascii")
-                blocks.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": _media_type_for(fmt),
-                        "data": b64,
-                    },
-                })
+                blocks.append(image_content_block(raw, item.format, oversize="raise"))
         pos = m.end()
 
     if pos < len(text):
