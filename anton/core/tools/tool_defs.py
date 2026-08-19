@@ -80,6 +80,8 @@ SCRATCHPAD_TOOL = ToolDef(
         "sample(var) inspects any variable with type-aware formatting — DataFrames get "
         "shape/dtypes/head, dicts get keys/values, lists get length/items. "
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
+        "get_llm, agentic_loop, web_search, sample, and progress are already available "
+        "as globals in the scratchpad — do not import them.\n"
         "All .anton/.env secrets are available as environment variables (os.environ)."
     ),
     input_schema={

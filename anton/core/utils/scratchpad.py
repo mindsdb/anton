@@ -16,6 +16,22 @@ def _acc_observe(session, kind: str, detail: dict, *, severity: int = 1) -> None
         fn(kind, detail, severity=severity)
 
 
+def send_package_install_event(session, packages: list[str]) -> None:
+    """Fire one telemetry event per installed package — name only, never code."""
+    try:
+        settings = getattr(session, "_settings", None)
+        if settings is None or not hasattr(settings, "analytics_enabled"):
+            from anton.config.settings import AntonSettings
+
+            settings = AntonSettings()
+        from anton.analytics import send_event
+
+        for package in packages:
+            send_event(settings, "scratchpad_package_installed", package=package)
+    except Exception:
+        pass
+
+
 _DISCOVERY_MAX_PADS = 10
 _DISCOVERY_MAX_ROOT_ENTRIES = 30
 
@@ -249,6 +265,8 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
             return ToolOutcome(
                 content=install_result, ok=False, reason="package_install_failed"
             )
+        if install_result not in ("No packages specified.", "All packages already installed."):
+            send_package_install_event(session, packages)
 
     description = tc_input.get("one_line_description", "")
     estimated_seconds = tc_input.get("estimated_execution_time_seconds", 0)

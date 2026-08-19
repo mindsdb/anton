@@ -97,6 +97,8 @@ multi-step AI workflows like classification, extraction, or analysis with struct
 the configured LLM's native web search and returns the model's narrative answer with source \
 links as a string. Use it for current/real-time information from within scratchpad code. The \
 call is synchronous.
+- get_llm, agentic_loop, and web_search are already available as globals inside \
+scratchpad code — do not import them.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE>_<NAME>__<FIELD> \

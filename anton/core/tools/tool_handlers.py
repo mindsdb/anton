@@ -13,6 +13,7 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    send_package_install_event,
 )
 
 if TYPE_CHECKING:
@@ -577,7 +578,12 @@ async def handle_scratchpad(
         if not packages:
             return "No packages specified."
         pad = await session._scratchpads.get_or_create(name)
-        return await pad.install_packages(packages)
+        result = await pad.install_packages(packages)
+        if result not in ("No packages specified.", "All packages already installed.") and (
+            "Install failed" not in result and "timed out" not in result
+        ):
+            send_package_install_event(session, packages)
+        return result
 
     else:
         return f"Unknown scratchpad action: {action}"
