@@ -67,23 +67,35 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+#: Width of `_new_id()`, plus the hyphen joining it to the name. Every slug ends
+#: in `-<id>` (see `create`), and the name is trimmed by this much so the whole
+#: slug still respects `_NAME_MAX_LEN`.
+_ID_SUFFIX_LEN = 8 + 1
+
+
 _UNSET = object()
 
 
-def _sanitize_slug(value: str) -> str:
+def _sanitize_slug(value: str, max_len: int = _NAME_MAX_LEN) -> str:
     """Map any name to a folder-safe slug.
 
     Always returns a non-empty string. Strange characters collapse
     to hyphens; runs are deduped; leading/trailing punctuation is
     stripped. Lowercased so the slug reads consistently (matters for
     case-insensitive filesystems on macOS / Windows).
+
+    The whitelist is ASCII, so a name in a non-Latin script collapses
+    entirely and falls back to `_NAME_FALLBACK` — every artifact a
+    Russian- or Chinese-speaking user names gets the SAME base. That is
+    why `create` appends an id rather than relying on the name to
+    distinguish folders.
     """
     raw = (value or "").strip().lower()
     cleaned = _NAME_DISALLOWED.sub("-", raw)
     cleaned = _NAME_HYPHEN_RUNS.sub("-", cleaned)
     cleaned = cleaned.strip("-._")
-    if len(cleaned) > _NAME_MAX_LEN:
-        cleaned = cleaned[:_NAME_MAX_LEN].rstrip("-._")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip("-._")
     return cleaned or _NAME_FALLBACK
 
 
@@ -136,7 +148,13 @@ class ArtifactStore:
 
     def _unique_slug(self, base: str) -> str:
         """Append `-2`, `-3`, … on collision. Mirrors
-        `projects_store.unique_name` semantics."""
+        `projects_store.unique_name` semantics.
+
+        A backstop since `create` began ending every slug in a random id:
+        it now fires only on an id collision within one store, and cannot
+        help across stores (see `create`), which is why it is not the
+        thing keeping slugs distinct.
+        """
         if not self.folder_for(base).exists():
             return base
         i = 2
@@ -158,10 +176,29 @@ class ArtifactStore:
     ) -> Artifact:
         """Create a fresh artifact folder + metadata.json + README.
 
-        Slug derives from the name (sanitised + collision suffix).
+        Slug is `<sanitised name>-<id>`, e.g. `sales-report-a1b2c3d4`.
         Returns the populated `Artifact`. The folder is empty other
         than the two metadata files — the agent writes its own
         files into it.
+
+        The id is IN the folder name, not just in metadata.json, because
+        the name alone does not identify an artifact:
+
+        * `_sanitize_slug`'s whitelist is ASCII, so every artifact named
+          in a non-Latin script collapses to the same `untitled-artifact`
+          base;
+        * `_unique_slug`'s `-2`/`-3` counter only sees the store it is
+          rooted at, and on the cloud deployment each conversation gets
+          its own store (the agent's workspace is a conversation, not a
+          project), so the counter restarts per conversation and two
+          conversations happily produce the same folder name.
+
+        Together those made `project + slug` — which is how cowork-server
+        addresses an artifact once paths stop being usable — ambiguous in
+        the common case rather than the rare one.
+
+        Only NEW artifacts get the suffix; existing folders keep their
+        slugs, so consumers still cannot assume every slug carries one.
 
         `primary` (optional) is the relative path of the artifact's
         entry-point file. The renderer reads this to decide what to
@@ -171,16 +208,22 @@ class ArtifactStore:
         the file in the next scratchpad cell.
         """
         self.ensure_root()
-        slug_base = _sanitize_slug(name)
-        slug = self._unique_slug(slug_base)
+        # The id is part of the slug, so it has to exist before it.
+        artifact_id = _new_id()
+        slug_base = _sanitize_slug(name, max_len=_NAME_MAX_LEN - _ID_SUFFIX_LEN)
+        slug = self._unique_slug(f"{slug_base}-{artifact_id}")
         now = _utc_now()
         artifact = Artifact(
             schemaVersion=METADATA_SCHEMA_VERSION,
-            id=_new_id(),
+            id=artifact_id,
             slug=slug,
             createdAt=now,
             updatedAt=now,
-            name=name.strip() or slug,
+            # `slug_base`, not `slug`: this is the human-facing name, and it
+            # surfaces as the card title wherever the UI falls back to it
+            # (cowork-server's card_for_folder, the chat stream adapter). The
+            # id belongs in the folder name, not on screen.
+            name=name.strip() or slug_base,
             description=description.strip(),
             type=type,
             primary=(primary.strip() if isinstance(primary, str) and primary.strip() else None),
