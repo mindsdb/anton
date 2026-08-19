@@ -66,6 +66,34 @@ def url_hostname(url: str) -> str:
         return ""
 
 
+def is_minds_host(base: str, minds_url: str = "") -> bool:
+    """Whether *base* points at MindsHub rather than an endpoint of the user's own.
+
+    Judged from the endpoint, never from whether a MindsHub key or URL happens to
+    be configured: signing in sets those, so a user running a local model has
+    them too. *minds_url* covers self-hosted gateways on a private host.
+    """
+    from urllib.parse import urlparse
+
+    def _origin(url: str) -> tuple[str, int | None]:
+        try:
+            parsed = urlparse(url)
+            return (parsed.hostname or "", parsed.port)
+        except Exception:
+            return ("", None)
+
+    host, port = _origin(base)
+    if not host:
+        return False
+    # Host AND port: a self-hosted gateway and a local model server often share
+    # a machine and differ only by port.
+    if minds_url and (host, port) == _origin(minds_url):
+        return True
+    return host in ("mindshub.ai", "mdb.ai") or host.endswith(
+        (".mindshub.ai", ".mdb.ai")
+    )
+
+
 def _reexec() -> None:
     """Re-execute the current process from scratch using the original binary."""
     # Prefer the installed `anton` binary so the uv tool wrapper re-runs correctly.
@@ -588,9 +616,10 @@ async def _animate_onboard(
     model_label = settings.planning_model
     if provider_label == "openai-compatible":
         base = settings.openai_base_url or ""
-        if settings.minds_url and (
-            "mindshub.ai" in settings.minds_url or "mdb.ai" in settings.minds_url
-        ):
+        # The base URL decides, not minds_url: that is set for anyone signed in,
+        # so testing it labelled a local endpoint "MindsHub" — telling a user
+        # their prompts stayed on their machine when they did not.
+        if is_minds_host(base, settings.minds_url or ""):
             provider_label = "MindsHub"
         elif url_hostname(base) == "generativelanguage.googleapis.com":
             provider_label = "Google Gemini"
