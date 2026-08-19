@@ -197,3 +197,20 @@ def test_a_rename_plus_compensating_edit_still_counts_as_a_change(tmp_path):
     (folder / "ab").unlink()
     (folder / "a").write_text("bc")
     assert [e["slug"] for e in drain_pending_skills(session)] == ["my-skill"]
+
+
+def test_which_siblings_survive_the_budget_is_deterministic(tmp_path):
+    """Sorting on the SKILL.md flag alone is stable, so siblings would keep
+    readdir order and a budget overflow would drop different files per host."""
+    big = "x" * 200_000
+    kept = []
+    for run in range(2):
+        root = tmp_path / f"run{run}"
+        session = _session(root)
+        folder = _write(root, "my-skill")
+        # Created in opposite orders: readdir order differs, output must not.
+        names = [f"ref-{i:02d}.md" for i in range(10)]
+        for name in (names if run == 0 else reversed(names)):
+            (folder / name).write_text(big)
+        kept.append(sorted(drain_pending_skills(session)[0]["files"]))
+    assert kept[0] == kept[1]

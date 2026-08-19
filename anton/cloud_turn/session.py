@@ -187,8 +187,10 @@ def _draft_files(folder: Path) -> dict[str, str] | None:
     resolved = folder.resolve()
     files: dict[str, str] = {}
     budget = _DRAFT_TOTAL_MAX
-    # SKILL.md first so the procedure is never the thing the budget squeezes out.
-    for child in sorted(folder.iterdir(), key=lambda p: p.name != SKILL_FILE):
+    # SKILL.md first so the procedure is never the thing the budget squeezes out,
+    # then by name — sorting on the flag alone is stable, so siblings would keep
+    # readdir order and the budget would drop different files on different hosts.
+    for child in sorted(folder.iterdir(), key=lambda p: (p.name != SKILL_FILE, p.name)):
         if child.is_symlink() or not child.is_file():
             continue
         if child.resolve().parent != resolved:
