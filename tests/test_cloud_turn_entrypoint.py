@@ -327,3 +327,24 @@ def test_untracked_late_write_is_not_awaited():
     never blocks on unrelated live tasks (scratchpad readers, the heartbeat)."""
     events = _drive(_MemorySession([], deltas=["ok"], encode_late=True, track=False))
     assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
+
+
+def test_entrypoint_wires_attachment_augmentation(tmp_path, monkeypatch):
+    """Removing the build_turn_content call in __main__ must fail a test: a
+    staged attachment has to reach the session as multimodal turn input."""
+    att = tmp_path / "attachments" / "fid"
+    att.mkdir(parents=True)
+    (att / "notes.txt").write_text("hi")
+    monkeypatch.setenv("ANTON_CLOUD_WORKSPACE_PATH", str(tmp_path))
+
+    captured = {}
+
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            captured["input"] = user_input
+            for d in self._deltas:
+                yield StreamTextDelta(text=d)
+
+    _drive(_S())
+    assert isinstance(captured["input"], list)            # augmented, not the bare "hi"
+    assert any(b.get("type") == "text" and "notes.txt" in b.get("text", "") for b in captured["input"])
