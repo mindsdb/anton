@@ -13,6 +13,7 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    install_call_installed_something,
     send_package_install_event,
 )
 
@@ -579,9 +580,7 @@ async def handle_scratchpad(
             return "No packages specified."
         pad = await session._scratchpads.get_or_create(name)
         result = await pad.install_packages(packages)
-        if result not in ("No packages specified.", "All packages already installed.") and (
-            "Install failed" not in result and "timed out" not in result
-        ):
+        if install_call_installed_something(result):
             send_package_install_event(session, packages)
         return result
 

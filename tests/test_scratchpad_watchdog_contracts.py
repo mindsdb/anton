@@ -567,6 +567,18 @@ class TestNudgeRouting:
         )
         assert nudge == SCRATCHPAD_INSTALL_NUDGE
 
+    def test_undeclared_import_routes_to_install_nudge(self):
+        """The real shape scratchpad_boot.py now produces: a hint before the
+        traceback, no install ever attempted."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            "'somepkg' was not auto-installed. If your code deliberately "
+            "needs it, list it in the exec call's 'packages' array (or use "
+            "the scratchpad's install action) and retry.\n"
+            "ModuleNotFoundError: No module named 'somepkg'",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
+
 
 from anton.core.memory.acc import Event, detect_kill_loop
 

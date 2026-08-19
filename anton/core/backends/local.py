@@ -656,10 +656,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             env["ANTON_UV_PATH"] = uv
 
-        # The in-cell auto-installer (scratchpad_boot) runs pip/uv under this
-        # budget. Pass the resolved setting so the worker's timer and the
-        # parent's kill windows in _read_result run off one number — they
-        # used to be independent constants that drifted apart (ENG-1275).
+        # scratchpad_boot no longer auto-installs on ModuleNotFoundError, so
+        # this var (and _read_result's install-span handling below) is dead;
+        # left wired rather than reworking the kill-window logic in one pass.
         env["ANTON_CELL_INSTALL_TIMEOUT"] = str(CoreSettings().cell_install_timeout)
 
         # Namespace snapshot path (ENG-1124). The boot script reads
@@ -1050,12 +1049,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         last_notice = 0.0
         last_output = 0.0
 
-        # In-cell auto-install span (ENG-1275). While the worker's installer
-        # runs, both kill windows defer to the install budget — the same
-        # cell_install_timeout the worker was handed at spawn — plus a grace
-        # margin, so the worker's own named install error wins the race
-        # against a parent kill. The cell's budget resumes, install time
-        # excluded, when the end marker arrives.
+        # Dead since scratchpad_boot dropped its in-cell auto-installer: the
+        # markers this deferral watches for are never emitted anymore. Left
+        # in place rather than unpicking it from the kill-window logic below.
         install_budget = float(s.cell_install_timeout)
         installing: str | None = None
         install_started = 0.0

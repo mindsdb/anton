@@ -64,6 +64,19 @@ def test_a_submodule_counts_as_its_top_level_package():
     assert a.key == b.key == "missing_dependency:pandas"
 
 
+def test_a_hint_prefixed_before_the_traceback_still_classifies():
+    """A hint prepended before the traceback must not become the LAST line
+    tool_handlers.py reads as `reason` — that has to stay the exception."""
+    error = (
+        "'somepkg' was not auto-installed. Declare it explicitly and retry.\n"
+        "Traceback (most recent call last):\n"
+        '  File "<scratchpad>", line 1, in <module>\n'
+        "ModuleNotFoundError: No module named 'somepkg'"
+    )
+    reason = error.splitlines()[-1][:160]
+    assert classify(reason).cls == "missing_dependency"
+
+
 # ── The safety property ────────────────────────────────────────────────────
 
 

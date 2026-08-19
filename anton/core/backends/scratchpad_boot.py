@@ -1155,8 +1155,6 @@ while True:
     # Liveness heartbeat: a daemon thread pings the real pipe while this cell
     # runs, so the parent's inactivity watchdog sees activity through a
     # deliberate sleep or a blocking call, not just through stdout/progress().
-    # Span covers the auto-install retry below too (ENG-1275: a silent
-    # in-cell install used to be indistinguishable from a wedged process).
     _hb_stop = threading.Event()
     _hb_thread = None
     if _HEARTBEAT_INTERVAL > 0:
@@ -1186,14 +1184,16 @@ while True:
         except ModuleNotFoundError as _mnf:
             # Don't pip-install a name pulled from an exception — it may be a
             # hallucinated import, and the string is attacker-controllable.
-            error = traceback.format_exc()
+            # Hint goes before the traceback: callers key off its last line.
+            hint = ""
             if _mnf.name:
-                error += (
-                    f"\n'{_mnf.name}' was not auto-installed. If your code "
+                hint = (
+                    f"'{_mnf.name}' was not auto-installed. If your code "
                     "deliberately needs it, list it in the exec call's "
                     "'packages' array (or use the scratchpad's install "
-                    "action) and retry."
+                    "action) and retry.\n"
                 )
+            error = hint + traceback.format_exc()
         except Exception:
             error = traceback.format_exc()
         finally:

@@ -16,8 +16,31 @@ def _acc_observe(session, kind: str, detail: dict, *, severity: int = 1) -> None
         fn(kind, detail, severity=severity)
 
 
-def send_package_install_event(session, packages: list[str]) -> None:
-    """Fire one telemetry event per installed package — name only, never code."""
+# install_packages' own return shape — no structured success/failure value,
+# so both call sites (exec+packages here, and the standalone install action
+# in tool_handlers.py) key off these same literals.
+_INSTALL_FAILURE_MARKERS = ("Install failed", "timed out")
+_INSTALL_NOOP_RESULTS = frozenset(
+    {"No packages specified.", "All packages already installed."}
+)
+
+
+def install_call_failed(result: str) -> bool:
+    return any(marker in result for marker in _INSTALL_FAILURE_MARKERS)
+
+
+def install_call_installed_something(result: str) -> bool:
+    """True if install_packages ran pip and it succeeded.
+
+    Package-level, not request-level: a request naming one cached and one new
+    package still counts as "installed" for every name in it (install_packages
+    doesn't report which of the requested names were actually new).
+    """
+    return result not in _INSTALL_NOOP_RESULTS and not install_call_failed(result)
+
+
+def send_package_install_event(session: ChatSession, packages: list[str]) -> None:
+    """Fire one telemetry event per package named in the call — name only, never code."""
     try:
         settings = getattr(session, "_settings", None)
         if settings is None or not hasattr(settings, "analytics_enabled"):
@@ -261,11 +284,11 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
         # The substring check against install_packages' message is this
         # handler's own protocol with the runtime (its return shape predates
         # ToolOutcome); the verdict it produces is explicit from here on out.
-        if "Install failed" in install_result or "timed out" in install_result:
+        if install_call_failed(install_result):
             return ToolOutcome(
                 content=install_result, ok=False, reason="package_install_failed"
             )
-        if install_result not in ("No packages specified.", "All packages already installed."):
+        if install_call_installed_something(install_result):
             send_package_install_event(session, packages)
 
     description = tc_input.get("one_line_description", "")
