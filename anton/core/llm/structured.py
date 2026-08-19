@@ -62,6 +62,19 @@ def no_preamble_instruction(schema_class) -> str:
     )
 
 
+def truncation_verdict(exc: StructuredOutputError) -> str:
+    """The log verdict for a failed forced-schema call, naming its cure.
+
+    Three outcomes, because the two truncated ones need opposite fixes and a
+    single ``TRUNCATED`` could not tell them apart — which is what made
+    ENG-1523 take a round-trip to diagnose. Shared by every log site so they
+    cannot drift into reporting the same failure differently.
+    """
+    if not exc.truncated:
+        return "NO_TOOL_CALL"
+    return "TRUNCATED_INSIDE_CALL" if exc.reached_tool_call else "TRUNCATED_BEFORE_CALL"
+
+
 async def generate_with_truncation_retry(
     generate: Callable[..., Awaitable[Any]],
     schema_class,
@@ -109,7 +122,7 @@ async def generate_with_truncation_retry(
                 "retrying=%s",
                 subsystem,
                 getattr(schema_class, "__name__", schema_class),
-                "TRUNCATED" if exc.truncated else "NO_TOOL_CALL",
+                truncation_verdict(exc),
                 budget,
                 exc.output_tokens,
                 retrying,
@@ -211,15 +224,18 @@ def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoRetu
         budget: The ``max_tokens`` the call was given.
 
     Raises:
-        StructuredOutputError: Always. ``.truncated`` carries the verdict.
+        StructuredOutputError: Always. ``.truncated`` says whether a retry can
+            help and ``.reached_tool_call`` which of the two truncations it was
+            — the message itself cannot be logged, it can quote model output.
     """
     usage = getattr(response, "usage", None)
     output_tokens = getattr(usage, "output_tokens", 0) or 0
     stop_reason = getattr(response, "stop_reason", None)
     truncated = looks_truncated(response, budget)
+    reached_tool_call = bool(getattr(response, "tool_calls", None))
     what = (
         "returned an unusable tool call for"
-        if getattr(response, "tool_calls", None)
+        if reached_tool_call
         else "did not return a tool call for"
     )
     detail = (
@@ -234,6 +250,7 @@ def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoRetu
         output_tokens=output_tokens,
         max_tokens=budget,
         stop_reason=stop_reason,
+        reached_tool_call=reached_tool_call,
     )
 
 

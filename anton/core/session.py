@@ -56,7 +56,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     damaged_tool_call_result,
 )
-from anton.core.llm.structured import looks_truncated, usable_tool_call
+from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.thalamus import (
     ACTION_RESPOND,
     ThalamicDecision,
@@ -590,6 +590,12 @@ def _render_tool_result_content(content, cap: int) -> str:
     return _clip_keep_cause(str(content), cap)
 
 
+# Stands in for a multimodal block in the verify transcript. Named because
+# the judged-entry selection below has to be able to tell it apart from a
+# real reply.
+_IMAGE_PLACEHOLDER = "[image]"
+
+
 def _render_verify_transcript(
     history: list[dict],
     *,
@@ -597,6 +603,7 @@ def _render_verify_transcript(
     max_tool: int = 12,
     tool_cap: int = 400,
     text_cap: int = 2000,
+    final_cap: int = 12000,
 ) -> str:
     """Render a compact, text-only view of the recent conversation for the
     completion verifier.
@@ -612,9 +619,36 @@ def _render_verify_transcript(
     injections are dropped before budgeting so they don't consume slots. Keeps
     the call cheap and free of tool_use/tool_result pairing constraints
     (ENG-716).
+
+    EVERY cap here goes through ``_clip_keep_cause``, so no text reaches the
+    verifier cut without an explicit ``[... N chars elided ...]`` marker. The
+    conversational path used to use a bare ``text[:text_cap]``, which handed the
+    verifier a reply ending mid-word with nothing saying it had been cut — and,
+    asked whether a complete answer was delivered, the verifier correctly
+    reported what it was shown. It was not judging badly; it was reasoning from
+    a false premise. 31% of anton's replies exceed 2,000 chars, and 44% of all
+    production continuations carried a truncation-worded reason (ENG-1633).
+
+    Two budgets, because the verifier is judging exactly ONE message:
+    ``final_cap`` for the last assistant turn (the reply under judgment) and
+    ``text_cap`` for everything else.
+
+    A flat cap is NOT sufficient, and this is the part that is easy to get
+    wrong. Measured live: with one cap for every entry, a reply that opens "all
+    three done" and buries "(3) I could NOT send the email" in the elided middle
+    is graded COMPLETE 3/3 — while both the shipped code and an unclipped
+    control catch it. Head-clipping deletes the tail; a flat both-ends clip
+    deletes the middle. Any fixed window has a hole, so the window for the one
+    message actually being judged has to be wide enough that the hole rarely
+    opens. Raising the cap for that entry alone also bounds the added cost to a
+    single message rather than ``max_convo`` of them: +276 tokens/turn on
+    average at 12,000, which sends 97.2% of real replies whole.
     """
-    convo: list[tuple[int, str]] = []   # (orig_index, line) — user/assistant text
-    tools: list[tuple[int, str]] = []   # (orig_index, line) — tool activity
+    # (orig_index, speaker, unclipped text) — conversational entries are held
+    # raw until the loop ends, because which one is "last" (and therefore gets
+    # ``final_cap``) is not known until then.
+    convo: list[tuple[int, str, str]] = []
+    tools: list[tuple[int, str]] = []   # (orig_index, line) — already rendered
 
     for i, msg in enumerate(history):
         role = msg.get("role")
@@ -624,7 +658,7 @@ def _render_verify_transcript(
             text = content.strip()
             if not text or (role == "user" and text.startswith("SYSTEM:")):
                 continue
-            convo.append((i, f"{speaker}: {text[:text_cap]}"))
+            convo.append((i, speaker, text))
         elif isinstance(content, list):
             # Assistant text emitted alongside a tool call is preamble/narration
             # ("Processing step 4"), not a conversational turn — route it to the
@@ -641,17 +675,48 @@ def _render_verify_transcript(
                     text = (block.get("text") or "").strip()
                     if not text:
                         continue
-                    bucket = tools if preamble else convo
-                    bucket.append((i, f"{speaker}: {text[:text_cap]}"))
+                    if preamble:
+                        # A tool_use rides with this text, so it is never the
+                        # reply under judgment — clip it now, at the small cap.
+                        tools.append(
+                            (i, f"{speaker}: {_clip_keep_cause(text, text_cap)}")
+                        )
+                    else:
+                        convo.append((i, speaker, text))
                 elif btype in ("image", "image_url"):
-                    convo.append((i, f"{speaker}: [image]"))
+                    convo.append((i, speaker, _IMAGE_PLACEHOLDER))
                 elif btype == "tool_use":
                     tools.append((i, f"ASSISTANT called tool: {block.get('name')}"))
                 elif btype == "tool_result":
                     rendered = _render_tool_result_content(block.get("content"), tool_cap)
                     tools.append((i, f"TOOL RESULT: {rendered}"))
 
-    kept = convo[-max_convo:] + tools[-max_tool:]
+    # Budget only what survives, and pick the judged entry from that same
+    # window — chosen over the full list, ``final_cap`` could land on an entry
+    # the slice then discards. Slicing first also stops us clipping entries that
+    # are about to be thrown away.
+    kept_convo = convo[-max_convo:]
+    # The reply under judgment is the most recent ASSISTANT *text* entry. One
+    # message contributes one entry per content block, so an image placeholder
+    # trailing the reply would otherwise be picked as "the last assistant
+    # entry", silently dropping the reply itself back to ``text_cap`` — the flat
+    # cap this function exists to avoid (caught in self-review on #364).
+    judged = max(
+        (
+            n
+            for n, (_, speaker, text) in enumerate(kept_convo)
+            if speaker == "ASSISTANT" and text != _IMAGE_PLACEHOLDER
+        ),
+        default=-1,
+    )
+    kept = [
+        (
+            i,
+            f"{speaker}: "
+            f"{_clip_keep_cause(text, final_cap if n == judged else text_cap)}",
+        )
+        for n, (i, speaker, text) in enumerate(kept_convo)
+    ] + tools[-max_tool:]
     kept.sort(key=lambda entry: entry[0])
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
@@ -4692,7 +4757,7 @@ class ChatSession:
                     _verifier_log.info(
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s retrying=%s",
-                        "TRUNCATED" if exc.truncated else "NO_TOOL_CALL",
+                        truncation_verdict(exc),
                         budget, exc.output_tokens, exc.stop_reason, retrying,
                     )
                     if not retrying:

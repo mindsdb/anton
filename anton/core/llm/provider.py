@@ -471,12 +471,21 @@ class TokenLimitExceeded(Exception):
 class StructuredOutputError(ValueError):
     """Raised when a forced-tool-call structured-output call yields no usable call.
 
-    ``truncated`` says whether a retry can help: ``True`` means the model spent
-    the ``max_tokens`` budget narrating before it reached the tool call (the
-    narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``, ``qwen`` — do
-    this deterministically under a tight budget, ENG-1081); ``False`` means the
-    provider errored, refused, or returned nothing, and a bigger budget won't
-    fix it. See `structured.looks_truncated` for how that's decided.
+    ``truncated`` says whether a retry can help: ``True`` means the
+    ``max_tokens`` budget ran out before a usable call existed; ``False`` means
+    the provider errored, refused, or returned nothing, and a bigger budget
+    won't fix it. See `structured.looks_truncated` for how that's decided.
+
+    ``reached_tool_call`` splits the truncated case into the two cures, which
+    otherwise look identical in a log and pull in opposite directions:
+
+    - ``False`` — the model narrated in plain ``content`` and never got to the
+      call (the narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``,
+      ``qwen`` — do this deterministically under a tight budget, ENG-1081).
+      The cure is a bigger budget.
+    - ``True`` — the call started and the budget ran out inside its JSON
+      arguments. A bigger budget only helps until the payload grows again; the
+      cure is a smaller response (ENG-1523).
 
     Subclasses ``ValueError`` so call sites catching the documented ``ValueError``
     from ``generate_object``/``generate_object_code`` keep working.
@@ -490,12 +499,14 @@ class StructuredOutputError(ValueError):
         output_tokens: int = 0,
         max_tokens: int = 0,
         stop_reason: str | None = None,
+        reached_tool_call: bool = False,
     ):
         super().__init__(message)
         self.truncated = truncated
         self.output_tokens = output_tokens
         self.max_tokens = max_tokens
         self.stop_reason = stop_reason
+        self.reached_tool_call = reached_tool_call
 
 
 class TransientProviderError(ConnectionError):
@@ -572,6 +583,134 @@ _TRANSIENT_ERROR_TYPES = frozenset(
 # never in the retry loop. The gate's velocity 429 (``rate_limited``) is NOT
 # here on purpose: that one means "slow down", and stays transient.
 _WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
+
+
+# Hosts that ARE the MindsHub gateway. Only a response from one of these may
+# select a billing verdict — see :func:`origin_is_known_third_party` (ENG-1693).
+#
+# VERIFIED COMPLETE for every host MindsHub ITSELF serves (review question on
+# #363, checked 2026-08-18 against the terraform host inventory, which is the
+# source of truth for zones and certs). Deliberately not the broader claim
+# "every host that can serve a gateway billing denial" — see the relay note
+# below, where that is false by design. Two apexes cover the served set because
+# every environment and vanity host is a subdomain of one of them:
+# prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
+# per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
+# `llm.mdb.ai`, `llm.staging.mdb.ai`, `writer.mdb.ai`, `terabase.dev.mdb.ai`,
+# `view.mindshub.ai`. Terraform declares no other apex zone, and the wildcards
+# `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
+# positive cases are pinned in tests/test_status_error_mapper.py so this
+# paragraph cannot quietly go stale.
+#
+# A RELAY in front of MindsHub is the known, accepted exception: a corporate
+# proxy that forwards our denials resolves its own host, so a GENUINE
+# out-of-credits denial arriving through one loses the credits card and
+# ENG-1169's symptom returns for that shape. That is a decision, not an
+# oversight — a spoofed billing card asks the user for money, a spoofed wait
+# does not, which is why `_velocity` is ungated and this is not. Recorded on
+# ENG-1693 under "Accepted tradeoff". If relayed MindsHub ever becomes a
+# supported deployment the remedy is a CONFIGURABLE trusted-host list, never a
+# looser match here.
+#
+# `4nton.ai` is a real production zone and is DELIBERATELY absent: it serves
+# agent provisioning and per-instance hosts (`sp_<hash>.4nton.ai`,
+# `cw-<id>.4nton.ai`) plus artifact publishing, never LLM inference. If an
+# inference endpoint is ever routed onto it, it MUST be added here — otherwise a
+# genuine out-of-credits denial from that host silently degrades to generic copy
+# and reopens ENG-1169's user-visible bug. Failing closed is the right default;
+# this note exists so the cost of that default is not discovered in production.
+_MINDSHUB_HOSTS = ("mindshub.ai", "mdb.ai")
+
+
+def is_mindshub_host(host: str | None) -> bool:
+    """Whether ``host`` is the MindsHub gateway or one of its subdomains.
+
+    Deliberately NOT the ``"mindshub.ai" in base_url`` substring test used
+    elsewhere in this package for flavour detection and trace-header opt-in.
+    That form is fine for choosing an API dialect and unfit for a trust
+    decision: ``mindshub.ai.evil.com`` satisfies it. This matches the exact
+    domain or a dot-delimited subdomain of it, so an attacker cannot buy a
+    name that merely contains ours.
+    """
+    if not host:
+        return False
+    h = str(host).strip().lower().rstrip(".")
+    return any(h == d or h.endswith("." + d) for d in _MINDSHUB_HOSTS)
+
+
+def response_origin_host(exc: BaseException) -> str | None:
+    """Hostname the failing request was sent to, or ``None`` if unknowable.
+
+    ``httpx.Response.url`` is a property that RAISES when no request is
+    attached, so this cannot be a bare ``getattr`` chain.
+
+    Falls back to the exception's OWN ``request``, which is what makes this
+    work on the mid-stream lane. A mid-stream failure surfaces as a bare
+    ``openai.APIError`` — constructed as ``APIError(message, request, body=…)``,
+    so it has **no** ``.response`` but does carry ``.request`` with the real
+    URL. Reading only ``.response`` made the gate silently inert exactly where
+    an attacker has the freest hand: answering 200 and smuggling the wallet
+    code into an SSE frame is the remote's choice, not a quirk of our plumbing.
+    """
+    resp = getattr(exc, "response", None)
+    try:
+        url = None
+        if resp is not None:
+            # BOTH `httpx.Response.url` and `httpx.Response.request` are
+            # properties that RAISE RuntimeError when no request is attached, and
+            # `getattr(resp, name, None)` does NOT rescue that — getattr's
+            # default only covers AttributeError. Either one reaching the outer
+            # handler returned None, i.e. "origin unknown", a state this gate
+            # deliberately TRUSTS — so a request-less response shadowed a
+            # foreign host sitting on `exc.request`. Each read is contained
+            # individually so the next fallback stays reachable.
+            #
+            # The review nit on #363 named `.url`; `.request` has the identical
+            # trap, and guarding only `.url` still failed the test below.
+            try:
+                url = resp.url
+            except Exception:
+                url = None
+            if url is None:
+                try:
+                    url = resp.request.url
+                except Exception:
+                    url = None
+        if url is None:
+            url = getattr(getattr(exc, "request", None), "url", None)
+        if url is None:
+            return None
+        host = getattr(url, "host", None)
+        if not host:
+            from urllib.parse import urlparse
+
+            host = urlparse(str(url)).hostname
+    except Exception:
+        return None
+    return str(host).lower() if host else None
+
+
+def origin_is_known_third_party(exc: BaseException) -> bool:
+    """Whether this failure provably came from somewhere that is NOT our gateway.
+
+    Three-valued on purpose, mirroring cowork-server's gate (ENG-1686): it
+    answers "do we KNOW it was someone else", so an unknown origin stays
+    trusted rather than being treated as hostile. A real SDK error always
+    carries its request, so every genuine HTTP response resolves a host;
+    unknown origin means a synthetic or mid-stream error, which no remote
+    server can choose.
+
+    Used to stop a BYOK endpoint selecting a MindsHub billing verdict by
+    echoing our private ``X-MindsHub-Reason`` header or wallet ``code``
+    (ENG-1693). NOT used in :func:`classify_transient`'s wallet check — see
+    the comment there.
+    """
+    return origin_is_known_third_party_host(response_origin_host(exc))
+
+
+def origin_is_known_third_party_host(host: str | None) -> bool:
+    """Host-level form of :func:`origin_is_known_third_party`."""
+    return host is not None and not is_mindshub_host(host)
 
 
 def wallet_denial_code(body: Any) -> str | None:
@@ -692,6 +831,15 @@ def classify_transient(
         if etype == "insufficient_quota":
             return None
         if wallet_denial_code(b):
+            # Deliberately NOT origin-gated (ENG-1693), for a plainer reason
+            # than an earlier version of this comment claimed. It said gating
+            # would make a hostile wallet code "retryable"; that is false —
+            # both this branch and the fallthrough reach the same count-based
+            # retry, so retryability is unchanged either way. The real reasons
+            # are that this call site cannot see the origin (it receives only
+            # status + body, never the exception), and that suppressing a
+            # retry is conservative regardless of who sent the code: retrying
+            # a third party's quota denial cannot succeed either.
             return None
         # session_backoff=True, unlike every other request-time status here
         # (ENG-1537). The flag means "should the SESSION spend its budget on

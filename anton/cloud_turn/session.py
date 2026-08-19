@@ -421,6 +421,100 @@ def resolve_trusted_workspace_path() -> Path:
     return resolved
 
 
+#: Attachments cowork-server stages into the workspace for this conversation.
+_ATTACHMENTS_DIRNAME = "attachments"
+
+
+def _sniff_image_format(head: bytes) -> str | None:
+    """The real image format from magic bytes, or None if not a known image.
+    Content, never the extension — a BMP named ``.png`` must not ship as PNG,
+    and a text file named ``.png`` must not ship at all."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "JPEG"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "GIF"
+    if head.startswith(b"BM"):
+        return "BMP"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "WEBP"
+    return None
+
+
+def _image_block_from_file(path: Path) -> dict | None:
+    """A base64 image content block for *path*, or None if it can't be shown.
+
+    Format is detected from magic bytes (not the extension: a mislabeled or
+    non-image file must not be shipped and rejected by the model, which would
+    fail every turn). Size is capped BEFORE the file is read, so a huge upload
+    can't OOM the pod. Pillow is optional in the deployed image, so it's used
+    only to convert BMP (via the shared ``clipboard.image_content_block``); a
+    BMP where Pillow is absent is skipped rather than crashing."""
+    from anton.utils.clipboard import MAX_IMAGE_BYTES, image_content_block
+
+    try:
+        if path.stat().st_size * 4 // 3 > MAX_IMAGE_BYTES:  # cap before reading into memory
+            return None
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    fmt = _sniff_image_format(raw[:16])
+    if fmt is None:
+        return None
+    try:
+        return image_content_block(raw, fmt, oversize="skip")
+    except Exception:  # e.g. BMP with Pillow absent, or a decode failure
+        return None
+
+
+def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
+    """Turn input augmented with the conversation's attachments.
+
+    cowork-server stages uploads into ``<workspace>/attachments/`` on the shared
+    mount (they never cross the stdin wire). Returns the plain string when there
+    are none — unchanged behaviour. Otherwise a multimodal user message: an
+    image block per image (so the model can actually see it) plus a text block
+    that lists every attachment's path and carries the user's text. Never
+    raises: a bad attachment is skipped, the turn still runs.
+    """
+    attach_dir = base / _ATTACHMENTS_DIRNAME
+    try:
+        files = sorted(p for p in attach_dir.rglob("*") if p.is_file()) if attach_dir.is_dir() else []
+    except OSError:
+        files = []
+    if not files:
+        return user_text
+
+    from anton.clipboard import is_image_path
+
+    image_blocks: list[dict] = []
+    lines: list[str] = []
+    for f in files:
+        # One bad attachment must never sink the whole set — degrade it to a
+        # path listing line so the docstring's "never raises" actually holds.
+        try:
+            if is_image_path(f.name):
+                block = _image_block_from_file(f)
+                if block is not None:
+                    image_blocks.append(block)
+                    lines.append(f"  - {f.name} (image, shown above)")
+                else:
+                    lines.append(f"  - {f} (image could not be shown inline; read from this path if needed)")
+            else:
+                lines.append(f"  - {f}")
+        except Exception:
+            logger.warning("cloud turn: skipping unreadable attachment %s", f, exc_info=True)
+
+    listing = (
+        "The user attached the following files to this conversation. Any images "
+        "are included in this message; read other files from their absolute paths:\n"
+        + "\n".join(lines)
+    )
+    text = f"{listing}\n\n{user_text}" if user_text.strip() else listing
+    return [*image_blocks, {"type": "text", "text": text}]
+
+
 def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
 
