@@ -160,6 +160,10 @@ def access_from_owner_side(entry: Any) -> dict:
             "mode": "restricted",
             "emails": entry.get("emails", []) or [],
             "org_allowed": bool(entry.get("org_allowed")),
+            # LOAD-BEARING: without this key a "keep" re-publish of an
+            # owner-only artifact reconstructs an empty selection, which
+            # degrades to public — silently un-privating the artifact.
+            "owner_only": bool(entry.get("owner_only")),
         }
     return {"mode": "public"}
 

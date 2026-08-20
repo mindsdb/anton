@@ -167,8 +167,34 @@ def test_access_from_owner_side_password():
 def test_access_from_owner_side_restricted():
     entry = {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": True}
     assert access_from_owner_side(entry) == {
-        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": True,
+        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": True, "owner_only": False,
     }
+
+
+def test_access_from_owner_side_restricted_owner_only():
+    entry = {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}
+    assert access_from_owner_side(entry) == {
+        "mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True,
+    }
+
+
+def test_access_from_owner_side_restricted_legacy_entry_has_false_flag():
+    """Pre-ENG-1769 entries have no owner_only key — it must read as False, not None."""
+    entry = {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False}
+    assert access_from_owner_side(entry)["owner_only"] is False
+
+
+def test_keep_republish_of_owner_only_stays_restricted():
+    """The regression this exists for: without owner_only in the round-trip, a
+    'keep' re-publish reconstructs an empty selection which degrades to public,
+    silently making a private artifact world-readable."""
+    _, _, _, owner = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, None
+    )
+    reconstructed = access_from_owner_side(owner)
+    eff, _, _, owner2 = resolve_access(None, reconstructed, owner)
+    assert eff["mode"] == "restricted"
+    assert owner2["owner_only"] is True
 
 
 def test_access_from_owner_side_public_and_legacy():
