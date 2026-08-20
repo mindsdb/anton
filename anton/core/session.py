@@ -2460,6 +2460,40 @@ class ChatSession:
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
         )
 
+        # Script traffic never reaches the analytics sink (ENG-1692).
+        #
+        # A turn with NO session id AND zero LLM calls did nothing and belongs to
+        # nobody: it is an eval, replay or test driver. Measured over 14 days to
+        # 2026-08-20, that shape was 8,209 of 11,734 `turn_completed` events —
+        # **70% of all volume, carrying 0 tokens** — from 15 machines. It made
+        # the per-turn median come out at ZERO, which is impossible for a
+        # completed turn, and would have set ENG-1286's spend ceiling from a
+        # fabricated distribution.
+        #
+        # BOTH conditions are required, and each half alone deletes real data:
+        #   * `llm_calls == 0` alone would drop 338 real turns that failed
+        #     before reaching a model (ended_by error / retry_exhausted /
+        #     cancelled, 88 installs) — real users hitting real errors.
+        #   * a missing session id alone would drop cowork-server's connector
+        #     probe, which legitimately runs a turn without one and spent 4.8M
+        #     tokens over the same window.
+        #
+        # Deliberately BEHAVIOURAL, not a version test. The original plan gated
+        # on `.dev` in the version; re-measured, that catches only 2,907 of the
+        # 8,209 and misses the single largest contaminant (`2.26.8.18.1rc2`,
+        # 5,253 events, no `.dev` in it). A version says what the software IS,
+        # not who is running it — the same build is installed by a real tester
+        # AND driven by a script, so `2.26.8.18.1rc2` holds 5,253 fake turns and
+        # 16 real ones. No version rule can split that; this one does not try.
+        #
+        # No env override is needed to test the sink by hand: a developer running
+        # a REAL turn has a session id and LLM calls, so it still emits.
+        #
+        # The log line above is deliberately NOT gated — whoever is running the
+        # driver keeps full local diagnosability.
+        if not self._session_id and tc.llm_calls == 0:
+            return
+
         # Analytics sink — same settings-resolution pattern as the
         # ds_connect_* events (anton/tools.py): the session's settings when
         # the host provided AntonSettings, else a fresh resolve so

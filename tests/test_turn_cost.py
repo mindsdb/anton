@@ -593,3 +593,69 @@ class TestUnknownRoleReconciles:
             for r in ("planning", "coding", "router", "unknown")
         )
         assert per_role == int(kw["tokens_total"]) == 1886
+
+
+class TestScriptTrafficIsNotReported:
+    """A turn with no session id AND no LLM call is not a user turn (ENG-1692).
+
+    That shape was 8,209 of 11,734 `turn_completed` events over 14 days to
+    2026-08-20 — 70% of all volume, 0 tokens, 15 machines — and it dragged the
+    per-turn median to ZERO, which is impossible for a completed turn. ENG-1286's
+    spend ceiling would have been derived from it.
+
+    The four cases below are the 2x2 that made the discriminator measurable, and
+    they exist to stop the conjunction being "simplified" to one condition later:
+    each half alone deletes real data.
+    """
+
+    def test_no_session_and_no_llm_call_is_dropped(self):
+        # The script cohort: nothing ran, nobody owns it.
+        s = _bare_session(_session_id=None)
+        assert s._turn_cost.llm_calls == 0
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert not send.called
+
+    def test_the_log_line_still_records_the_dropped_turn(self, caplog):
+        # Dropping the EVENT must not cost local diagnosability for whoever is
+        # running the driver — that is why the guard sits after the log.
+        s = _bare_session(_session_id=None)
+        with patch("anton.analytics.send_event") as send:
+            with caplog.at_level(logging.INFO, logger="anton.core.session"):
+                s._emit_turn_cost()
+        assert not send.called
+        assert any("turn_cost" in r.message for r in caplog.records)
+
+    def test_no_session_but_a_real_llm_call_still_emits(self):
+        """cowork-server's connector probe runs a turn with no session id.
+
+        It spent 4.8M real tokens over the measured window. Gating on the
+        missing session id ALONE would have deleted all of it.
+        """
+        s = _bare_session(_session_id=None)
+        s._turn_cost.add("planning", "planner", _usage(100, 10, 0, 0))
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.called
+        assert send.call_args.kwargs["conversation_id"] == ""
+        assert send.call_args.kwargs["llm_calls"] == "1"
+
+    def test_a_real_turn_that_failed_before_any_llm_call_still_emits(self):
+        """338 real turns over the window ended error / retry_exhausted /
+        cancelled with zero LLM calls, across 88 installs. Gating on
+        `llm_calls == 0` ALONE would have deleted those users' failures — the
+        exact population a reliability question needs."""
+        s = _bare_session()          # session id present
+        s._turn_cost.ended_by = "error"
+        assert s._turn_cost.llm_calls == 0
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.called
+        assert send.call_args.kwargs["ended_by"] == "error"
+
+    def test_an_ordinary_turn_still_emits(self):
+        s = _bare_session()
+        s._turn_cost.add("planning", "planner", _usage(100, 10, 0, 0))
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.called
