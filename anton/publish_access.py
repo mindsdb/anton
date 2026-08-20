@@ -43,8 +43,9 @@ def resolve_access(
 
     Returns ``(effective_access, pwd_version, access_version, owner_side)``.
     A request with no usable selection (empty password, or restricted with no
-    emails and no org) degrades to ``public`` — a server-side safety net for
-    programmatic callers; interactive callers must gate empty input earlier.
+    emails, no org and no owner_only) degrades to ``public`` — a server-side
+    safety net for programmatic callers; interactive callers must gate empty
+    input earlier.
     NOTE: with ``access=None`` and ``password=None`` the mode defaults to
     ``public`` — the prior mode is NOT inherited (``previous`` only feeds the
     version counters). Callers that want to preserve a prior non-public mode
@@ -79,17 +80,29 @@ def resolve_access(
     if mode == "restricted":
         emails = normalize_emails((access or {}).get("emails"))
         org_allowed = bool((access or {}).get("org_allowed"))
-        if emails or org_allowed:
+        # The owner always matches (the FK condition in auth), so an explicit
+        # owner_only next to emails/org carries no information — canonicalise it
+        # away so two equivalent selections don't differ in access_version.
+        owner_only = bool((access or {}).get("owner_only")) and not emails and not org_allowed
+        if emails or org_allowed or owner_only:
             prev_restricted = prev.get("mode") == "restricted"
             prev_emails = prev.get("emails") if prev_restricted else None
             prev_org = prev.get("org_allowed") if prev_restricted else None
-            changed = (emails != prev_emails) or (org_allowed != prev_org)
+            # bool(): pre-ENG-1769 entries have no owner_only key, and a bare
+            # `False != None` would bump the version on an unchanged re-publish.
+            prev_owner_only = bool(prev.get("owner_only")) if prev_restricted else None
+            changed = (
+                (emails != prev_emails)
+                or (org_allowed != prev_org)
+                or (owner_only != prev_owner_only)
+            )
             access_version = (prev_access_version + 1) if changed else (prev_access_version or 1)
             owner_side = {
                 "mode": "restricted",
                 "requires_password": False,
                 "emails": emails,
                 "org_allowed": org_allowed,
+                "owner_only": owner_only,
                 "access_version": access_version,
             }
             return (

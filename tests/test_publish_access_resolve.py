@@ -84,6 +84,69 @@ def test_resolve_restricted_empty_degrades_to_public():
     assert eff == {"mode": "public"}
 
 
+def test_resolve_restricted_owner_only_does_not_degrade():
+    """Explicit owner_only is a valid selection: empty emails + no org stays restricted."""
+    eff, _, acc_v, owner = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, None
+    )
+    assert eff == {"mode": "restricted", "emails": [], "org_allowed": False}
+    assert acc_v == 1
+    assert owner["mode"] == "restricted"
+    assert owner["emails"] == []
+    assert owner["org_allowed"] is False
+    assert owner["owner_only"] is True
+
+
+def test_resolve_restricted_owner_only_canonicalized_away_when_emails_present():
+    """The owner always has access, so owner_only carries no meaning next to emails."""
+    _, _, _, owner = resolve_access(
+        None, {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "owner_only": True}, None
+    )
+    assert owner["owner_only"] is False
+
+
+def test_resolve_restricted_owner_only_canonicalized_away_when_org_allowed():
+    _, _, _, owner = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": True, "owner_only": True}, None
+    )
+    assert owner["owner_only"] is False
+
+
+def test_resolve_owner_only_to_emails_and_back_bumps_access_version():
+    """Each switch must invalidate viewer grants."""
+    prev = {"mode": "restricted", "emails": [], "org_allowed": False,
+            "owner_only": True, "access_version": 5}
+    _, _, acc_v, owner = resolve_access(
+        None, {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False}, prev
+    )
+    assert acc_v == 6
+
+    _, _, acc_v2, _ = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, owner
+    )
+    assert acc_v2 == 7
+
+
+def test_resolve_owner_only_unchanged_keeps_access_version():
+    prev = {"mode": "restricted", "emails": [], "org_allowed": False,
+            "owner_only": True, "access_version": 4}
+    _, _, acc_v, _ = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, prev
+    )
+    assert acc_v == 4
+
+
+def test_resolve_legacy_restricted_entry_without_owner_only_key_keeps_version():
+    """A pre-ENG-1769 entry has no owner_only key: prev.get() returns None and a
+    naive `False != None` comparison would bump the version on an unchanged
+    re-publish, resetting every viewer's grant."""
+    prev = {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "access_version": 3}
+    _, _, acc_v, _ = resolve_access(
+        None, {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False}, prev
+    )
+    assert acc_v == 3
+
+
 def test_parse_emails_splits_and_validates():
     valid, invalid = parse_emails("a@x.com, b@x.com foo@ ; c@y.io")
     assert valid == ["a@x.com", "b@x.com", "c@y.io"]
