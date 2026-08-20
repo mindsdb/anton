@@ -620,6 +620,11 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
 
 # ─── error_type: naming the failure, not just counting it (ENG-1689) ─────────
 
+# Every session here carries a `session_id` deliberately: ENG-1692's guard
+# suppresses `turn_completed` for a turn with no session id AND zero LLM
+# calls (script traffic), which is exactly the shape of a pre-model failure.
+# Without it these tests pass alone and fail the moment anton#379 lands —
+# a break neither PR's CI can see, since each is green on its own base.
 def _error_type(send_event_mock) -> str:
     assert send_event_mock.called, "no turn_completed event emitted"
     return send_event_mock.call_args.kwargs["error_type"]
@@ -633,7 +638,11 @@ async def test_retry_exhausted_names_the_exception_class(workspace):
     """
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(side_effect=RuntimeError("provider down"))
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
 
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("do something"):
@@ -649,7 +658,11 @@ async def test_retry_exhausted_reports_the_specific_provider_exception(workspace
     """
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(side_effect=TimeoutError("upstream stalled"))
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
 
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("do something"):
@@ -672,7 +685,11 @@ async def test_error_terminal_names_the_exception_class(workspace):
     """
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(side_effect=KeyboardInterrupt())
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
 
     with patch("anton.analytics.send_event") as send:
         with pytest.raises(KeyboardInterrupt):
@@ -691,7 +708,11 @@ async def test_completed_turn_carries_no_error_type(workspace):
     mock_llm.plan_stream = MagicMock(
         side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
     )
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
 
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("hello"):
@@ -718,7 +739,11 @@ async def test_user_stop_carries_no_error_type(workspace):
         return _gen()
 
     mock_llm.plan_stream = MagicMock(side_effect=_hang)
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
 
     with patch("anton.analytics.send_event") as send:
 
