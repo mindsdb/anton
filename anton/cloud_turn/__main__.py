@@ -184,6 +184,10 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             return
 
     hb = asyncio.create_task(_heartbeat())
+    # A teardown crash / CancelledError escapes `except Exception`, so guarantee
+    # a terminal event in `finally` — else the turn dies with no terminal and
+    # the controller reports a silent "unexpected error".
+    terminal_emitted = False
     try:
         req = TurnRequestV1.from_json(raw_line)
         session = builder(req)
@@ -277,11 +281,19 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             emit({"kind": "skill", "entries": drafts})
         logger.info("cloud turn completed")
         emit({"kind": "turn_completed"})
+        terminal_emitted = True
     except Exception as exc:
         # Full traceback -> stderr only; wire carries a short scrubbed string.
         logger.exception("cloud turn failed")
         emit({"kind": "turn_failed", "error": _scrub(exc)})
+        terminal_emitted = True
     finally:
+        # No terminal yet = BaseException/teardown path; emit one (guarded — a
+        # broken pipe here must not mask the original error).
+        if not terminal_emitted:
+            logger.warning("cloud turn ended without a terminal event; emitting turn_failed")
+            with contextlib.suppress(Exception):
+                emit({"kind": "turn_failed", "error": "The turn ended unexpectedly. Please try again."})
         hb.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await hb

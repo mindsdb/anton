@@ -224,6 +224,29 @@ def test_turn_failure_is_terminal_and_scrubbed():
     assert session.closed is True  # closed even on failure
 
 
+class _BaseBoom(BaseException):
+    """A non-Exception failure, like the httpcore GeneratorExit->RuntimeError
+    teardown or a CancelledError, that escapes `except Exception`."""
+
+
+def test_baseexception_teardown_still_emits_a_terminal_event():
+    """Regression: a teardown crash after the turn body must not close the
+    stream with no terminal event (controller reports 'stream ended without a
+    terminal event' -> cowork shows a bare 'unexpected error'). The finally
+    guarantee emits turn_failed, then the BaseException re-propagates."""
+    session = _FakeSession(raise_on_stream=_BaseBoom("teardown"))
+    events = []
+    try:
+        asyncio.run(stream_turn(
+            '{"protocol_version":1,"conversation_id":"c","input":"hi"}',
+            events.append, session_builder=lambda r: session,
+        ))
+    except _BaseBoom:
+        pass  # re-propagates after finally emitted the terminal event
+    assert events and events[-1]["kind"] == "turn_failed"
+    assert session.closed is True
+
+
 def test_bad_request_is_a_single_turn_failed():
     events = []
     asyncio.run(stream_turn("{not valid json", events.append))
