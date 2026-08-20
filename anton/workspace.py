@@ -8,6 +8,7 @@ Handles:
 
 from __future__ import annotations
 
+import errno
 import os
 from datetime import datetime
 from pathlib import Path
@@ -83,7 +84,22 @@ class Workspace:
     # ── Initialization ───────────────────────────────────────────
 
     def initialize(self) -> list[str]:
-        """Create the workspace structure. Returns list of actions taken."""
+        """Create the workspace structure. Returns list of actions taken.
+
+        Retries once on ESTALE: on a shared NFS/EFS workspace another
+        client (cowork-server re-staging `.anton/anton.md`, or a workspace
+        wipe) can delete an inode this pod still has cached, so the first
+        stat fails with a stale handle. That failed stat drops the cached
+        dentry, so a second pass does a fresh lookup and succeeds.
+        """
+        try:
+            return self._initialize_once()
+        except OSError as exc:
+            if exc.errno != errno.ESTALE:
+                raise
+            return self._initialize_once()
+
+    def _initialize_once(self) -> list[str]:
         actions: list[str] = []
 
         # Create .anton/ directory and memory subdirectory
