@@ -574,10 +574,10 @@ _SUMMARY_INPUT_WINDOW_SHARE = 0.25
 _CHARS_PER_TOKEN = 4
 # Floor: never budget below the old flat cap, whatever the window.
 _MIN_SUMMARY_INPUT_CHARS = 8_000
-# 4x what the prompt asks for (~2000 tokens), which leaves room for reasoning
-# and for the preamble cheap models write before the record — both bill against
-# this same ceiling. Bounded rather than generous because the record then lives
-# in the context window compaction just freed.
+# 4x what the prompt asks for (~1500 words, so ~2000 tokens), leaving room for
+# reasoning and for the preamble cheap models write before the record — both bill
+# against this same ceiling. Bounded rather than generous because the record then
+# lives in the context window compaction just freed.
 _SUMMARY_OUTPUT_BUDGET = 8192
 
 # A structured, in-place-updated STATE RECORD rather than a freeform blob, so
@@ -600,7 +600,7 @@ _SUMMARY_SYSTEM_PROMPT = (
     "If a PREVIOUS SUMMARY is provided, update it with the new turns "
     "instead of starting over. If the user changed direction, narrowed "
     "scope, or cancelled something, reflect that — drop superseded items "
-    "from Remaining, don't keep them. Keep it under ~2000 tokens."
+    "from Remaining, don't keep them. Keep it under ~1500 words."
 )
 
 
