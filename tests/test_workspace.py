@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -83,6 +84,30 @@ class TestInitialization:
 
     def test_artifacts_dir_property(self, ws, tmp_path):
         assert ws.artifacts_dir == tmp_path / ".anton" / "artifacts"
+
+    def test_retries_once_on_stale_nfs_handle(self, ws, monkeypatch):
+        calls = {"n": 0}
+        real = ws._initialize_once
+
+        def stale_then_ok():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(errno.ESTALE, "Stale file handle")
+            return real()
+
+        monkeypatch.setattr(ws, "_initialize_once", stale_then_ok)
+        actions = ws.initialize()
+        assert calls["n"] == 2
+        assert len(actions) == 4
+
+    def test_does_not_retry_other_oserrors(self, ws, monkeypatch):
+        def boom():
+            raise OSError(errno.EACCES, "Permission denied")
+
+        monkeypatch.setattr(ws, "_initialize_once", boom)
+        with pytest.raises(OSError) as exc_info:
+            ws.initialize()
+        assert exc_info.value.errno == errno.EACCES
 
 
 class TestAntonMd:
