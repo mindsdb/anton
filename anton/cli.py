@@ -72,6 +72,11 @@ def is_minds_host(base: str, minds_url: str = "") -> bool:
     Judged from the endpoint, never from whether a MindsHub key or URL happens to
     be configured: signing in sets those, so a user running a local model has
     them too. *minds_url* covers self-hosted gateways on a private host.
+
+    A schemeless base ("api.mindshub.ai/v1") names no host to ``urlparse`` and
+    so reads as not-MindsHub. Deliberate: this only picks a display label, and
+    declining to claim MindsHub is the safe direction. Cowork's equivalent
+    assumes a scheme, because there the answer decides routing.
     """
     from urllib.parse import urlparse
 
@@ -92,6 +97,30 @@ def is_minds_host(base: str, minds_url: str = "") -> bool:
     return host in ("mindshub.ai", "mdb.ai") or host.endswith(
         (".mindshub.ai", ".mdb.ai")
     )
+
+
+def openai_compatible_label(settings) -> str:
+    """Display label for an ``openai-compatible`` provider.
+
+    Names the endpoint that will actually serve requests, read from
+    ``openai_base_url``. Not from ``minds_url``: signing in to MindsHub sets
+    that, so a user pointed at a local model has it too and would be told their
+    prompts go to MindsHub when they do not.
+
+    Shared with the ``/setup`` summary so the two surfaces cannot disagree
+    about where requests go.
+    """
+    base = settings.openai_base_url or ""
+    if is_minds_host(base, settings.minds_url or ""):
+        return "MindsHub"
+    host = url_hostname(base)
+    if host == "generativelanguage.googleapis.com" or host.endswith(
+        ".generativelanguage.googleapis.com"
+    ):
+        return "Google Gemini"
+    if base:
+        return f"OpenAI-compatible ({base})"
+    return "OpenAI-compatible"
 
 
 def _reexec() -> None:
@@ -615,18 +644,7 @@ async def _animate_onboard(
     provider_label = settings.planning_provider
     model_label = settings.planning_model
     if provider_label == "openai-compatible":
-        base = settings.openai_base_url or ""
-        # The base URL decides, not minds_url: that is set for anyone signed in,
-        # so testing it labelled a local endpoint "MindsHub" — telling a user
-        # their prompts stayed on their machine when they did not.
-        if is_minds_host(base, settings.minds_url or ""):
-            provider_label = "MindsHub"
-        elif url_hostname(base) == "generativelanguage.googleapis.com":
-            provider_label = "Google Gemini"
-        elif base:
-            provider_label = f"OpenAI-compatible ({base})"
-        else:
-            provider_label = "OpenAI-compatible"
+        provider_label = openai_compatible_label(settings)
     console.print(f"  [anton.muted]Provider:[/] [anton.cyan]{provider_label}[/]")
     console.print(f"  [anton.muted]Model:[/]    [anton.cyan]{model_label}[/]")
     console.print()
