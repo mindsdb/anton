@@ -222,6 +222,35 @@ def test_all_three_derived_url_shapes_classify_as_the_gateway(minds_url, expecte
     assert classify_endpoint(settings) == expected
 
 
+# ─── the turn's own settings, never the ambient environment ──────────────────
+
+def test_absent_settings_reports_unknown_not_the_process_environment():
+    """The gap `ENDPOINT_UNKNOWN` exists for — and it was unreachable at first.
+
+    `_emit_turn_cost` falls back to a fresh `AntonSettings()` when the session
+    carries none, which reads the *process environment*. That is fine for
+    `llm_provider` (its historical meaning) and wrong here: it would describe
+    the machine rather than the turn, confidently. cowork-server's connector
+    probe builds a `ChatSessionConfig` with no `settings=` and is a live path
+    (68 events / 4.8M tokens in 14 days), so this is not hypothetical.
+
+    A default `AntonSettings` always carries a valid provider, so the unknown
+    branch could never fire through the fallback — the same
+    unreachable-by-construction shape as ENG-1459's `surface=web`.
+    """
+    assert classify_endpoint(None) == ENDPOINT_UNKNOWN
+
+
+def test_core_settings_without_provider_fields_reports_unknown():
+    """`ChatSessionConfig.settings` is typed `CoreSettings | None`, and
+    `CoreSettings` has no `planning_provider` and no `openai_base_url`. Absent
+    is the truthful answer; guessing `third-party` from a missing field is not.
+    """
+    from anton.core.settings import CoreSettings
+
+    assert classify_endpoint(CoreSettings()) == ENDPOINT_UNKNOWN
+
+
 # ─── the emit-site seam ──────────────────────────────────────────────────────
 
 def test_emit_site_actually_sends_both_new_properties():

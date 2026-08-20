@@ -759,3 +759,62 @@ async def test_user_stop_carries_no_error_type(workspace):
 
     assert _ended_by(send) == "cancelled"
     assert _error_type(send) == ""
+
+
+async def test_stop_after_exhausted_retries_does_not_report_an_error_type(workspace):
+    """A stale `error_type` must not survive into a `cancelled` turn.
+
+    The retry-exhausted site stamps `error_type` and then keeps going to
+    produce its apology — and a user who has sat through repeated failures is
+    precisely the one who then presses Stop. `ended_by` correctly flips to
+    `cancelled`; without clearing, `error_type` kept the old exception and
+    ordinary Stops showed up in an error-cause breakdown.
+    """
+    from anton.core.turn_cost import TurnCost
+
+    tc = TurnCost()
+    tc.ended_by = "retry_exhausted"
+    tc.error_type = "RuntimeError"
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=make_mock_llm(), workspace=workspace, session_id="conv-t"
+        )
+    )
+    session._turn_cost = tc
+
+    with patch("anton.analytics.send_event") as send:
+        session._emit_turn_cost(expected=tc, exc=asyncio.CancelledError())
+
+    assert _ended_by(send) == "cancelled"
+    assert _error_type(send) == ""
+
+
+async def test_session_without_settings_emits_no_endpoint_class(workspace):
+    """The emit-site half of the same defect, which the helper test cannot see.
+
+    `_emit_turn_cost` resolves a fresh `AntonSettings()` when the session
+    carries none, so passing THAT to the classifier would report the machine's
+    environment as if it were the turn's endpoint — confidently, and with no
+    way to tell it apart from a real answer. cowork-server's connector probe
+    builds a session with no `settings=`, so this path carries real traffic.
+
+    Driven through the real turn rather than the helper, because the defect is
+    which object the emit site hands over.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(
+        side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
+    )
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
+    assert session._settings is None, "fixture must have no settings for this to bite"
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("hello"):
+            pass
+
+    assert send.called
+    assert send.call_args.kwargs["endpoint_class"] == ""

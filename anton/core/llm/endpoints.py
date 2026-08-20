@@ -16,6 +16,17 @@ ENG-1689. ``turn_completed`` could report *how much* a turn cost but not
 
 Only anton knows the base URL it resolved, so only anton can answer this.
 
+**Scope: this is the PLANNING role's endpoint.** A turn has independent
+``planning_provider``, ``coding_provider`` and ``router_provider`` settings, so
+roles CAN reach different destinations — and this reports one label, matching
+``llm_provider``, which is also planning-only. The exposure is small because
+there is a single ``openai_base_url``: two roles both on ``openai-compatible``
+share an endpoint, so they diverge only when the provider *types* differ.
+Measured 14d: 12.9% of real turns ran a different coding model, but only 0.5%
+of tokens, and most of those pairs sit on the same endpoint (``sonnet`` with
+``haiku``, both ours). Read this as "where the planning role went", not as a
+guarantee that every token in the turn went there.
+
 **The values are a partition over the observed host, not over who pays.** That
 distinction is what makes them mutually exclusive: "is this loopback" and "is
 this our domain" are facts about a string we hold, whereas "whose money paid"

@@ -2445,6 +2445,13 @@ class ChatSession:
         # narrower case where the cancel lands exactly at a yield boundary.
         if isinstance(exc, (GeneratorExit, asyncio.CancelledError)) or cancelled:
             tc.ended_by = "cancelled"
+            # Clear any error_type an earlier terminal already stamped. The
+            # retry-exhausted site stamps one and then keeps going to produce
+            # its apology — and a user who has sat through failed retries is
+            # exactly the user who then presses Stop, so this path is ordinary,
+            # not exotic. Leaving the stale value would let plain Stops appear
+            # in an error-cause breakdown, which is the opposite of the point.
+            tc.error_type = ""
         elif exc is not None:
             tc.ended_by = "error"
             # The exception was in scope here and thrown away until ENG-1689,
@@ -2493,6 +2500,19 @@ class ChatSession:
         # never conversation content (ENG-1288).
         try:
             settings = getattr(self, "_settings", None)
+            # Held separately from the fallback below. `endpoint_class` must
+            # describe THIS TURN's endpoint, and the fallback describes the
+            # process environment — which is not the same thing on any host
+            # that builds a session without passing settings (cowork-server's
+            # connector probe does exactly that, and it is a live path). Where
+            # the turn's own settings are absent, or are a `CoreSettings` that
+            # has no provider fields at all, the honest answer is "unknown",
+            # and `classify_endpoint` returns that for both.
+            #
+            # `llm_provider` below deliberately keeps reading the fallback:
+            # changing an existing field's source is ENG-1695's call, not a
+            # side effect of adding a new one.
+            _turn_settings = settings
             if settings is None or not hasattr(settings, "analytics_enabled"):
                 from anton.config.settings import AntonSettings
 
@@ -2572,7 +2592,7 @@ class ChatSession:
                 # Where the tokens actually went, from the resolved base-URL
                 # host: local / mindshub / third-party (ENG-1689). Never the
                 # URL itself — those carry internal corporate hostnames.
-                endpoint_class=classify_endpoint(settings),
+                endpoint_class=classify_endpoint(_turn_settings),
                 harness=str(self._harness or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
