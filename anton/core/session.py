@@ -2105,7 +2105,20 @@ class ChatSession:
                     _SUMMARY_OUTPUT_BUDGET,
                     summary_response.usage.output_tokens,
                 )
-            summary = summary_response.content or "(summary unavailable)"
+            # An empty 200 reaches here: `raise_on_empty_response` returns early
+            # on any truthy stop_reason, so a cut-off-before-any-text generation
+            # is a "success" carrying no record. Substituting a placeholder would
+            # replace real turns with a fact-free line that can never self-heal
+            # (ENG-1274) — treat it as a failed summarisation instead.
+            if not summary_response.content:
+                logger.warning(
+                    "history summarization: empty record (stop_reason=%s) — "
+                    "keeping %d turns intact",
+                    summary_response.stop_reason,
+                    len(old_turns),
+                )
+                return False
+            summary = summary_response.content
             # Record the compaction ONLY on success.
             self._last_compacted_count = compacted_count
         except Exception as exc:
