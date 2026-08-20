@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 from rich.console import Console
 
@@ -40,25 +39,12 @@ async def handle_setup_models(
     global_ws = _Workspace(Path.home())
 
     def _provider_label(provider: str) -> str:
+        # Shared with the startup summary so both surfaces name the endpoint
+        # that actually serves requests.
+        from anton.cli import openai_compatible_label
+
         if provider == "openai-compatible":
-            base = settings.openai_base_url or ""
-            if settings.minds_url and (
-                "mindshub.ai" in settings.minds_url or "mdb.ai" in settings.minds_url
-            ):
-                return "MindsHub"
-            else:
-                hostname = None
-                if base:
-                    parsed = urlparse(base)
-                    hostname = parsed.hostname
-                if hostname and (
-                    hostname == "generativelanguage.googleapis.com"
-                    or hostname.endswith(".generativelanguage.googleapis.com")
-                ):
-                    return "Google Gemini"
-                elif base:
-                    return f"OpenAI-compatible ({base})"
-            return "OpenAI-compatible"
+            return openai_compatible_label(settings)
         return provider.capitalize()
 
     provider_display = _provider_label(settings.planning_provider)
