@@ -277,7 +277,56 @@ async def test_prompt_access_restricted():
     fp = _FakePrompt(["restricted", "a@x.com, b@x.com", "y"])
     assert await prompt_access(fp) == {
         "mode": "restricted", "emails": ["a@x.com", "b@x.com"], "org_allowed": True,
+        "owner_only": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_empty_input_is_owner_only():
+    """Empty emails + no org is now a valid, explicit 'only me' selection."""
+    fp = _FakePrompt(["restricted", "", "n"])
+    assert await prompt_access(fp) == {
+        "mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_valid_emails_not_owner_only():
+    fp = _FakePrompt(["restricted", "a@x.com", "n"])
+    assert await prompt_access(fp) == {
+        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "owner_only": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_org_only_not_owner_only():
+    fp = _FakePrompt(["restricted", "", "y"])
+    assert await prompt_access(fp) == {
+        "mode": "restricted", "emails": [], "org_allowed": True, "owner_only": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_invalid_email_reprompts():
+    """A malformed address must NOT be silently dropped into an owner-only publish."""
+    fp = _FakePrompt(["restricted", "colleague@corp", "a@x.com", "n"])
+    result = await prompt_access(fp)
+    assert result == {
+        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "owner_only": False,
+    }
+    # The org question is asked once, after the email input finally validates.
+    assert sum("organization" in label for label in fp.asked) == 1
+    # The rejected token is echoed back in the re-prompt label.
+    assert any("colleague@corp" in label for label in fp.asked)
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_mixed_input_reprompts():
+    """Valid + invalid together is still blocked: no silent 'invalid ignored'."""
+    fp = _FakePrompt(["restricted", "a@x.com bad", "a@x.com", "n"])
+    result = await prompt_access(fp)
+    assert result["emails"] == ["a@x.com"]
+    assert sum("organization" in label for label in fp.asked) == 1
 
 
 @pytest.mark.asyncio

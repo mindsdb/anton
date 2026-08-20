@@ -272,10 +272,11 @@ async def prompt_access(prompt_fn, *, previous=None, allow_keep=False) -> dict |
     """Interactively collect an access spec via a prompt_or_cancel-like coro.
 
     Returns an input access dict ({"mode": ...}) or None if the user cancels
-    (Esc at any step). Empty password / empty restricted selection re-prompt
-    rather than silently degrading to public — parity with cowork's
-    isAccessDraftValid(). ``prompt_fn`` is injected so this is unit-testable
-    without a TTY.
+    (Esc at any step). An empty password re-prompts rather than silently
+    degrading to public; an empty restricted selection is an explicit
+    owner-only publish, while malformed addresses re-prompt — parity with
+    cowork's isAccessDraftValid(). ``prompt_fn`` is injected so this is
+    unit-testable without a TTY.
     """
     choices = ["public", "password", "restricted"]
     if allow_keep:
@@ -306,11 +307,20 @@ async def prompt_access(prompt_fn, *, previous=None, allow_keep=False) -> dict |
             # empty → re-prompt (do NOT degrade to public silently)
 
     if mode == "restricted":
+        hint = ""
         while True:
-            raw = await prompt_fn("  Allowed emails (comma or space separated)")
+            raw = await prompt_fn(
+                f"{hint}  Allowed emails (comma or space separated; empty = only you)"
+            )
             if raw is None:
                 return None
-            valid, _invalid = parse_emails(raw)
+            valid, invalid = parse_emails(raw)
+            if invalid:
+                # Re-prompt instead of dropping them: a typo'd address would
+                # otherwise turn into an owner-only publish the user never asked
+                # for. prompt_fn is the only output channel available here.
+                hint = f"  Invalid: {', '.join(invalid)}\n"
+                continue
             org_ans = await prompt_fn(
                 "  Allow everyone in your organization?",
                 choices=["y", "n"], choices_display="y/n", default="n",
@@ -318,8 +328,11 @@ async def prompt_access(prompt_fn, *, previous=None, allow_keep=False) -> dict |
             if org_ans is None:
                 return None
             org_allowed = org_ans.strip().lower() in ("y", "yes")
-            if valid or org_allowed:
-                return {"mode": "restricted", "emails": valid, "org_allowed": org_allowed}
-            # nothing selected → re-prompt
+            return {
+                "mode": "restricted",
+                "emails": valid,
+                "org_allowed": org_allowed,
+                "owner_only": not valid and not org_allowed,
+            }
 
     return {"mode": "public"}
