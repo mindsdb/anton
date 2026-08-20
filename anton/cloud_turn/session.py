@@ -26,6 +26,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
@@ -587,7 +588,12 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         settings=settings,
         workspace=workspace,
         session_id=request.conversation_id,
-        harness="cloud",
+        # WHICH AGENT: this pod image is "anton + boot" — the agent running here
+        # IS anton, so "cloud" was factually wrong, not merely overloaded
+        # (ENG-1694). Where it ran comes from `surface` below, which cowork
+        # sends; every web turn executes in a pod and only web turns do, so
+        # "ran in a pod" needs no field of its own today.
+        harness=HARNESS_ANTON,
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
         # driven directly rather than by cowork; an unset surface reads as

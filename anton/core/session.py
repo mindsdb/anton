@@ -865,20 +865,27 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
-    # Identifier for the host driving this session. Surfaced on telemetry /
-    # langfuse traces so the host that produced a given trace is filterable.
+    # WHICH AGENT ran this session. Surfaced on telemetry / langfuse traces, and
+    # the gateway composes the trace's display name from it as
+    # "{harness}:turn-{turn_id}".
     #
-    # The values actually in use, which are NOT what this field's name suggests:
-    #   "cli"     — anton's own interactive chat (chat_session.py, chat.py)
-    #   "anton"   — cowork-server, which passes its *agent harness* id here;
-    #               this — see `surface` below, which is how they are now told
-    #               apart (ENG-1459)
-    #   "cloud"   — the one-turn-per-pod cloud path
-    #   None      — a host that did not identify itself
+    #   "anton"   — the anton agent. Every first-party caller today: the CLI,
+    #               cowork-server (desktop and web), and the cloud pod.
+    #   "hermes"  — the hermes agent (cowork-server's other harness). Note it
+    #               emits no langfuse traces yet, so this value has no volume —
+    #               a query showing 100% anton is NOT evidence hermes is unused.
+    #   None      — a host that did not identify itself.
     #
     # None must stay reserved for that last case: until ENG-1495 the CLI left it
     # unset, so "" meant both "CLI" and "unidentified" and nothing could tell
     # them apart.
+    #
+    # WHERE it ran is `surface`, below — a separate axis. Until ENG-1694 this one
+    # field carried both, holding "cli" and "cloud" (places) alongside "anton"
+    # and "hermes" (agents), so it could answer neither question: a "cli" trace
+    # could not say which agent ran, and an "anton" trace could not say where.
+    # Keep the vocabularies apart. A value that answers "where" belongs in
+    # `surface`; if a third question ever needs answering, it gets a third field.
     harness: str | None = None
     # WHERE the user was, as opposed to which agent ran: one of
     # `anton.core.llm.tracing.VALID_SURFACES` (`desktop` / `web` / `cli`), or
