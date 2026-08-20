@@ -73,10 +73,16 @@ def _extract_metadata(text: str) -> tuple[str, dict]:
             except ValueError:
                 pass
 
-    for key in ("topic", "kind", "confidence", "source"):
-        if key in raw:
-            if raw[key]:
-                meta[key] = raw[key]
+    for key in ("topic", "kind", "confidence", "source", "producer"):
+        if key in raw and raw[key]:
+            meta[key] = raw[key]
+    if raw.get("cells"):
+        try:
+            meta["source_cells"] = tuple(
+                int(cell) for cell in raw["cells"].split(",") if cell.isdigit()
+            )
+        except ValueError:
+            pass
 
     return clean_text, meta
 
@@ -327,10 +333,12 @@ class Hippocampus:
         for entry in entries:
             parts: list[str] = []
 
-            for key in ("confidence", "source", "topic"):
+            for key in ("confidence", "source", "topic", "producer"):
                 val = getattr(entry, key)
                 if val is not None and val != "":
                     parts.append(f"{key}:{val}")
+            if entry.source_cells:
+                parts.append(f"cells:{','.join(str(cell) for cell in entry.source_cells)}")
 
             ts = (
                 entry.updated_at.strftime("%Y-%m-%d")
