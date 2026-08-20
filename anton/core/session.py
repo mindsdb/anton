@@ -539,7 +539,7 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
-def _clip_keep_cause(text: str, cap: int) -> str:
+def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
 
     A failing tool result names its cause at the END — a traceback's final
@@ -549,9 +549,18 @@ def _clip_keep_cause(text: str, cap: int) -> str:
     but discarded its cause, which is how an unrecoverable environment wall
     kept getting judged INCOMPLETE instead of STUCK (ENG-836). Keep a small
     head, elide the middle, and spend most of the budget on the tail.
+
+    ``keep="head"`` inverts that for text whose meaning is up front — a tool
+    call's target sits in its first fields — and keeps the result on one line,
+    so it stays usable inside a serialized transcript entry.
     """
     if len(text) <= cap:
         return text
+    if keep == "head":
+        marker = f" [... {len(text) - cap} chars elided ...]"
+        if len(text) <= cap + len(marker):
+            return text
+        return f"{text[:cap]}{marker}"
     head = cap // 3
     tail = cap - head
     elided = len(text) - head - tail
@@ -2042,9 +2051,9 @@ class ChatSession:
                             # Head, not tail: a call's target (path, command) sits in
                             # its first fields, while the tail is the end of a written
                             # file body. The name is outside the clip and never lost.
-                            args = str(block.get("input", ""))
-                            if len(args) > 500:
-                                args = f"{args[:500]}… (+{len(args) - 500} chars)"
+                            args = _clip_keep_cause(
+                                str(block.get("input", "")), 500, keep="head"
+                            )
                             lines.append(f"[{role}/tool_use]: {block.get('name', '')}({args})")
                         elif block.get("type") == "tool_result":
                             lines.append(
@@ -2102,7 +2111,7 @@ class ChatSession:
                 logger.warning(
                     "history summarization: record truncated at budget %d "
                     "(output_tokens=%s) — keeping the partial record",
-                    _SUMMARY_OUTPUT_BUDGET,
+                    budget,
                     summary_response.usage.output_tokens,
                 )
             # An empty 200 reaches here: `raise_on_empty_response` returns early

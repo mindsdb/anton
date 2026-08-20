@@ -35,6 +35,7 @@ def make_mock_llm() -> AsyncMock:
     # The real client defaults the router role to the coding model; mirror it so
     # window-derived budgets read a real model id, not a Mock.
     mock.router_model = "claude-sonnet-4-6"
+    mock.max_tokens = 8192  # LLMClient's own default output ceiling
     mock.planning_provider = MagicMock()
     # Default test posture: no native web tools — fallback tools also off
     # unless a specific test configures otherwise via ChatSessionConfig.
