@@ -557,6 +557,50 @@ def test_skills_root_is_a_fresh_dir_outside_the_workspace(tmp_path, monkeypatch,
     assert not str(cfg.settings.skills_root).startswith(str(cfg.workspace.base))
 
 
+def test_skill_drafts_root_is_on_the_workspace(tmp_path, monkeypatch, skills_tmp):
+    """The inverse of the staged skills above: drafts go ON the workspace, the
+    only per-conversation storage that outlives the pod."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    drafts = cfg.settings.skill_drafts_root
+    assert drafts.is_dir()
+    assert drafts.is_relative_to(cfg.workspace.base)
+    assert not drafts.is_relative_to(skills_tmp)
+
+
+def test_a_draft_survives_into_the_next_turn(tmp_path, monkeypatch, skills_tmp):
+    """Editing a skill spans turns, so unlike the staged skills root this path
+    must be stable and its contents must carry over."""
+    _, cfg1 = _build(tmp_path, monkeypatch)
+    (cfg1.settings.skill_drafts_root / "my-skill").mkdir()
+    (cfg1.settings.skill_drafts_root / "my-skill" / "SKILL.md").write_text("turn 1 work")
+
+    _, cfg2 = _build(tmp_path, monkeypatch)
+    assert cfg2.settings.skill_drafts_root == cfg1.settings.skill_drafts_root
+    carried = cfg2.settings.skill_drafts_root / "my-skill" / "SKILL.md"
+    assert carried.read_text() == "turn 1 work"
+
+
+def test_a_skill_the_agent_builds_comes_back_out(tmp_path, monkeypatch, skills_tmp):
+    """The whole point of the feature, end to end on a REAL session: the tool
+    claims a folder, the agent writes into it, and the drain reports it."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from anton.cloud_turn.session import drain_pending_skills
+    from anton.core.tools.skill_draft import handle_create_skill_draft
+
+    session = _real_cloud_session(tmp_path, monkeypatch)
+    claimed = json.loads(asyncio.run(
+        handle_create_skill_draft(session, {"name": "Competitive Analysis"})
+    ))
+    Path(claimed["skill_file"]).write_text("---\nname: competitive-analysis\n---\nsteps")
+
+    entries = drain_pending_skills(session)
+    assert [e["slug"] for e in entries] == ["competitive-analysis"]
+    assert "steps" in entries[0]["files"]["SKILL.md"]
+
+
 def test_recall_skill_survives_the_real_tool_build(tmp_path, monkeypatch, skills_tmp):
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     session._build_tools()

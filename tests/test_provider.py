@@ -13,6 +13,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     compute_context_pressure,
     raise_on_empty_response,
+    safe_parse_tool_input,
 )
 
 
@@ -114,6 +115,41 @@ class TestDataclasses:
         assert r.stop_reason == "tool_use"
 
 
+class TestSafeParseToolInput:
+    """`repaired` must mean "an argument is missing", not "json.loads failed once".
+
+    The session refuses to dispatch a repaired call, so marking a complete body
+    repaired costs a whole tool call: the model re-emits the same deterministic
+    shape and the round repeats until the tool-round cap.
+    """
+
+    def test_body_cut_mid_value_is_repaired(self):
+        parsed, error, repaired = safe_parse_tool_input(
+            '{"action": "exec", "name": "main", "code": "print(1'
+        )
+        assert error is None
+        assert repaired is True
+        assert parsed["name"] == "main"
+
+    def test_complete_body_with_trailing_junk_is_not_repaired(self):
+        # A relay leaking its stop sentinel into the arguments — every argument
+        # arrived, so the call stays dispatchable.
+        parsed, error, repaired = safe_parse_tool_input(
+            '{"action": "exec", "code": "print(1)"}<|tool_call_end|>'
+        )
+        assert (parsed, error, repaired) == (
+            {"action": "exec", "code": "print(1)"}, None, False,
+        )
+
+    def test_complete_body_with_a_stray_comma_is_not_repaired(self):
+        # Nothing was left open, so the comma is junk after a finished value —
+        # not the "cut off after a comma" shape.
+        assert safe_parse_tool_input('{"a": 1},') == ({"a": 1}, None, False)
+
+    def test_clean_body_is_not_repaired(self):
+        assert safe_parse_tool_input('{"a": 1}') == ({"a": 1}, None, False)
+
+
 class TestAnthropicProvider:
     async def test_complete_text_response(self):
         with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
@@ -176,6 +212,61 @@ class TestAnthropicProvider:
             assert result.tool_calls[0].name == "create_plan"
             assert result.tool_calls[0].input == {"reasoning": "test"}
             assert result.stop_reason == "tool_use"
+            assert result.tool_calls[0].repaired is False, "a completed call is intact"
+
+    async def test_complete_at_the_cap_marks_the_last_call_unfinished(self):
+        """Non-streaming has no raw JSON to inspect, only `stop_reason`.
+
+        The SDK hands back an already-parsed `input`, so a call whose arguments
+        were cut arrives as a dict that simply lacks whatever the model had not
+        written yet — indistinguishable from a complete one unless
+        `stop_reason: "max_tokens"` is taken as the evidence it is. Without this
+        the whole invariant is bypassed on Anthropic-direct deployments: the
+        session's gates and the structured-output guards all read these flags.
+
+        Only the last call is marked: blocks arrive in order, so an earlier one
+        had already finished before the budget ran out.
+        """
+        with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+            mock_client = AsyncMock()
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
+
+            first = MagicMock()
+            first.type = "tool_use"
+            first.id = "tool_1"
+            first.name = "memorize"
+            first.input = {"content": "prefers weekly reports"}
+
+            cut = MagicMock()
+            cut.type = "tool_use"
+            cut.id = "tool_2"
+            cut.name = "scratchpad"
+            cut.input = {"action": "exec", "name": "main"}
+
+            mock_response = MagicMock()
+            mock_response.content = [first, cut]
+            mock_response.usage.input_tokens = 15
+            mock_response.usage.output_tokens = 8192
+            mock_response.stop_reason = "max_tokens"
+
+            mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+            provider = AnthropicProvider(api_key="test-key")
+            result = await provider.complete(
+                model="claude-sonnet-4-6",
+                system="plan",
+                messages=[{"role": "user", "content": "do something"}],
+                tools=[{"name": "scratchpad", "description": "x", "input_schema": {}}],
+                max_tokens=8192,
+            )
+
+            assert result.tool_calls[1].repaired is True
+            assert result.tool_calls[0].repaired is False, (
+                "the earlier call finished before the budget ran out"
+            )
+            # The dict is left exactly as the SDK parsed it — the flag is the
+            # only thing added, so nothing downstream sees invented arguments.
+            assert result.tool_calls[1].input == {"action": "exec", "name": "main"}
 
     async def test_complete_passes_tool_choice(self):
         with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:

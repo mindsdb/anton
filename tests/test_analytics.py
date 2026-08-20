@@ -3,11 +3,23 @@
 CI/automation traffic is dropped entirely rather than sent. ``send_event`` fires
 a daemon thread doing an HTTP GET; both are stubbed so we can assert what (if
 anything) would be sent, without network or threads.
+
+The exception is the exit-flush section at the bottom (ENG-1617), which uses a
+real loopback endpoint and a real child process — the bug it guards only exists
+at interpreter shutdown, so a stub cannot reproduce it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import http.server
 import json
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -511,3 +523,264 @@ def test_blanking_analytics_url_stops_the_routed_events_too(monkeypatch):
     analytics.send_event(_Blanked(), "turn_completed", tokens_total="1")
     analytics.send_event(_Blanked(), "rule_retrieval", outcome="ok")
     analytics.send_event(_Blanked(), "ds_connect_success", engine="pg")
+
+
+# ── Exit flush (ENG-1617) ───────────────────────────────────────────
+# Sends run in daemon threads, which are killed at interpreter shutdown without
+# running to completion. On `python -m anton.cloud_turn` — one turn, then exit —
+# that lost the event every time, not merely sometimes.
+
+
+def test_send_registers_the_send_as_outstanding(monkeypatch):
+    """`flush` can only wait for what it knows about, and it must know about a
+    send before the thread starts — otherwise there is a window where an event
+    is in flight and invisible."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_pending", set())
+
+    started: list[bool] = []
+
+    class _NeverRunThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            pass
+
+        def start(self):
+            # Deliberately never runs the target: this is the state where the
+            # request is outstanding.
+            started.append(True)
+
+    monkeypatch.setattr(analytics.threading, "Thread", _NeverRunThread)
+
+    analytics.send_event(_PosthogSettings(), "turn_completed")
+
+    assert started == [True]
+    assert len(analytics._pending) == 1
+
+
+def test_pending_is_cleared_once_the_send_finishes(monkeypatch):
+    """Long-lived hosts (cowork-server, an interactive CLI) send continuously.
+    A registration that is not cleared would grow without bound and make every
+    later `flush` walk a list of sends that finished hours ago."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_pending", set())
+    _capture_posthog(monkeypatch)  # runs the thread target synchronously
+
+    analytics.send_event(_PosthogSettings(), "turn_completed")
+
+    assert analytics._pending == set()
+
+
+def test_pending_is_cleared_when_the_thread_cannot_start(monkeypatch):
+    """A thread that never started cannot clear its own registration, so the
+    stale entry would cost every later `flush` the whole budget waiting on a
+    send that is not happening — turning a failed thread spawn into a
+    permanent one-second tax on exit."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_pending", set())
+
+    class _WontStart:
+        def __init__(self, target=None, args=(), daemon=None):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(analytics.threading, "Thread", _WontStart)
+
+    # send_event's own guard keeps this from reaching the caller.
+    analytics.send_event(_PosthogSettings(), "turn_completed")
+
+    assert analytics._pending == set()
+
+
+def test_pending_is_cleared_even_when_the_send_raises(monkeypatch):
+    """`_fire_posthog` swallows its own exceptions today, so this guards the
+    contract rather than current behaviour: if a sender ever raises, the
+    registration must still clear or exit hangs for the full budget on every
+    subsequent call."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_pending", set())
+
+    class _SyncThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target, self._args = target, args
+
+        def start(self):
+            with pytest.raises(RuntimeError):
+                self._target(*self._args)
+
+    monkeypatch.setattr(analytics.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(
+        analytics, "_fire_posthog",
+        lambda url, body: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    analytics.send_event(_PosthogSettings(), "turn_completed")
+
+    assert analytics._pending == set()
+
+
+def test_flush_waits_for_an_in_flight_send():
+    """The behaviour the ticket exists for: a send still in progress when the
+    process wants to exit gets time to land."""
+    landed: list[str] = []
+    analytics._spawn(lambda: (time.sleep(0.05), landed.append("sent")))
+
+    analytics.flush(timeout=2.0)
+
+    assert landed == ["sent"]
+
+
+def test_flush_returns_immediately_when_nothing_is_pending(monkeypatch):
+    """The normal case for an interactive CLI, where the event went out long
+    before the user quit. The budget is a ceiling, not a cost — if this ever
+    became a real wait, every `anton` session would pay it on exit."""
+    monkeypatch.setattr(analytics, "_pending", set())
+
+    start = time.monotonic()
+    analytics.flush(timeout=5.0)
+
+    assert time.monotonic() - start < 0.5
+
+
+def test_flush_gives_up_at_the_budget():
+    """A hung send must not hold the process open. `_TIMEOUT` allows a request
+    3s; the flush budget deliberately sits below that, so a black-holed network
+    costs exit the budget rather than the request timeout."""
+    release = threading.Event()
+    try:
+        analytics._spawn(release.wait)
+
+        start = time.monotonic()
+        analytics.flush(timeout=0.2)
+        elapsed = time.monotonic() - start
+
+        assert 0.2 <= elapsed < 1.0
+    finally:
+        release.set()
+
+
+def test_flush_logs_when_the_only_pending_send_is_abandoned(caplog):
+    """One outstanding send is the common case, and it is the case an earlier
+    version logged nothing for: the budget ran out *inside* `Event.wait`, so the
+    `remaining <= 0` branch was never reached and the loop just ended. The loss
+    this line exists to record was the one it never recorded."""
+    release = threading.Event()
+    try:
+        analytics._spawn(release.wait)
+
+        with caplog.at_level(logging.DEBUG, logger="anton.analytics"):
+            analytics.flush(timeout=0.2)
+
+        assert any("budget exhausted" in r.getMessage() for r in caplog.records)
+        assert any("1 send(s) abandoned" in r.getMessage() for r in caplog.records)
+    finally:
+        release.set()
+
+
+def test_flush_budget_is_shared_across_sends():
+    """Total, not per-send. A turn can emit several events; a per-send
+    allowance would multiply the worst-case exit delay by their number."""
+    release = threading.Event()
+    try:
+        for _ in range(4):
+            analytics._spawn(release.wait)
+
+        start = time.monotonic()
+        analytics.flush(timeout=0.2)
+        elapsed = time.monotonic() - start
+
+        # 4 sends x 0.2s would be 0.8s if the budget were per-send.
+        assert elapsed < 0.6
+    finally:
+        release.set()
+
+
+#: A child process shaped like `anton/cloud_turn/__main__.py`: send one event,
+#: return from `main`, exit. `--no-flush` unregisters the atexit hook to
+#: reproduce the pre-fix behaviour, which is what makes the assertion below
+#: evidence rather than a tautology — the same script fails without it.
+_SHORT_LIVED_CHILD = """
+import sys
+import anton.analytics as analytics
+
+if "--no-flush" in sys.argv:
+    import atexit
+    atexit.unregister(analytics.flush)
+
+class S:
+    analytics_enabled = True
+    analytics_url = "http://127.0.0.1:{port}/collect"
+    posthog_host = "http://127.0.0.1:{port}"
+    posthog_key = "phc_test"
+
+def main():
+    analytics.send_event(S(), "turn_completed", tokens_total="123")
+    return 0
+
+sys.exit(main())
+"""
+
+
+@contextlib.contextmanager
+def _capture_endpoint():
+    """A real local HTTP endpoint, so the child process makes a real request."""
+    received: list[bytes] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            received.append(self.rfile.read(length))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"Ok"}')
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1], received
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _run_child(port: int, *args: str) -> None:
+    env = dict(os.environ)
+    # The suite itself may run under GitHub Actions; CI traffic is dropped
+    # entirely, which would make this pass for the wrong reason.
+    for marker in _CI_MARKERS:
+        env.pop(marker, None)
+    subprocess.run(
+        [sys.executable, "-c", _SHORT_LIVED_CHILD.format(port=port), *args],
+        check=True, timeout=30, env=env,
+    )
+
+
+def test_short_lived_process_delivers_its_event():
+    """The regression test for ENG-1617, run as a real process because the bug
+    only exists at interpreter shutdown and cannot be reproduced in-process.
+
+    This is the `cloud_turn` shape: one turn, then exit. Before the fix it
+    delivered nothing at all — see the companion test below."""
+    with _capture_endpoint() as (port, received):
+        _run_child(port)
+        time.sleep(0.2)  # the endpoint records on its own thread
+
+    assert len(received) == 1
+    body = json.loads(received[0])
+    assert body["event"] == "turn_completed"
+    assert body["properties"]["tokens_total"] == "123"
+
+
+def test_short_lived_process_loses_its_event_without_the_flush():
+    """Pins the failure the fix addresses. If this ever starts passing, either
+    the atexit hook stopped being the thing doing the work, or CPython changed
+    when it kills daemon threads — both of which invalidate the test above."""
+    with _capture_endpoint() as (port, received):
+        _run_child(port, "--no-flush")
+        time.sleep(0.2)
+
+    assert received == []

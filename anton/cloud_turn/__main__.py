@@ -24,7 +24,13 @@ import sys
 import time
 
 from anton.cloud_turn.contract import TurnRequestV1
-from anton.cloud_turn.session import build_cloud_chat_session, drain_pending_memory
+from anton.cloud_turn.session import (
+    build_cloud_chat_session,
+    build_turn_content,
+    drain_pending_memory,
+    resolve_trusted_workspace_path,
+    drain_pending_skills,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +184,22 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             return
 
     hb = asyncio.create_task(_heartbeat())
+    # A teardown crash / CancelledError escapes `except Exception`, so guarantee
+    # a terminal event in `finally` — else the turn dies with no terminal and
+    # the controller reports a silent "unexpected error".
+    terminal_emitted = False
     try:
         req = TurnRequestV1.from_json(raw_line)
         session = builder(req)
+        # Fold in any attachments cowork-server staged into the workspace (read
+        # off the mount, so image bytes never crossed the stdin wire). Plain
+        # string when there are none. Never fail the turn over this — degrade to
+        # the plain input if the workspace can't be resolved or a file is bad.
+        try:
+            turn_content = build_turn_content(resolve_trusted_workspace_path(), req.input)
+        except Exception:
+            logger.warning("cloud turn: attachment augmentation failed; using plain input", exc_info=True)
+            turn_content = req.input
         # Tool-call args accumulate here and ship once on tool_end, so the
         # wire carries one event per call instead of one per args token.
         # Accumulation stops at the wire cap — a runaway call can't grow
@@ -189,7 +208,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         tool_args_len: dict[str, int] = {}
         seen_tool_progress: set[str] = set()
         last_progress_wire = 0.0
-        async for event in session.turn_stream(req.input):
+        async for event in session.turn_stream(turn_content):
             if isinstance(event, StreamTextDelta):
                 emit({"kind": "delta", "text": event.text or ""})
             # Step events go on the wire for cowork's thinking/steps UI;
@@ -253,13 +272,28 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             # Before the terminal event: cowork persists on this, then stops reading.
             logger.info("emitting %d memory entr(ies)", len(entries))
             emit({"kind": "memory", "entries": entries})
+        drafts = drain_pending_skills(session)
+        if drafts:
+            # Pre-terminal for the same reason as memory. Staged only — cowork
+            # surfaces a card the user saves; nothing reaches their skill store.
+            logger.info("emitting %d skill draft(s): %s",
+                        len(drafts), ", ".join(d["slug"] for d in drafts))
+            emit({"kind": "skill", "entries": drafts})
         logger.info("cloud turn completed")
         emit({"kind": "turn_completed"})
+        terminal_emitted = True
     except Exception as exc:
         # Full traceback -> stderr only; wire carries a short scrubbed string.
         logger.exception("cloud turn failed")
         emit({"kind": "turn_failed", "error": _scrub(exc)})
+        terminal_emitted = True
     finally:
+        # No terminal yet = BaseException/teardown path; emit one (guarded — a
+        # broken pipe here must not mask the original error).
+        if not terminal_emitted:
+            logger.warning("cloud turn ended without a terminal event; emitting turn_failed")
+            with contextlib.suppress(Exception):
+                emit({"kind": "turn_failed", "error": "The turn ended unexpectedly. Please try again."})
         hb.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await hb
