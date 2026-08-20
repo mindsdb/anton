@@ -616,3 +616,121 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
     # Every later turn — the latched skips AND the failed re-probe that falls
     # inside this window — books completed and must carry the flag.
     assert all(r == ("completed", "true") for r in rows[2:]), rows[2:]
+
+
+# ─── error_type: naming the failure, not just counting it (ENG-1689) ─────────
+
+def _error_type(send_event_mock) -> str:
+    assert send_event_mock.called, "no turn_completed event emitted"
+    return send_event_mock.call_args.kwargs["error_type"]
+
+
+async def test_retry_exhausted_names_the_exception_class(workspace):
+    """`retry_exhausted` was 6.7% of real turns with a median of ZERO LLM
+    calls — dying before the first model call — and said nothing about why.
+    The exception was already in hand: the retry loop formats it into a SYSTEM
+    message the model and the user both read, then dropped it.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=RuntimeError("provider down"))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("do something"):
+            pass
+
+    assert _ended_by(send) == "retry_exhausted"
+    assert _error_type(send) == "RuntimeError"
+
+
+async def test_retry_exhausted_reports_the_specific_provider_exception(workspace):
+    """The value of the field is discriminating between causes, so a second
+    exception type must produce a different label rather than a generic one.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=TimeoutError("upstream stalled"))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("do something"):
+            pass
+
+    assert _ended_by(send) == "retry_exhausted"
+    assert _error_type(send) == "TimeoutError"
+
+
+async def test_error_terminal_names_the_exception_class(workspace):
+    """The catch-all. `ended_by="error"` covered a parse failure, a tool
+    crash, a bad config and an anton bug alike, with the exception object in
+    scope at the assignment and discarded.
+
+    A `BaseException` is what reaches this branch — the retry loop catches
+    `Exception`, so only something outside that hierarchy escapes to the
+    outer handler. `KeyboardInterrupt` is the real-world instance of that
+    (Ctrl-C in the CLI) and is not one of the cancel shapes that would file
+    as `cancelled`.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=KeyboardInterrupt())
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+        with pytest.raises(KeyboardInterrupt):
+            async for _ in session.turn_stream("do something"):
+                pass
+
+    assert _ended_by(send) == "error"
+    assert _error_type(send) == "KeyboardInterrupt"
+
+
+async def test_completed_turn_carries_no_error_type(workspace):
+    """Empty, not "none" or "unknown" — a clean turn has no exception, and a
+    placeholder would pollute the distribution this field exists to produce.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(
+        side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("hello"):
+            pass
+
+    assert _ended_by(send) == "completed"
+    assert _error_type(send) == ""
+
+
+async def test_user_stop_carries_no_error_type(workspace):
+    """A user pressing Stop is not a failure. `CancelledError` takes the
+    `cancelled` branch, which deliberately does not stamp `error_type` — so
+    an error-cause breakdown cannot be inflated by ordinary stops.
+    """
+    mock_llm = make_mock_llm()
+    started = asyncio.Event()
+
+    def _hang(**kwargs):
+        async def _gen():
+            started.set()
+            await asyncio.sleep(3600)
+            yield StreamComplete(response=_text())
+
+        return _gen()
+
+    mock_llm.plan_stream = MagicMock(side_effect=_hang)
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with patch("anton.analytics.send_event") as send:
+
+        async def _run():
+            async for _ in session.turn_stream("long one"):
+                pass
+
+        task = asyncio.create_task(_run())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert _ended_by(send) == "cancelled"
+    assert _error_type(send) == ""
