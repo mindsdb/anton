@@ -2095,10 +2095,16 @@ class ChatSession:
             user_content = old_text
 
         try:
+            # Never above the client's own ceiling: a host that configures a
+            # smaller `max_tokens` (or a distinct router model with a lower
+            # output cap) would otherwise get a 400 on every compaction, and the
+            # handler below logs only the exception type — proactive compaction
+            # would be dead and invisible.
+            budget = min(_SUMMARY_OUTPUT_BUDGET, self._llm.max_tokens)
             summary_response = await self._llm.summarize(
                 system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
-                max_tokens=_SUMMARY_OUTPUT_BUDGET,
+                max_tokens=budget,
             )
             # A truncated record is kept, not retried:
             # - hitting a cap 4x the requested length means the model ignored the
@@ -2107,7 +2113,7 @@ class ChatSession:
             #   still beats leaving compaction to the reactive overflow path,
             #   which discards history outright
             # Logged so a record built from a cut-off generation is identifiable.
-            if looks_truncated(summary_response, _SUMMARY_OUTPUT_BUDGET):
+            if looks_truncated(summary_response, budget):
                 logger.warning(
                     "history summarization: record truncated at budget %d "
                     "(output_tokens=%s) — keeping the partial record",
