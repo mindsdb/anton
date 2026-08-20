@@ -204,7 +204,17 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         tool_args_len: dict[str, int] = {}
         seen_tool_progress: set[str] = set()
         last_progress_wire = 0.0
-        async for event in session.turn_stream(turn_content):
+        # Build attribution rides the turn, not the session: cowork resolved it
+        # per turn and only it knows the server version / install channel (this
+        # image has no cowork-server). `surface` is handled on the session
+        # config instead, so it is dropped here to avoid stamping it twice.
+        # Observability only — a malformed block must never affect the turn.
+        _trace_md = {
+            str(k): str(v)
+            for k, v in (req.trace or {}).items()
+            if k != "surface" and v is not None
+        } or None
+        async for event in session.turn_stream(turn_content, trace_metadata=_trace_md):
             if isinstance(event, StreamTextDelta):
                 emit({"kind": "delta", "text": event.text or ""})
             # Step events go on the wire for cowork's thinking/steps UI;

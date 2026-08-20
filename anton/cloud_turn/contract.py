@@ -45,6 +45,19 @@ class TurnRequestV1:
     #: {slug: {"files": {relpath: text}}}. Staged read-only in the pod; the pod
     #: never writes skills back (agent-built skills are a desktop draft flow).
     skills: dict | None = None
+    #: Optional trace-attribution block cowork resolved for this turn:
+    #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``.
+    #: Observability only — nothing here may affect what the turn DOES.
+    #:
+    #: It has to travel because the pod cannot derive any of it: cowork-server is
+    #: not installed in this image, and only the deployment knows which surface it
+    #: serves. Without it a web turn is indistinguishable from a desktop one
+    #: (ENG-1459), and ENG-1279's server version + install channel are absent too.
+    #:
+    #: Deliberately one open dict rather than N typed fields: every key otherwise
+    #: needs declaring in three repos (cowork-server -> scratchpad-controller's
+    #: allowlist -> here), so a block keeps the next key to two.
+    trace: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -59,4 +72,7 @@ class TurnRequestV1:
             llm=d.get("llm"),
             memory=d.get("memory"),
             skills=d.get("skills"),
+            # A controller too old to forward it simply yields None, which reads
+            # as "no attribution" rather than failing the turn.
+            trace=d.get("trace") if isinstance(d.get("trace"), dict) else None,
         )

@@ -391,3 +391,59 @@ def test_entrypoint_wires_attachment_augmentation(tmp_path, monkeypatch):
     _drive(_S())
     assert isinstance(captured["input"], list)            # augmented, not the bare "hi"
     assert any(b.get("type") == "text" and "notes.txt" in b.get("text", "") for b in captured["input"])
+
+
+# ── build attribution rides the turn (ENG-1459 / ENG-1279) ───────────────────
+
+
+class _KwargCapturingSession(_FakeSession):
+    """Records the kwargs the entrypoint passes to turn_stream."""
+
+    def __init__(self):
+        super().__init__(deltas=["ok"])
+        self.turn_kwargs = None
+
+    async def turn_stream(self, user_input, **kwargs):
+        self.turn_kwargs = kwargs
+        for d in self._deltas:
+            yield StreamTextDelta(text=d)
+
+
+def _drive_with_trace(trace_json: str):
+    session = _KwargCapturingSession()
+    _drive(
+        session,
+        req_json='{"protocol_version":1,"conversation_id":"c","input":"hi",'
+                 f'"trace":{trace_json}}}',
+    )
+    return session.turn_kwargs
+
+
+def test_build_attribution_is_forwarded_onto_the_turn():
+    # `cowork_server_version` / `install_channel` are ENG-1279 fields the pod
+    # cannot self-report — 0 of 68 prod cloud traces carried them before this.
+    kwargs = _drive_with_trace(
+        '{"surface":"web","cowork_server_version":"0.26.8.17.1","install_channel":"hosted"}'
+    )
+    assert kwargs["trace_metadata"] == {
+        "cowork_server_version": "0.26.8.17.1",
+        "install_channel": "hosted",
+    }
+
+
+def test_surface_is_not_duplicated_into_the_turn_metadata():
+    # It rides the session config instead; stamping both would put two sources
+    # of truth for one value on the same trace.
+    kwargs = _drive_with_trace('{"surface":"web","install_channel":"hosted"}')
+    assert "surface" not in kwargs["trace_metadata"]
+
+
+def test_a_surface_only_block_forwards_no_metadata():
+    kwargs = _drive_with_trace('{"surface":"web"}')
+    assert kwargs["trace_metadata"] is None
+
+
+def test_no_trace_block_forwards_no_metadata():
+    session = _KwargCapturingSession()
+    _drive(session)
+    assert session.turn_kwargs["trace_metadata"] is None

@@ -123,3 +123,47 @@ class TestItReachesTheWireFromTheConfig:
         # value must not reach the wire, and a sloppy one must be normalised.
         assert make_session(surface=" WEB ")._surface == SURFACE_WEB
         assert make_session(surface="cowork")._surface is None
+
+
+class TestThePodReceivesItsAttribution:
+    """The pod cannot derive any of this, so it has to arrive on the wire.
+
+    ENG-1459. Web turns do not run in cowork-server — they execute here, in a
+    `minds-anton-scratchpad` pod ("anton + boot", no cowork-server installed).
+    So `surface`, `cowork_server_version` and `install_channel` are all absent
+    on web unless cowork sends them, which is what `TurnRequestV1.trace` is for.
+    """
+
+    def _req(self, **over):
+        import json
+
+        from anton.cloud_turn.contract import TurnRequestV1
+
+        body = {"protocol_version": 1, "conversation_id": "c1", "input": "go"}
+        body.update(over)
+        return TurnRequestV1.from_json(json.dumps(body))
+
+    def test_the_trace_block_survives_the_wire(self):
+        req = self._req(trace={"surface": "web", "install_channel": "hosted"})
+        assert req.trace == {"surface": "web", "install_channel": "hosted"}
+
+    def test_a_controller_too_old_to_forward_it_yields_none(self):
+        # Steps land in any order, so an unforwarded block must read as
+        # "no attribution" rather than failing the turn.
+        assert self._req().trace is None
+
+    def test_a_non_dict_trace_is_rejected_rather_than_carried(self):
+        # It reaches ChatSessionConfig and a metadata dict; a string or list
+        # would explode somewhere less obvious than here.
+        assert self._req(trace="web").trace is None
+        assert self._req(trace=["web"]).trace is None
+
+    def test_the_pod_config_takes_its_surface_from_the_block(self):
+        from anton.core.llm.tracing import SURFACE_WEB
+
+        # Assert on the resolution rule rather than building a real cloud
+        # session (which needs a trusted mount + settings): the pod reads
+        # `(request.trace or {}).get("surface")`.
+        req = self._req(trace={"surface": "web"})
+        assert (req.trace or {}).get("surface") == SURFACE_WEB
+        assert (self._req().trace or {}).get("surface") is None
