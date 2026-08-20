@@ -579,14 +579,16 @@ def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
 # 17,078 chars), so real conversations pass whole and the clip is a backstop.
 # The old flat 8,000 sat below the median and fired on 81% of compactions.
 _SUMMARY_INPUT_WINDOW_SHARE = 0.25
-# ponytail: rule of thumb, not a tokenizer — only sizes a backstop.
+# ponytail: rule of thumb, not a tokenizer — only sizes a backstop. Two other
+# copies of this calibration live in the memory subsystem (hippocampus,
+# cortex); recalibrating for code-heavy or non-English corpora has to touch all
+# three.
 _CHARS_PER_TOKEN = 4
-# Floor: never budget below the old flat cap, whatever the window.
-_MIN_SUMMARY_INPUT_CHARS = 8_000
-# 2-4x what the prompt asks for (~1500 words — ~2000 tokens of English, should fit in 8k limit for other languages), leaving
-# room for reasoning and for the preamble cheap models write before the record —
-# both bill against this same ceiling. Bounded rather than generous because the
-# record then lives in the context window compaction just freed.
+# 2-4x what the prompt asks for (~1500 words — ~2000 tokens of English, should
+# fit in 8k limit for other languages), leaving room for reasoning and for the
+# preamble cheap models write before the record — both bill against this same
+# ceiling. Bounded rather than generous because the record then lives in the
+# context window compaction just freed.
 _SUMMARY_OUTPUT_BUDGET = 8192
 
 # A structured, in-place-updated STATE RECORD rather than a freeform blob, so
@@ -616,14 +618,21 @@ _SUMMARY_SYSTEM_PROMPT = (
 def _summarizer_input_budget(model: str, reserved: int = 0) -> int:
     """Char budget for the old turns handed to the history summariser.
 
-    Compaction fires at 70% pressure on the coding model, and the summariser's
-    router role defaults to that same model — so the folded turns already fit
-    its window, and a routine clip only discards readable material.
+    Compaction fires at 70% pressure on the *coding* model, so with the default
+    config — router falls back to coding — the folded turns already fit the
+    summariser's window and a routine clip only discards readable material.
 
-    ``reserved`` is text sharing the request (the carried-forward summary).
+    ponytail: a configured `router_model` breaks that symmetry, since nothing
+    reconciles a share of the router's window against material sized by the
+    coding model's trigger. A smaller router still gets its own share, so the
+    clip stays a bound, but the 25% intent no longer holds. Reconciling them
+    needs the two windows compared at the call site.
+
+    ``reserved`` is text sharing the request (the carried-forward summary and
+    the system prompt).
     """
     window_chars = int(context_window(model) * _SUMMARY_INPUT_WINDOW_SHARE) * _CHARS_PER_TOKEN
-    return max(window_chars - reserved, _MIN_SUMMARY_INPUT_CHARS)
+    return max(window_chars - reserved, 0)
 
 
 def _render_tool_result_content(content, cap: int) -> str:

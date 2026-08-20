@@ -15,7 +15,6 @@ from anton.core.session import (
     ChatSession,
     ChatSessionConfig,
     _COMPACTED_MARKER,
-    _MIN_SUMMARY_INPUT_CHARS,
     _summarizer_input_budget,
 )
 from anton.core.llm.provider import LLMResponse, Usage
@@ -128,11 +127,6 @@ class TestSummarizerInputBudget:
     def test_carried_forward_summary_shares_the_budget(self):
         full = _summarizer_input_budget("claude-sonnet-4-6")
         assert _summarizer_input_budget("claude-sonnet-4-6", reserved=5000) == full - 5000
-
-    def test_never_budgets_below_the_historical_cap(self):
-        """An oversized carried-forward summary must not squeeze the budget
-        below what the old flat cap already allowed."""
-        assert _summarizer_input_budget("mystery-1", reserved=10**9) == _MIN_SUMMARY_INPUT_CHARS
 
 
 class TestTruncatedRecord:
