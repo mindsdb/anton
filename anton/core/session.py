@@ -574,10 +574,10 @@ _SUMMARY_INPUT_WINDOW_SHARE = 0.25
 _CHARS_PER_TOKEN = 4
 # Floor: never budget below the old flat cap, whatever the window.
 _MIN_SUMMARY_INPUT_CHARS = 8_000
-# 4x what the prompt asks for (~1500 words, so ~2000 tokens), leaving room for
-# reasoning and for the preamble cheap models write before the record — both bill
-# against this same ceiling. Bounded rather than generous because the record then
-# lives in the context window compaction just freed.
+# 2-4x what the prompt asks for (~1500 words — ~2000 tokens of English, should fit in 8k limit for other languages), leaving
+# room for reasoning and for the preamble cheap models write before the record —
+# both bill against this same ceiling. Bounded rather than generous because the
+# record then lives in the context window compaction just freed.
 _SUMMARY_OUTPUT_BUDGET = 8192
 
 # A structured, in-place-updated STATE RECORD rather than a freeform blob, so
