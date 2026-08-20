@@ -659,3 +659,31 @@ class TestScriptTrafficIsNotReported:
         with patch("anton.analytics.send_event") as send:
             s._emit_turn_cost()
         assert send.called
+
+    def test_a_dropped_turn_still_closes_its_books(self):
+        """Position matters: the guard must sit BELOW the books-closing block.
+
+        Dropping the event must not drop the cleanup. If the guard is ever moved
+        above `self._turn_cost = None` / `usage_listener = None`, a script turn
+        leaves the books open and the usage listener ARMED — which then attributes
+        the next turn's LLM calls to a dead ledger. That is a far worse failure
+        than a missing analytics event, and until this test existed it was caught
+        only incidentally, by the log-line assertion above.
+        """
+        s = _bare_session(_session_id=None)
+        assert s._turn_cost.llm_calls == 0
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert not send.called
+        assert s._turn_cost is None, "books left open — the guard skipped cleanup"
+        assert s._llm.usage_listener is None, "listener left armed — leaks into the next turn"
+
+    def test_a_dropped_turn_cannot_double_emit_later(self):
+        # The `tc.emitted` latch is also above the guard, so a dropped turn must
+        # not become a delivered one on a second finalizer pass.
+        s = _bare_session(_session_id=None)
+        with patch("anton.analytics.send_event"):
+            s._emit_turn_cost()
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert not send.called
