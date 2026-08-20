@@ -45,7 +45,12 @@ def snapshot_dir(root: Path) -> DirSnapshot:
             # Race against a concurrent write — skip the file. The
             # next snapshot pass will pick it up.
             continue
-        rel = str(p.relative_to(root))
+        # POSIX separators regardless of platform: these keys are compared
+        # against each other across snapshots, split on "/" by
+        # _files_by_artifact, and persisted in provenance records. On Windows
+        # str() yields backslashes, so the split silently matched nothing and
+        # every artifact file was dropped from the grouping.
+        rel = p.relative_to(root).as_posix()
         out[rel] = (stat.st_mtime_ns, stat.st_size)
     return out
 

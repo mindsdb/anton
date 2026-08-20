@@ -399,6 +399,22 @@ def test_snapshot_lists_files(tmp_path: Path):
     assert "sub/b.txt" in snap
 
 
+def test_snapshot_keys_use_posix_separators(tmp_path: Path):
+    """Snapshot keys must be POSIX-separated on every platform.
+
+    The keys are split on "/" by `_files_by_artifact` and persisted in
+    provenance records, so a native-separator key silently groups to
+    nothing on Windows instead of failing loudly.
+    """
+    nested = tmp_path / "dashboard" / "data"
+    nested.mkdir(parents=True)
+    (nested / "prices.csv").write_text("a,b")
+    snap = snapshot_dir(tmp_path)
+    assert "dashboard/data/prices.csv" in snap
+    assert not any("\\" in key for key in snap)
+    assert diff_snapshots({}, snap) == ["dashboard/data/prices.csv"]
+
+
 def test_diff_picks_up_new_and_changed(tmp_path: Path):
     (tmp_path / "a.txt").write_text("x")
     before = snapshot_dir(tmp_path)
