@@ -8,6 +8,7 @@ already covered by `TestContextCompaction` in test_chat.py.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock
 
 from anton.core.session import (
@@ -132,6 +133,31 @@ class TestSummarizerInputBudget:
         """An oversized carried-forward summary must not squeeze the budget
         below what the old flat cap already allowed."""
         assert _summarizer_input_budget("mystery-1", reserved=10**9) == _MIN_SUMMARY_INPUT_CHARS
+
+
+class TestTruncatedRecord:
+    async def test_partial_record_is_kept_and_logged_not_retried(self, caplog):
+        """ENG-1291: hitting a cap 4x the requested length means the model ignored
+        the length instruction, so more room only buys more of the same. Keep the
+        partial record — it still beats the reactive path, which discards history —
+        but leave a log line so it's identifiable."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=LLMResponse(
+            content="## Goal\nhalf-writ",
+            usage=Usage(input_tokens=10, output_tokens=8192),
+            stop_reason="max_tokens",
+        ))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+        with caplog.at_level(logging.WARNING, logger="anton.core.session"):
+            assert await session._summarize_history() is True
+
+        mock_llm.summarize.assert_awaited_once()
+        assert mock_llm.summarize.await_args.kwargs["max_tokens"] == 8192
+        assert "half-writ" in session.history[0]["content"]
+        assert "truncated" in caplog.text
 
 
 class TestSkipWhenLittleNewMaterial:

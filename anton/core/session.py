@@ -574,6 +574,34 @@ _SUMMARY_INPUT_WINDOW_SHARE = 0.25
 _CHARS_PER_TOKEN = 4
 # Floor: never budget below the old flat cap, whatever the window.
 _MIN_SUMMARY_INPUT_CHARS = 8_000
+# 4x what the prompt asks for (~2000 tokens), which leaves room for reasoning
+# and for the preamble cheap models write before the record — both bill against
+# this same ceiling. Bounded rather than generous because the record then lives
+# in the context window compaction just freed.
+_SUMMARY_OUTPUT_BUDGET = 8192
+
+# A structured, in-place-updated STATE RECORD rather than a freeform blob, so
+# "Remaining" work survives compaction instead of being flattened into prose.
+_SUMMARY_SYSTEM_PROMPT = (
+    "You compact an agent's earlier conversation into a terse, factual "
+    "STATE RECORD (not prose). Output only these sections, omitting any "
+    "that are empty:\n"
+    "## Goal — what the user ultimately wants\n"
+    "## Constraints — explicit requirements / preferences / do-nots\n"
+    "## Completed — work already done, each as `action → outcome`\n"
+    "## Active state — variables, data, files/artifacts in play and their "
+    "current values or paths\n"
+    "## Blocked — anything stuck and why\n"
+    "## Decisions — choices made and the reason\n"
+    "## Remaining — what is still left to do\n\n"
+    "Preserve the date/time of key events when it matters (e.g. "
+    "`Completed (2026-06-05): …`) — the raw per-message timestamps are "
+    "gone after compaction, so keep the ones that anchor the timeline.\n"
+    "If a PREVIOUS SUMMARY is provided, update it with the new turns "
+    "instead of starting over. If the user changed direction, narrowed "
+    "scope, or cancelled something, reflect that — drop superseded items "
+    "from Remaining, don't keep them. Keep it under ~2000 tokens."
+)
 
 
 def _summarizer_input_budget(model: str, reserved: int = 0) -> int:
@@ -2011,10 +2039,13 @@ class ChatSession:
                         if block.get("type") == "text":
                             lines.append(f"[{role}]: {_clip_keep_cause(block['text'], 1000)}")
                         elif block.get("type") == "tool_use":
-                            lines.append(
-                                f"[{role}/tool_use]: {block.get('name', '')}"
-                                f"({_clip_keep_cause(str(block.get('input', '')), 500)})"
-                            )
+                            # Head, not tail: a call's target (path, command) sits in
+                            # its first fields, while the tail is the end of a written
+                            # file body. The name is outside the clip and never lost.
+                            args = str(block.get("input", ""))
+                            if len(args) > 500:
+                                args = f"{args[:500]}… (+{len(args) - 500} chars)"
+                            lines.append(f"[{role}/tool_use]: {block.get('name', '')}({args})")
                         elif block.get("type") == "tool_result":
                             lines.append(
                                 f"[tool_result]: "
@@ -2027,7 +2058,10 @@ class ChatSession:
         #   what `## Active state` / `## Blocked` / `## Remaining` are built from
         # - folded turns are *replaced*, so a clip loses them permanently
         # - a summary built from part of the turns must be visible as such
-        budget = _summarizer_input_budget(self._llm.router_model, len(prior_summary))
+        budget = _summarizer_input_budget(
+            self._llm.router_model,
+            len(prior_summary) + len(_SUMMARY_SYSTEM_PROMPT),
+        )
         clipped = _clip_keep_cause(old_text, budget)
         if clipped != old_text:
             logger.warning(
@@ -2052,33 +2086,25 @@ class ChatSession:
             user_content = old_text
 
         try:
-            # 3b-full: a structured, in-place-updated STATE RECORD rather than a
-            # freeform blob — so "Remaining" work survives compaction instead of
-            # being flattened into prose.
             summary_response = await self._llm.summarize(
-                system=(
-                    "You compact an agent's earlier conversation into a terse, factual "
-                    "STATE RECORD (not prose). Output only these sections, omitting any "
-                    "that are empty:\n"
-                    "## Goal — what the user ultimately wants\n"
-                    "## Constraints — explicit requirements / preferences / do-nots\n"
-                    "## Completed — work already done, each as `action → outcome`\n"
-                    "## Active state — variables, data, files/artifacts in play and their "
-                    "current values or paths\n"
-                    "## Blocked — anything stuck and why\n"
-                    "## Decisions — choices made and the reason\n"
-                    "## Remaining — what is still left to do\n\n"
-                    "Preserve the date/time of key events when it matters (e.g. "
-                    "`Completed (2026-06-05): …`) — the raw per-message timestamps are "
-                    "gone after compaction, so keep the ones that anchor the timeline.\n"
-                    "If a PREVIOUS SUMMARY is provided, update it with the new turns "
-                    "instead of starting over. If the user changed direction, narrowed "
-                    "scope, or cancelled something, reflect that — drop superseded items "
-                    "from Remaining, don't keep them. Keep it under ~2000 tokens."
-                ),
+                system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
-                max_tokens=2048,
+                max_tokens=_SUMMARY_OUTPUT_BUDGET,
             )
+            # A truncated record is kept, not retried:
+            # - hitting a cap 4x the requested length means the model ignored the
+            #   length instruction, and more room only buys more of the same
+            # - the record replaces the folded turns either way, so a partial one
+            #   still beats leaving compaction to the reactive overflow path,
+            #   which discards history outright
+            # Logged so a record built from a cut-off generation is identifiable.
+            if looks_truncated(summary_response, _SUMMARY_OUTPUT_BUDGET):
+                logger.warning(
+                    "history summarization: record truncated at budget %d "
+                    "(output_tokens=%s) — keeping the partial record",
+                    _SUMMARY_OUTPUT_BUDGET,
+                    summary_response.usage.output_tokens,
+                )
             summary = summary_response.content or "(summary unavailable)"
             # Record the compaction ONLY on success.
             self._last_compacted_count = compacted_count
