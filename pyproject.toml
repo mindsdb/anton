@@ -30,6 +30,7 @@ dependencies = [
     "pyyaml>=6.0",
     "dill==0.3.8",
     "aiohttp>=3.9",
+    "truststore>=0.10.4",
 ]
 
 [project.optional-dependencies]
