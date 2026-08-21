@@ -198,7 +198,7 @@ def test_apply_env_to_process_never_called(tmp_path, monkeypatch):
     real_apply = ws_mod.Workspace.apply_env_to_process
 
     monkeypatch.setattr(ws_mod.Workspace, "initialize",
-                        lambda self, **kw: (calls.__setitem__("init", calls["init"] + 1), real_init(self, **kw))[1])
+                        lambda self, *a, **kw: (calls.__setitem__("init", calls["init"] + 1), real_init(self, *a, **kw))[1])
     monkeypatch.setattr(ws_mod.Workspace, "apply_env_to_process",
                         lambda self: (calls.__setitem__("apply_env", calls["apply_env"] + 1), real_apply(self))[1])
 

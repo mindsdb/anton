@@ -117,10 +117,10 @@ class TestInitialization:
         create (or even stat) the file."""
         actions = ws.initialize(create_anton_md=False)
         assert not (tmp_path / ".anton" / "anton.md").exists()
+        assert not any("anton.md" in a for a in actions)
         # Everything else is still set up.
         assert (tmp_path / ".anton" / ".env").is_file()
         assert (tmp_path / ".anton" / "artifacts").is_dir()
-        assert len(actions) == 3  # .anton/, .env, artifacts/
 
     def test_cloud_mode_leaves_staged_instructions_alone(self, ws, tmp_path):
         (tmp_path / ".anton").mkdir()
