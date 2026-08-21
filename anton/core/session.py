@@ -2768,7 +2768,11 @@ class ChatSession:
             send_event(
                 settings,
                 "tool_completed",
-                name=name,
+                # `tc.name` is model-generated: a hallucinated tool name is
+                # real signal and SHOULD emit, but unbounded model output has
+                # no business being a property value verbatim. Same idiom as
+                # the dispatch loop's args_summary[:120].
+                name=name[:200],
                 ok="unknown" if ok is None else str(ok).lower(),
                 duration_ms=str(int(duration_ms)),
                 error_type=error_type,
@@ -3427,6 +3431,10 @@ class ChatSession:
                     tool_results.append(damaged)
                     continue
 
+                import time as _time  # same local-import idiom as turn_stream
+
+                _tool_t0 = _time.monotonic()
+                _tool_error_type = ""
                 try:
                     outcome = await self.tool_registry.dispatch_tool(
                         self, tc.name, tc.input, tool_call_id=tc.id,
@@ -3439,6 +3447,19 @@ class ChatSession:
                         ok=False,
                         reason=type(exc).__name__,
                     )
+                    _tool_error_type = type(exc).__name__
+                # Same per-tool-call analytics as the streaming loop's tail
+                # (ENG-1486) — without this, a host on the non-streaming API
+                # silently undercounts. Raw elapsed, no human-wait deduction:
+                # elicitation is structurally unavailable on this path (no
+                # emitter to render a question), so there is no wait to
+                # subtract.
+                self._emit_tool_completed(
+                    name=tc.name,
+                    ok=outcome.ok,
+                    duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
+                    error_type=_tool_error_type,
+                )
                 result = outcome.content
 
                 if isinstance(result, list):
@@ -4447,12 +4468,14 @@ class ChatSession:
                         continue
 
                     _tool_t0 = _time.monotonic()
-                    # Per dispatched call, not per general-branch call: every
-                    # branch below can elicit() (which accumulates the wait),
-                    # and the duration maths at the bottom of this block runs
-                    # for all of them. Resetting only on the general branch
-                    # left a stale wait from an earlier call in the round to
-                    # be subtracted from the wrong tool's runtime.
+                    # Reset alongside the timer, before ANY branch dispatches:
+                    # the tool_completed emit at the bottom of this block is
+                    # the first reader that runs for every branch, and every
+                    # branch can elicit() (which accumulates the wait). The
+                    # reset used to live on the general branch only — correct
+                    # while that branch was also the only subtractor, but the
+                    # cross-branch emit would have deducted another call's
+                    # leftover wait from this one's runtime.
                     self.answer_wait_s = 0.0
 
                     # The handler's own failure verdict, when it gave one —

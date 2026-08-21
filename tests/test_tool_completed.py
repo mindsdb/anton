@@ -76,7 +76,14 @@ def _session(workspace, dispatch_side_effect, n_tool_calls: int = 1):
             )
         return gen()
 
+    async def plan(**kw):
+        seq["i"] += 1
+        if llm.usage_listener:
+            llm.usage_listener("planning", "m", _usage())
+        return _tool_call(seq["i"]) if seq["i"] <= n_tool_calls else _text()
+
     llm.plan_stream = plan_stream
+    llm.plan = plan
     s = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace,
                                       session_id="conv-tc"))
     s._max_turn_tokens = 0
@@ -219,9 +226,14 @@ async def test_duration_excludes_human_wait(workspace):
     assert int(events[0]["duration_ms"]) < 200
 
 
-async def test_wait_reset_is_per_call_not_per_general_branch(workspace):
-    """A stale wait from an earlier call must not deflate the next call's
-    duration: answer_wait_s resets with _tool_t0 for EVERY dispatched call."""
+async def test_wait_from_one_call_never_leaks_into_the_next(workspace):
+    """Consecutive calls each get a clean wait ledger and a clamped duration.
+
+    Guards the per-call reset plus the negative clamp — NOT a historical bug:
+    before the tail emit existed, the general branch was both the only
+    resetter and the only subtractor, so the old maths was self-consistent.
+    The reset's earlier position is a prerequisite of the cross-branch emit.
+    """
     calls = {"n": 0}
 
     async def first_waits(*a, **k):
@@ -239,6 +251,35 @@ async def test_wait_reset_is_per_call_not_per_general_branch(workspace):
     # second because the first call's wait was NOT carried into its maths as
     # a negative (clamped) or its own subtraction baseline.
     assert all(int(e["duration_ms"]) < 1_000 for e in events)
+
+
+async def test_nonstreaming_turn_path_also_emits(workspace):
+    """`turn()` has its own dispatch loop (session.py ~3315), separate from the
+    streaming tail — self-review finding: without its own emit, any host on
+    the non-streaming API silently undercounts. No production caller uses it
+    today; this test is the seam guard for the first one that does.
+    """
+    session = _session(workspace, RuntimeError("boom"))
+    with patch("anton.analytics.send_event") as sent:
+        await session.turn("go")
+    events = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
+    assert len(events) == 1
+    assert events[0]["ok"] == "false"
+    assert events[0]["error_type"] == "RuntimeError"
+    assert events[0]["name"] == "scratchpad"
+
+
+async def test_model_generated_tool_name_is_bounded(workspace):
+    """`tc.name` is model output: a degenerate name must emit (it is real
+    signal) but bounded, never verbatim-unbounded into a property value."""
+    session = _session(workspace, [ToolOutcome(content="ok", ok=True)])
+    with patch("anton.analytics.send_event") as sent:
+        session._emit_tool_completed(
+            name="x" * 5000, ok=False, duration_ms=1.0, error_type="",
+        )
+    kwargs = sent.call_args.kwargs
+    assert kwargs["name"] == "x" * 200
+    assert len(kwargs["name"]) == 200
 
 
 # ── Analytics resilience + routing ───────────────────────────────────
