@@ -230,8 +230,21 @@ def get_installation_id() -> str:
     networking), a random UUID is persisted to ``~/.anton/.installation_id``
     as a one-time fallback. Computed once per process and cached.
 
+    **The format is depended on outside this repo.** cowork-server serves this
+    value on ``/health`` and cowork's renderer validates it as **lowercase
+    hex** before stamping it as the join key that connects anton's per-turn
+    cost events to an identified user (ENG-1689). Those consumers deliberately
+    do *not* pin the width, so widening the ``[:16]`` truncation is safe —
+    moving off lowercase hex is not, and would silently drop the key rather
+    than fail loudly.
+
+    The ``"unknown"`` return below is filtered by those consumers too: every
+    unfingerprintable machine reports the same string, so a join on it would
+    merge them into one identity.
+
     Returns:
-        A 16-character hex string (64 bits of entropy).
+        A 16-character hex string (64 bits of entropy), or ``"unknown"`` when
+        the machine cannot be fingerprinted at all.
     """
     global _cached_aid
     if _cached_aid is not None:
