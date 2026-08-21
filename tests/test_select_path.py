@@ -4,6 +4,10 @@ migration so the refactor cannot change observable behaviour silently.
 The tool's JSON result is a contract with the LLM: statuses resolved /
 invalid / no_matches / cancelled / picker_unavailable / error, plus the
 auto_resolved and path fields. Nothing here may change in Task 7.
+
+ENG-1852 later extended the contract deliberately: needs_confirmation was
+added, and auto_resolved narrowed to pattern matches only — a lone
+model-supplied candidate is confirmed with the user instead.
 """
 
 from __future__ import annotations
@@ -422,6 +426,196 @@ def test_picker_unavailable_is_a_documented_status_in_both_definitions():
     assert "picker_unavailable" in SELECT_PATH_TOOL_PICK_ONLY.description
     # The full definition must say what to do in each mode.
     assert "attach" in SELECT_PATH_TOOL.description.lower()
+
+
+# ─── ENG-1852: a model-supplied single candidate is not the user's choice ──
+#
+# In a fresh cowork project exactly one directory exists (`skills`), so the
+# model enumerates the project, offers it as the lone candidate, and the old
+# `len(candidates) == 1` shortcut confirmed it — reporting a folder nobody
+# chose as connected, in answer to "give you access to a folder on my
+# computer". A lone PATTERN match stays auto-resolved (the glob searched and
+# found exactly one thing); a lone EXPLICIT candidate now needs the user.
+
+
+class _TextAnswerElicitor(_PathlessElicitor):
+    """Answers a choice card with free-typed text instead of an option."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(None)
+        self.text = text
+
+    async def ask(self, question_id, request):
+        self.requests.append(request)
+        return AskAnswer(status="answered", text=self.text)
+
+
+def _choice_session(tmp_path, elicitor):
+    """A session whose host can render choice cards (non-None emitter):
+    elicit() refuses to publish kind="choice" into a void."""
+    session = _session(tmp_path, elicitor)
+    session.emitter = object()
+    return session
+
+
+async def test_single_explicit_candidate_needs_confirmation_without_any_elicitor(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "needs_confirmation"
+    assert "auto_resolved" not in result
+    assert result["candidates"] == [str((tmp_path / "skills").resolve())]
+    # The two remedies: confirm before using, attach for anything outside.
+    assert "confirm" in result["message"].lower()
+    assert "attach" in result["message"].lower()
+
+
+async def test_single_explicit_candidate_confirmed_through_choice_card(tmp_path):
+    (tmp_path / "skills").mkdir()
+    elicitor = _PathlessElicitor("yes")
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, elicitor),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "resolved"
+    assert result["path"] == str((tmp_path / "skills").resolve())
+    # Confirmed by the user — the opposite of auto-resolved.
+    assert "auto_resolved" not in result
+    card = elicitor.requests[0]
+    assert card.kind == "choice"
+    assert [option.value for option in card.options] == ["yes", "no"]
+
+
+async def test_single_explicit_candidate_declined_is_cancelled_with_attach_guidance(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, _PathlessElicitor("no")),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert "path" not in result
+    assert "declined" in result["message"].lower()
+    assert "attach" in result["message"].lower()
+
+
+async def test_single_explicit_candidate_typed_reply_is_relayed_not_asserted_as_decline(tmp_path):
+    """A user who types what they actually meant must be heard — the words
+    reach the model verbatim, and the result must not claim the user
+    'declined': a free-typed reply (possibly the literal word 'yes') is not a
+    decline they made (review nit on #392)."""
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, _TextAnswerElicitor("I meant /Users/me/dev/tenantguard")),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert "path" not in result
+    assert "/Users/me/dev/tenantguard" in result["message"]
+    assert "declined" not in result["message"].lower()
+    assert "not confirmed" in result["message"]
+
+
+async def test_single_explicit_candidate_card_dismissed_is_cancelled(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, _PathlessElicitor(None)),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert "path" not in result
+
+
+async def test_single_explicit_candidate_without_emitter_needs_confirmation(tmp_path):
+    """kind="choice" cannot publish without an emitter (the non-streaming
+    turn() path): elicit answers unavailable, which must not become resolved."""
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _PathlessElicitor("yes")),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "needs_confirmation"
+
+
+async def test_single_explicit_candidate_budget_exhausted_is_not_resolved(tmp_path):
+    (tmp_path / "skills").mkdir()
+    session = _choice_session(tmp_path, _PathlessElicitor("yes"))
+    session.question_count = MAX_QUESTIONS_PER_TURN
+    result = json.loads(
+        await handle_select_path(
+            session,
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "error"
+    assert "confirmation" in result["message"].lower()
+
+
+async def test_single_explicit_candidate_goes_through_the_path_picker_where_one_renders(tmp_path):
+    (tmp_path / "skills").mkdir()
+    chosen = str((tmp_path / "skills").resolve())
+    elicitor = _FakeElicitor(chosen)
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, elicitor),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    # Picking it in the picker IS the confirmation.
+    assert result == {"status": "resolved", "path": chosen}
+    assert len(elicitor.requests[0].options) == 1
+
+
+async def test_single_explicit_candidate_path_picker_can_be_cancelled(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _FakeElicitor(None)),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+
+
+async def test_single_pattern_match_still_auto_resolves_with_a_choice_host(tmp_path):
+    """The ENG-1852 guard must not widen: a lone pattern match is a genuine
+    discovery and keeps resolving with no prompt, even where a card could
+    render."""
+    (tmp_path / "report.csv").write_text("a,b\n")
+    elicitor = _PathlessElicitor("yes")
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, elicitor),
+            {"prompt": "Which one?", "pattern": "*.csv"},
+        )
+    )
+    assert result["status"] == "resolved"
+    assert result["auto_resolved"] is True
+    assert elicitor.requests == []
+
+
+def test_needs_confirmation_is_a_documented_status_in_both_definitions():
+    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
+
+    assert "needs_confirmation" in SELECT_PATH_TOOL.description
+    assert "needs_confirmation" in SELECT_PATH_TOOL_PICK_ONLY.description
+    # The pick-only host is where the failure lived: its definition must also
+    # forbid substituting an in-project path for an out-of-project request.
+    assert "substitute" in SELECT_PATH_TOOL_PICK_ONLY.description
+    assert "substitute" in SELECT_PATH_TOOL_PICK_ONLY.prompt
 
 
 def test_module_singletons_are_not_mutated(make_session):

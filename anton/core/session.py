@@ -1841,9 +1841,10 @@ class ChatSession:
         # prompt AND by the host's file-access policy, guessing forbidden. It
         # fabricated the data and reported a forecast from it (ENG-1357).
         #
-        # PICK mode does still work here — one match auto-resolves, and ≥2
-        # comes back with the candidate list to ask about — so this is a
-        # narrowing, not a removal.
+        # PICK mode does still work here — one pattern match auto-resolves, a
+        # single model-supplied candidate is confirmed with the user via a
+        # choice card (ENG-1852), and ≥2 comes back with the candidate list to
+        # ask about — so this is a narrowing, not a removal.
         if self.elicitor is not None and "path" in self.elicitor.supported_kinds:
             self.tool_registry.register_tool(SELECT_PATH_TOOL)
         else:
