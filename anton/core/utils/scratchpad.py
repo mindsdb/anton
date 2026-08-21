@@ -18,15 +18,62 @@ def _acc_observe(session, kind: str, detail: dict, *, severity: int = 1) -> None
 
 # install_packages' own return shape — no structured success/failure value,
 # so both call sites (exec+packages here, and the standalone install action
-# in tool_handlers.py) key off these same literals.
-_INSTALL_FAILURE_MARKERS = ("Install failed", "timed out")
+# in tool_handlers.py) key off these same literals. Anchored to the message
+# HEAD: failures are reported as a first-line prefix, while a SUCCESSFUL
+# pip/uv run may mention "timed out" mid-output (a retried network read
+# inside an install that then succeeded) without having failed.
+_INSTALL_FAILURE_PREFIXES = ("Install failed", "Install timed out", "Install refused")
 _INSTALL_NOOP_RESULTS = frozenset(
     {"No packages specified.", "All packages already installed."}
 )
 
 
 def install_call_failed(result: str) -> bool:
-    return any(marker in result for marker in _INSTALL_FAILURE_MARKERS)
+    return result.startswith(_INSTALL_FAILURE_PREFIXES)
+
+
+def invalid_package_spec(entry: str) -> bool:
+    """True if `entry` is not a plain PEP 508 requirement (ENG-1635).
+
+    Entries land in `pip install` argv unquoted, so a flag-shaped string
+    ("--index-url=…") would redirect resolution for every package in the
+    call — dependency confusion through the one install path this ticket
+    leaves open. Direct-URL requirements ("name @ https://…") are refused
+    for the same reason: installs come from the configured index or not
+    at all.
+    """
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    try:
+        return Requirement(str(entry)).url is not None
+    except InvalidRequirement:
+        return True
+
+
+def reject_invalid_packages(packages: list[str]) -> str | None:
+    """The shared "Install refused" message, or None when every entry parses.
+
+    Called before install_packages at the model-facing call sites (exec's
+    'packages' array and the install action), and again inside the local
+    runtime as the belt for every other caller (requirements.txt launches).
+    """
+    bad = [str(p) for p in packages if invalid_package_spec(p)]
+    if not bad:
+        return None
+    return (
+        "Install refused: not a plain PyPI package specifier: "
+        + ", ".join(repr(p) for p in bad)
+        + ". Use requirement syntax like 'requests' or 'requests==2.32.0' — "
+        "flags, URLs, and local paths are never passed to pip."
+    )
+
+
+def cell_failure_reason(error: str | None) -> str:
+    """The machine-comparable failure key (ENG-1286/ENG-1492): the traceback's
+    LAST line — the cause — never a hint prepended above it. Tests call this
+    rather than restating the extraction (ENG-1635 review)."""
+    error = (error or "").strip()
+    return error.splitlines()[-1][:160] if error else ""
 
 
 def install_call_installed_something(result: str) -> bool:
@@ -277,9 +324,14 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
 
     pad = await session._scratchpads.get_or_create(name)
 
-    # Auto-install packages before running the cell
+    # Install explicitly declared packages before running the cell
     packages = tc_input.get("packages", [])
     if packages:
+        refused = reject_invalid_packages(packages)
+        if refused:
+            return ToolOutcome(
+                content=refused, ok=False, reason="package_install_rejected"
+            )
         install_result = await pad.install_packages(packages)
         # The substring check against install_packages' message is this
         # handler's own protocol with the runtime (its return shape predates

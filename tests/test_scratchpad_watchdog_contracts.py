@@ -13,6 +13,7 @@ import pytest
 
 from anton.core.backends import local as local_backend
 from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.wire import MISSING_MODULE_HINT
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
@@ -534,31 +535,24 @@ class TestNudgeRouting:
             == RESILIENCE_NUDGE
         )
 
-    def test_install_timeout_error_routes_to_install_nudge(self):
-        """An install that ran out of its budget is neither a size nor a
-        liveness problem — 'make the cell smaller' cannot make a package
-        install (ENG-1275)."""
-        nudge = ChatSession._select_resilience_nudge(
-            "scratchpad",
-            "ModuleNotFoundError: No module named 'torch'\n"
-            "Auto-install of 'torch' was killed after 120s (cell_install_timeout) "
-            "without finishing — the package is not installed.",
-        )
-        assert nudge == SCRATCHPAD_INSTALL_NUDGE
-        assert "too heavy" not in nudge
-        assert "smaller" not in nudge
+    def test_explicit_install_failure_routes_to_install_nudge(self):
+        """install_packages' own failure shapes — the only install messages
+        the code still emits. Before ENG-1635's review these misrouted:
+        'Install timed out …' fell through to the too-heavy nudge and
+        'Install failed …' to the generic one."""
+        for text in (
+            "Install failed (exit 1):\nERROR: No matching distribution found for torhc",
+            "Install timed out after 120s.",
+            "Install refused: not a plain PyPI package specifier: '--index-url=x'.",
+        ):
+            nudge = ChatSession._select_resilience_nudge("scratchpad", text)
+            assert nudge == SCRATCHPAD_INSTALL_NUDGE, text
+            assert "too heavy" not in nudge
 
-    def test_install_failure_routes_to_install_nudge(self):
-        nudge = ChatSession._select_resilience_nudge(
-            "scratchpad",
-            "ModuleNotFoundError: No module named 'torhc'\n"
-            "Auto-install failed:\nERROR: No matching distribution found for torhc",
-        )
-        assert nudge == SCRATCHPAD_INSTALL_NUDGE
-
-    def test_kill_during_install_routes_to_install_nudge(self):
-        """The kill wording also contains 'liveness' — the install cause must
-        win over the stuck diagnosis."""
+    def test_legacy_worker_kill_during_install_routes_to_install_nudge(self):
+        """Old-version workers still emit the auto-install kill wording, which
+        also contains 'liveness' — the install cause must keep winning over
+        the stuck diagnosis for them."""
         nudge = ChatSession._select_resilience_nudge(
             "scratchpad",
             "Cell killed during auto-install of 'torch' — no liveness signal "
@@ -568,16 +562,31 @@ class TestNudgeRouting:
         assert nudge == SCRATCHPAD_INSTALL_NUDGE
 
     def test_undeclared_import_routes_to_install_nudge(self):
-        """The real shape scratchpad_boot.py now produces: a hint before the
-        traceback, no install ever attempted."""
+        """The real shape scratchpad_boot.py produces: the shared hint before
+        the traceback, no install ever attempted. Routing keys on the
+        interpreter's exception name, so the hint constant is free to change
+        wording without silently killing this route."""
         nudge = ChatSession._select_resilience_nudge(
             "scratchpad",
-            "'somepkg' was not auto-installed. If your code deliberately "
-            "needs it, list it in the exec call's 'packages' array (or use "
-            "the scratchpad's install action) and retry.\n"
+            MISSING_MODULE_HINT.format(name="somepkg")
+            + "Traceback (most recent call last):\n"
+            '  File "<scratchpad>", line 1, in <module>\n'
             "ModuleNotFoundError: No module named 'somepkg'",
         )
         assert nudge == SCRATCHPAD_INSTALL_NUDGE
+
+    def test_hint_and_nudge_do_not_coach_redeclaring_the_name(self):
+        """ENG-1635 finding 1: neither the hint nor the nudge may instruct the
+        model to re-declare the failed name — that routes the same
+        hallucinated package through the surviving install path one turn
+        later, with the agent as the only approver."""
+        hint = MISSING_MODULE_HINT.format(name="functions").lower()
+        assert "'packages'" not in hint
+        assert "install action" not in hint
+        assert "retry" not in hint
+        low = SCRATCHPAD_INSTALL_NUDGE.lower()
+        assert "'packages' array" not in low
+        assert "declare the package" not in low
 
 
 from anton.core.memory.acc import Event, detect_kill_loop

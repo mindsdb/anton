@@ -15,6 +15,19 @@ STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
 INSTALL_START_MARKER = "__ANTON_INSTALL_START__"
 INSTALL_END_MARKER = "__ANTON_INSTALL_END__"
 
+# The hint the worker prepends to a ModuleNotFoundError traceback (ENG-1635).
+# Lives here so the session side (nudge tests, and anything that needs the
+# exact shape) shares one definition with the boot script. Deliberately does
+# NOT tell the model to declare the failed name in 'packages' — that would
+# route the same hallucinated package through the surviving install path one
+# turn later, which is the attack this ticket closes.
+MISSING_MODULE_HINT = (
+    "'{name}' is not installed, and imports never install anything. Check "
+    "the import itself first — a missing module is often a wrong or invented "
+    "name, not a missing package. Only a real PyPI distribution this task "
+    "genuinely needs should ever be installed.\n"
+)
+
 
 def heal_surrogate_source(code: str) -> str:
     """Return ``code`` with any lone surrogates resolved to valid UTF-8.

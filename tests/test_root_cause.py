@@ -66,15 +66,19 @@ def test_a_submodule_counts_as_its_top_level_package():
 
 def test_a_hint_prefixed_before_the_traceback_still_classifies():
     """A hint prepended before the traceback must not become the LAST line
-    tool_handlers.py reads as `reason` — that has to stay the exception."""
+    read as `reason` — that has to stay the exception. Uses the production
+    hint and the production extractor, so a change to either is exercised
+    here rather than shadowed by a stale copy (ENG-1635 review)."""
+    from anton.core.backends.wire import MISSING_MODULE_HINT
+    from anton.core.utils.scratchpad import cell_failure_reason
+
     error = (
-        "'somepkg' was not auto-installed. Declare it explicitly and retry.\n"
-        "Traceback (most recent call last):\n"
+        MISSING_MODULE_HINT.format(name="somepkg")
+        + "Traceback (most recent call last):\n"
         '  File "<scratchpad>", line 1, in <module>\n'
         "ModuleNotFoundError: No module named 'somepkg'"
     )
-    reason = error.splitlines()[-1][:160]
-    assert classify(reason).cls == "missing_dependency"
+    assert classify(cell_failure_reason(error)).cls == "missing_dependency"
 
 
 # ── The safety property ────────────────────────────────────────────────────
@@ -333,7 +337,7 @@ def test_ambiguous_sentinels_resolve_away_from_tripping():
     from anton.core.root_cause import classify
 
     for reason in ("artifact_not_found", "unknown_datasource", "launch_failed",
-                   "missing_name", "invalid_port"):
+                   "missing_name", "invalid_port", "package_install_rejected"):
         assert not classify(reason).trip_eligible, reason
     # …while the unambiguous walls stay trip-eligible.
     for reason in ("package_install_failed", "store_unavailable"):

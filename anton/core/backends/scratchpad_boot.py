@@ -9,6 +9,7 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
     heal_surrogate_source,
@@ -1187,12 +1188,7 @@ while True:
             # Hint goes before the traceback: callers key off its last line.
             hint = ""
             if _mnf.name:
-                hint = (
-                    f"'{_mnf.name}' was not auto-installed. If your code "
-                    "deliberately needs it, list it in the exec call's "
-                    "'packages' array (or use the scratchpad's install "
-                    "action) and retry.\n"
-                )
+                hint = MISSING_MODULE_HINT.format(name=_mnf.name)
             error = hint + traceback.format_exc()
         except Exception:
             error = traceback.format_exc()

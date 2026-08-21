@@ -257,6 +257,100 @@ class TestPackageInstallTelemetry:
         assert sent == []
 
     @pytest.mark.asyncio
+    async def test_install_success_with_retry_warning_is_not_a_failure(self, monkeypatch):
+        """A network hiccup pip retried through must not fail the call: the
+        old markers matched 'timed out' ANYWHERE, so a successful install
+        whose output mentioned a retried read was classified as failed — the
+        cell never ran despite the package being present, and the install
+        event was suppressed (ENG-1635 review, finding 3)."""
+        sent = []
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **extra: sent.append((action, extra)),
+        )
+        pad = SimpleNamespace(
+            install_packages=AsyncMock(
+                return_value=(
+                    "WARNING: Retrying (Retry(total=4)) after connection broken by "
+                    "'ReadTimeoutError(\"HTTPSConnectionPool: Read timed out.\")'\n"
+                    "Successfully installed numpy-2.1.0"
+                )
+            )
+        )
+        result = await prepare_scratchpad_exec(
+            _install_session(pad),
+            {"action": "exec", "name": "main", "code": "import numpy", "packages": ["numpy"]},
+        )
+        assert not isinstance(result, ToolOutcome), "install succeeded — the cell must run"
+        assert sent == [("scratchpad_package_installed", {"package": "numpy"})]
+
+    @pytest.mark.asyncio
+    async def test_flag_shaped_package_entry_is_refused_before_any_install(self, monkeypatch):
+        """ENG-1635 finding 2: 'packages' entries land in pip's argv, so a
+        flag-shaped entry ('--index-url=…') would redirect resolution for
+        every package in the call. It must be refused before install_packages
+        runs, with a self-inflicted (non-wall) reason."""
+        sent = []
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **extra: sent.append((action, extra)),
+        )
+        pad = SimpleNamespace(install_packages=AsyncMock())
+        for bad in (
+            "--index-url=http://127.0.0.1:9/simple",
+            "-e .",
+            "requests @ https://evil.example/requests.whl",
+            "../local/path",
+        ):
+            result = await prepare_scratchpad_exec(
+                _install_session(pad),
+                {"action": "exec", "name": "main", "code": "import requests",
+                 "packages": [bad, "requests"]},
+            )
+            assert isinstance(result, ToolOutcome), bad
+            assert result.ok is False
+            assert result.reason == "package_install_rejected"
+            assert "Install refused" in result.content
+        pad.install_packages.assert_not_called()
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_install_action_also_refuses_flag_shaped_entries(self):
+        from anton.core.tools.tool_handlers import handle_scratchpad
+
+        pad = SimpleNamespace(install_packages=AsyncMock())
+        session = _install_session(pad)
+        result = await handle_scratchpad(
+            session,
+            {"action": "install", "name": "main",
+             "packages": ["--extra-index-url=http://evil/simple"]},
+        )
+        assert isinstance(result, ToolOutcome)
+        assert result.ok is False
+        assert result.reason == "package_install_rejected"
+        pad.install_packages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_valid_specifiers_still_install(self, monkeypatch):
+        """The gate must not over-reject: plain names, pins, and extras are
+        the legitimate traffic."""
+        sent = []
+        monkeypatch.setattr(
+            "anton.analytics.send_event",
+            lambda settings, action, **extra: sent.append((action, extra)),
+        )
+        pad = SimpleNamespace(
+            install_packages=AsyncMock(return_value="Successfully installed x")
+        )
+        result = await prepare_scratchpad_exec(
+            _install_session(pad),
+            {"action": "exec", "name": "main", "code": "import requests",
+             "packages": ["requests==2.32.0", "uvicorn[standard]", "numpy>=2,<3"]},
+        )
+        assert not isinstance(result, ToolOutcome)
+        pad.install_packages.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_install_action_also_sends_the_event(self, monkeypatch):
         from anton.core.tools.tool_handlers import handle_scratchpad
 

@@ -455,13 +455,18 @@ SCRATCHPAD_STUCK_NUDGE = (
 # A missing package is neither a size nor a liveness problem — shrinking the
 # cell cannot conjure an import. Routed on "auto-install" in the error text,
 # ahead of the other scratchpad branches.
+# Must not coach re-declaring the failed name (ENG-1635): a hallucinated
+# import that gets echoed into 'packages' is the same unattended install one
+# turn later, with the agent as the only approver.
 SCRATCHPAD_INSTALL_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps failing on a missing package, not "
-    "on its logic — cells no longer auto-install on ModuleNotFoundError. Do "
-    "not shrink or split the cell. Declare the package explicitly, either in "
-    "the exec call's 'packages' array or via the scratchpad's install action "
-    "(double-check the PyPI name), then rerun the same cell. If the explicit "
-    "install also fails or times out, tell the user instead of retrying."
+    "\n\nSYSTEM: This scratchpad cell keeps failing on a missing module, not "
+    "on its logic — imports never install anything. Do not shrink or split "
+    "the cell. Question the import itself first: get_llm, agentic_loop, "
+    "web_search, sample and progress are already globals (no import), and a "
+    "name recovered from a failing import may not be a real package at all. "
+    "Install a package only when you can name the real PyPI distribution "
+    "this task needs; if an install fails or times out, tell the user "
+    "instead of retrying."
 )
 # A budget kill with zero output is ambiguous — a stuck call and silent heavy
 # work look identical from outside. Say so, rather than confidently claiming

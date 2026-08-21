@@ -1248,6 +1248,16 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         needed = [p for p in packages if p.lower() not in self._installed_packages]
         if not needed:
             return "All packages already installed."
+        # Belt for every caller (the tool paths reject earlier, with a typed
+        # reason): nothing flag-, URL- or path-shaped may reach pip's argv
+        # (ENG-1635 — a single "--index-url=…" entry redirects resolution for
+        # the whole call). Lazy import: this module must stay importable
+        # without the tools layer.
+        from anton.core.utils.scratchpad import reject_invalid_packages
+
+        refused = reject_invalid_packages(needed)
+        if refused:
+            return refused
         self._ensure_venv()
 
         uv = self._find_uv()
