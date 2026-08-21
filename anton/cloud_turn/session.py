@@ -588,6 +588,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         workspace=workspace,
         session_id=request.conversation_id,
         harness="cloud",
+        # WHERE the user was, which this pod cannot know on its own — only the
+        # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
+        # driven directly rather than by cowork; an unset surface reads as
+        # "nobody declared one", which is the honest answer for a standalone run.
+        surface=(request.trace or {}).get("surface"),
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless

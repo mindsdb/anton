@@ -23,6 +23,47 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 
 
+# Where the user was when the turn happened (ENG-1459). This is the CANONICAL
+# definition; cowork-server imports these rather than repeating the strings, so
+# the field cannot pick up a second vocabulary the way ``harness`` did.
+#
+# `surface` answers WHERE, `harness` answers WHICH AGENT. They are orthogonal:
+# a `web` turn and a `desktop` turn can both run the anton agent, and after
+# ENG-1694 `harness` will carry only the agent identity (`anton` / `hermes`).
+#
+#   SURFACE_DESKTOP  the Electron app
+#   SURFACE_WEB      the SaaS build (cowork-server derives it from org tenancy)
+#   SURFACE_CLI      anton's own interactive chat
+#
+# Deliberately NOT a value here: the cloud one-turn-per-pod path. That is an
+# *execution mode*, not a place a user sits — cowork is its caller, so one web
+# turn could legitimately be both — and folding it in would recreate exactly
+# the two-vocabularies-in-one-field problem this pair of fields is undoing.
+SURFACE_DESKTOP = "desktop"
+SURFACE_WEB = "web"
+SURFACE_CLI = "cli"
+VALID_SURFACES = frozenset({SURFACE_DESKTOP, SURFACE_WEB, SURFACE_CLI})
+
+# Tags are the only Langfuse dimension a filter can reach cheaply, but they are
+# a flat namespace shared with caller-supplied tags — so the value is prefixed.
+# Two reasons it is not emitted bare: an unprefixed `cli` would be
+# indistinguishable from the `harness` tag of the same name while ENG-1694 is
+# still in flight, and `origin:` (ENG-1289) already set this convention one
+# change earlier.
+#
+# NOTE for anyone querying it: tags are FILTERABLE, not groupable.
+# ``dimensions: [{field: "tags"}]`` keys on the whole tag array as a tuple and
+# returns roughly one row per trace. Use
+# ``filters: [{column: "tags", operator: "any of", value: ["surface:web"], type: "arrayOptions"}]``
+# and count, one query per surface.
+SURFACE_TAG_PREFIX = "surface:"
+
+
+def surface_tag(surface: str) -> str:
+    """Render a surface as its Langfuse tag (``web`` -> ``surface:web``)."""
+    return f"{SURFACE_TAG_PREFIX}{surface}"
+
+
 @dataclass(frozen=True)
 class TraceContext:
     """Identifiers attached to outbound LLM calls during a turn."""
@@ -30,6 +71,11 @@ class TraceContext:
     session_id: str | None = None
     turn_id: int | None = None
     harness: str | None = None
+    # Where the user was: one of VALID_SURFACES, or None when the host did not
+    # say. None is a real answer ("unknown host"), not a default to be guessed
+    # at — the same reservation ``harness`` makes, and the reason ENG-1495 had
+    # to stop the CLI reporting an empty string.
+    surface: str | None = None
     # Optional, caller-supplied trace annotations forwarded verbatim to the
     # langfuse-style headers (see ``OpenAIProvider._build_trace_headers``).
     # `tags` are appended to ``Langfuse-Tags``; `metadata` is merged into

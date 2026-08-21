@@ -913,7 +913,7 @@ class OpenAIProvider(LLMProvider):
         """
         if not self._emit_trace_headers:
             return None
-        from .tracing import get_trace_context
+        from .tracing import get_trace_context, surface_tag
 
         ctx = get_trace_context()
         if ctx is None:
@@ -929,6 +929,12 @@ class OpenAIProvider(LLMProvider):
         tags: list[str] = []
         if ctx.harness:
             tags.append(ctx.harness)
+        # Where the user was (ENG-1459), prefixed so it cannot be confused with
+        # the bare `harness` tag — `cli` is currently a legal value of BOTH
+        # fields while ENG-1694 is in flight, and an unprefixed tag would make
+        # the two indistinguishable in a filter.
+        if ctx.surface:
+            tags.append(surface_tag(ctx.surface))
         tags.extend(ctx.tags)
         tags = [t for t in (self._sanitize_langfuse_tag(s) for s in tags) if t]
         if tags:
@@ -940,6 +946,11 @@ class OpenAIProvider(LLMProvider):
             extra["turn_id"] = ctx.turn_id
         if ctx.harness:
             extra["harness"] = ctx.harness
+        # Also in metadata, unprefixed: a human reading one trace sees the
+        # plain value, and a metadata filter can reach it without knowing the
+        # tag convention. The tag is what a cheap population count uses.
+        if ctx.surface:
+            extra["surface"] = ctx.surface
         # Our own build (ENG-1279). The router lifts this onto the trace's
         # native `version` field, the only form the Langfuse metrics API can
         # group by — so "did this fix change behaviour in production?" becomes
