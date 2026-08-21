@@ -506,9 +506,11 @@ async def test_single_explicit_candidate_declined_is_cancelled_with_attach_guida
     assert "attach" in result["message"].lower()
 
 
-async def test_single_explicit_candidate_decline_carries_the_typed_answer(tmp_path):
+async def test_single_explicit_candidate_typed_reply_is_relayed_not_asserted_as_decline(tmp_path):
     """A user who types what they actually meant must be heard — the words
-    reach the model verbatim, not as a bare 'cancelled'."""
+    reach the model verbatim, and the result must not claim the user
+    'declined': a free-typed reply (possibly the literal word 'yes') is not a
+    decline they made (review nit on #392)."""
     (tmp_path / "skills").mkdir()
     result = json.loads(
         await handle_select_path(
@@ -517,7 +519,10 @@ async def test_single_explicit_candidate_decline_carries_the_typed_answer(tmp_pa
         )
     )
     assert result["status"] == "cancelled"
+    assert "path" not in result
     assert "/Users/me/dev/tenantguard" in result["message"]
+    assert "declined" not in result["message"].lower()
+    assert "not confirmed" in result["message"]
 
 
 async def test_single_explicit_candidate_card_dismissed_is_cancelled(tmp_path):

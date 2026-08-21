@@ -906,6 +906,20 @@ async def _confirm_single_candidate(
             f'The user added: "{typed}"' if typed else "",
             path=str(candidate),
         )
+    if typed and "no" not in answer.values:
+        # A free-typed reply is not a decline the user made — it may even be
+        # the word "yes" — so assert nothing; hand it over verbatim. Parsing
+        # typed affirmations here would be a worse failure than one re-ask.
+        return _status(
+            "cancelled",
+            f'The user typed a reply instead of choosing an option: "{typed}". '
+            f"'{label}' is not confirmed — do not use it or present it as "
+            "connected; act on their reply. If it reads as agreement, call "
+            "select_path again for an explicit confirmation. If they want a "
+            "file or folder outside the project, tell them plainly that this "
+            "host cannot reach it and ask them to attach the relevant files "
+            "to the conversation.",
+        )
     return _status(
         "cancelled",
         f"The user declined '{label}'. Do not use this path and do not present "
