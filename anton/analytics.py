@@ -238,9 +238,25 @@ def get_installation_id() -> str:
     moving off lowercase hex is not, and would silently drop the key rather
     than fail loudly.
 
-    The ``"unknown"`` return below is filtered by those consumers too: every
-    unfingerprintable machine reports the same string, so a join on it would
-    merge them into one identity.
+    Two limits worth knowing before changing either, since both are the change
+    someone would plausibly make:
+
+    - **The width freedom stops at 64.** The consumer bound is ``{8,64}``, so
+      anything up to a full SHA-256 hexdigest is fine, including dropping the
+      truncation entirely. A longer digest left untruncated is not — SHA-512 is
+      128 hex characters and would be rejected.
+    - **A replacement sentinel must stay NON-HEX.** cowork-server filters
+      ``"unknown"`` by name, but cowork's renderer rejects it only because it
+      fails the hex test — and the renderer is the side that mints the join
+      key. So a hex-shaped sentinel (``"0000000000000000"`` being the obvious
+      accident) would pass validation and stamp every unfingerprintable machine
+      with the *same* key, merging them into one identity. That is the exact
+      over-merge this value is guarded against, arriving through the door the
+      guard is assumed to cover.
+
+    The ``"unknown"`` return below exists for that reason: every
+    unfingerprintable machine reports the same string, so it must never be
+    usable as a join key.
 
     Returns:
         A 16-character hex string (64 bits of entropy), or ``"unknown"`` when
