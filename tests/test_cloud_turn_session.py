@@ -71,6 +71,17 @@ def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypa
     assert cfg.session_id == "conv_1"
 
 
+def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
+    """ENG-1817: `.anton/anton.md` is cowork-server's staged copy of the project
+    instructions. If the pod creates a template there, the next staging pass
+    deletes it, and under gVisor the pod's cached NFS handle then fails every
+    stat with ESTALE. The cloud builder must set up the workspace without
+    creating that file."""
+    _build(tmp_path, monkeypatch)
+    assert (tmp_path / ".anton").is_dir()  # the rest of the workspace is set up
+    assert not (tmp_path / ".anton" / "anton.md").exists()
+
+
 def test_db_history_is_seeded_not_loaded(tmp_path, monkeypatch):
     _, cfg = _build(
         tmp_path, monkeypatch,
@@ -187,7 +198,7 @@ def test_apply_env_to_process_never_called(tmp_path, monkeypatch):
     real_apply = ws_mod.Workspace.apply_env_to_process
 
     monkeypatch.setattr(ws_mod.Workspace, "initialize",
-                        lambda self: (calls.__setitem__("init", calls["init"] + 1), real_init(self))[1])
+                        lambda self, *a, **kw: (calls.__setitem__("init", calls["init"] + 1), real_init(self, *a, **kw))[1])
     monkeypatch.setattr(ws_mod.Workspace, "apply_env_to_process",
                         lambda self: (calls.__setitem__("apply_env", calls["apply_env"] + 1), real_apply(self))[1])
 
