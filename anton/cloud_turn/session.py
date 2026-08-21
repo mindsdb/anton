@@ -570,7 +570,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     settings.skill_drafts_root.mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(base, settings=settings)
-    workspace.initialize()
+    # create_anton_md=False: in the cloud, .anton/anton.md is cowork-server's
+    # staged copy of the project instructions. A pod-written template gets
+    # deleted by the next staging pass, and the pod's cached NFS handle then
+    # fails every stat with ESTALE under gVisor (ENG-1817).
+    workspace.initialize(create_anton_md=False)
     # No apply_env_to_process(): loading workspace .env into the process env
     # would expose tenant secrets to cell code.
 
