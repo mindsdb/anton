@@ -180,6 +180,9 @@ _pending_lock = threading.Lock()
 #                    never the message, which carries paths and user input).
 #                    One event per executed tool call; tool arguments and
 #                    result content are deliberately absent (ENG-1486).
+#                    conversation_id + turn_index mirror turn_completed's
+#                    values, so a tool row joins to its parent turn row and,
+#                    via Langfuse sessionId, to the gateway trace.
 #                    (anton/core/session.py::_emit_tool_completed)
 #
 # An event NOT listed here keeps the collector path, so moving one is an

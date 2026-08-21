@@ -2732,9 +2732,16 @@ class ChatSession:
         is reported as ``"unknown"`` rather than coerced either way.
 
         Payload is deliberately name + verdict + duration + exception CLASS
-        and nothing else. Arguments, result content and ``str(exc)`` routinely
-        carry file paths, user data and credentials-adjacent strings — none of
-        them may ever appear here.
+        plus the two join keys, and nothing else. Arguments, result content
+        and ``str(exc)`` routinely carry file paths, user data and
+        credentials-adjacent strings — none of them may ever appear here.
+
+        ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
+        values exactly (same names, same derivation), so a tool failure spotted
+        in PostHog joins to its parent turn row there and, via
+        ``conversation_id`` → Langfuse ``sessionId``, to the gateway trace of
+        the turn it happened in. Both already ride ``turn_completed`` through
+        this same sink — no new privacy surface.
         """
         try:
             # Same settings resolution as `_emit_turn_cost` above: the
@@ -2750,6 +2757,14 @@ class ChatSession:
             # send_event takes STRING values only — every extra is a wire
             # parameter (tests/test_ask_user.py:496 exists because a first
             # draft assumed a (name, props) shape).
+            # The same derivation `_emit_turn_cost` uses at close-of-books:
+            # the live TurnCost carries the authoritative index (an explicit
+            # turn_id on the cloud path, the local counter otherwise), so the
+            # values here and on the turn's own row can never disagree.
+            _tc = getattr(self, "_turn_cost", None)
+            turn_index = (
+                getattr(_tc, "turn_index", 0) or (self._turn_count + 1)
+            )
             send_event(
                 settings,
                 "tool_completed",
@@ -2757,6 +2772,8 @@ class ChatSession:
                 ok="unknown" if ok is None else str(ok).lower(),
                 duration_ms=str(int(duration_ms)),
                 error_type=error_type,
+                conversation_id=str(self._session_id or ""),
+                turn_index=str(turn_index),
             )
         except Exception:
             # Analytics must never affect the tool call that just ran.

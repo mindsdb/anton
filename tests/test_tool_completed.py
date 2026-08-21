@@ -149,16 +149,37 @@ async def test_unmigrated_handler_verdict_is_unknown_not_a_guess(workspace):
 # ── Payload contract ─────────────────────────────────────────────────
 
 
-async def test_payload_is_exactly_name_ok_duration_error_type_all_strings(workspace):
+async def test_payload_is_exactly_the_six_keys_all_strings(workspace):
     """No arguments, no result content, no surprise keys — and str values only,
     because send_event's extras are wire parameters (tests/test_ask_user.py:496).
     """
     session = _session(workspace, [ToolOutcome(content="secret result body", ok=True)])
     events = await _tool_completed_calls(session)
-    assert set(events[0]) == {"name", "ok", "duration_ms", "error_type"}
+    assert set(events[0]) == {"name", "ok", "duration_ms", "error_type",
+                              "conversation_id", "turn_index"}
     assert all(isinstance(v, str) for v in events[0].values())
     assert "secret result body" not in json.dumps(events[0])
     int(events[0]["duration_ms"])  # numeric string, parseable
+
+
+async def test_join_keys_match_the_same_turns_turn_completed_row(workspace):
+    """The reason the two keys exist: a tool row must join to its parent turn.
+
+    conversation_id and turn_index on tool_completed must equal the values the
+    SAME run's turn_completed carries — same names, same derivation — so the
+    PostHog join (and the conversation_id → Langfuse sessionId pivot) needs no
+    translation table.
+    """
+    session = _session(workspace, [ToolOutcome(content="fine", ok=True)])
+    with patch("anton.analytics.send_event") as sent:
+        async for _ in session.turn_stream("go"):
+            pass
+    tool = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
+    turn = [c.kwargs for c in sent.call_args_list if c.args[1] == "turn_completed"]
+    assert len(tool) == 1 and len(turn) == 1
+    assert tool[0]["conversation_id"] == turn[0]["conversation_id"] == "conv-tc"
+    assert tool[0]["turn_index"] == turn[0]["turn_index"]
+    assert tool[0]["turn_index"] != ""  # a real index, not a blank join key
 
 
 async def test_one_event_per_tool_call(workspace):
