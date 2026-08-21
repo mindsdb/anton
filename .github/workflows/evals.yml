@@ -1,0 +1,214 @@
+name: Anton evals
+
+# Behavioural baseline for the Anton harness: runs the `dialog_context` dataset
+# through a cowork-server built from this PR's anton sha, then posts accuracy,
+# tokens and latency as a PR comment.
+#
+# This reports numbers; it does not gate. Agent runs vary between passes, and a
+# red check on noise trains people to click "re-run" without reading. The job
+# fails only when it could not measure anything at all.
+#
+# Required repository secrets:
+#   MINDSHUB_API_KEY   prod gateway key — also seeded into the built cowork-server.
+#   LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
+#                      the project the PROD gateway writes to. A dev-project key
+#                      here yields empty token/cost columns, not an error.
+#   GH_PULL_REQUEST_READ_TOKEN
+#                      read access to mindsdb/cowork-server + mindsdb/cowork_evals.
+#                      The automatic GITHUB_TOKEN is scoped to this repository
+#                      alone — same-org membership does not extend it.
+#
+# Credentials come from secrets ONLY. This repository is public, and
+# workflow_dispatch inputs are recorded on the run for anyone to read, so a key
+# typed into the launch form would be published. The inputs below are all
+# non-sensitive by design.
+
+permissions:
+  contents: read
+  pull-requests: write        # the report is posted as a PR comment
+
+on:
+  # `labeled` fires once, when the label is added — later pushes to the PR do not
+  # re-trigger it. Re-running is "remove the label, add it again", which is the
+  # explicit opt-in a paid run should have.
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      anton_ref:
+        description: "anton ref to build (default: this branch)"
+        required: false
+      cowork_ref:
+        description: "cowork-server ref to build"
+        default: staging
+      evals_ref:
+        description: "cowork_evals ref providing the run config and the report"
+        default: pr-reporting
+      repeats:
+        description: "replicate passes per task"
+        default: "3"
+
+concurrency:
+  group: evals-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-evals'
+    runs-on: ubuntu-latest
+    # A clean run is ~6 minutes plus the cowork-server build. Anything past this
+    # is hung rather than slow, and the GitHub default of 360 would hold a runner
+    # for six hours to establish that.
+    timeout-minutes: 60
+    env:
+      COWORK_REF: ${{ inputs.cowork_ref || 'staging' }}
+      EVALS_REF: ${{ inputs.evals_ref || 'pr-reporting' }}
+      REPEATS: ${{ inputs.repeats || '3' }}
+      ANTON_SHA: ${{ github.event.pull_request.head.sha || inputs.anton_ref || github.sha }}
+      REPO_TOKEN: ${{ secrets.GH_PULL_REQUEST_READ_TOKEN }}
+      LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+    steps:
+      # `pull_request` withholds secrets from forks by design, so a fork PR cannot
+      # run this and must not be failed for it — but it must not look measured
+      # either.
+      - name: Skip fork PRs
+        id: fork
+        if: github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "skip=1" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Evals skipped — fork PR"
+            echo ""
+            echo "\`pull_request\` withholds repository secrets from forks, so no"
+            echo "numbers were measured for this change. Re-run the eval from a"
+            echo "first-party branch before merging."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Checked before the checkouts so a missing credential reads as "nobody
+      # provisioned this" rather than a confusing 404 on a repository that does
+      # exist.
+      - name: Fail loudly on a missing credential
+        if: steps.fork.outputs.skip != '1'
+        env:
+          MINDS_API_KEY: ${{ secrets.MINDSHUB_API_KEY }}
+        run: |
+          set -euo pipefail
+          : "${MINDS_API_KEY:?MINDSHUB_API_KEY secret is not set}"
+          : "${REPO_TOKEN:?no read token — set the GH_PULL_REQUEST_READ_TOKEN secret or pass repo_token}"
+          : "${LANGFUSE_PUBLIC_KEY:?no Langfuse key — token and cost columns would be empty}"
+
+      - name: Check out anton
+        if: steps.fork.outputs.skip != '1'
+        uses: actions/checkout@v4
+        with:
+          path: anton
+          ref: ${{ env.ANTON_SHA }}
+          # The eval builds its harness with `git worktree add <sha>`, which needs
+          # the object present locally — a shallow clone does not have it.
+          fetch-depth: 0
+
+      - name: Check out cowork-server
+        if: steps.fork.outputs.skip != '1'
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/cowork-server
+          ref: ${{ env.COWORK_REF }}
+          token: ${{ env.REPO_TOKEN }}
+          path: cowork-server
+          fetch-depth: 0
+
+      - name: Check out cowork_evals
+        if: steps.fork.outputs.skip != '1'
+        uses: actions/checkout@v4
+        with:
+          repository: mindsdb/cowork_evals
+          ref: ${{ env.EVALS_REF }}
+          token: ${{ env.REPO_TOKEN }}
+          path: cowork_evals
+
+      - name: Install uv
+        if: steps.fork.outputs.skip != '1'
+        uses: astral-sh/setup-uv@v5
+        with:
+          # The managed build runs `uv sync` in a fresh cowork-server worktree on
+          # every new anton sha, so the build dir itself is never reused. uv's
+          # package cache is the part that carries over.
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Run the eval
+        id: eval
+        if: steps.fork.outputs.skip != '1'
+        working-directory: cowork_evals
+        env:
+          MINDS_URL: https://api.mindshub.ai/v1
+          MINDS_API_KEY: ${{ secrets.MINDSHUB_API_KEY }}
+          CI_ANTON_REPO: ${{ github.workspace }}/anton
+          CI_COWORK_REPO: ${{ github.workspace }}/cowork-server
+          CI_ANTON_REF: ${{ env.ANTON_SHA }}
+          CI_COWORK_REF: ${{ env.COWORK_REF }}
+        run: |
+          set -euo pipefail
+          uv run eval run \
+            --config runs/templates/ci-dialog-context.yaml \
+            --repeats "$REPEATS" | tee run.log
+          # `eval run` ends with "done: <run_id> (...)"; that id names the results
+          # directory everything downstream reads.
+          run_id=$(sed -n 's/^done: \([^ ]*\).*/\1/p' run.log | tail -1)
+          [ -n "$run_id" ] || { echo "::error::eval run printed no run id"; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Render the report
+        id: report
+        if: steps.fork.outputs.skip != '1'
+        working-directory: cowork_evals
+        run: |
+          set -euo pipefail
+          # Derived, not hardcoded: adding a task to the dataset must not silently
+          # lower the bar for what counts as a complete run.
+          tasks=$(grep -c . datasets/dialog_context.jsonl)
+          expected=$(( tasks * REPEATS ))
+          uv run eval report --run "${{ steps.eval.outputs.run_id }}" \
+            --fmt pr --expect "$expected" > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR
+        if: steps.fork.outputs.skip != '1' && github.event_name == 'pull_request'
+        working-directory: cowork_evals
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ env.ANTON_SHA }}
+        run: |
+          set -euo pipefail
+          marker='<!-- anton-evals -->'
+          {
+            echo "$marker"
+            cat report.md
+            echo ""
+            echo "<sub>anton \`${SHA:0:8}\` · cowork-server \`$COWORK_REF\` · $REPEATS replicates</sub>"
+          } > comment.md
+          # One comment per PR, edited in place: a fresh comment per run buries the
+          # conversation under near-identical tables.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+                 --jq "[.[] | select(.body | startswith(\"$marker\")) | .id] | first // empty")
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@comment.md
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@comment.md
+          fi
+
+      # Kept even when the run fails: a broken run's logs and partial results are
+      # the only way to tell a harness bug from a gateway outage.
+      - name: Upload run artifacts
+        if: always() && steps.fork.outputs.skip != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-run-${{ steps.eval.outputs.run_id || github.run_id }}
+          path: |
+            cowork_evals/run.log
+            cowork_evals/runs/
+          retention-days: 90
