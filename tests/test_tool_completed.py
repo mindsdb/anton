@@ -253,6 +253,31 @@ async def test_wait_from_one_call_never_leaks_into_the_next(workspace):
     assert all(int(e["duration_ms"]) < 1_000 for e in events)
 
 
+async def test_slow_consumer_after_tool_done_does_not_inflate_the_duration(workspace):
+    """The booked duration is the tool's runtime, not the consumer's pull rate.
+
+    #390 review: the emit sits a few yields past the point the branch stops
+    the clock, so re-reading `monotonic()` there would bill whatever the
+    consumer spends pulling `tool_done` (and a scratchpad `dump`'s result) to
+    the tool. Here the consumer stalls 0.4s right after `tool_done`; the
+    emitted duration must stay near zero AND equal the `eta_seconds` the UI
+    displayed, so the two sources can never disagree.
+    """
+    import asyncio
+
+    session = _session(workspace, [ToolOutcome(content="fine", ok=True)])
+    displayed: list[float] = []
+    with patch("anton.analytics.send_event") as sent:
+        async for ev in session.turn_stream("go"):
+            if getattr(ev, "phase", None) == "tool_done":
+                displayed.append(ev.eta_seconds)
+                await asyncio.sleep(0.4)
+    events = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
+    assert len(events) == 1 and len(displayed) == 1
+    assert int(events[0]["duration_ms"]) < 200
+    assert int(events[0]["duration_ms"]) == int(displayed[0] * 1000)
+
+
 async def test_nonstreaming_turn_path_also_emits(workspace):
     """`turn()` has its own dispatch loop (session.py ~3315), separate from the
     streaming tail — self-review finding: without its own emit, any host on

@@ -4491,6 +4491,10 @@ class ChatSession:
                     # message) and so can carry paths and user input — this one
                     # is the only failure detail analytics may see (ENG-1486).
                     _tool_error_type: str = ""
+                    # Set by the branch that stops the clock at the moment the
+                    # tool finished. None = that branch didn't, so the emit
+                    # falls back to reading the clock itself. See the emit.
+                    _tool_elapsed: float | None = None
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
@@ -4749,11 +4753,22 @@ class ChatSession:
                     # (`generate_object_code`) never enter tool dispatch at
                     # all. Human wait is subtracted so an ask_user answered
                     # after four minutes is not booked as a slow tool.
+                    # Prefer the duration the branch already stopped the clock
+                    # on — the same value `tool_done` displays. Re-reading the
+                    # clock here would bill the consumer's pull latency for
+                    # the events yielded in between (`tool_done`, and a
+                    # `StreamToolResult` for a scratchpad `dump`) to the tool.
+                    # Small and always upward, but it lands on exactly the
+                    # "how slowly" metric this event exists to answer, and it
+                    # would make the booked duration disagree with the
+                    # displayed one (#390 review). Branches that never stopped
+                    # the clock fall back to reading it now.
                     self._emit_tool_completed(
                         name=tc.name,
                         ok=tool_ok,
                         duration_ms=max(
-                            _time.monotonic() - _tool_t0 - self.answer_wait_s,
+                            _tool_elapsed if _tool_elapsed is not None
+                            else _time.monotonic() - _tool_t0 - self.answer_wait_s,
                             0.0,
                         ) * 1000.0,
                         error_type=_tool_error_type,
