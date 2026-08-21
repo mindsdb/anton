@@ -2460,6 +2460,58 @@ class ChatSession:
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
         )
 
+        # Script traffic never reaches the analytics sink (ENG-1692).
+        #
+        # A turn with NO session id AND zero LLM calls did nothing and belongs to
+        # nobody: it is an eval, replay or test driver. Measured over 14 days to
+        # 2026-08-20, that shape was 8,209 of 11,734 `turn_completed` events —
+        # **70% of all volume, carrying 0 tokens** — from 15 machines. It made
+        # the per-turn median come out at ZERO, which is impossible for a
+        # completed turn, and would have set ENG-1286's spend ceiling from a
+        # fabricated distribution.
+        #
+        # BOTH conditions are required, and each half alone deletes real data:
+        #   * `llm_calls == 0` alone would drop 338 real turns that failed
+        #     before reaching a model (ended_by error / retry_exhausted /
+        #     cancelled, 88 installs) — real users hitting real errors.
+        #   * a missing session id alone would drop cowork-server's connector
+        #     probe, which legitimately runs a turn without one and spent 4.8M
+        #     tokens over the same window.
+        #
+        # Two hosts run turns without a session id, not one (#379 review):
+        # cowork-server's connector probe, and `anton chat` when episodic memory
+        # is off — `chat.py`'s `current_session_id` is None whenever
+        # `settings.episodic_memory` is False (user-settable, default True). The
+        # probe survives on `llm_calls > 0`; a CLI turn that fails BEFORE its
+        # first model call has neither half and is dropped with the scripts.
+        #
+        # That collateral is accepted, and measured rather than assumed: over 14
+        # days, all 8,569 script-shaped events carry an EMPTY `harness`, while
+        # every `harness="cli"` turn (26) is kept. So the observed loss is zero.
+        #
+        # `harness` is therefore a discriminator that could narrow this guard if
+        # the loss ever becomes non-zero — deliberately not used yet, because it
+        # would make a fix worth 70% of the volume depend on a field ENG-1695
+        # flags as unreliable (33 turns already carry an empty harness from a
+        # host that should set one). Trading a measured zero for that brittleness
+        # is the wrong direction; revisit only with a real CLI case in hand.
+        #
+        # Deliberately BEHAVIOURAL, not a version test. The original plan gated
+        # on `.dev` in the version; re-measured, that catches only 2,907 of the
+        # 8,209 and misses the single largest contaminant (`2.26.8.18.1rc2`,
+        # 5,253 events, no `.dev` in it). A version says what the software IS,
+        # not who is running it — the same build is installed by a real tester
+        # AND driven by a script, so `2.26.8.18.1rc2` holds 5,253 fake turns and
+        # 16 real ones. No version rule can split that; this one does not try.
+        #
+        # No env override is needed to test the sink by hand: a developer running
+        # a REAL turn has a session id and LLM calls, so it still emits.
+        #
+        # The log line above is deliberately NOT gated — whoever is running the
+        # driver keeps full local diagnosability.
+        if not self._session_id and tc.llm_calls == 0:
+            return
+
         # Analytics sink — same settings-resolution pattern as the
         # ds_connect_* events (anton/tools.py): the session's settings when
         # the host provided AntonSettings, else a fresh resolve so
