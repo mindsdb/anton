@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
+from anton.core.llm.endpoints import classify_endpoint
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -509,6 +510,26 @@ def _safe_error_detail(exc: BaseException) -> str:
         # and never the message.
         pass
     return name
+
+
+def _safe_error_type(exc: BaseException) -> str:
+    """The exception's class name, and nothing else, for analytics.
+
+    Deliberately narrower than its sibling `_safe_error_detail`, which appends
+    a status code or the offending pydantic field paths. That extra detail is
+    right for a log line a human reads and wrong for a PostHog property: the
+    point of `error_type` is to resolve one opaque bucket into a *groupable*
+    distribution, and a compound value would spread a single failure mode
+    across many rows. Both are content-free; they differ only in cardinality.
+
+    Never raises, for the same reason as `_safe_error_detail`: it runs inside
+    an `except` handler, where an escape would turn a handled failure into a
+    dead turn.
+    """
+    try:
+        return type(exc).__name__
+    except Exception:  # pragma: no cover - defensive
+        return "unavailable"
 
 
 def _is_provider_auth_error(exc: BaseException) -> bool:
@@ -2424,8 +2445,19 @@ class ChatSession:
         # narrower case where the cancel lands exactly at a yield boundary.
         if isinstance(exc, (GeneratorExit, asyncio.CancelledError)) or cancelled:
             tc.ended_by = "cancelled"
+            # Clear any error_type an earlier terminal already stamped. The
+            # retry-exhausted site stamps one and then keeps going to produce
+            # its apology — and a user who has sat through failed retries is
+            # exactly the user who then presses Stop, so this path is ordinary,
+            # not exotic. Leaving the stale value would let plain Stops appear
+            # in an error-cause breakdown, which is the opposite of the point.
+            tc.error_type = ""
         elif exc is not None:
             tc.ended_by = "error"
+            # The exception was in scope here and thrown away until ENG-1689,
+            # so "error" covered a parse failure, a tool crash, a bad config
+            # and an anton bug alike — indistinguishable in any query.
+            tc.error_type = _safe_error_type(exc)
 
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
@@ -2520,6 +2552,19 @@ class ChatSession:
         # never conversation content (ENG-1288).
         try:
             settings = getattr(self, "_settings", None)
+            # Held separately from the fallback below. `endpoint_class` must
+            # describe THIS TURN's endpoint, and the fallback describes the
+            # process environment — which is not the same thing on any host
+            # that builds a session without passing settings (cowork-server's
+            # connector probe does exactly that, and it is a live path). Where
+            # the turn's own settings are absent, or are a `CoreSettings` that
+            # has no provider fields at all, the honest answer is "unknown",
+            # and `classify_endpoint` returns that for both.
+            #
+            # `llm_provider` below deliberately keeps reading the fallback:
+            # changing an existing field's source is ENG-1695's call, not a
+            # side effect of adding a new one.
+            _turn_settings = settings
             if settings is None or not hasattr(settings, "analytics_enabled"):
                 from anton.config.settings import AntonSettings
 
@@ -2537,6 +2582,9 @@ class ChatSession:
                 # classification is broken.
                 **_root_cause_fields,
                 ended_by=tc.ended_by,
+                # Empty unless the turn ended on an exception — see
+                # `TurnCost.error_type`.
+                error_type=tc.error_type,
                 # A completed-but-unverified turn (denied/latched verifier,
                 # ENG-1632) must be excludable from the honest-stop
                 # denominator without a per-conversation Langfuse hop.
@@ -2577,10 +2625,26 @@ class ChatSession:
                 # value is the alarm that some caller invented a role.
                 unknown_tokens=_role_tokens(tc, UNKNOWN_ROLE),
                 unknown_calls=_role_calls(tc, UNKNOWN_ROLE),
-                # Configured provider name (anthropic / openai /
-                # openai-compatible): separates gateway traffic from BYOK in
-                # queries. The finer per-model provider split is a follow-up.
+                # The provider label in the EMITTING HOST's own vocabulary,
+                # drawn from one of two registries that do not share a value
+                # space: anton's CLI dispatch has three values (anthropic /
+                # openai / openai-compatible), cowork-server's has five (plus
+                # gemini / minds-cloud). The same configuration therefore
+                # reports differently depending on which host wrote it, because
+                # a `@field_validator` rewrites `minds-cloud` on construction
+                # while cowork-server's `setattr` overlay bypasses validation
+                # (ENG-1695). An earlier comment here claimed this field
+                # "separates gateway traffic from BYOK in queries" — it cannot,
+                # and doing so undercounted the gateway by 18%. `endpoint_class`
+                # below is the field that answers that; this one is left
+                # deliberately un-normalised, since flattening the two
+                # vocabularies would destroy `minds-cloud`, the one label that
+                # is correct today.
                 llm_provider=str(getattr(settings, "planning_provider", "") or ""),
+                # Where the tokens actually went, from the resolved base-URL
+                # host: local / mindshub / third-party (ENG-1689). Never the
+                # URL itself — those carry internal corporate hostnames.
+                endpoint_class=classify_endpoint(_turn_settings),
                 harness=str(self._harness or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
@@ -3781,6 +3845,10 @@ class ChatSession:
                         # mode in any error-rate query (#309 review).
                         if self._turn_cost is not None:
                             self._turn_cost.ended_by = "retry_exhausted"
+                            # Same exception the SYSTEM message below shows the
+                            # model and the user; it just never reached
+                            # telemetry (ENG-1689).
+                            self._turn_cost.error_type = _safe_error_type(_agent_exc)
                         self._append_history(
                             {
                                 "role": "user",
