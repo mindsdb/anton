@@ -2478,6 +2478,24 @@ class ChatSession:
         #     probe, which legitimately runs a turn without one and spent 4.8M
         #     tokens over the same window.
         #
+        # Two hosts run turns without a session id, not one (#379 review):
+        # cowork-server's connector probe, and `anton chat` when episodic memory
+        # is off — `chat.py`'s `current_session_id` is None whenever
+        # `settings.episodic_memory` is False (user-settable, default True). The
+        # probe survives on `llm_calls > 0`; a CLI turn that fails BEFORE its
+        # first model call has neither half and is dropped with the scripts.
+        #
+        # That collateral is accepted, and measured rather than assumed: over 14
+        # days, all 8,569 script-shaped events carry an EMPTY `harness`, while
+        # every `harness="cli"` turn (26) is kept. So the observed loss is zero.
+        #
+        # `harness` is therefore a discriminator that could narrow this guard if
+        # the loss ever becomes non-zero — deliberately not used yet, because it
+        # would make a fix worth 70% of the volume depend on a field ENG-1695
+        # flags as unreliable (33 turns already carry an empty harness from a
+        # host that should set one). Trading a measured zero for that brittleness
+        # is the wrong direction; revisit only with a real CLI case in hand.
+        #
         # Deliberately BEHAVIOURAL, not a version test. The original plan gated
         # on `.dev` in the version; re-measured, that catches only 2,907 of the
         # 8,209 and misses the single largest contaminant (`2.26.8.18.1rc2`,
