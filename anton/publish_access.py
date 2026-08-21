@@ -43,8 +43,9 @@ def resolve_access(
 
     Returns ``(effective_access, pwd_version, access_version, owner_side)``.
     A request with no usable selection (empty password, or restricted with no
-    emails and no org) degrades to ``public`` — a server-side safety net for
-    programmatic callers; interactive callers must gate empty input earlier.
+    emails, no org and no owner_only) degrades to ``public`` — a server-side
+    safety net for programmatic callers; interactive callers must gate empty
+    input earlier.
     NOTE: with ``access=None`` and ``password=None`` the mode defaults to
     ``public`` — the prior mode is NOT inherited (``previous`` only feeds the
     version counters). Callers that want to preserve a prior non-public mode
@@ -79,17 +80,29 @@ def resolve_access(
     if mode == "restricted":
         emails = normalize_emails((access or {}).get("emails"))
         org_allowed = bool((access or {}).get("org_allowed"))
-        if emails or org_allowed:
+        # The owner always matches (the FK condition in auth), so an explicit
+        # owner_only next to emails/org carries no information — canonicalise it
+        # away so two equivalent selections don't differ in access_version.
+        owner_only = bool((access or {}).get("owner_only")) and not emails and not org_allowed
+        if emails or org_allowed or owner_only:
             prev_restricted = prev.get("mode") == "restricted"
             prev_emails = prev.get("emails") if prev_restricted else None
             prev_org = prev.get("org_allowed") if prev_restricted else None
-            changed = (emails != prev_emails) or (org_allowed != prev_org)
+            # bool(): pre-ENG-1769 entries have no owner_only key, and a bare
+            # `False != None` would bump the version on an unchanged re-publish.
+            prev_owner_only = bool(prev.get("owner_only")) if prev_restricted else None
+            changed = (
+                (emails != prev_emails)
+                or (org_allowed != prev_org)
+                or (owner_only != prev_owner_only)
+            )
             access_version = (prev_access_version + 1) if changed else (prev_access_version or 1)
             owner_side = {
                 "mode": "restricted",
                 "requires_password": False,
                 "emails": emails,
                 "org_allowed": org_allowed,
+                "owner_only": owner_only,
                 "access_version": access_version,
             }
             return (
@@ -147,6 +160,10 @@ def access_from_owner_side(entry: Any) -> dict:
             "mode": "restricted",
             "emails": entry.get("emails", []) or [],
             "org_allowed": bool(entry.get("org_allowed")),
+            # LOAD-BEARING: without this key a "keep" re-publish of an
+            # owner-only artifact reconstructs an empty selection, which
+            # degrades to public — silently un-privating the artifact.
+            "owner_only": bool(entry.get("owner_only")),
         }
     return {"mode": "public"}
 
@@ -255,10 +272,11 @@ async def prompt_access(prompt_fn, *, previous=None, allow_keep=False) -> dict |
     """Interactively collect an access spec via a prompt_or_cancel-like coro.
 
     Returns an input access dict ({"mode": ...}) or None if the user cancels
-    (Esc at any step). Empty password / empty restricted selection re-prompt
-    rather than silently degrading to public — parity with cowork's
-    isAccessDraftValid(). ``prompt_fn`` is injected so this is unit-testable
-    without a TTY.
+    (Esc at any step). An empty password re-prompts rather than silently
+    degrading to public; an empty restricted selection is an explicit
+    owner-only publish, while malformed addresses re-prompt — parity with
+    cowork's isAccessDraftValid(). ``prompt_fn`` is injected so this is
+    unit-testable without a TTY.
     """
     choices = ["public", "password", "restricted"]
     if allow_keep:
@@ -289,11 +307,20 @@ async def prompt_access(prompt_fn, *, previous=None, allow_keep=False) -> dict |
             # empty → re-prompt (do NOT degrade to public silently)
 
     if mode == "restricted":
+        hint = ""
         while True:
-            raw = await prompt_fn("  Allowed emails (comma or space separated)")
+            raw = await prompt_fn(
+                f"{hint}  Allowed emails (comma or space separated; empty = only you)"
+            )
             if raw is None:
                 return None
-            valid, _invalid = parse_emails(raw)
+            valid, invalid = parse_emails(raw)
+            if invalid:
+                # Re-prompt instead of dropping them: a typo'd address would
+                # otherwise turn into an owner-only publish the user never asked
+                # for. prompt_fn is the only output channel available here.
+                hint = f"  Invalid: {', '.join(invalid)}\n"
+                continue
             org_ans = await prompt_fn(
                 "  Allow everyone in your organization?",
                 choices=["y", "n"], choices_display="y/n", default="n",
@@ -301,8 +328,11 @@ async def prompt_access(prompt_fn, *, previous=None, allow_keep=False) -> dict |
             if org_ans is None:
                 return None
             org_allowed = org_ans.strip().lower() in ("y", "yes")
-            if valid or org_allowed:
-                return {"mode": "restricted", "emails": valid, "org_allowed": org_allowed}
-            # nothing selected → re-prompt
+            return {
+                "mode": "restricted",
+                "emails": valid,
+                "org_allowed": org_allowed,
+                "owner_only": not valid and not org_allowed,
+            }
 
     return {"mode": "public"}
