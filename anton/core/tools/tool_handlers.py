@@ -829,6 +829,94 @@ def _status(status: str, message: str = "", **extra) -> str:
     return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
 
 
+def _needs_confirmation(candidate: "Path", label: str) -> str:
+    """The model-supplied candidate cannot be silently accepted and no
+    confirmation card can render on this host: hand the decision back."""
+    return _status(
+        "needs_confirmation",
+        f"You supplied '{label}' as the only candidate — that is your guess, not "
+        "the user's choice, so it was not accepted. Ask the user to confirm it "
+        "before using it, and do not present it as chosen or connected until "
+        "they do. If they asked for a file or folder outside the project, no "
+        "path inside the project is an answer: tell them plainly that this host "
+        "cannot reach paths outside the project, and ask them to attach the "
+        "relevant files to the conversation.",
+        candidates=[str(candidate)],
+    )
+
+
+async def _confirm_single_candidate(
+    session: "ChatSession", candidate: "Path", root: "Path", timeout_s: "int | None"
+) -> str:
+    """Confirm a model-supplied single candidate with the user (ENG-1852).
+
+    A lone entry in ``candidates`` is the model's own guess echoed back, not a
+    discovery: in a fresh project exactly one directory exists (``skills``), so
+    silently resolving it reported folders nobody chose as connected — to the
+    first-run prompt "give you access to a folder on my computer", no less.
+    Confirmation is enforced here rather than in the prompt, because the model
+    already narrates such guesses as decisions ("I'll use it as the folder").
+
+    Renders a yes/no choice card (supported on every cowork host, which has no
+    path picker). Where no card can render either, returns
+    ``needs_confirmation`` so the model must ask in plain text.
+    """
+    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+    try:
+        label = str(candidate.relative_to(root))
+    except ValueError:
+        label = str(candidate)
+    noun = "folder" if candidate.is_dir() else "file"
+    request = AskRequest(
+        prompt=f"Only one candidate was found — use this {noun}?",
+        kind="choice",
+        timeout_s=timeout_s,
+        options=(
+            AskOption(value="yes", label=f"Yes — use {label}", kind=noun, style="primary"),
+            AskOption(value="no", label="No — that's not it"),
+        ),
+    )
+    try:
+        answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+    except Exception as exc:  # noqa: BLE001 — the card is host code
+        _log.warning("select_path confirmation elicitor failed: %s", exc, exc_info=True)
+        return _status("error", f"Selection failed: {exc}")
+    if answer.status == "unavailable":
+        return _needs_confirmation(candidate, label)
+    if answer.status == "cancelled":
+        return _status(
+            "cancelled",
+            "The user dismissed the confirmation without choosing. Ask how they "
+            "would like to proceed.",
+        )
+    if answer.status == "limit":
+        return _status(
+            "error",
+            "Too many questions this turn; do not use the candidate without the "
+            "user's confirmation — ask in plain text.",
+        )
+    if answer.status != "answered":
+        return _status("error", f"The confirmation did not return an answer ({answer.status}).")
+    typed = (answer.text or "").strip()
+    if "yes" in answer.values:
+        # Deliberately NOT auto_resolved: the user confirmed this path.
+        return _status(
+            "resolved",
+            f'The user added: "{typed}"' if typed else "",
+            path=str(candidate),
+        )
+    return _status(
+        "cancelled",
+        f"The user declined '{label}'. Do not use this path and do not present "
+        "it as connected. Ask what they actually meant — and if it is a file or "
+        "folder outside the project, tell them plainly that this host cannot "
+        "reach paths outside the project, and ask them to attach the relevant "
+        "files to the conversation."
+        + (f' The user said: "{typed}"' if typed else ""),
+    )
+
+
 def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
     """Validate a browse-mode pick: any existing path of the requested kind."""
     if chosen is None:
@@ -858,9 +946,11 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
       is not offered browse at all, because ``session.py`` registers
       ``SELECT_PATH_TOOL_PICK_ONLY`` there (ENG-1357).
     * **pick** — ``candidates`` or ``pattern`` given: disambiguate concrete
-      matches within the project. Auto-resolves a single match and reports
-      "no matches" for none, so the picker appears only for a genuine (≥2)
-      ambiguity.
+      matches within the project. A single *pattern* match auto-resolves and
+      zero matches reports "no matches"; a single model-supplied candidate is
+      confirmed with the user first (ENG-1852) — via the path picker where one
+      renders, a yes/no choice card elsewhere, or ``needs_confirmation`` when
+      neither can.
 
     The result is fed back as the tool result, so the agent continues without a
     separate user message.
@@ -940,7 +1030,16 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             ),
         )
     if len(candidates) == 1:
-        return _status("resolved", auto_resolved=True, path=str(candidates[0]))
+        if not has_candidates:
+            # A lone *pattern* match is a genuine discovery — the glob searched
+            # the project and found exactly one thing — so resolving it without
+            # a prompt is safe. A lone *explicit* candidate is not (ENG-1852):
+            # it is the model's own guess echoed back, so it must be confirmed
+            # by the user — via the confirmation card below, or by picking it
+            # in the path picker where one renders.
+            return _status("resolved", auto_resolved=True, path=str(candidates[0]))
+        if not can_pick:
+            return await _confirm_single_candidate(session, candidates[0], root, timeout_s)
     if not can_pick:
         return _status(
             "picker_unavailable",
