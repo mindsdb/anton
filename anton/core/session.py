@@ -2710,6 +2710,58 @@ class ChatSession:
             # Reporting must never affect the turn that just ran.
             pass
 
+    def _emit_tool_completed(
+        self,
+        name: str,
+        ok: bool | None,
+        duration_ms: float,
+        error_type: str,
+    ) -> None:
+        """Per-tool-call analytics event (ENG-1486).
+
+        The verdict the dispatch loop already computes for the UI's
+        ``tool_done`` marker, sent where it can be aggregated: without this,
+        "which tools fail, how often, how slowly" is unanswerable — the
+        gateway's vantage point is structurally wrong (67% of its tool spans
+        are structured-output schemas that never return by design, and anton's
+        own retries hide failures from it).
+
+        ``ok`` is the definitive verdict, never a prose guess: ``True``/
+        ``False`` from a caught exception or the handler's own
+        ``ToolOutcome.ok``; ``None`` (an unmigrated handler, a cancelled exec)
+        is reported as ``"unknown"`` rather than coerced either way.
+
+        Payload is deliberately name + verdict + duration + exception CLASS
+        and nothing else. Arguments, result content and ``str(exc)`` routinely
+        carry file paths, user data and credentials-adjacent strings — none of
+        them may ever appear here.
+        """
+        try:
+            # Same settings resolution as `_emit_turn_cost` above: the
+            # session's settings when the host provided AntonSettings, else a
+            # fresh resolve so analytics_enabled / the CI drop still apply.
+            settings = getattr(self, "_settings", None)
+            if settings is None or not hasattr(settings, "analytics_enabled"):
+                from anton.config.settings import AntonSettings
+
+                settings = AntonSettings()
+            from anton.analytics import send_event
+
+            # send_event takes STRING values only — every extra is a wire
+            # parameter (tests/test_ask_user.py:496 exists because a first
+            # draft assumed a (name, props) shape).
+            send_event(
+                settings,
+                "tool_completed",
+                name=name,
+                ok="unknown" if ok is None else str(ok).lower(),
+                duration_ms=str(int(duration_ms)),
+                error_type=error_type,
+            )
+        except Exception:
+            # Analytics must never affect the tool call that just ran.
+            pass
+
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.
 
@@ -4378,6 +4430,13 @@ class ChatSession:
                         continue
 
                     _tool_t0 = _time.monotonic()
+                    # Per dispatched call, not per general-branch call: every
+                    # branch below can elicit() (which accumulates the wait),
+                    # and the duration maths at the bottom of this block runs
+                    # for all of them. Resetting only on the general branch
+                    # left a stale wait from an earlier call in the round to
+                    # be subtracted from the wrong tool's runtime.
+                    self.answer_wait_s = 0.0
 
                     # The handler's own failure verdict, when it gave one —
                     # drives the error streak instead of text matching
@@ -4386,6 +4445,12 @@ class ChatSession:
                     # ENG-1276 populated this and nothing ever read it; ENG-1492
                     # is what reads it.
                     tool_reason: str = ""
+                    # Exception class name when the verdict came from a raise,
+                    # "" otherwise. Kept apart from `tool_reason`, which on the
+                    # ToolOutcome path is prose (a traceback line, a handler
+                    # message) and so can carry paths and user input — this one
+                    # is the only failure detail analytics may see (ENG-1486).
+                    _tool_error_type: str = ""
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
@@ -4547,7 +4612,7 @@ class ChatSession:
                             # itself via session.emitter — _dispatch_draining
                             # forwards them here as ordinary ("event", ev)
                             # tuples, no different from an ask_user event.
-                            self.answer_wait_s = 0.0
+                            # (answer_wait_s was reset with _tool_t0 above.)
                             _tool_error: Exception | None = None
                             agen = self._dispatch_draining(tc)
                             try:
@@ -4632,6 +4697,27 @@ class ChatSession:
                         result_text = f"Tool '{tc.name}' failed: {exc}"
                         tool_ok = False
                         tool_reason = type(exc).__name__
+                        _tool_error_type = type(exc).__name__
+
+                    # Per-tool-call analytics (ENG-1486): the verdict computed
+                    # for the UI stream, finally aggregable. This is the one
+                    # point every EXECUTED call flows through — all three
+                    # dispatch branches, both the raise and the
+                    # ToolOutcome.ok=False failure shapes — and only executed
+                    # calls: discarded/damaged calls `continue` before
+                    # `_tool_t0`, and structured-output extractions
+                    # (`generate_object_code`) never enter tool dispatch at
+                    # all. Human wait is subtracted so an ask_user answered
+                    # after four minutes is not booked as a slow tool.
+                    self._emit_tool_completed(
+                        name=tc.name,
+                        ok=tool_ok,
+                        duration_ms=max(
+                            _time.monotonic() - _tool_t0 - self.answer_wait_s,
+                            0.0,
+                        ) * 1000.0,
+                        error_type=_tool_error_type,
+                    )
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
