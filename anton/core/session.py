@@ -3447,7 +3447,7 @@ class ChatSession:
                         ok=False,
                         reason=type(exc).__name__,
                     )
-                    _tool_error_type = type(exc).__name__
+                    _tool_error_type = _safe_error_type(exc)
                 # Same per-tool-call analytics as the streaming loop's tail
                 # (ENG-1486) — without this, a host on the non-streaming API
                 # silently undercounts. Raw elapsed, no human-wait deduction:
@@ -4486,7 +4486,10 @@ class ChatSession:
                     # is what reads it.
                     tool_reason: str = ""
                     # Exception class name when the verdict came from a raise,
-                    # "" otherwise. Kept apart from `tool_reason`, which on the
+                    # "" otherwise, via the same `_safe_error_type` helper
+                    # `turn_completed`'s own error_type uses (ENG-1689) — one
+                    # definition of "class name only, never raises" for both
+                    # events. Kept apart from `tool_reason`, which on the
                     # ToolOutcome path is prose (a traceback line, a handler
                     # message) and so can carry paths and user input — this one
                     # is the only failure detail analytics may see (ENG-1486).
@@ -4741,7 +4744,7 @@ class ChatSession:
                         result_text = f"Tool '{tc.name}' failed: {exc}"
                         tool_ok = False
                         tool_reason = type(exc).__name__
-                        _tool_error_type = type(exc).__name__
+                        _tool_error_type = _safe_error_type(exc)
 
                     # Per-tool-call analytics (ENG-1486): the verdict computed
                     # for the UI stream, finally aggregable. This is the one
