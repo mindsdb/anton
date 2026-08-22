@@ -1364,11 +1364,18 @@ class ChatSession:
         if tool_name != "scratchpad":
             return RESILIENCE_NUDGE
         low = result_text.lower()
-        # An install failure/kill is neither a size nor a liveness problem —
-        # checked before both: the mid-install kill wording also contains
-        # "liveness", and the worker's install errors contain "killed"/
-        # "timed out"-adjacent words (ENG-1275).
-        if "auto-install" in low:
+        # An install/missing-module failure is neither a size nor a liveness
+        # problem — checked before both: the legacy mid-install kill wording
+        # also contains "liveness", and install errors contain "killed"/
+        # "timed out"-adjacent words (ENG-1275). Keyed on the interpreter's
+        # own exception name and install_packages' message prefixes, never on
+        # the hint text — a hint reword must not silently kill this route
+        # (ENG-1635). "auto-install" keeps matching old-version workers.
+        if (
+            "modulenotfounderror" in low
+            or low.startswith(("install failed", "install timed out", "install refused"))
+            or "auto-install" in low
+        ):
             return SCRATCHPAD_INSTALL_NUDGE
         # A silence/liveness kill means the worker looked dead — "make the
         # cell smaller" is exactly the wrong advice there (ENG-578: it taught

@@ -174,7 +174,9 @@ _pending_lock = threading.Lock()
 #
 # An event NOT listed here keeps the collector path, so moving one is an
 # explicit decision rather than something that happens by default.
-_POSTHOG_EVENTS = frozenset({"turn_completed", "rule_retrieval"})
+_POSTHOG_EVENTS = frozenset(
+    {"turn_completed", "rule_retrieval", "scratchpad_package_installed"}
+)
 
 # `$lib` names the sender, matching the convention the other emitters follow
 # (`cowork-desktop`, `mindshub-site-beacon`), so a per-emitter breakdown in

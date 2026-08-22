@@ -13,6 +13,10 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    cell_failure_reason,
+    install_call_installed_something,
+    reject_invalid_packages,
+    send_package_install_event,
 )
 
 if TYPE_CHECKING:
@@ -536,7 +540,7 @@ async def handle_scratchpad(
         return ToolOutcome(
             content=format_cell_result(cell),
             ok=not error,
-            reason=error.splitlines()[-1][:160] if error else "",
+            reason=cell_failure_reason(error),
         )
 
     elif action == "view":
@@ -576,8 +580,16 @@ async def handle_scratchpad(
         packages = tc_input.get("packages", [])
         if not packages:
             return "No packages specified."
+        refused = reject_invalid_packages(packages)
+        if refused:
+            return ToolOutcome(
+                content=refused, ok=False, reason="package_install_rejected"
+            )
         pad = await session._scratchpads.get_or_create(name)
-        return await pad.install_packages(packages)
+        result = await pad.install_packages(packages)
+        if install_call_installed_something(result):
+            send_package_install_event(session, packages)
+        return result
 
     else:
         return f"Unknown scratchpad action: {action}"

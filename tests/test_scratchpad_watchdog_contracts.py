@@ -13,6 +13,7 @@ import pytest
 
 from anton.core.backends import local as local_backend
 from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.wire import MISSING_MODULE_HINT
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
@@ -40,8 +41,8 @@ def shrink_timers(monkeypatch, *, heartbeat: str = "0.2") -> None:
     Also shrinks the post-progress() grace window to 1s: left at its 60s
     default, a single "Installing {module}..." progress line would widen the
     silence window enough to survive a several-second silent auto-install on
-    its own, making test_silent_auto_install_survives pass with or without
-    the heartbeat and pin nothing.
+    its own, making tests relying on the inactivity window pass with or
+    without the heartbeat and pin nothing.
     """
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
@@ -140,21 +141,17 @@ class TestLivenessHeartbeat:
         finally:
             await pad.close()
 
-    async def test_silent_auto_install_survives(self, monkeypatch, tmp_path):
-        """The ENG-1275 shape: in-cell auto-install silent past the window.
-        ANTON_UV_PATH is pointed at a stub that sleeps then fails, so the cell
-        must survive the silent install attempt and report the install error
-        (not an inactivity kill).
+    async def test_module_not_found_does_not_auto_install(self, monkeypatch, tmp_path):
+        """A missing import must never trigger an unattended install — the
+        stub installer touches a sentinel file if it's ever invoked.
 
-        _find_uv is patched to return None: LocalScratchpadRuntime.start()
-        otherwise always overwrites ANTON_UV_PATH with a real `uv` found on
-        PATH (near-universal on a dev/CI box that runs `uv run pytest`),
-        silently discarding this test's stub and making it install-fail in
-        well under a second instead of exercising the slow, silent path.
+        _find_uv is patched to None so start() doesn't overwrite the stub
+        path with a real uv found on PATH.
         """
         shrink_timers(monkeypatch)
+        sentinel = tmp_path / "installer_ran"
         stub = tmp_path / "slow_uv.sh"
-        stub.write_text("#!/bin/sh\nsleep 3\nexit 1\n")
+        stub.write_text(f"#!/bin/sh\ntouch {sentinel}\nsleep 3\nexit 1\n")
         stub.chmod(0o755)
         monkeypatch.setenv("ANTON_UV_PATH", str(stub))
         monkeypatch.setattr(
@@ -165,8 +162,9 @@ class TestLivenessHeartbeat:
         try:
             cell = await pad.execute("import definitely_not_a_real_module_xyz")
             assert cell.error is not None
-            assert "auto-install failed" in cell.error.lower()
-            assert "liveness" not in cell.error.lower()
+            assert "ModuleNotFoundError" in cell.error
+            assert "definitely_not_a_real_module_xyz" in cell.error
+            assert not sentinel.exists(), "an undeclared import must never trigger an install"
         finally:
             await pad.close()
 
@@ -225,139 +223,6 @@ class TestQuietCellNotice:
             assert not any(m.startswith("still running") for m in messages)
         finally:
             await pad.close()
-
-    async def test_quiet_notice_during_install_names_the_install(
-        self, monkeypatch, tmp_path
-    ):
-        """A notice firing mid-install must name the install (ENG-1275's span
-        temporarily inflates the budget the notice quotes, so a bare 'still
-        running' would read as the cell's own progress instead of the
-        install's)."""
-        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
-        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
-        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
-        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
-        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_AFTER", 0.3)
-        monkeypatch.setattr(local_backend, "_QUIET_NOTICE_EVERY", 0.1)
-        fake_mod = tmp_path / "eng1324_fake_mod.py"
-        stub = tmp_path / "slow_ok_uv.sh"
-        stub.write_text(
-            f"#!/bin/sh\nsleep 1\necho 'VALUE = 1' > '{fake_mod}'\nexit 0\n"
-        )
-        stub.chmod(0o755)
-        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
-        monkeypatch.setattr(
-            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
-        )
-        pad = make_pad()
-        await pad.start()
-        try:
-            messages: list[str] = []
-            code = (
-                f"import sys\nsys.path.insert(0, {str(tmp_path)!r})\n"
-                "import eng1324_fake_mod\nprint(eng1324_fake_mod.VALUE)\n"
-            )
-            async for item in pad.execute_streaming(code):
-                if isinstance(item, str):
-                    messages.append(item)
-            notices = [m for m in messages if m.startswith("still running")]
-            assert notices, "expected a quiet notice during the slow install"
-            assert all("eng1324_fake_mod" in m for m in notices)
-        finally:
-            await pad.close()
-
-
-class TestAutoInstallBudget:
-    """ENG-1275: the in-cell auto-installer must run under a budget derived
-    from CoreSettings.cell_install_timeout (one number, both sides), fail with
-    an error naming the install as the cause, and never take the pad down."""
-
-    async def test_install_past_install_timeout_fails_named_and_pad_survives(
-        self, monkeypatch, tmp_path
-    ):
-        """An install running past cell_install_timeout must produce a cell
-        error naming the auto-install and the module — and the worker must
-        survive it (no crash, next cell runs)."""
-        shrink_timers(monkeypatch)
-        monkeypatch.setenv("ANTON_CELL_INSTALL_TIMEOUT", "1")
-        stub = tmp_path / "hung_uv.sh"
-        stub.write_text("#!/bin/sh\nexec sleep 5\n")
-        stub.chmod(0o755)
-        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
-        monkeypatch.setattr(
-            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
-        )
-        pad = make_pad()
-        await pad.start()
-        try:
-            cell = await pad.execute("import module_that_installs_slowly_eng1275")
-            assert cell.error is not None
-            low = cell.error.lower()
-            assert "auto-install" in low
-            assert "module_that_installs_slowly_eng1275" in cell.error
-            assert "liveness" not in low
-            follow_up = await pad.execute("print('pad-still-alive')")
-            assert follow_up.error is None
-            assert "pad-still-alive" in follow_up.stdout
-        finally:
-            await pad.close()
-
-    async def test_install_outlasting_total_budget_completes(
-        self, monkeypatch, tmp_path
-    ):
-        """The `import torch` shape: an install longer than the cell's total
-        budget must not be killed — the budget defers to the install's own
-        allowance while it runs, and the retried cell completes."""
-        monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
-        monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
-        monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "1")
-        monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
-        monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
-        fake_mod = tmp_path / "eng1275_fake_mod.py"
-        stub = tmp_path / "slow_ok_uv.sh"
-        stub.write_text(
-            f"#!/bin/sh\nsleep 3\necho 'VALUE = 42' > '{fake_mod}'\nexit 0\n"
-        )
-        stub.chmod(0o755)
-        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
-        monkeypatch.setattr(
-            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
-        )
-        pad = make_pad()
-        await pad.start()
-        try:
-            cell = await pad.execute(
-                f"import sys\nsys.path.insert(0, {str(tmp_path)!r})\n"
-                "import eng1275_fake_mod\nprint(eng1275_fake_mod.VALUE)\n"
-            )
-            assert cell.error is None
-            assert "42" in cell.stdout
-        finally:
-            await pad.close()
-
-    async def test_worker_death_mid_install_names_install(
-        self, monkeypatch, tmp_path
-    ):
-        """A worker that dies while installing must not report the generic
-        'Process exited unexpectedly.' — the error names the install."""
-        shrink_timers(monkeypatch)
-        stub = tmp_path / "killer_uv.sh"
-        stub.write_text("#!/bin/sh\nkill -9 $PPID\n")
-        stub.chmod(0o755)
-        monkeypatch.setenv("ANTON_UV_PATH", str(stub))
-        monkeypatch.setattr(
-            LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None)
-        )
-        pad = make_pad()
-        await pad.start()
-        try:
-            cell = await pad.execute("import module_whose_install_crashes_eng1275")
-            assert cell.error is not None
-            assert "auto-install" in cell.error.lower()
-            assert "module_whose_install_crashes_eng1275" in cell.error
-        finally:
-            await pad.close()
-
 
 class TestPartialStdoutSalvage:
     async def test_killed_cell_reports_partial_stdout(self, monkeypatch):
@@ -670,31 +535,24 @@ class TestNudgeRouting:
             == RESILIENCE_NUDGE
         )
 
-    def test_install_timeout_error_routes_to_install_nudge(self):
-        """An install that ran out of its budget is neither a size nor a
-        liveness problem — 'make the cell smaller' cannot make a package
-        install (ENG-1275)."""
-        nudge = ChatSession._select_resilience_nudge(
-            "scratchpad",
-            "ModuleNotFoundError: No module named 'torch'\n"
-            "Auto-install of 'torch' was killed after 120s (cell_install_timeout) "
-            "without finishing — the package is not installed.",
-        )
-        assert nudge == SCRATCHPAD_INSTALL_NUDGE
-        assert "too heavy" not in nudge
-        assert "smaller" not in nudge
+    def test_explicit_install_failure_routes_to_install_nudge(self):
+        """install_packages' own failure shapes — the only install messages
+        the code still emits. Before ENG-1635's review these misrouted:
+        'Install timed out …' fell through to the too-heavy nudge and
+        'Install failed …' to the generic one."""
+        for text in (
+            "Install failed (exit 1):\nERROR: No matching distribution found for torhc",
+            "Install timed out after 120s.",
+            "Install refused: not a plain PyPI package specifier: '--index-url=x'.",
+        ):
+            nudge = ChatSession._select_resilience_nudge("scratchpad", text)
+            assert nudge == SCRATCHPAD_INSTALL_NUDGE, text
+            assert "too heavy" not in nudge
 
-    def test_install_failure_routes_to_install_nudge(self):
-        nudge = ChatSession._select_resilience_nudge(
-            "scratchpad",
-            "ModuleNotFoundError: No module named 'torhc'\n"
-            "Auto-install failed:\nERROR: No matching distribution found for torhc",
-        )
-        assert nudge == SCRATCHPAD_INSTALL_NUDGE
-
-    def test_kill_during_install_routes_to_install_nudge(self):
-        """The kill wording also contains 'liveness' — the install cause must
-        win over the stuck diagnosis."""
+    def test_legacy_worker_kill_during_install_routes_to_install_nudge(self):
+        """Old-version workers still emit the auto-install kill wording, which
+        also contains 'liveness' — the install cause must keep winning over
+        the stuck diagnosis for them."""
         nudge = ChatSession._select_resilience_nudge(
             "scratchpad",
             "Cell killed during auto-install of 'torch' — no liveness signal "
@@ -702,6 +560,33 @@ class TestNudgeRouting:
             "the package is likely not installed",
         )
         assert nudge == SCRATCHPAD_INSTALL_NUDGE
+
+    def test_undeclared_import_routes_to_install_nudge(self):
+        """The real shape scratchpad_boot.py produces: the shared hint before
+        the traceback, no install ever attempted. Routing keys on the
+        interpreter's exception name, so the hint constant is free to change
+        wording without silently killing this route."""
+        nudge = ChatSession._select_resilience_nudge(
+            "scratchpad",
+            MISSING_MODULE_HINT.format(name="somepkg")
+            + "Traceback (most recent call last):\n"
+            '  File "<scratchpad>", line 1, in <module>\n'
+            "ModuleNotFoundError: No module named 'somepkg'",
+        )
+        assert nudge == SCRATCHPAD_INSTALL_NUDGE
+
+    def test_hint_and_nudge_do_not_coach_redeclaring_the_name(self):
+        """ENG-1635 finding 1: neither the hint nor the nudge may instruct the
+        model to re-declare the failed name — that routes the same
+        hallucinated package through the surviving install path one turn
+        later, with the agent as the only approver."""
+        hint = MISSING_MODULE_HINT.format(name="functions").lower()
+        assert "'packages'" not in hint
+        assert "install action" not in hint
+        assert "retry" not in hint
+        low = SCRATCHPAD_INSTALL_NUDGE.lower()
+        assert "'packages' array" not in low
+        assert "declare the package" not in low
 
 
 from anton.core.memory.acc import Event, detect_kill_loop
