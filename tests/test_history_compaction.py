@@ -8,9 +8,15 @@ already covered by `TestContextCompaction` in test_chat.py.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock
 
-from anton.core.session import ChatSession, ChatSessionConfig, _COMPACTED_MARKER
+from anton.core.session import (
+    ChatSession,
+    ChatSessionConfig,
+    _COMPACTED_MARKER,
+    _summarizer_input_budget,
+)
 from anton.core.llm.provider import LLMResponse, Usage
 from tests.conftest import make_mock_llm
 
@@ -90,6 +96,99 @@ class TestLastCompaction:
         session.hard_truncate_history()
 
         assert session.last_compaction is None
+
+
+class TestSummarizerInputBudget:
+    """ENG-1291: the summariser's input budget and which end survives it."""
+
+    async def test_newest_folded_turn_reaches_the_summarizer(self):
+        """A conversation this size fits the summariser's window whole, so no
+        folded turn may be dropped — the old 8,000-char head-cut kept turn 0 and
+        discarded turn 23, which is where current state lives."""
+        history = [
+            _msg("user" if i % 2 == 0 else "assistant", f"turn-{i} " + "x" * 1200)
+            for i in range(40)
+        ]
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nx"))
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        assert await session._summarize_history() is True
+
+        sent = mock_llm.summarize.await_args.kwargs["messages"][0]["content"]
+        # compacted_count = min(int(40*0.6), 40-4) = 24 → turns 0..23 are folded.
+        assert "turn-0 " in sent
+        assert "turn-23 " in sent
+
+    def test_budget_scales_with_the_window(self):
+        # 200k-token window vs the 128k default for an unknown id.
+        assert _summarizer_input_budget("claude-sonnet-4-6") > _summarizer_input_budget("mystery-1")
+
+    def test_carried_forward_summary_shares_the_budget(self):
+        full = _summarizer_input_budget("claude-sonnet-4-6")
+        assert _summarizer_input_budget("claude-sonnet-4-6", reserved=5000) == full - 5000
+
+
+class TestTruncatedRecord:
+    async def test_partial_record_is_kept_and_logged_not_retried(self, caplog):
+        """ENG-1291: hitting a cap 4x the requested length means the model ignored
+        the length instruction, so more room only buys more of the same. Keep the
+        partial record — it still beats the reactive path, which discards history —
+        but leave a log line so it's identifiable."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=LLMResponse(
+            content="## Goal\nhalf-writ",
+            usage=Usage(input_tokens=10, output_tokens=8192),
+            stop_reason="max_tokens",
+        ))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+        with caplog.at_level(logging.WARNING, logger="anton.core.session"):
+            assert await session._summarize_history() is True
+
+        mock_llm.summarize.assert_awaited_once()
+        assert mock_llm.summarize.await_args.kwargs["max_tokens"] == 8192
+        assert "half-writ" in session.history[0]["content"]
+        assert "truncated" in caplog.text
+
+    async def test_empty_record_leaves_history_intact(self, caplog):
+        """A generation cut off before any text is a "success" carrying no
+        record — `raise_on_empty_response` returns early on any stop_reason.
+        Substituting a placeholder would replace real turns with a fact-free
+        line that can never self-heal (ENG-1274)."""
+        original = _alternating_history(10, "x" * 50)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=LLMResponse(
+            content="",
+            usage=Usage(input_tokens=10, output_tokens=8192),
+            stop_reason="max_tokens",
+        ))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=list(original),
+        ))
+        with caplog.at_level(logging.WARNING, logger="anton.core.session"):
+            assert await session._summarize_history() is False
+
+        assert session.history == original
+        assert session.last_compaction is None
+        assert "empty record" in caplog.text
+
+    async def test_budget_never_exceeds_the_client_ceiling(self):
+        """A host configuring a smaller `max_tokens` would otherwise get a 400 on
+        every compaction, logged only as an exception type name."""
+        mock_llm = make_mock_llm()
+        mock_llm.max_tokens = 4096
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nx"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+        assert await session._summarize_history() is True
+
+        assert mock_llm.summarize.await_args.kwargs["max_tokens"] == 4096
 
 
 class TestSkipWhenLittleNewMaterial:

@@ -55,6 +55,7 @@ from anton.core.llm.provider import (
     TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
+    context_window,
     damaged_tool_call_result,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
@@ -560,7 +561,7 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
-def _clip_keep_cause(text: str, cap: int) -> str:
+def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
 
     A failing tool result names its cause at the END — a traceback's final
@@ -570,9 +571,18 @@ def _clip_keep_cause(text: str, cap: int) -> str:
     but discarded its cause, which is how an unrecoverable environment wall
     kept getting judged INCOMPLETE instead of STUCK (ENG-836). Keep a small
     head, elide the middle, and spend most of the budget on the tail.
+
+    ``keep="head"`` inverts that for text whose meaning is up front — a tool
+    call's target sits in its first fields — and keeps the result on one line,
+    so it stays usable inside a serialized transcript entry.
     """
     if len(text) <= cap:
         return text
+    if keep == "head":
+        marker = f" [... {len(text) - cap} chars elided ...]"
+        if len(text) <= cap + len(marker):
+            return text
+        return f"{text[:cap]}{marker}"
     head = cap // 3
     tail = cap - head
     elided = len(text) - head - tail
@@ -585,6 +595,66 @@ def _clip_keep_cause(text: str, cap: int) -> str:
     if len(text) <= cap + len(marker):
         return text
     return f"{text[:head]}{marker}{text[-tail:]}"
+
+
+# 25% of a 200k window is ~12x the largest input measured in production (max
+# 17,078 chars), so real conversations pass whole and the clip is a backstop.
+# The old flat 8,000 sat below the median and fired on 81% of compactions.
+_SUMMARY_INPUT_WINDOW_SHARE = 0.25
+# ponytail: rule of thumb, not a tokenizer — only sizes a backstop. Two other
+# copies of this calibration live in the memory subsystem (hippocampus,
+# cortex); recalibrating for code-heavy or non-English corpora has to touch all
+# three.
+_CHARS_PER_TOKEN = 4
+# 2-4x what the prompt asks for (~1500 words — ~2000 tokens of English, should
+# fit in 8k limit for other languages), leaving room for reasoning and for the
+# preamble cheap models write before the record — both bill against this same
+# ceiling. Bounded rather than generous because the record then lives in the
+# context window compaction just freed.
+_SUMMARY_OUTPUT_BUDGET = 8192
+
+# A structured, in-place-updated STATE RECORD rather than a freeform blob, so
+# "Remaining" work survives compaction instead of being flattened into prose.
+_SUMMARY_SYSTEM_PROMPT = (
+    "You compact an agent's earlier conversation into a terse, factual "
+    "STATE RECORD (not prose). Output only these sections, omitting any "
+    "that are empty:\n"
+    "## Goal — what the user ultimately wants\n"
+    "## Constraints — explicit requirements / preferences / do-nots\n"
+    "## Completed — work already done, each as `action → outcome`\n"
+    "## Active state — variables, data, files/artifacts in play and their "
+    "current values or paths\n"
+    "## Blocked — anything stuck and why\n"
+    "## Decisions — choices made and the reason\n"
+    "## Remaining — what is still left to do\n\n"
+    "Preserve the date/time of key events when it matters (e.g. "
+    "`Completed (2026-06-05): …`) — the raw per-message timestamps are "
+    "gone after compaction, so keep the ones that anchor the timeline.\n"
+    "If a PREVIOUS SUMMARY is provided, update it with the new turns "
+    "instead of starting over. If the user changed direction, narrowed "
+    "scope, or cancelled something, reflect that — drop superseded items "
+    "from Remaining, don't keep them. Keep it under ~1500 words."
+)
+
+
+def _summarizer_input_budget(model: str, reserved: int = 0) -> int:
+    """Char budget for the old turns handed to the history summariser.
+
+    Compaction fires at 70% pressure on the *coding* model, so with the default
+    config — router falls back to coding — the folded turns already fit the
+    summariser's window and a routine clip only discards readable material.
+
+    ponytail: a configured `router_model` breaks that symmetry, since nothing
+    reconciles a share of the router's window against material sized by the
+    coding model's trigger. A smaller router still gets its own share, so the
+    clip stays a bound, but the 25% intent no longer holds. Reconciling them
+    needs the two windows compared at the call site.
+
+    ``reserved`` is text sharing the request (the carried-forward summary and
+    the system prompt).
+    """
+    window_chars = int(context_window(model) * _SUMMARY_INPUT_WINDOW_SHARE) * _CHARS_PER_TOKEN
+    return max(window_chars - reserved, 0)
 
 
 def _render_tool_result_content(content, cap: int) -> str:
@@ -2053,25 +2123,47 @@ class ChatSession:
                 if content.lstrip().startswith(_COMPACTED_MARKER):
                     prior_summary = content
                     continue
-                lines.append(f"[{role}]: {content[:2000]}")
+                lines.append(f"[{role}]: {_clip_keep_cause(content, 2000)}")
             elif isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "text":
-                            lines.append(f"[{role}]: {block['text'][:1000]}")
+                            lines.append(f"[{role}]: {_clip_keep_cause(block['text'], 1000)}")
                         elif block.get("type") == "tool_use":
-                            lines.append(
-                                f"[{role}/tool_use]: {block.get('name', '')}({str(block.get('input', ''))[:500]})"
+                            # Head, not tail: a call's target (path, command) sits in
+                            # its first fields, while the tail is the end of a written
+                            # file body. The name is outside the clip and never lost.
+                            args = _clip_keep_cause(
+                                str(block.get("input", "")), 500, keep="head"
                             )
+                            lines.append(f"[{role}/tool_use]: {block.get('name', '')}({args})")
                         elif block.get("type") == "tool_result":
                             lines.append(
-                                f"[tool_result]: {str(block.get('content', ''))[:500]}"
+                                f"[tool_result]: "
+                                f"{_clip_keep_cause(str(block.get('content', '')), 500)}"
                             )
 
         old_text = "\n".join(lines)
-        # Cap at ~8000 chars to avoid overloading the summarizer
-        if len(old_text) > 8000:
-            old_text = old_text[:8000] + "\n... (truncated)"
+        # Budgeted off the summariser's own window, clipped tail-biased, logged:
+        # - `lines` is chronological, so `[:N]` dropped the newest folded turns —
+        #   what `## Active state` / `## Blocked` / `## Remaining` are built from
+        # - folded turns are *replaced*, so a clip loses them permanently
+        # - a summary built from part of the turns must be visible as such
+        budget = _summarizer_input_budget(
+            self._llm.router_model,
+            len(prior_summary) + len(_SUMMARY_SYSTEM_PROMPT),
+        )
+        clipped = _clip_keep_cause(old_text, budget)
+        if clipped != old_text:
+            logger.warning(
+                "history summarization: input clipped %d -> %d chars "
+                "(budget %d, %d turns folded)",
+                len(old_text),
+                len(clipped),
+                budget,
+                len(old_turns),
+            )
+            old_text = clipped
 
         if prior_summary:
             user_content = (
@@ -2085,34 +2177,45 @@ class ChatSession:
             user_content = old_text
 
         try:
-            # 3b-full: a structured, in-place-updated STATE RECORD rather than a
-            # freeform blob — so "Remaining" work survives compaction instead of
-            # being flattened into prose.
+            # Never above the client's own ceiling: a host that configures a
+            # smaller `max_tokens` (or a distinct router model with a lower
+            # output cap) would otherwise get a 400 on every compaction, and the
+            # handler below logs only the exception type — proactive compaction
+            # would be dead and invisible.
+            budget = min(_SUMMARY_OUTPUT_BUDGET, self._llm.max_tokens)
             summary_response = await self._llm.summarize(
-                system=(
-                    "You compact an agent's earlier conversation into a terse, factual "
-                    "STATE RECORD (not prose). Output only these sections, omitting any "
-                    "that are empty:\n"
-                    "## Goal — what the user ultimately wants\n"
-                    "## Constraints — explicit requirements / preferences / do-nots\n"
-                    "## Completed — work already done, each as `action → outcome`\n"
-                    "## Active state — variables, data, files/artifacts in play and their "
-                    "current values or paths\n"
-                    "## Blocked — anything stuck and why\n"
-                    "## Decisions — choices made and the reason\n"
-                    "## Remaining — what is still left to do\n\n"
-                    "Preserve the date/time of key events when it matters (e.g. "
-                    "`Completed (2026-06-05): …`) — the raw per-message timestamps are "
-                    "gone after compaction, so keep the ones that anchor the timeline.\n"
-                    "If a PREVIOUS SUMMARY is provided, update it with the new turns "
-                    "instead of starting over. If the user changed direction, narrowed "
-                    "scope, or cancelled something, reflect that — drop superseded items "
-                    "from Remaining, don't keep them. Keep it under ~2000 tokens."
-                ),
+                system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
-                max_tokens=2048,
+                max_tokens=budget,
             )
-            summary = summary_response.content or "(summary unavailable)"
+            # A truncated record is kept, not retried:
+            # - hitting a cap 4x the requested length means the model ignored the
+            #   length instruction, and more room only buys more of the same
+            # - the record replaces the folded turns either way, so a partial one
+            #   still beats leaving compaction to the reactive overflow path,
+            #   which discards history outright
+            # Logged so a record built from a cut-off generation is identifiable.
+            if looks_truncated(summary_response, budget):
+                logger.warning(
+                    "history summarization: record truncated at budget %d "
+                    "(output_tokens=%s) — keeping the partial record",
+                    budget,
+                    summary_response.usage.output_tokens,
+                )
+            # An empty 200 reaches here: `raise_on_empty_response` returns early
+            # on any truthy stop_reason, so a cut-off-before-any-text generation
+            # is a "success" carrying no record. Substituting a placeholder would
+            # replace real turns with a fact-free line that can never self-heal
+            # (ENG-1274) — treat it as a failed summarisation instead.
+            if not summary_response.content:
+                logger.warning(
+                    "history summarization: empty record (stop_reason=%s) — "
+                    "keeping %d turns intact",
+                    summary_response.stop_reason,
+                    len(old_turns),
+                )
+                return False
+            summary = summary_response.content
             # Record the compaction ONLY on success.
             self._last_compacted_count = compacted_count
         except Exception as exc:
