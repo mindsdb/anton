@@ -12,10 +12,13 @@ harness shape as ``test_root_cause_wiring.py``) and assert on what
   unconditional success);
 - ``error_type`` is the exception CLASS name and never the message —
   ``str(exc)`` routinely embeds file paths and user input;
-- the payload is exactly {name, ok, duration_ms, error_type}, all strings —
-  no tool arguments, no result content;
+- the payload is exactly {name, ok, duration_ms, error_type, conversation_id,
+  turn_index}, all strings — no tool arguments, no result content;
 - human wait (``answer_wait_s``, accumulated by ``elicit()``) is subtracted
-  from the duration;
+  from the duration — which covers ``ask_user`` and ``select_path``, the only
+  tools that elicit. It does NOT cover the interactive branch, whose tools
+  prompt via ``prompt_or_cancel`` and never touch that counter; see
+  ``test_interactive_branch_emits_too`` for the pinned limit;
 - the event name is registered in ``_POSTHOG_EVENTS``, because a name the
   collector has never heard of otherwise reaches nothing (ENG-1355/ENG-1495).
 """
@@ -47,10 +50,12 @@ def _usage(n: int = 1_000) -> Usage:
     return Usage(input_tokens=n // 2, output_tokens=n // 2)
 
 
-def _tool_call(i: int) -> LLMResponse:
+def _tool_call(i: int, name: str = "scratchpad") -> LLMResponse:
+    # Default routes to the general dispatch branch (a scratchpad "view", not
+    # an "exec"); pass connect_new_datasource to route to the interactive one.
     return LLMResponse(
         content="working",
-        tool_calls=[ToolCall(id=f"tc{i}", name="scratchpad",
+        tool_calls=[ToolCall(id=f"tc{i}", name=name,
                              input={"action": "view", "name": "m"})],
         usage=_usage(), stop_reason="tool_use",
     )
@@ -60,7 +65,8 @@ def _text(t: str = "done") -> LLMResponse:
     return LLMResponse(content=t, tool_calls=[], usage=_usage(), stop_reason="end_turn")
 
 
-def _session(workspace, dispatch_side_effect, n_tool_calls: int = 1):
+def _session(workspace, dispatch_side_effect, n_tool_calls: int = 1,
+             tool_name: str = "scratchpad"):
     """Session whose tool dispatch runs `dispatch_side_effect`."""
     llm = make_mock_llm()
     llm.usage_listener = None
@@ -72,7 +78,8 @@ def _session(workspace, dispatch_side_effect, n_tool_calls: int = 1):
             if llm.usage_listener:
                 llm.usage_listener("planning", "m", _usage())
             yield StreamComplete(
-                response=_tool_call(seq["i"]) if seq["i"] <= n_tool_calls else _text()
+                response=_tool_call(seq["i"], tool_name)
+                if seq["i"] <= n_tool_calls else _text()
             )
         return gen()
 
@@ -80,7 +87,7 @@ def _session(workspace, dispatch_side_effect, n_tool_calls: int = 1):
         seq["i"] += 1
         if llm.usage_listener:
             llm.usage_listener("planning", "m", _usage())
-        return _tool_call(seq["i"]) if seq["i"] <= n_tool_calls else _text()
+        return _tool_call(seq["i"], tool_name) if seq["i"] <= n_tool_calls else _text()
 
     llm.plan_stream = plan_stream
     llm.plan = plan
@@ -276,6 +283,37 @@ async def test_slow_consumer_after_tool_done_does_not_inflate_the_duration(works
     assert len(events) == 1 and len(displayed) == 1
     assert int(events[0]["duration_ms"]) < 200
     assert int(events[0]["duration_ms"]) == int(displayed[0] * 1000)
+
+
+async def test_interactive_branch_emits_too(workspace):
+    """The interactive branch (`connect_new_datasource`, `publish_or_preview`
+    publish) reaches the shared emit — nothing else asserted this.
+
+    It also pins a known limit. This branch's tools collect human input via
+    `prompt_or_cancel`, which — unlike `elicit()` — does not feed
+    `answer_wait_s`, so the emitted duration INCLUDES the human's typing time.
+    The 0.4s stall below stands in for that and is expected in the number;
+    real credential entry takes minutes. The emit's fallback subtracts
+    `answer_wait_s`, but that counter is provably 0.0 here (only `elicit()`
+    writes it, and its callers all route to the general branch), so the
+    subtraction cannot help these two tools. Asserted as-is deliberately:
+    the value is honest wall-clock, and a silent inflation would be worse
+    than a documented one.
+    """
+    import asyncio
+
+    async def human_types_credentials(*a, **k):
+        await asyncio.sleep(0.4)
+        return ToolOutcome(content="connected", ok=True)
+
+    session = _session(workspace, human_types_credentials,
+                       tool_name="connect_new_datasource")
+    events = await _tool_completed_calls(session)
+    assert len(events) == 1
+    assert events[0]["name"] == "connect_new_datasource"
+    assert events[0]["ok"] == "true"
+    assert int(events[0]["duration_ms"]) >= 400  # human time is in there
+    assert session.answer_wait_s == 0.0  # prompt_or_cancel never fed it
 
 
 async def test_nonstreaming_turn_path_also_emits(workspace):

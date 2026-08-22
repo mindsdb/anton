@@ -4763,6 +4763,26 @@ class ChatSession:
                     # would make the booked duration disagree with the
                     # displayed one (#390 review). Branches that never stopped
                     # the clock fall back to reading it now.
+                    #
+                    # The fallback's `- answer_wait_s` is inert TODAY and kept
+                    # for the day it isn't: `elicit()` is the only writer of
+                    # that counter, and its only callers (`handle_select_path`,
+                    # `handle_ask_user`) both route to the branch above, which
+                    # never reaches this fallback. Verified dynamically too —
+                    # asserting the counter is 0.0 here passes the whole suite,
+                    # across the 29 tests that do reach this line.
+                    #
+                    # KNOWN LIMIT, not covered by that subtraction: the
+                    # interactive branch's tools (`connect_new_datasource`,
+                    # `publish_or_preview` publish) collect human input via
+                    # `prompt_or_cancel`, which does NOT feed `answer_wait_s`.
+                    # Their duration therefore includes however long the human
+                    # spent typing — measured at 401ms for a 0.4s stand-in, so
+                    # minutes of real credential entry. Read p95 for those two
+                    # names as "wall-clock of an interactive flow", never as
+                    # tool performance. Fixing it needs a session-scoped
+                    # accumulator behind `prompt_or_cancel`, which is a change
+                    # to the CLI prompt path rather than to this event.
                     self._emit_tool_completed(
                         name=tc.name,
                         ok=tool_ok,
