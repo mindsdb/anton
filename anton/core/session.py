@@ -2710,6 +2710,79 @@ class ChatSession:
             # Reporting must never affect the turn that just ran.
             pass
 
+    def _emit_tool_completed(
+        self,
+        name: str,
+        ok: bool | None,
+        duration_ms: float,
+        error_type: str,
+    ) -> None:
+        """Per-tool-call analytics event (ENG-1486).
+
+        The verdict the dispatch loop already computes for the UI's
+        ``tool_done`` marker, sent where it can be aggregated: without this,
+        "which tools fail, how often, how slowly" is unanswerable — the
+        gateway's vantage point is structurally wrong (67% of its tool spans
+        are structured-output schemas that never return by design, and anton's
+        own retries hide failures from it).
+
+        ``ok`` is the definitive verdict, never a prose guess: ``True``/
+        ``False`` from a caught exception or the handler's own
+        ``ToolOutcome.ok``; ``None`` (an unmigrated handler, a cancelled exec)
+        is reported as ``"unknown"`` rather than coerced either way.
+
+        Payload is deliberately name + verdict + duration + exception CLASS
+        plus the two join keys, and nothing else. Arguments, result content
+        and ``str(exc)`` routinely carry file paths, user data and
+        credentials-adjacent strings — none of them may ever appear here.
+
+        ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
+        values exactly (same names, same derivation), so a tool failure spotted
+        in PostHog joins to its parent turn row there and, via
+        ``conversation_id`` → Langfuse ``sessionId``, to the gateway trace of
+        the turn it happened in. Both already ride ``turn_completed`` through
+        this same sink — no new privacy surface.
+        """
+        try:
+            # Same settings resolution as `_emit_turn_cost` above: the
+            # session's settings when the host provided AntonSettings, else a
+            # fresh resolve so analytics_enabled / the CI drop still apply.
+            settings = getattr(self, "_settings", None)
+            if settings is None or not hasattr(settings, "analytics_enabled"):
+                from anton.config.settings import AntonSettings
+
+                settings = AntonSettings()
+            from anton.analytics import send_event
+
+            # send_event takes STRING values only — every extra is a wire
+            # parameter (tests/test_ask_user.py:496 exists because a first
+            # draft assumed a (name, props) shape).
+            # The same derivation `_emit_turn_cost` uses at close-of-books:
+            # the live TurnCost carries the authoritative index (an explicit
+            # turn_id on the cloud path, the local counter otherwise), so the
+            # values here and on the turn's own row can never disagree.
+            _tc = getattr(self, "_turn_cost", None)
+            turn_index = (
+                getattr(_tc, "turn_index", 0) or (self._turn_count + 1)
+            )
+            send_event(
+                settings,
+                "tool_completed",
+                # `tc.name` is model-generated: a hallucinated tool name is
+                # real signal and SHOULD emit, but unbounded model output has
+                # no business being a property value verbatim. Same idiom as
+                # the dispatch loop's args_summary[:120].
+                name=name[:200],
+                ok="unknown" if ok is None else str(ok).lower(),
+                duration_ms=str(int(duration_ms)),
+                error_type=error_type,
+                conversation_id=str(self._session_id or ""),
+                turn_index=str(turn_index),
+            )
+        except Exception:
+            # Analytics must never affect the tool call that just ran.
+            pass
+
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.
 
@@ -3358,6 +3431,10 @@ class ChatSession:
                     tool_results.append(damaged)
                     continue
 
+                import time as _time  # same local-import idiom as turn_stream
+
+                _tool_t0 = _time.monotonic()
+                _tool_error_type = ""
                 try:
                     outcome = await self.tool_registry.dispatch_tool(
                         self, tc.name, tc.input, tool_call_id=tc.id,
@@ -3370,6 +3447,19 @@ class ChatSession:
                         ok=False,
                         reason=type(exc).__name__,
                     )
+                    _tool_error_type = _safe_error_type(exc)
+                # Same per-tool-call analytics as the streaming loop's tail
+                # (ENG-1486) — without this, a host on the non-streaming API
+                # silently undercounts. Raw elapsed, no human-wait deduction:
+                # elicitation is structurally unavailable on this path (no
+                # emitter to render a question), so there is no wait to
+                # subtract.
+                self._emit_tool_completed(
+                    name=tc.name,
+                    ok=outcome.ok,
+                    duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
+                    error_type=_tool_error_type,
+                )
                 result = outcome.content
 
                 if isinstance(result, list):
@@ -4378,6 +4468,15 @@ class ChatSession:
                         continue
 
                     _tool_t0 = _time.monotonic()
+                    # Reset alongside the timer, before ANY branch dispatches:
+                    # the tool_completed emit at the bottom of this block is
+                    # the first reader that runs for every branch, and every
+                    # branch can elicit() (which accumulates the wait). The
+                    # reset used to live on the general branch only — correct
+                    # while that branch was also the only subtractor, but the
+                    # cross-branch emit would have deducted another call's
+                    # leftover wait from this one's runtime.
+                    self.answer_wait_s = 0.0
 
                     # The handler's own failure verdict, when it gave one —
                     # drives the error streak instead of text matching
@@ -4386,6 +4485,19 @@ class ChatSession:
                     # ENG-1276 populated this and nothing ever read it; ENG-1492
                     # is what reads it.
                     tool_reason: str = ""
+                    # Exception class name when the verdict came from a raise,
+                    # "" otherwise, via the same `_safe_error_type` helper
+                    # `turn_completed`'s own error_type uses (ENG-1689) — one
+                    # definition of "class name only, never raises" for both
+                    # events. Kept apart from `tool_reason`, which on the
+                    # ToolOutcome path is prose (a traceback line, a handler
+                    # message) and so can carry paths and user input — this one
+                    # is the only failure detail analytics may see (ENG-1486).
+                    _tool_error_type: str = ""
+                    # Set by the branch that stops the clock at the moment the
+                    # tool finished. None = that branch didn't, so the emit
+                    # falls back to reading the clock itself. See the emit.
+                    _tool_elapsed: float | None = None
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
@@ -4547,7 +4659,7 @@ class ChatSession:
                             # itself via session.emitter — _dispatch_draining
                             # forwards them here as ordinary ("event", ev)
                             # tuples, no different from an ask_user event.
-                            self.answer_wait_s = 0.0
+                            # (answer_wait_s was reset with _tool_t0 above.)
                             _tool_error: Exception | None = None
                             agen = self._dispatch_draining(tc)
                             try:
@@ -4632,6 +4744,58 @@ class ChatSession:
                         result_text = f"Tool '{tc.name}' failed: {exc}"
                         tool_ok = False
                         tool_reason = type(exc).__name__
+                        _tool_error_type = _safe_error_type(exc)
+
+                    # Per-tool-call analytics (ENG-1486): the verdict computed
+                    # for the UI stream, finally aggregable. This is the one
+                    # point every EXECUTED call flows through — all three
+                    # dispatch branches, both the raise and the
+                    # ToolOutcome.ok=False failure shapes — and only executed
+                    # calls: discarded/damaged calls `continue` before
+                    # `_tool_t0`, and structured-output extractions
+                    # (`generate_object_code`) never enter tool dispatch at
+                    # all. Human wait is subtracted so an ask_user answered
+                    # after four minutes is not booked as a slow tool.
+                    # Prefer the duration the branch already stopped the clock
+                    # on — the same value `tool_done` displays. Re-reading the
+                    # clock here would bill the consumer's pull latency for
+                    # the events yielded in between (`tool_done`, and a
+                    # `StreamToolResult` for a scratchpad `dump`) to the tool.
+                    # Small and always upward, but it lands on exactly the
+                    # "how slowly" metric this event exists to answer, and it
+                    # would make the booked duration disagree with the
+                    # displayed one (#390 review). Branches that never stopped
+                    # the clock fall back to reading it now.
+                    #
+                    # The fallback's `- answer_wait_s` is inert TODAY and kept
+                    # for the day it isn't: `elicit()` is the only writer of
+                    # that counter, and its only callers (`handle_select_path`,
+                    # `handle_ask_user`) both route to the branch above, which
+                    # never reaches this fallback. Verified dynamically too —
+                    # asserting the counter is 0.0 here passes the whole suite,
+                    # across the 29 tests that do reach this line.
+                    #
+                    # KNOWN LIMIT, not covered by that subtraction: the
+                    # interactive branch's tools (`connect_new_datasource`,
+                    # `publish_or_preview` publish) collect human input via
+                    # `prompt_or_cancel`, which does NOT feed `answer_wait_s`.
+                    # Their duration therefore includes however long the human
+                    # spent typing — measured at 401ms for a 0.4s stand-in, so
+                    # minutes of real credential entry. Read p95 for those two
+                    # names as "wall-clock of an interactive flow", never as
+                    # tool performance. Fixing it needs a session-scoped
+                    # accumulator behind `prompt_or_cancel`, which is a change
+                    # to the CLI prompt path rather than to this event.
+                    self._emit_tool_completed(
+                        name=tc.name,
+                        ok=tool_ok,
+                        duration_ms=max(
+                            _tool_elapsed if _tool_elapsed is not None
+                            else _time.monotonic() - _tool_t0 - self.answer_wait_s,
+                            0.0,
+                        ) * 1000.0,
+                        error_type=_tool_error_type,
+                    )
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text

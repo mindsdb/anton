@@ -172,10 +172,28 @@ _pending_lock = threading.Lock()
 #                    stop_reason, input_tokens, output_tokens, duration_ms
 #                    (anton/core/memory/cortex.py::_emit_rule_retrieval)
 #
+#   tool_completed   name, ok ("true"/"false"/"unknown" — the dispatch loop's
+#                    definitive verdict, never a prose guess; "unknown" is an
+#                    unmigrated handler or a cancelled exec), duration_ms
+#                    (human wait already subtracted), error_type (exception
+#                    CLASS name when the failure was a raise, "" otherwise —
+#                    never the message, which carries paths and user input).
+#                    One event per executed tool call; tool arguments and
+#                    result content are deliberately absent (ENG-1486).
+#                    conversation_id + turn_index mirror turn_completed's
+#                    values, so a tool row joins to its parent turn row and,
+#                    via Langfuse sessionId, to the gateway trace.
+#                    (anton/core/session.py::_emit_tool_completed)
+#
 # An event NOT listed here keeps the collector path, so moving one is an
 # explicit decision rather than something that happens by default.
 _POSTHOG_EVENTS = frozenset(
-    {"turn_completed", "rule_retrieval", "scratchpad_package_installed"}
+    {
+        "turn_completed",
+        "rule_retrieval",
+        "scratchpad_package_installed",
+        "tool_completed",
+    }
 )
 
 # `$lib` names the sender, matching the convention the other emitters follow
