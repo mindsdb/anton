@@ -10,9 +10,13 @@ import json
 
 from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.tracing import (
+    SURFACE_CLI,
+    SURFACE_DESKTOP,
+    SURFACE_WEB,
     TraceContext,
     reset_trace_context,
     set_trace_context,
+    surface_tag,
 )
 
 
@@ -97,3 +101,62 @@ def test_caller_cannot_spoof_anton_version():
     )
     meta = json.loads(headers["Langfuse-Metadata"])
     assert meta["anton_version"] == __version__
+
+
+# ---------------------------------------------------------------------------
+# ENG-1459: `surface` says WHERE the user was, so web and desktop use can be
+# told apart. Orthogonal to `harness`, which says which agent ran.
+# ---------------------------------------------------------------------------
+
+
+def test_surface_rides_as_a_prefixed_tag_and_plain_metadata():
+    headers = _headers_for(
+        TraceContext(session_id="s1", turn_id=1, harness="anton", surface=SURFACE_WEB)
+    )
+    # Prefixed in tags: cheap to filter, and unambiguous next to `harness`.
+    assert headers["Langfuse-Tags"] == "anton,surface:web"
+    # Unprefixed in metadata: what a human reads on a single trace.
+    assert json.loads(headers["Langfuse-Metadata"])["surface"] == "web"
+
+
+def test_web_and_desktop_are_distinguishable():
+    """The whole point of the ticket: these two must not look alike."""
+    web = _headers_for(TraceContext(turn_id=1, harness="anton", surface=SURFACE_WEB))
+    desktop = _headers_for(TraceContext(turn_id=1, harness="anton", surface=SURFACE_DESKTOP))
+    assert web["Langfuse-Tags"] != desktop["Langfuse-Tags"]
+    assert surface_tag(SURFACE_WEB) in web["Langfuse-Tags"]
+    assert surface_tag(SURFACE_DESKTOP) in desktop["Langfuse-Tags"]
+
+
+def test_surface_is_prefixed_so_it_cannot_be_confused_with_the_harness_tag():
+    """`cli` is currently a legal value of BOTH fields (until ENG-1694).
+
+    Emitted bare, a `surface` of "cli" would be indistinguishable from a
+    `harness` of "cli" in a tag filter — which is the ambiguity this pair of
+    fields exists to remove, reintroduced one layer down.
+    """
+    headers = _headers_for(TraceContext(turn_id=1, harness="anton", surface=SURFACE_CLI))
+    tags = headers["Langfuse-Tags"].split(",")
+    assert "surface:cli" in tags
+    assert "cli" not in tags, "a bare surface tag collides with the harness vocabulary"
+
+
+def test_absent_surface_emits_nothing_rather_than_a_placeholder():
+    """An unidentified host must stay visibly unknown.
+
+    An empty-string or "unknown" surface would become a junk row in every
+    breakdown, and would repeat the ENG-1495 failure where "" meant both "CLI"
+    and "the host did not say".
+    """
+    headers = _headers_for(TraceContext(session_id="s1", turn_id=1, harness="anton"))
+    assert headers["Langfuse-Tags"] == "anton"
+    assert "surface" not in json.loads(headers["Langfuse-Metadata"])
+
+
+def test_a_caller_cannot_smuggle_a_second_surface_through_metadata():
+    """Built-in identity wins on collision, as it does for harness/turn_id."""
+    headers = _headers_for(
+        TraceContext(turn_id=1, harness="anton", surface=SURFACE_WEB,
+                     metadata={"surface": "desktop"})
+    )
+    assert json.loads(headers["Langfuse-Metadata"])["surface"] == "web"

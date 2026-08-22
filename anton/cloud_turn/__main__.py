@@ -24,6 +24,7 @@ import sys
 import time
 
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.history_rows import split_turn_into_rows
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
     build_turn_content,
@@ -191,6 +192,14 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     try:
         req = TurnRequestV1.from_json(raw_line)
         session = builder(req)
+        # Length of the seeded history — everything anton appends past this
+        # index belongs to this turn. Captured BEFORE turn_stream, so the
+        # current turn's user input lands inside the slice and is trimmed off
+        # below. Guarded: a session double without `.history` skips capture and
+        # the turn degrades to text-only replay (mirrors cowork-server's
+        # in-process harness).
+        seed_len = len(session.history) if hasattr(session, "history") else None
+        compacted = False  # set if anton summarizes history mid-turn
         # Fold in any attachments cowork-server staged into the workspace (read
         # off the mount, so image bytes never crossed the stdin wire). Plain
         # string when there are none. Never fail the turn over this — degrade to
@@ -208,7 +217,17 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         tool_args_len: dict[str, int] = {}
         seen_tool_progress: set[str] = set()
         last_progress_wire = 0.0
-        async for event in session.turn_stream(turn_content):
+        # Build attribution rides the turn, not the session: cowork resolved it
+        # per turn and only it knows the server version / install channel (this
+        # image has no cowork-server). `surface` is handled on the session
+        # config instead, so it is dropped here to avoid stamping it twice.
+        # Observability only — a malformed block must never affect the turn.
+        _trace_md = {
+            str(k): str(v)
+            for k, v in (req.trace or {}).items()
+            if k != "surface" and v is not None
+        } or None
+        async for event in session.turn_stream(turn_content, trace_metadata=_trace_md):
             if isinstance(event, StreamTextDelta):
                 emit({"kind": "delta", "text": event.text or ""})
             # Step events go on the wire for cowork's thinking/steps UI;
@@ -258,6 +277,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                       "content": _clip_result_content(event.content or "")})
             elif isinstance(event, StreamContextCompacted):
                 logger.info("context compacted: %s", event.message)
+                compacted = True
                 emit({"kind": "compacted", "message": event.message})
             elif isinstance(event, StreamComplete):
                 logger.info("model response complete")
@@ -279,6 +299,28 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
             emit({"kind": "skill", "entries": drafts})
+        # Pre-terminal for the same reason as memory and skills: cowork stops
+        # reading the stream at the terminal event.
+        #
+        # Skipped after a mid-turn compaction: session.history was reassigned,
+        # so seed_len no longer marks this turn's start and slicing could drop
+        # rows or surface an orphan tool_result whose tool_use was summarized
+        # away — an invalid replay. Text-only replay stays valid, so degrade to
+        # it. The failure paths below never reach this line, so a failed or
+        # torn-down turn degrades the same way.
+        if seed_len is not None and not compacted:
+            turn_slice = session.history[seed_len:]
+            # Drop this turn's user input (and anything before the first
+            # assistant message) so the slice starts where the model replied.
+            while turn_slice and (
+                not isinstance(turn_slice[0], dict)
+                or turn_slice[0].get("role") != "assistant"
+            ):
+                turn_slice = turn_slice[1:]
+            rows = split_turn_into_rows(turn_slice)
+            if rows:
+                logger.info("emitting %d turn-history row(s)", len(rows))
+                emit({"kind": "history", "rows": rows})
         logger.info("cloud turn completed")
         emit({"kind": "turn_completed"})
         terminal_emitted = True
