@@ -570,7 +570,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     settings.skill_drafts_root.mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(base, settings=settings)
-    workspace.initialize()
+    # create_anton_md=False: in the cloud, .anton/anton.md is cowork-server's
+    # staged copy of the project instructions. A pod-written template gets
+    # deleted by the next staging pass, and the pod's cached NFS handle then
+    # fails every stat with ESTALE under gVisor (ENG-1817).
+    workspace.initialize(create_anton_md=False)
     # No apply_env_to_process(): loading workspace .env into the process env
     # would expose tenant secrets to cell code.
 
@@ -584,6 +588,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         workspace=workspace,
         session_id=request.conversation_id,
         harness="cloud",
+        # WHERE the user was, which this pod cannot know on its own — only the
+        # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
+        # driven directly rather than by cowork; an unset surface reads as
+        # "nobody declared one", which is the honest answer for a standalone run.
+        surface=(request.trace or {}).get("surface"),
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless

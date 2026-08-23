@@ -122,6 +122,9 @@ _SENTINEL_REASONS = {
     "invalid_port": (TIER_SELF, "invalid_argument"),
     "invalid_health_timeout": (TIER_SELF, "invalid_argument"),
     "invalid_datasources": (TIER_SELF, "invalid_argument"),
+    # A refused package spec (flag/URL/path-shaped entry) is the agent's own
+    # bad argument, not an environment wall (ENG-1635).
+    "package_install_rejected": (TIER_SELF, "invalid_argument"),
     # The agent named something that does not exist. Ambiguous — it could be a
     # genuinely absent resource — but the agent chose the identifier and can
     # list the real ones, so it resolves to the non-tripping side.

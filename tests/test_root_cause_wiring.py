@@ -75,7 +75,7 @@ def _session(workspace, outcomes, n_tool_calls: int):
 
     llm.plan_stream = plan_stream
     llm.plan = plan
-    s = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    s = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace, session_id="conv-rc"))
     s._max_turn_tokens = 0  # ceiling off — this ticket must be independent of it
     pending = list(outcomes)
     s.tool_registry.dispatch_tool = AsyncMock(
@@ -369,7 +369,7 @@ async def test_the_scratchpad_exec_path_records_its_traceback(workspace):
         return gen()
 
     llm.plan_stream = plan_stream
-    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace, session_id="conv-rc"))
     session._max_turn_tokens = 0
 
     pad = MagicMock()
