@@ -4,9 +4,18 @@ Matches what the controller sends (`scratchpad_controller.anton_turn.request_lin
 and what cowork-server consumes off the reply stream. Intentionally minimal and
 data-only: the entrypoint reads ONE newline-terminated JSON line on stdin.
 
-Events written back on stdout (JSONL) are the four the controller translates:
+Events written back on stdout (JSONL) are the six the controller translates:
   {"kind": "delta", "text": "..."}   - streamed assistant text, one per chunk
   {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
+  {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
+      built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork
+      surfaces a card and the user saves it, so nothing reaches the skill store.
+  {"kind": "history", "rows": [...]}  - pre-terminal; this turn's tool
+      block-rows as [{"role", "content"}], where content holds only tool_use
+      (assistant) or tool_result (user) blocks. cowork persists them as their
+      own hidden `messages` rows so the NEXT turn's history replays a valid
+      tool_use -> tool_result sequence. Omitted after a mid-turn compaction or
+      on failure, in which case that turn replays text-only.
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
 """
@@ -42,6 +51,19 @@ class TurnRequestV1:
     #: {slug: {"files": {relpath: text}}}. Staged read-only in the pod; the pod
     #: never writes skills back (agent-built skills are a desktop draft flow).
     skills: dict | None = None
+    #: Optional trace-attribution block cowork resolved for this turn:
+    #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``.
+    #: Observability only — nothing here may affect what the turn DOES.
+    #:
+    #: It has to travel because the pod cannot derive any of it: cowork-server is
+    #: not installed in this image, and only the deployment knows which surface it
+    #: serves. Without it a web turn is indistinguishable from a desktop one
+    #: (ENG-1459), and ENG-1279's server version + install channel are absent too.
+    #:
+    #: Deliberately one open dict rather than N typed fields: every key otherwise
+    #: needs declaring in three repos (cowork-server -> scratchpad-controller's
+    #: allowlist -> here), so a block keeps the next key to two.
+    trace: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -56,4 +78,7 @@ class TurnRequestV1:
             llm=d.get("llm"),
             memory=d.get("memory"),
             skills=d.get("skills"),
+            # A controller too old to forward it simply yields None, which reads
+            # as "no attribution" rather than failing the turn.
+            trace=d.get("trace") if isinstance(d.get("trace"), dict) else None,
         )

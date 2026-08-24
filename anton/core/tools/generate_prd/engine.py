@@ -31,6 +31,20 @@ if TYPE_CHECKING:
 MAX_ROUNDS = 20
 
 
+def _unwrap_outcome(result):
+    """Flatten a handler result down to `tool_result`-ready content.
+
+    Same reason as generate_artifact/engine.py's twin: since ENG-696
+    `handle_scratchpad`'s exec path returns a `ToolOutcome` rather than a
+    bare string, and only its `content` belongs in a tool_result block —
+    the ok/reason verdict feeds the outer agent's error streak, which this
+    loop is not part of.
+    """
+    from anton.core.tools.registry import ToolOutcome
+
+    return result.content if isinstance(result, ToolOutcome) else result
+
+
 async def run_gathering_loop(state: "PrdState") -> None:
     """Run phase 1 to completion (or until MAX_ROUNDS is exhausted).
 
@@ -149,7 +163,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
             elif name == "scratchpad":
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = await handle_scratchpad(state.session, inp)
+                content = _unwrap_outcome(await handle_scratchpad(state.session, inp))
                 state.trace_log.scratchpad(node="scratchpad", input=inp, output=content)
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
             elif name == "web_search":

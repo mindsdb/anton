@@ -27,7 +27,9 @@ from .provider import (
     Usage,
     classify_404,
     classify_transient,
+    retry_after_seconds,
     compute_context_pressure,
+    origin_is_known_third_party,
     wallet_denial_code,
     raise_on_empty_response,
 )
@@ -63,8 +65,20 @@ def _raise_for_status_error(
         ) from exc
 
     body = exc.body if isinstance(exc.body, dict) else {}
-    if exc.status_code == 429 and body.get("detail"):
-        msg = f"Server returned 429 — {body['detail']}"
+
+    # Computed once, up front: several branches below can mint a MindsHub
+    # billing verdict and each must refuse a provably foreign origin (ENG-1693).
+    _foreign = origin_is_known_third_party(exc)
+
+    # Origin-gated, and `str`-guarded to match the openai twin. Two bugs the
+    # twin already avoided and this one did not: an unguarded `detail` lets a
+    # FastAPI validation error (whose `detail` is a LIST) render as a Python
+    # repr next to our billing link, and an ungated one lets any BYOK endpoint
+    # mint the credits card from a single JSON key with attacker-authored prose
+    # in it.
+    _detail = body.get("detail")
+    if not _foreign and exc.status_code == 429 and isinstance(_detail, str) and _detail:
+        msg = f"Server returned 429 — {_detail}"
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
@@ -75,11 +89,20 @@ def _raise_for_status_error(
     # them — but a wallet denial that DOES arrive here must hit the credits
     # card, not the generic copy. Code/reason-exact: a BYOK Anthropic billing
     # error carries neither and stays generic.
-    gate_reason = ""
+    # ENG-1693 — see the openai twin for the full reasoning. Both carriers are
+    # third-party controlled on a BYOK endpoint, and cowork-server's own gates
+    # run too late because anton converts a wallet denial into a typed error
+    # that is matched above all origin logic.
+    # Read once, UNGATED, then used two different ways below.
+    raw_gate_reason = ""
     if getattr(exc, "response", None) is not None:
-        gate_reason = exc.response.headers.get("x-mindshub-reason", "")
-    wallet_code = wallet_denial_code(body) or (
-        gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+        raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+    # Gated form — only this one may pick a BILLING verdict.
+    gate_reason = "" if _foreign else raw_gate_reason
+    wallet_code = None if _foreign else (
+        wallet_denial_code(body) or (
+            gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
+        )
     )
     if exc.status_code in (402, 429) and wallet_code:
         what = (
@@ -106,11 +129,27 @@ def _raise_for_status_error(
             error_type=envelope.get("type"),
         ) from exc
 
-    transient = classify_transient(exc.status_code, body, provider=provider, model=model)
+    # Body `code` in both dialects — the SDK may deliver the wire envelope
+    # unmodified, unlike the openai client which peels it.
+    _env = body.get("error") if isinstance(body.get("error"), dict) else {}
+    _body_code = body.get("code") or _env.get("code")
+    # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
+    # our gateway names it on the reason header and in the body code. Anything
+    # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
+    # old fail-fast path rather than burning the budget on a limit that may not
+    # clear.
+    # Ungated — see the openai twin: velocity is not a billing verdict.
+    _velocity = raw_gate_reason == "rate_limited" or _body_code == "rate_limited"
+    transient = classify_transient(
+        exc.status_code, body, provider=provider, model=model,
+        retry_after=retry_after_seconds(exc),
+        velocity_confirmed=_velocity,
+    )
     if transient is not None:
         logger.warning(
-            "transient provider error (%s): status=%s body=%s",
-            transient.code, exc.status_code, scrub_credentials(str(exc.body))[:500],
+            "transient provider error (%s): status=%s retry_after=%s body=%s",
+            transient.code, exc.status_code, transient.retry_after,
+            scrub_credentials(str(exc.body))[:500],
         )
         raise transient from exc
 
@@ -237,6 +276,13 @@ class AnthropicProvider(LLMProvider):
                     ToolCall(id=block.id, name=block.name, input=block.input)
                 )
 
+        # The SDK hands back an already-parsed `input`, so unlike the streaming
+        # path there is no raw JSON to check: `stop_reason` is the only evidence
+        # that the last call's arguments (blocks arrive in order) are unfinished.
+        if response.stop_reason == "max_tokens" and tool_calls:
+            tool_calls[-1].repaired = True
+
+
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
             stop_reason=response.stop_reason, provider="Anthropic", model=model,
@@ -355,20 +401,14 @@ class AnthropicProvider(LLMProvider):
                         info = blocks.get(idx, {})
                         if info.get("type") == "tool_use":
                             raw_json = "".join(info["json_parts"])
-                            # safe_parse_tool_input never raises. It
-                            # returns (parsed_dict, parse_error). When
-                            # parse_error is set, the session
-                            # dispatcher short-circuits with a tool
-                            # result asking the LLM to re-emit a clean
-                            # call — that recovery happens via the
-                            # tool_use/tool_result protocol the LLM
-                            # already understands, so it doesn't need
-                            # to escalate to a session-level retry.
-                            parsed_input, parse_error = safe_parse_tool_input(raw_json)
+                            # Never raises; the two flags it returns tell
+                            # the session what the body was missing. See
+                            # `safe_parse_tool_input`.
+                            parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
                             tool_calls.append(
                                 ToolCall(
                                     id=info["id"], name=info["name"], input=parsed_input,
-                                    parse_error=parse_error,
+                                    parse_error=parse_error, repaired=repaired,
                                 )
                             )
                             yield StreamToolUseEnd(id=info["id"])

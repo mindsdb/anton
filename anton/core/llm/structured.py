@@ -62,6 +62,19 @@ def no_preamble_instruction(schema_class) -> str:
     )
 
 
+def truncation_verdict(exc: StructuredOutputError) -> str:
+    """The log verdict for a failed forced-schema call, naming its cure.
+
+    Three outcomes, because the two truncated ones need opposite fixes and a
+    single ``TRUNCATED`` could not tell them apart — which is what made
+    ENG-1523 take a round-trip to diagnose. Shared by every log site so they
+    cannot drift into reporting the same failure differently.
+    """
+    if not exc.truncated:
+        return "NO_TOOL_CALL"
+    return "TRUNCATED_INSIDE_CALL" if exc.reached_tool_call else "TRUNCATED_BEFORE_CALL"
+
+
 async def generate_with_truncation_retry(
     generate: Callable[..., Awaitable[Any]],
     schema_class,
@@ -109,7 +122,7 @@ async def generate_with_truncation_retry(
                 "retrying=%s",
                 subsystem,
                 getattr(schema_class, "__name__", schema_class),
-                "TRUNCATED" if exc.truncated else "NO_TOOL_CALL",
+                truncation_verdict(exc),
                 budget,
                 exc.output_tokens,
                 retrying,
@@ -131,10 +144,13 @@ async def generate_with_truncation_retry(
 def looks_truncated(response, budget: int) -> bool:
     """True if `response` was cut off by the `max_tokens` budget.
 
-    Token count first, because the MindsHub gateway reports
-    ``finish_reason: "stop"`` at the cap for most aliases (ENG-1082) — the
-    standard ``"length"`` check can't be relied on there. Both dialects are
-    honoured when reported: OpenAI says ``"length"``, Anthropic ``"max_tokens"``.
+    Token count first: it is provider-agnostic and needs no dialect mapping.
+    The clause exists because the MindsHub gateway once reported
+    ``finish_reason: "stop"`` at the cap for most aliases (ENG-1082) — measured
+    2026-08-11, it now reports ``"length"`` on all 19 chat aliases, streaming
+    and non-streaming, so both gates fire. Keep both: the token count is the
+    one that cannot silently regress. Both dialects are honoured when
+    reported: OpenAI says ``"length"``, Anthropic ``"max_tokens"``.
     No usage information → ``False``; without evidence we don't buy a retry.
     """
     usage = getattr(response, "usage", None)
@@ -143,6 +159,32 @@ def looks_truncated(response, budget: int) -> bool:
     return stop_reason in ("length", "max_tokens") or (
         budget > 0 and output_tokens >= budget
     )
+
+
+def usable_tool_call(response) -> bool:
+    """True when `response` carries tool calls and every one of them is intact.
+
+    A tool call is what lets a round that hit the output cap still be worth
+    using — but only if nothing it emitted was cut:
+
+    - ``repaired`` marks arguments the repair pass patched back into valid JSON,
+      which means the model's own body ended mid-value. It closes an open string
+      or brace; it cannot invent the argument that never arrived.
+    - ``parse_error`` marks a body it could not salvage at all.
+
+    One damaged call makes the whole round unfinished, even alongside intact
+    ones: using the intact half acts on part of what the model was still in the
+    middle of asking for.
+
+    Lives here rather than in the session because the reason it exists is
+    shared: a repaired dict whose missing field happens to be optional
+    validates cleanly, so no amount of schema validation downstream can catch
+    it. The structured-output paths (`LLMClient.generate_object` and its sync
+    twin) test `repaired` alone — a `parse_error` there is left to the
+    validation branch, which classifies it only when the budget ran out.
+    """
+    calls = getattr(response, "tool_calls", None)
+    return bool(calls) and not any(tc.parse_error or tc.repaired for tc in calls)
 
 
 def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoReturn:
@@ -182,15 +224,18 @@ def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoRetu
         budget: The ``max_tokens`` the call was given.
 
     Raises:
-        StructuredOutputError: Always. ``.truncated`` carries the verdict.
+        StructuredOutputError: Always. ``.truncated`` says whether a retry can
+            help and ``.reached_tool_call`` which of the two truncations it was
+            — the message itself cannot be logged, it can quote model output.
     """
     usage = getattr(response, "usage", None)
     output_tokens = getattr(usage, "output_tokens", 0) or 0
     stop_reason = getattr(response, "stop_reason", None)
     truncated = looks_truncated(response, budget)
+    reached_tool_call = bool(getattr(response, "tool_calls", None))
     what = (
         "returned an unusable tool call for"
-        if getattr(response, "tool_calls", None)
+        if reached_tool_call
         else "did not return a tool call for"
     )
     detail = (
@@ -205,6 +250,7 @@ def raise_unusable_tool_call(response, *, tool_name: str, budget: int) -> NoRetu
         output_tokens=output_tokens,
         max_tokens=budget,
         stop_reason=stop_reason,
+        reached_tool_call=reached_tool_call,
     )
 
 

@@ -68,6 +68,22 @@ _NO_CONTENT_MSG = (
 )
 
 
+def _unwrap_outcome(result):
+    """Flatten a handler result down to `tool_result`-ready content.
+
+    Since ENG-696 some handlers return a `ToolOutcome` (content + the
+    handler's own ok/reason verdict) instead of a bare string —
+    `handle_scratchpad`'s exec path is the one this loop hits. The verdict
+    drives the outer agent's error streak, which this sub-generator does
+    not participate in, so only `content` is meaningful here; passing the
+    dataclass straight into a tool_result block would ship its repr to the
+    model.
+    """
+    from anton.core.tools.registry import ToolOutcome
+
+    return result.content if isinstance(result, ToolOutcome) else result
+
+
 def _output_token_cap(session) -> int | None:
     """The client's effective output cap, or None when it cannot be read.
 
@@ -387,7 +403,7 @@ async def _run_loop(
                 # import avoids a tool_handlers <-> generate_artifact cycle.
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = await handle_scratchpad(session, inp)
+                content = _unwrap_outcome(await handle_scratchpad(session, inp))
                 if inp.get("action") == "exec":
                     scratchpad_execs.append(
                         {

@@ -15,7 +15,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 
@@ -58,6 +58,10 @@ SCRATCHPAD_TOOL = ToolDef(
         "time.sleep between sends) are safe in a single cell and are the preferred "
         "shape for batch work. A cell is killed only when its total time budget runs "
         "out or the worker itself dies or wedges; a kill loses the cell's state. "
+        "If session persistence is enabled for this run, the scratchpad restarts "
+        "and restores everything else automatically on your next call — you do not "
+        "need to reset for that; reset is only for when you want to deliberately "
+        "clear all state yourself. "
         "You MUST provide estimated_execution_time_seconds for every exec call — it "
         "sizes the total budget (roughly 2x the estimate; without one the default "
         "budget is small). Call progress(message) to narrate long phases — it is "
@@ -78,6 +82,8 @@ SCRATCHPAD_TOOL = ToolDef(
         "sample(var) inspects any variable with type-aware formatting — DataFrames get "
         "shape/dtypes/head, dicts get keys/values, lists get length/items. "
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
+        "get_llm, agentic_loop, web_search, sample, and progress are already available "
+        "as globals in the scratchpad — do not import them.\n"
         "All .anton/.env secrets are available as environment variables (os.environ)."
     ),
     input_schema={
@@ -349,8 +355,9 @@ LAUNCH_BACKEND_TOOL = ToolDef(
         "Start an artifact's backend script as a standalone subprocess. "
         "Picks a free TCP port, runs the script with `--port <port>` "
         "(plus any `extra_args`), waits until the server is reachable, "
-        "records the port in the artifact's `metadata.json`, and returns "
-        "`{slug, port, pid, url, log_path}` as JSON.\n\n"
+        "records the port in the artifact's `metadata.json`, and returns a "
+        "structured result carrying the backend's `url` (as `external_url`), "
+        "plus `pid`/`port`/log path in the message.\n\n"
         "You normally do NOT call this: `generate_artifact` launches the backend "
         "itself and records the port. Use this tool for a hand-built backend, or "
         "to restart one after editing its code.\n\n"
@@ -363,7 +370,7 @@ LAUNCH_BACKEND_TOOL = ToolDef(
         "If `<artifact_folder>/requirements.txt` exists, its package lines are "
         "installed into that scratchpad's venv before spawn — install output "
         "appended to `backend.log`, install failures abort the launch and are "
-        "returned as an error string. Only simple lines are supported "
+        "returned as a failure result. Only simple lines are supported "
         "(`pkg` / `pkg==1.2`); blank lines, `#` comments, and `-`-prefixed "
         "flags (`-r`, `-e`, `--index-url`) are ignored.\n\n"
         "Idempotent: a second call with the same slug terminates the "
@@ -687,12 +694,20 @@ SELECT_PATH_TOOL = ToolDef(
         "`start_dir` to seed the starting folder.\n"
         "• PICK — you already found several matches and need the user to disambiguate. "
         "Pass an explicit `candidates` list, OR a glob `pattern` (optionally under "
-        "`base_dir`) to find matches within the project. Exactly one match resolves "
-        "immediately with no prompt; zero matches tells you to refine.\n\n"
+        "`base_dir`) to find matches within the project. Exactly one `pattern` match "
+        "resolves immediately with no prompt; zero matches tells you to refine. A "
+        "single explicit candidate is NOT accepted silently — it is your guess, not "
+        "the user's choice, so the user is asked to confirm it first.\n\n"
         'On selection the tool returns {"status":"resolved","path":"<absolute path>"} '
         "— use that path directly and keep going. Other statuses: 'cancelled' (user "
-        "dismissed), 'no_matches', 'invalid'. Never re-ask in plain text after a "
-        "resolved selection."
+        "dismissed or declined), 'no_matches', 'invalid', 'needs_confirmation' (confirm "
+        "the named candidate with the user before using it — never present it as "
+        "chosen until they agree), and 'picker_unavailable' (this host "
+        "cannot render a picker). On 'picker_unavailable' follow the `message` in the "
+        "result: in PICK mode it carries the `candidates` it found, so ask which of "
+        "those the user meant; in BROWSE mode the file is somewhere you cannot reach, "
+        "so ask the user to attach it to the conversation. Never re-ask in plain text "
+        "after a resolved selection."
     ),
     # Injected into the system prompt: bias the model toward the picker over a
     # type-the-path request, which is the whole point of the tool.
@@ -740,6 +755,83 @@ SELECT_PATH_TOOL = ToolDef(
         "required": ["prompt"],
     },
     handler=handle_select_path,
+)
+
+
+# Variant registered when no elicitor on this host supports `kind="path"`
+# (cowork-server injects none, so this is every cowork session today).
+#
+# BROWSE mode is physically impossible there — handle_select_path returns
+# picker_unavailable before it ever reaches the elicitor — yet the full
+# definition above advertises browse as the right move for an unknown location
+# AND injects a system-prompt rule forbidding the alternatives. That
+# combination is what routed a user who said "I have my sales data" into a dead
+# end with no legitimate exit: picker can't render, asking for a path is
+# forbidden here and by the harness file-access policy, guessing is forbidden.
+# The model resolved it by inventing the data (ENG-1357).
+#
+# PICK mode still earns its place without an elicitor: a lone pattern match
+# auto-resolves with no user interaction, and ≥2 returns the candidate list so
+# the agent can ask in plain text — legitimate, because those paths are ones it
+# already found inside the project, not a path the user must type from memory.
+# A lone *explicit* candidate is the exception (ENG-1852): it is the model's
+# own guess echoed back, so it needs the user's confirmation (a choice card
+# where one renders, else 'needs_confirmation').
+SELECT_PATH_TOOL_PICK_ONLY = replace(
+    SELECT_PATH_TOOL,
+    description=(
+        "Disambiguate between file/folder paths you have ALREADY located inside "
+        "the project. Pass an explicit `candidates` list, OR a glob `pattern` "
+        "(optionally under `base_dir`).\n\n"
+        "Exactly one `pattern` match resolves immediately and you get the path "
+        "back. Zero matches tells you to refine. Two or more comes back as "
+        "'picker_unavailable' WITH the candidates it found — ask the user which "
+        "of those they meant. A single explicit candidate is NOT accepted "
+        "silently: it is your guess, not the user's choice, so the user is shown "
+        "a confirmation card first (or you get 'needs_confirmation' back — "
+        "confirm with the user before using it).\n\n"
+        "This host cannot render an interactive file browser, so there is no "
+        "BROWSE mode: you cannot ask the user to navigate to a file whose "
+        "location you do not know. If the file is not in the project, ask the "
+        "user to attach it to the conversation. Never offer a path inside the "
+        "project as a substitute for a file or folder the user asked for "
+        "outside it — say plainly that this host cannot reach it, and ask them "
+        "to attach the files instead.\n\n"
+        'Returns {"status":"resolved","path":"<absolute path>"} on success. '
+        "Other statuses: 'no_matches', 'invalid', 'cancelled' (the user declined "
+        "or dismissed the confirmation), 'needs_confirmation', "
+        "'picker_unavailable'. Never re-ask in plain text after a resolved "
+        "selection."
+    ),
+    prompt=(
+        "When the user refers to a file or folder without giving a path you can "
+        "confidently resolve, first look for it inside the project — then call "
+        "`select_path` with `candidates` or a `pattern` to have the user pick "
+        "between the matches. Do not guess which one they meant. If the file is "
+        "not in the project at all, ask the user to attach it to the "
+        "conversation; this host has no file browser, so do not ask them to "
+        "navigate to it and do not ask them to type or paste a path. Never "
+        "offer a folder inside the project as a substitute for one the user "
+        "asked for outside it."
+    ),
+    # `replace()` copies input_schema by reference, so the schema must be
+    # overridden too — otherwise the model is told two different things by the
+    # two channels it reads: prose saying "there is no BROWSE mode" and a
+    # function-calling schema still offering `start_dir`, whose own description
+    # reads "BROWSE mode only". Dropping it is the point of the variant.
+    #
+    # Rebuilt rather than mutated, for the same reason the ToolDef itself is
+    # copied: `SELECT_PATH_TOOL.input_schema` is a module-level dict shared by
+    # every session in the process. The inner property dicts are shared but
+    # never written, so a one-level rebuild is enough.
+    input_schema={
+        **SELECT_PATH_TOOL.input_schema,
+        "properties": {
+            key: value
+            for key, value in SELECT_PATH_TOOL.input_schema["properties"].items()
+            if key != "start_dir"
+        },
+    },
 )
 
 

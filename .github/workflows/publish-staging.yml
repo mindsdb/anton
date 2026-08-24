@@ -1,0 +1,111 @@
+name: Staging pre-release and publish to PyPI
+
+# rc pre-release stream: on every push to staging, validate, cut a PEP 440
+# pre-release (2.YY.M.DD.SEQrcN), and publish it to PyPI so cowork-server staging
+# consumes an immutable, versioned Anton artifact instead of a mutable git branch
+# or a hand-pinned commit (ENG-1159). Resolvers ignore pre-releases unless a
+# specifier names one, and PyPI's `info.version` (which the prod desktop updater
+# reads) excludes them, so prod installs can never pick these up.
+#
+# The publish job MUST live in this top-level workflow — PyPI Trusted Publishing
+# does not support reusable workflows and matches the OIDC claim on THIS
+# filename. Register publish-staging.yml as a trusted publisher (environment
+# `pypi`) at the anton-agent PyPI project's publishing settings.
+#
+# Anton has nothing to self-pin (it does not depend on itself) — unlike
+# cowork-server's staging publisher — so this builds from a clean checkout of
+# the tag. It still pins the build to the version the release job just minted
+# (SETUPTOOLS_SCM_PRETEND_VERSION on the build step): a re-run or re-dispatch on
+# an already-tagged head leaves two rc tags on one commit, and hatch-vcs would
+# otherwise resolve the older one via `git describe` and build a duplicate PyPI
+# rejects. release.yml pins the same way for the same reason.
+#
+# No workflow-level `permissions:` block: only the release job needs
+# `contents: write`; every other job declares its own, so the repo default
+# (read) applies to the rest.
+#
+# run-tree-ok: PyPI Trusted Publishing binds to this top-level workflow file.
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+concurrency:
+  group: staging-prerelease-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  unit-tests:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/tests.yml
+
+  release:
+    needs: unit-tests
+    # workflow_dispatch can be pointed at any ref; only staging mints rc tags.
+    if: github.ref == 'refs/heads/staging'
+    permissions:
+      contents: write  # tag push + release creation
+    uses: mindsdb/github-actions/.github/workflows/calver-release.yml@main
+    with:
+      calver-major: "2"
+      prerelease: true
+      runs-on: ubuntu-latest
+
+  publish:
+    name: Build and publish pre-release to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # required for trusted publisher (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          fetch-depth: 0  # hatch-vcs needs tags to derive version
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build package
+        env:
+          # A re-run or re-dispatch on an already-tagged head leaves two CalVer
+          # tags on one commit and `git describe` resolves the older one; build
+          # exactly the version the release job minted.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.release.outputs.version }}
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Trusted publisher (OIDC) — publish-staging.yml must be registered at
+        # the anton-agent PyPI project's publishing settings (environment: pypi).
+
+  notify:
+    # Alert the eng channel if ANY job in the staging release/publish pipeline
+    # fails.
+    # One job covers both outcomes: a `uses:` job cannot branch on status, so
+    # the aggregate result picks the failed or recovered message, and a
+    # cancelled run stays silent.
+    needs: [unit-tests, release, publish]
+    if: ${{ github.ref == 'refs/heads/staging' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
+    permissions:
+      contents: read
+      actions: read  # the prior-run lookup behind the recovery message
+    uses: mindsdb/github-actions/.github/workflows/notify-main-failure.yml@main
+    with:
+      env-name: "staging prerelease"
+      status: ${{ contains(needs.*.result, 'failure') && 'failed' || 'recovered' }}
+      # This publisher only ever runs on staging, so the alert is always
+      # freeze-scoped: reserve release-blocking escalation for the freeze
+      # window rather than paging the eng channel on every midweek failure.
+      # Preserves the policy the shared CI notify applied via
+      # `freeze-scoped: ${{ github.ref_name == 'staging' }}` before this
+      # pipeline took ownership of the alert.
+      freeze-scoped: true
+      runs-on: ubuntu-latest
+    secrets: inherit

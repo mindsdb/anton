@@ -1,7 +1,20 @@
-name: Auto-release on push to main
+name: Auto-release and publish to PyPI
 
-permissions:
-  contents: write
+# Stable release stream: on every push to main, validate, cut a CalVer release,
+# publish it to PyPI, and run live release e2e. Staging pre-releases (rc) live in
+# publish-staging.yml so each stream keeps its own run tree, permissions,
+# notifications, and publishing identity.
+#
+# The publish job MUST live in this top-level workflow — PyPI Trusted Publishing
+# does not support reusable workflows and matches the OIDC claim on THIS
+# filename. Register release.yml as a trusted publisher (environment `pypi`) at
+# https://pypi.org/manage/project/anton-agent/settings/publishing/
+#
+# No workflow-level `permissions:` block: only the release job needs
+# `contents: write`; every other job declares its own, so the repo default
+# (read) applies to the rest.
+#
+# run-tree-ok: PyPI Trusted Publishing binds to this top-level workflow file.
 
 on:
   push:
@@ -13,7 +26,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  unit-tests:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/tests.yml
+
   auto-release:
+    needs: unit-tests
+    # workflow_dispatch can be pointed at any ref; only main cuts a stable release.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write  # tag push + release creation
     uses: mindsdb/github-actions/.github/workflows/calver-release.yml@main
     with:
       calver-major: "2"
@@ -25,6 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
       id-token: write  # required for trusted publisher (OIDC)
     steps:
       - uses: actions/checkout@v4
@@ -38,28 +62,35 @@ jobs:
           python-version: "3.12"
 
       - name: Build package
+        env:
+          # A re-run or re-dispatch on an already-tagged head leaves two CalVer
+          # tags on one commit and `git describe` resolves the older one; build
+          # exactly the version the release job minted.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.auto-release.outputs.version }}
         run: uv build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # Uses trusted publisher (OIDC) — no API token needed.
-        # Configure at: https://pypi.org/manage/project/anton/settings/publishing/
+        # Trusted publisher (OIDC) — release.yml must be registered at the
+        # anton-agent PyPI project's publishing settings (environment: pypi).
 
   e2e:
     needs: auto-release
+    permissions:
+      contents: read
     uses: ./.github/workflows/tests_e2e_release.yml
     with:
       tag: ${{ needs.auto-release.outputs.tag }}
     secrets: inherit
 
   notify:
-    # Alert the eng channel if ANY job in the release pipeline fails (tag, PyPI
-    # publish, or release e2e).
+    # Alert the eng channel if ANY job in the release pipeline fails (tests, tag,
+    # PyPI publish, or release e2e).
     # One job covers both outcomes: a `uses:` job cannot branch on status, so
     # the aggregate result picks the failed or recovered message, and a
     # cancelled run stays silent.
-    needs: [auto-release, publish, e2e]
-    if: ${{ !cancelled() && !contains(needs.*.result, 'cancelled') }}
+    needs: [unit-tests, auto-release, publish, e2e]
+    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
     permissions:
       contents: read
       actions: read  # the prior-run lookup behind the recovery message

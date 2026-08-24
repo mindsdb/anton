@@ -539,6 +539,11 @@ class TestSessionWebToolResolution:
         cfg = ChatSessionConfig(llm_client=mock_llm, **(cfg_kwargs or {}))
         return ChatSession(cfg)
 
+    def _settings_with_credential(self):
+        from anton.config.settings import AntonSettings
+
+        return AntonSettings(external_search_provider="exa", exa_api_key="k")
+
     def test_anthropic_style_native_provider_uses_no_fallback(self):
         session = self._build_session(provider_native={"web_search", "web_fetch"})
         assert session._native_web_tools == {"web_search", "web_fetch"}
@@ -559,11 +564,25 @@ class TestSessionWebToolResolution:
         assert "web_fetch" in session._native_web_tools
 
     def test_fallback_toolDefs_registered_when_provider_lacks_native(self):
-        session = self._build_session(provider_native=set())
-        # Trigger lazy build of the registry.
+        # web_search additionally needs a usable Exa/Brave credential; without
+        # one it must not be registered even though the provider isn't native.
+        session = self._build_session(
+            provider_native=set(),
+            cfg_kwargs={"settings": self._settings_with_credential()},
+        )
         tools = session._build_tools()
         names = {t["name"] for t in tools}
         assert "web_search" in names
+        assert "web_fetch" in names
+
+    def test_fallback_web_search_not_registered_without_credential(self):
+        # A model offered a tool that can only fail (no Exa/Brave key
+        # configured) will call it anyway — don't register it at all.
+        session = self._build_session(provider_native=set())
+        tools = session._build_tools()
+        names = {t["name"] for t in tools}
+        assert "web_search" not in names
+        # web_fetch needs no credential, so it's unaffected.
         assert "web_fetch" in names
 
     def test_fallback_toolDefs_not_registered_when_provider_is_native(self):

@@ -8,6 +8,7 @@ Handles:
 
 from __future__ import annotations
 
+import errno
 import os
 from datetime import datetime
 from pathlib import Path
@@ -82,8 +83,33 @@ class Workspace:
 
     # ── Initialization ───────────────────────────────────────────
 
-    def initialize(self) -> list[str]:
-        """Create the workspace structure. Returns list of actions taken."""
+    def initialize(self, *, create_anton_md: bool = True) -> list[str]:
+        """Create the workspace structure. Returns list of actions taken.
+
+        Retries once on ESTALE: on a shared NFS/EFS workspace another
+        client (cowork-server re-staging `.anton/anton.md`, or a workspace
+        wipe) can delete an inode this pod still has cached, so the first
+        stat fails with a stale handle. That failed stat drops the cached
+        dentry, so a second pass does a fresh lookup and succeeds.
+
+        ``create_anton_md=False`` is the cloud mode (ENG-1817): there
+        ``.anton/anton.md`` is owned by cowork-server, which stages the
+        project's instructions into it before every turn and clears it when
+        they are removed. A template written by the pod would be treated as
+        a stale staged copy and deleted — and under gVisor the pod then
+        keeps hitting the dead inode via its cached handle (ESTALE), which
+        the retry above cannot recover. Not creating the file removes the
+        ownership fight entirely; skipping the stat also removes the one
+        ESTALE-prone call from the cloud turn's critical path.
+        """
+        try:
+            return self._initialize_once(create_anton_md=create_anton_md)
+        except OSError as exc:
+            if exc.errno != errno.ESTALE:
+                raise
+            return self._initialize_once(create_anton_md=create_anton_md)
+
+    def _initialize_once(self, *, create_anton_md: bool = True) -> list[str]:
         actions: list[str] = []
 
         # Create .anton/ directory and memory subdirectory
@@ -92,7 +118,7 @@ class Workspace:
         actions.append(f"Created {self._anton_dir}")
 
         # Create anton.md if it doesn't exist
-        if not self._anton_md.is_file():
+        if create_anton_md and not self._anton_md.is_file():
             self._anton_md.write_text(
                 ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d"))
             )

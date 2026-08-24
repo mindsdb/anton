@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -83,6 +84,49 @@ class TestInitialization:
 
     def test_artifacts_dir_property(self, ws, tmp_path):
         assert ws.artifacts_dir == tmp_path / ".anton" / "artifacts"
+
+    def test_retries_once_on_stale_nfs_handle(self, ws, monkeypatch):
+        calls = {"n": 0}
+        real = ws._initialize_once
+
+        def stale_then_ok(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(errno.ESTALE, "Stale file handle")
+            return real(**kwargs)
+
+        monkeypatch.setattr(ws, "_initialize_once", stale_then_ok)
+        actions = ws.initialize()
+        assert calls["n"] == 2
+        assert len(actions) == 4
+
+    def test_does_not_retry_other_oserrors(self, ws, monkeypatch):
+        def boom(**kwargs):
+            raise OSError(errno.EACCES, "Permission denied")
+
+        monkeypatch.setattr(ws, "_initialize_once", boom)
+        with pytest.raises(OSError) as exc_info:
+            ws.initialize()
+        assert exc_info.value.errno == errno.EACCES
+
+    def test_cloud_mode_skips_anton_md(self, ws, tmp_path):
+        """ENG-1817: in the cloud, `.anton/anton.md` is owned by cowork-server's
+        instruction staging. A pod-written template is treated as a stale staged
+        copy and deleted before the next turn, and under gVisor the pod's cached
+        NFS handle then fails every stat with ESTALE — so the cloud path must not
+        create (or even stat) the file."""
+        actions = ws.initialize(create_anton_md=False)
+        assert not (tmp_path / ".anton" / "anton.md").exists()
+        assert not any("anton.md" in a for a in actions)
+        # Everything else is still set up.
+        assert (tmp_path / ".anton" / ".env").is_file()
+        assert (tmp_path / ".anton" / "artifacts").is_dir()
+
+    def test_cloud_mode_leaves_staged_instructions_alone(self, ws, tmp_path):
+        (tmp_path / ".anton").mkdir()
+        (tmp_path / ".anton" / "anton.md").write_text("staged by cowork-server")
+        ws.initialize(create_anton_md=False)
+        assert (tmp_path / ".anton" / "anton.md").read_text() == "staged by cowork-server"
 
 
 class TestAntonMd:

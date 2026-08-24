@@ -8,10 +8,15 @@ from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
 from anton.core.tools.registry import ToolOutcome
+from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    cell_failure_reason,
+    install_call_installed_something,
+    reject_invalid_packages,
+    send_package_install_event,
 )
 
 if TYPE_CHECKING:
@@ -164,34 +169,36 @@ async def handle_generate_prd(session: "ChatSession", tc_input: dict) -> str:
     return json.dumps(result, indent=2)
 
 
-async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
+async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Create a fresh artifact folder + metadata.json + README.md.
 
-    Returns a JSON-shaped string the LLM can parse into the artifact
-    path. The agent is expected to write its output files under
-    `<path>/...` after this call returns.
+    Returns a `SideEffectResult` whose `message` carries the artifact path the
+    agent writes output files under (`<path>/...`) after this call returns.
     """
-    import json
-
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
+        )
 
     name = (tc_input.get("name") or "").strip()
     description = (tc_input.get("description") or "").strip()
     artifact_type = (tc_input.get("type") or "").strip()
     primary = tc_input.get("primary")
     if not name:
-        return "Error: `name` is required."
+        return SideEffectResult.failed("Error: `name` is required.", reason="missing_name")
     if not description:
-        return "Error: `description` is required."
+        return SideEffectResult.failed(
+            "Error: `description` is required.", reason="missing_description"
+        )
 
     from anton.core.artifacts.models import ARTIFACT_TYPES
 
     if artifact_type not in ARTIFACT_TYPES:
-        return (
-            f"Error: `type` must be one of {ARTIFACT_TYPES}. "
-            f"Got: {artifact_type!r}."
+        return SideEffectResult.failed(
+            f"Error: `type` must be one of {ARTIFACT_TYPES}. Got: {artifact_type!r}.",
+            reason="invalid_type",
         )
 
     artifact = store.create(  # type: ignore[arg-type]
@@ -201,17 +208,27 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
         primary=primary if isinstance(primary, str) else None,
     )
     folder = store.folder_for(artifact.slug)
-    return json.dumps({
-        "id": artifact.id,
-        "slug": artifact.slug,
-        "name": artifact.name,
-        "type": artifact.type,
-        "primary": artifact.primary,
-        "path": str(folder),
-    }, indent=2)
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Created artifact `{artifact.slug}` ({artifact.type}). "
+            f"Write output files under: {folder}"
+            + (f" (primary: {artifact.primary})" if artifact.primary else "")
+        ),
+        resource_id=artifact.slug,
+        idempotency_key=artifact.slug,
+        committed_at=now_iso(),
+        details={
+            "slug": artifact.slug,
+            "path": str(folder),
+            "name": artifact.name,
+            "type": artifact.type,
+            "primary": artifact.primary,
+        },
+    ).to_outcome()
 
 
-async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> str:
+async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Update mutable metadata fields on an existing artifact.
 
     Only fields present in the input are modified. Supports:
@@ -220,15 +237,16 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
     """
-    import json
-
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
+        )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        return SideEffectResult.failed("Error: `slug` is required.", reason="missing_slug")
 
     kwargs: dict = {}
     if "primary" in tc_input:
@@ -237,7 +255,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         try:
             kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
         except (TypeError, ValueError):
-            return "Error: `port` must be a number."
+            return SideEffectResult.failed("Error: `port` must be a number.", reason="invalid_port")
 
     if "datasources" in tc_input:
         from anton.core.artifacts.models import DatasourceRef
@@ -245,7 +263,10 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
 
         raw_list = tc_input.get("datasources") or []
         if not isinstance(raw_list, list):
-            return "Error: `datasources` must be a list of slug strings."
+            return SideEffectResult.failed(
+                "Error: `datasources` must be a list of slug strings.",
+                reason="invalid_datasources",
+            )
 
         vault = session._data_vault or LocalDataVault()
         known = {f"{c['engine']}-{c['name']}": (c["engine"], c["name"])
@@ -255,7 +276,10 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         unknown: list[str] = []
         for item in raw_list:
             if not isinstance(item, str):
-                return "Error: each entry in `datasources` must be a slug string."
+                return SideEffectResult.failed(
+                    "Error: each entry in `datasources` must be a slug string.",
+                    reason="invalid_datasources",
+                )
             ref_slug = item.strip()
             if not ref_slug:
                 continue
@@ -265,25 +289,40 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             engine, name = known[ref_slug]
             refs.append(DatasourceRef(engine=engine, name=name))
         if unknown:
-            return (
+            return SideEffectResult.failed(
                 f"Error: unknown datasource slug(s): {', '.join(unknown)}. "
                 f"Each slug must match an existing vault connection "
-                f"(format: `<engine>-<name>`)."
+                f"(format: `<engine>-<name>`).",
+                reason="unknown_datasource",
             )
         kwargs["datasources"] = refs
 
     artifact = store.update(slug, **kwargs)
     if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
-    return json.dumps({
-        "slug": artifact.slug,
-        "primary": artifact.primary,
-        "port": artifact.port,
-        "datasources": [d.slug for d in artifact.datasources],
-    }, indent=2)
+        return SideEffectResult.failed(
+            f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+        )
+    datasources = [d.slug for d in artifact.datasources]
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Updated artifact `{artifact.slug}` "
+            f"(primary={artifact.primary}, port={artifact.port}, "
+            f"datasources={datasources})."
+        ),
+        resource_id=artifact.slug,
+        idempotency_key=artifact.slug,
+        committed_at=now_iso(),
+        details={
+            "slug": artifact.slug,
+            "primary": artifact.primary,
+            "port": artifact.port,
+            "datasources": datasources,
+        },
+    ).to_outcome()
 
 
-async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
+async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Launch the artifact's backend script as a standalone subprocess.
 
     Thin wrapper over `launch_artifact_backend`: validates tool-call shape,
@@ -296,20 +335,23 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     `anton.core.artifacts.backend_launcher.launch_artifact_backend` so
     other entry points (e.g. cowork's auto-relaunch) can reuse it.
     """
-    import json
-
     from anton.core.artifacts.backend_launcher import launch_artifact_backend
 
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        return SideEffectResult.failed(
+            "Artifact store unavailable (no workspace bound to this session).",
+            reason="store_unavailable",
+        )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        return SideEffectResult.failed("Error: `slug` is required.", reason="missing_slug")
     artifact = store.open(slug)
     if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
+        return SideEffectResult.failed(
+            f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+        )
 
     rel_path = (tc_input.get("path") or "backend.py").strip()
     extra_args = tc_input.get("extra_args") or []
@@ -317,7 +359,9 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
     try:
         health_timeout = float(tc_input.get("health_timeout", 10))
     except (TypeError, ValueError):
-        return "Error: `health_timeout` must be a number."
+        return SideEffectResult.failed(
+            "Error: `health_timeout` must be a number.", reason="invalid_health_timeout"
+        )
 
     tracked = getattr(session, "_tracked_backends", None)
     if tracked is None:
@@ -334,14 +378,31 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
         health_path=health_path,
         health_timeout=health_timeout,
     )
+    # The launcher rolls back on failure (kills the process, never tracks it),
+    # so a string result means nothing committed.
     if isinstance(result, str):
-        return result
+        return SideEffectResult.failed(result, reason="launch_failed")
 
     store.update(slug, port=result["port"])
-    return json.dumps(
-        {k: v for k, v in result.items() if k != "proc"},
-        indent=2,
-    )
+    url = result.get("url", "")
+    return SideEffectResult(
+        success=True,
+        message=(
+            f"Backend for `{slug}` is running at {url} "
+            f"(pid {result.get('pid')}, port {result.get('port')}, "
+            f"log {result.get('log_path')})."
+        ),
+        resource_id=slug,
+        external_url=url or None,
+        idempotency_key=slug,
+        committed_at=now_iso(),
+        details={
+            "slug": slug,
+            "port": result.get("port"),
+            "pid": result.get("pid"),
+            "log_path": result.get("log_path"),
+        },
+    ).to_outcome()
 
 
 def _generation_failed(reason: str) -> str:
@@ -644,7 +705,7 @@ async def handle_scratchpad(
         return ToolOutcome(
             content=format_cell_result(cell),
             ok=not error,
-            reason=error.splitlines()[-1][:160] if error else "",
+            reason=cell_failure_reason(error),
         )
 
     elif action == "view":
@@ -684,8 +745,16 @@ async def handle_scratchpad(
         packages = tc_input.get("packages", [])
         if not packages:
             return "No packages specified."
+        refused = reject_invalid_packages(packages)
+        if refused:
+            return ToolOutcome(
+                content=refused, ok=False, reason="package_install_rejected"
+            )
         pad = await session._scratchpads.get_or_create(name)
-        return await pad.install_packages(packages)
+        result = await pad.install_packages(packages)
+        if install_call_installed_something(result):
+            send_package_install_event(session, packages)
+        return result
 
     else:
         return f"Unknown scratchpad action: {action}"
@@ -937,6 +1006,108 @@ def _status(status: str, message: str = "", **extra) -> str:
     return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
 
 
+def _needs_confirmation(candidate: "Path", label: str) -> str:
+    """The model-supplied candidate cannot be silently accepted and no
+    confirmation card can render on this host: hand the decision back."""
+    return _status(
+        "needs_confirmation",
+        f"You supplied '{label}' as the only candidate — that is your guess, not "
+        "the user's choice, so it was not accepted. Ask the user to confirm it "
+        "before using it, and do not present it as chosen or connected until "
+        "they do. If they asked for a file or folder outside the project, no "
+        "path inside the project is an answer: tell them plainly that this host "
+        "cannot reach paths outside the project, and ask them to attach the "
+        "relevant files to the conversation.",
+        candidates=[str(candidate)],
+    )
+
+
+async def _confirm_single_candidate(
+    session: "ChatSession", candidate: "Path", root: "Path", timeout_s: "int | None"
+) -> str:
+    """Confirm a model-supplied single candidate with the user (ENG-1852).
+
+    A lone entry in ``candidates`` is the model's own guess echoed back, not a
+    discovery: in a fresh project exactly one directory exists (``skills``), so
+    silently resolving it reported folders nobody chose as connected — to the
+    first-run prompt "give you access to a folder on my computer", no less.
+    Confirmation is enforced here rather than in the prompt, because the model
+    already narrates such guesses as decisions ("I'll use it as the folder").
+
+    Renders a yes/no choice card (supported on every cowork host, which has no
+    path picker). Where no card can render either, returns
+    ``needs_confirmation`` so the model must ask in plain text.
+    """
+    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+    try:
+        label = str(candidate.relative_to(root))
+    except ValueError:
+        label = str(candidate)
+    noun = "folder" if candidate.is_dir() else "file"
+    request = AskRequest(
+        prompt=f"Only one candidate was found — use this {noun}?",
+        kind="choice",
+        timeout_s=timeout_s,
+        options=(
+            AskOption(value="yes", label=f"Yes — use {label}", kind=noun, style="primary"),
+            AskOption(value="no", label="No — that's not it"),
+        ),
+    )
+    try:
+        answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+    except Exception as exc:  # noqa: BLE001 — the card is host code
+        _log.warning("select_path confirmation elicitor failed: %s", exc, exc_info=True)
+        return _status("error", f"Selection failed: {exc}")
+    if answer.status == "unavailable":
+        return _needs_confirmation(candidate, label)
+    if answer.status == "cancelled":
+        return _status(
+            "cancelled",
+            "The user dismissed the confirmation without choosing. Ask how they "
+            "would like to proceed.",
+        )
+    if answer.status == "limit":
+        return _status(
+            "error",
+            "Too many questions this turn; do not use the candidate without the "
+            "user's confirmation — ask in plain text.",
+        )
+    if answer.status != "answered":
+        return _status("error", f"The confirmation did not return an answer ({answer.status}).")
+    typed = (answer.text or "").strip()
+    if "yes" in answer.values:
+        # Deliberately NOT auto_resolved: the user confirmed this path.
+        return _status(
+            "resolved",
+            f'The user added: "{typed}"' if typed else "",
+            path=str(candidate),
+        )
+    if typed and "no" not in answer.values:
+        # A free-typed reply is not a decline the user made — it may even be
+        # the word "yes" — so assert nothing; hand it over verbatim. Parsing
+        # typed affirmations here would be a worse failure than one re-ask.
+        return _status(
+            "cancelled",
+            f'The user typed a reply instead of choosing an option: "{typed}". '
+            f"'{label}' is not confirmed — do not use it or present it as "
+            "connected; act on their reply. If it reads as agreement, call "
+            "select_path again for an explicit confirmation. If they want a "
+            "file or folder outside the project, tell them plainly that this "
+            "host cannot reach it and ask them to attach the relevant files "
+            "to the conversation.",
+        )
+    return _status(
+        "cancelled",
+        f"The user declined '{label}'. Do not use this path and do not present "
+        "it as connected. Ask what they actually meant — and if it is a file or "
+        "folder outside the project, tell them plainly that this host cannot "
+        "reach paths outside the project, and ask them to attach the relevant "
+        "files to the conversation."
+        + (f' The user said: "{typed}"' if typed else ""),
+    )
+
+
 def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
     """Validate a browse-mode pick: any existing path of the requested kind."""
     if chosen is None:
@@ -960,11 +1131,17 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
 
     * **browse** — no ``candidates``/``pattern`` given: the location is unknown,
       so the user navigates a picker to locate it. Use this instead of asking
-      the user to type or paste a path.
+      the user to type or paste a path. **Host-gated:** only reachable where an
+      elicitor supports ``kind="path"``. Elsewhere — every cowork session today
+      — it returns ``picker_unavailable`` pointing at attachment, and the model
+      is not offered browse at all, because ``session.py`` registers
+      ``SELECT_PATH_TOOL_PICK_ONLY`` there (ENG-1357).
     * **pick** — ``candidates`` or ``pattern`` given: disambiguate concrete
-      matches within the project. Auto-resolves a single match and reports
-      "no matches" for none, so the picker appears only for a genuine (≥2)
-      ambiguity.
+      matches within the project. A single *pattern* match auto-resolves and
+      zero matches reports "no matches"; a single model-supplied candidate is
+      confirmed with the user first (ENG-1852) — via the path picker where one
+      renders, a yes/no choice card elsewhere, or ``needs_confirmation`` when
+      neither can.
 
     The result is fed back as the tool result, so the agent continues without a
     separate user message.
@@ -989,9 +1166,19 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     # ── browse — locate an unspecified path ──────────────────────────────
     if not has_candidates and not has_pattern:
         if not can_pick:
+            # NOT "ask for the path in plain text" (ENG-1357). Browse means the
+            # file's location is unknown, so it is very likely outside the
+            # project — and every host that lands here forbids reading files
+            # that are neither in the project nor attached, so a typed path is
+            # unusable even when the user supplies it. Naming the one route
+            # that works matters: with no legitimate exit offered, the model
+            # fabricated the user's data instead of asking.
             return _status(
                 "picker_unavailable",
-                "An interactive picker is unavailable here; ask the user for the path in plain text.",
+                "This host cannot render a file browser. Ask the user to attach the "
+                "file to the conversation — that is how they grant you access to a "
+                "file outside the project. Do not ask them to type or paste a path, "
+                "and do not proceed with invented or example data in its place.",
             )
         request = AskRequest(
             prompt=prompt,
@@ -1015,12 +1202,35 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     # ── pick — disambiguate concrete candidates within the project ───────
     candidates = _collect_selection_candidates(tc_input, root, kind)
     if not candidates:
+        # The browse suggestion is only honest where browse can actually run —
+        # on a host without a path elicitor it leads straight to
+        # picker_unavailable, and "ask in plain text" is unusable for a file
+        # outside the project (ENG-1357).
         return _status(
             "no_matches",
-            "No match found. Refine the pattern, omit candidates/pattern to let the user browse, or ask in plain text.",
+            (
+                "No match found. Refine the pattern, omit candidates/pattern to let "
+                "the user browse, or ask in plain text."
+            )
+            if can_pick
+            else (
+                "No match found in the project. Refine the pattern, or — if the file "
+                "is not in the project at all — ask the user to attach it to the "
+                "conversation. This host has no file browser, and you cannot read a "
+                "path the user types."
+            ),
         )
     if len(candidates) == 1:
-        return _status("resolved", auto_resolved=True, path=str(candidates[0]))
+        if not has_candidates:
+            # A lone *pattern* match is a genuine discovery — the glob searched
+            # the project and found exactly one thing — so resolving it without
+            # a prompt is safe. A lone *explicit* candidate is not (ENG-1852):
+            # it is the model's own guess echoed back, so it must be confirmed
+            # by the user — via the confirmation card below, or by picking it
+            # in the path picker where one renders.
+            return _status("resolved", auto_resolved=True, path=str(candidates[0]))
+        if not can_pick:
+            return await _confirm_single_candidate(session, candidates[0], root, timeout_s)
     if not can_pick:
         return _status(
             "picker_unavailable",

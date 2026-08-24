@@ -9,6 +9,7 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
     heal_surrogate_source,
@@ -91,6 +92,17 @@ def _inject_helper(name: str, fn) -> None:
 # rebind to something picklable is retried rather than excluded forever.
 _UNPICKLABLE: dict = {}
 
+# Byte marker of dill's file-handle reconstructor inside a pickle stream. A pickled
+# file object is stored as a CALL to `dill._dill._create_filehandle(name, mode, …)`,
+# and that call runs `open(name, mode)` at LOAD time — for a `'w'` handle (even an
+# already-closed one, e.g. `f` surviving a `with open(path, 'w') as f:` block) the
+# open() itself truncates the file on disk. In cloud mode the snapshot is reloaded on
+# every turn, so one leftover handle wiped artifact files turn after turn (ENG-1726).
+# Scanning the serialised bytes instead of isinstance-checking the value catches
+# handles nested inside containers too, and leaves harmless io.StringIO/io.BytesIO
+# (which pickle by contents, not by reconstructor) alone.
+_FILEHANDLE_MARKER = b"_create_filehandle"
+
 # Persistence notes for the next cell's `logs`. Deliberately NOT `error` — a snapshot
 # problem must not make the cell look failed, or it would feed the consecutive-error
 # circuit breaker and the resilience nudge.
@@ -169,6 +181,12 @@ def _decode_values(blobs: dict) -> tuple[dict, dict]:
     ns: dict = {}
     dropped: dict = {}
     for name, blob in blobs.items():
+        if _FILEHANDLE_MARKER in blob:
+            # Snapshots written before ENG-1726 can still hold pickled file handles;
+            # materialising one re-opens the file in its original mode, truncating it
+            # when that mode is 'w'. Refuse to load rather than damage workspace files.
+            dropped[name] = "file handle: restoring would re-open (and truncate) the file"
+            continue
         try:
             ns[name] = dill.loads(blob)
         except Exception as exc:
@@ -315,6 +333,14 @@ def _encode_values(payload: dict) -> tuple[dict, list]:
             _UNPICKLABLE[key] = id(value)
             dropped.append(key)
             continue
+        if _FILEHANDLE_MARKER in blob:
+            # File handles pickle without error but must never be persisted: loading
+            # them re-runs open() and truncates 'w'-mode files (ENG-1726). Registered
+            # in _UNPICKLABLE like any live resource, so the warning fires once and a
+            # rebind to real data is retried.
+            _UNPICKLABLE[key] = id(value)
+            dropped.append(key)
+            continue
         total += len(blob)
         if total > SESSION_MAX_BYTES:
             raise _TooBig()
@@ -370,8 +396,8 @@ def _dump_namespace(ns: dict) -> str | None:
             "will be undefined if this scratchpad restarts: "
             + ", ".join(sorted(dropped))
             + ". Objects holding live resources (database connections, sockets, "
-            "generators) cannot be saved — recreate them rather than relying on them "
-            "persisting."
+            "generators, open or closed file handles) cannot be saved — recreate "
+            "them rather than relying on them persisting."
         )
     return None
 
@@ -571,8 +597,11 @@ if _scratchpad_model:
                     max_tokens=max_tokens,
                 )
 
-                if not response.tool_calls:
-                    # Same classification as the async path (ENG-1081).
+                if not response.tool_calls or any(
+                    tc.repaired for tc in response.tool_calls
+                ):
+                    # Same classification as the async path (ENG-1081), and the
+                    # same reason `parse_error` is left to the validation branch.
                     # Nothing retries here, but the message reaches the model as
                     # a traceback, so "you ran out of budget" is actionable
                     # where "did not return structured output" was not.
@@ -616,6 +645,8 @@ if _scratchpad_model:
             Returns:
                 The final text response from the LLM.
             """
+            from anton.core.llm.provider import damaged_tool_call_result
+
             llm = get_llm()
             messages = [{"role": "user", "content": user_message}]
 
@@ -649,6 +680,14 @@ if _scratchpad_model:
                 # Execute each tool and collect results
                 tool_results = []
                 for tc in response.tool_calls:
+                    # Arguments the model never finished are answered, not
+                    # executed — same refusal as the session's tool loops, via
+                    # the same shared builder.
+                    damaged = damaged_tool_call_result(tc)
+                    if damaged is not None:
+                        tool_results.append(damaged)
+                        continue
+
                     try:
                         result = handle_tool(tc.name, tc.input)
                     except Exception as exc:
@@ -1142,8 +1181,6 @@ while True:
     # Liveness heartbeat: a daemon thread pings the real pipe while this cell
     # runs, so the parent's inactivity watchdog sees activity through a
     # deliberate sleep or a blocking call, not just through stdout/progress().
-    # Span covers the auto-install retry below too (ENG-1275: a silent
-    # in-cell install used to be indistinguishable from a wedged process).
     _hb_stop = threading.Event()
     _hb_thread = None
     if _HEARTBEAT_INTERVAL > 0:
@@ -1167,61 +1204,17 @@ while True:
 
         sys.stdout = out_buf
         sys.stderr = err_buf
-        _auto_installed = []
         try:
             compiled = compile(code, "<scratchpad>", "exec")
             exec(compiled, namespace)
         except ModuleNotFoundError as _mnf:
-            # Auto-install the missing module and retry the cell once
-            _missing = _mnf.name
-            if _missing:
-                sys.stdout = _real_stdout
-                sys.stderr = sys.__stderr__
-                _cell_log_handler.buf = None
-                with _wire_lock:
-                    _real_stdout.write(
-                        PROGRESS_MARKER + " " + f"Installing {_missing}..." + "\n"
-                    )
-                    _real_stdout.flush()
-                import subprocess as _sp
-
-                _uv_path = os.environ.get("ANTON_UV_PATH", "")
-                if _uv_path:
-                    _pip = _sp.run(
-                        [_uv_path, "pip", "install", "--python", sys.executable, _missing],
-                        capture_output=True,
-                        timeout=120,
-                    )
-                else:
-                    _pip = _sp.run(
-                        [sys.executable, "-m", "pip", "install", _missing],
-                        capture_output=True,
-                        timeout=120,
-                    )
-                # Reset buffers and retry
-                out_buf = io.StringIO()
-                err_buf = io.StringIO()
-                log_buf = io.StringIO()
-                # Same ordering rule as the first cell setup: shipped first,
-                # so the swap can only duplicate a chunk, never skip one.
-                _cell_out["shipped"] = 0
-                _cell_out["buf"] = out_buf
-                _cell_log_handler.buf = log_buf
-                sys.stdout = out_buf
-                sys.stderr = err_buf
-                if _pip.returncode == 0:
-                    _auto_installed.append(_missing)
-                    try:
-                        exec(compiled, namespace)
-                    except Exception:
-                        error = traceback.format_exc()
-                else:
-                    error = (
-                        f"ModuleNotFoundError: No module named '{_missing}'\n"
-                        f"Auto-install failed:\n{_pip.stderr.decode()}"
-                    )
-            else:
-                error = traceback.format_exc()
+            # Don't pip-install a name pulled from an exception — it may be a
+            # hallucinated import, and the string is attacker-controllable.
+            # Hint goes before the traceback: callers key off its last line.
+            hint = ""
+            if _mnf.name:
+                hint = MISSING_MODULE_HINT.format(name=_mnf.name)
+            error = hint + traceback.format_exc()
         except Exception:
             error = traceback.format_exc()
         finally:
@@ -1280,8 +1273,6 @@ while True:
         "error": error,
         "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
     }
-    if _auto_installed:
-        result["auto_installed"] = _auto_installed
     with _wire_lock:
         _real_stdout.write(RESULT_START + "\n")
         _real_stdout.write(json.dumps(result) + "\n")

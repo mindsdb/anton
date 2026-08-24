@@ -4,6 +4,10 @@ migration so the refactor cannot change observable behaviour silently.
 The tool's JSON result is a contract with the LLM: statuses resolved /
 invalid / no_matches / cancelled / picker_unavailable / error, plus the
 auto_resolved and path fields. Nothing here may change in Task 7.
+
+ENG-1852 later extended the contract deliberately: needs_confirmation was
+added, and auto_resolved narrowed to pattern matches only — a lone
+model-supplied candidate is confirmed with the user instead.
 """
 
 from __future__ import annotations
@@ -293,3 +297,343 @@ async def test_elicitor_exception_becomes_error_status(tmp_path):
         )
     )
     assert result["status"] == "error"
+
+
+# ─── ENG-1357: don't advertise a picker that cannot render ───────────────
+#
+# Browse mode is physically impossible without a path elicitor (cowork-server
+# injects none). Advertising it anyway — while the injected system prompt
+# forbids asking for a path and forbids guessing — left the model with no
+# legitimate move when a user referred to an unattached file. It fabricated
+# the user's data instead. These tests pin the two halves of the fix: the
+# tool's remedies, and which definition each host gets.
+
+
+class _PathlessElicitor(_FakeElicitor):
+    """A host that can render choices but has no file browser."""
+
+    supported_kinds = ("choice",)
+
+
+async def test_browse_without_elicitor_points_at_attachment_not_a_typed_path(tmp_path):
+    result = json.loads(
+        await handle_select_path(_session(tmp_path), {"prompt": "Find the folder"})
+    )
+    assert result["status"] == "picker_unavailable"
+    msg = result["message"]
+    # The one route that works on this host.
+    assert "attach" in msg.lower()
+    # NOT the route the harness file-access policy forbids anyway.
+    assert "plain text" not in msg.lower()
+    assert "paste" not in msg.lower() or "Do not ask them to type or paste" in msg
+
+
+async def test_ambiguous_pick_still_asks_which_candidate(tmp_path):
+    """The browse remedy changed; the PICK remedy must NOT. Asking which of
+    several paths you already found inside the project is legitimate — they are
+    files the agent may read. Guards against a blanket message rewrite."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "report.csv").write_text("x")
+    (tmp_path / "b" / "report.csv").write_text("y")
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path), {"prompt": "Which one?", "pattern": "**/report.csv"}
+        )
+    )
+    assert result["status"] == "picker_unavailable"
+    assert len(result["candidates"]) == 2
+    assert "which of these" in result["message"].lower()
+    assert "attach" not in result["message"].lower()
+
+
+async def test_no_matches_does_not_suggest_browsing_when_browse_cannot_run(tmp_path):
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path), {"prompt": "Which one?", "pattern": "*.parquet"}
+        )
+    )
+    assert result["status"] == "no_matches"
+    # Must not tell the model to fall back to browse mode — that lands on
+    # picker_unavailable here. (Careful: the message legitimately contains the
+    # word "browser", so match the suggestion, not the substring.)
+    assert "let the user browse" not in result["message"].lower()
+    assert "attach" in result["message"].lower()
+
+
+async def test_no_matches_still_suggests_browsing_where_browse_works(tmp_path):
+    """The honest advice must survive on hosts that can actually browse."""
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _FakeElicitor(None)),
+            {"prompt": "Which one?", "pattern": "*.parquet"},
+        )
+    )
+    assert result["status"] == "no_matches"
+    assert "browse" in result["message"].lower()
+
+
+# ─── which definition each host is given ────────────────────────────────
+
+
+def _registered_select_path(session):
+    session._build_tools()
+    return next(t for t in session.tool_registry.get_tool_defs() if t.name == "select_path")
+
+
+def test_pathless_host_gets_the_pick_only_definition(make_session):
+    tool = _registered_select_path(make_session(elicitor=_PathlessElicitor(None)))
+    # Browse is not offered as a mode — the full definition advertises it as a
+    # "• BROWSE —" bullet, which must be gone. It may still be *named* in order
+    # to say it does not exist here, so match the advertisement, not the word.
+    assert "• BROWSE" not in tool.description
+    assert "there is no BROWSE mode" in tool.description
+    # ...and the injected system prompt names attachment instead of steering
+    # the model at a picker that cannot render. This is the sentence whose
+    # absence produced the fabrication.
+    assert "attach" in tool.prompt.lower()
+    assert "no file browser" in tool.prompt.lower()
+    # ...and the FUNCTION-CALLING SCHEMA must agree with the prose. `replace()`
+    # copies input_schema by reference, so without an explicit override the
+    # model reads "there is no BROWSE mode" in the description while the schema
+    # still offers `start_dir`, documented as "BROWSE mode only" (caught in
+    # review of #331 — the description-only assertions above missed it).
+    assert "start_dir" not in tool.input_schema["properties"]
+    # The parameters pick mode actually needs are still there.
+    for key in ("prompt", "candidates", "pattern", "base_dir"):
+        assert key in tool.input_schema["properties"]
+
+
+def test_host_with_a_path_elicitor_keeps_browse_mode(make_session):
+    tool = _registered_select_path(make_session(elicitor=_FakeElicitor(None)))
+    assert "BROWSE" in tool.description
+    assert "Browse mode" in tool.prompt
+    # The browse-only parameter belongs here, and only here.
+    assert "start_dir" in tool.input_schema["properties"]
+
+
+def test_no_elicitor_at_all_gets_the_pick_only_definition(make_session):
+    tool = _registered_select_path(make_session())
+    assert "there is no BROWSE mode" in tool.description
+
+
+def test_picker_unavailable_is_a_documented_status_in_both_definitions():
+    """The model was handed a status the description never mentioned, carrying
+    a remedy in prose. Both variants must name it."""
+    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
+
+    assert "picker_unavailable" in SELECT_PATH_TOOL.description
+    assert "picker_unavailable" in SELECT_PATH_TOOL_PICK_ONLY.description
+    # The full definition must say what to do in each mode.
+    assert "attach" in SELECT_PATH_TOOL.description.lower()
+
+
+# ─── ENG-1852: a model-supplied single candidate is not the user's choice ──
+#
+# In a fresh cowork project exactly one directory exists (`skills`), so the
+# model enumerates the project, offers it as the lone candidate, and the old
+# `len(candidates) == 1` shortcut confirmed it — reporting a folder nobody
+# chose as connected, in answer to "give you access to a folder on my
+# computer". A lone PATTERN match stays auto-resolved (the glob searched and
+# found exactly one thing); a lone EXPLICIT candidate now needs the user.
+
+
+class _TextAnswerElicitor(_PathlessElicitor):
+    """Answers a choice card with free-typed text instead of an option."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(None)
+        self.text = text
+
+    async def ask(self, question_id, request):
+        self.requests.append(request)
+        return AskAnswer(status="answered", text=self.text)
+
+
+def _choice_session(tmp_path, elicitor):
+    """A session whose host can render choice cards (non-None emitter):
+    elicit() refuses to publish kind="choice" into a void."""
+    session = _session(tmp_path, elicitor)
+    session.emitter = object()
+    return session
+
+
+async def test_single_explicit_candidate_needs_confirmation_without_any_elicitor(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "needs_confirmation"
+    assert "auto_resolved" not in result
+    assert result["candidates"] == [str((tmp_path / "skills").resolve())]
+    # The two remedies: confirm before using, attach for anything outside.
+    assert "confirm" in result["message"].lower()
+    assert "attach" in result["message"].lower()
+
+
+async def test_single_explicit_candidate_confirmed_through_choice_card(tmp_path):
+    (tmp_path / "skills").mkdir()
+    elicitor = _PathlessElicitor("yes")
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, elicitor),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "resolved"
+    assert result["path"] == str((tmp_path / "skills").resolve())
+    # Confirmed by the user — the opposite of auto-resolved.
+    assert "auto_resolved" not in result
+    card = elicitor.requests[0]
+    assert card.kind == "choice"
+    assert [option.value for option in card.options] == ["yes", "no"]
+
+
+async def test_single_explicit_candidate_declined_is_cancelled_with_attach_guidance(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, _PathlessElicitor("no")),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert "path" not in result
+    assert "declined" in result["message"].lower()
+    assert "attach" in result["message"].lower()
+
+
+async def test_single_explicit_candidate_typed_reply_is_relayed_not_asserted_as_decline(tmp_path):
+    """A user who types what they actually meant must be heard — the words
+    reach the model verbatim, and the result must not claim the user
+    'declined': a free-typed reply (possibly the literal word 'yes') is not a
+    decline they made (review nit on #392)."""
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, _TextAnswerElicitor("I meant /Users/me/dev/tenantguard")),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert "path" not in result
+    assert "/Users/me/dev/tenantguard" in result["message"]
+    assert "declined" not in result["message"].lower()
+    assert "not confirmed" in result["message"]
+
+
+async def test_single_explicit_candidate_card_dismissed_is_cancelled(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, _PathlessElicitor(None)),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+    assert "path" not in result
+
+
+async def test_single_explicit_candidate_without_emitter_needs_confirmation(tmp_path):
+    """kind="choice" cannot publish without an emitter (the non-streaming
+    turn() path): elicit answers unavailable, which must not become resolved."""
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _PathlessElicitor("yes")),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "needs_confirmation"
+
+
+async def test_single_explicit_candidate_budget_exhausted_is_not_resolved(tmp_path):
+    (tmp_path / "skills").mkdir()
+    session = _choice_session(tmp_path, _PathlessElicitor("yes"))
+    session.question_count = MAX_QUESTIONS_PER_TURN
+    result = json.loads(
+        await handle_select_path(
+            session,
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "error"
+    assert "confirmation" in result["message"].lower()
+
+
+async def test_single_explicit_candidate_goes_through_the_path_picker_where_one_renders(tmp_path):
+    (tmp_path / "skills").mkdir()
+    chosen = str((tmp_path / "skills").resolve())
+    elicitor = _FakeElicitor(chosen)
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, elicitor),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    # Picking it in the picker IS the confirmation.
+    assert result == {"status": "resolved", "path": chosen}
+    assert len(elicitor.requests[0].options) == 1
+
+
+async def test_single_explicit_candidate_path_picker_can_be_cancelled(tmp_path):
+    (tmp_path / "skills").mkdir()
+    result = json.loads(
+        await handle_select_path(
+            _session(tmp_path, _FakeElicitor(None)),
+            {"prompt": "Choose the folder to connect", "kind": "folder", "candidates": ["skills"]},
+        )
+    )
+    assert result["status"] == "cancelled"
+
+
+async def test_single_pattern_match_still_auto_resolves_with_a_choice_host(tmp_path):
+    """The ENG-1852 guard must not widen: a lone pattern match is a genuine
+    discovery and keeps resolving with no prompt, even where a card could
+    render."""
+    (tmp_path / "report.csv").write_text("a,b\n")
+    elicitor = _PathlessElicitor("yes")
+    result = json.loads(
+        await handle_select_path(
+            _choice_session(tmp_path, elicitor),
+            {"prompt": "Which one?", "pattern": "*.csv"},
+        )
+    )
+    assert result["status"] == "resolved"
+    assert result["auto_resolved"] is True
+    assert elicitor.requests == []
+
+
+def test_needs_confirmation_is_a_documented_status_in_both_definitions():
+    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
+
+    assert "needs_confirmation" in SELECT_PATH_TOOL.description
+    assert "needs_confirmation" in SELECT_PATH_TOOL_PICK_ONLY.description
+    # The pick-only host is where the failure lived: its definition must also
+    # forbid substituting an in-project path for an out-of-project request.
+    assert "substitute" in SELECT_PATH_TOOL_PICK_ONLY.description
+    assert "substitute" in SELECT_PATH_TOOL_PICK_ONLY.prompt
+
+
+def test_module_singletons_are_not_mutated(make_session):
+    """ToolDefs are module-level singletons shared across every session in the
+    process — the pick-only variant must be a copy, never an in-place edit."""
+    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
+
+    pristine_full = SELECT_PATH_TOOL.description
+    pristine_pick = SELECT_PATH_TOOL_PICK_ONLY.description
+    _registered_select_path(make_session())
+    _registered_select_path(make_session(elicitor=_FakeElicitor(None)))
+    assert SELECT_PATH_TOOL.description == pristine_full
+    assert SELECT_PATH_TOOL_PICK_ONLY.description == pristine_pick
+    assert SELECT_PATH_TOOL is not SELECT_PATH_TOOL_PICK_ONLY
+    # input_schema is a module-level dict shared by every session in the
+    # process: the pick-only variant must rebuild it, never pop from it.
+    assert "start_dir" in SELECT_PATH_TOOL.input_schema["properties"]
+    assert (
+        SELECT_PATH_TOOL.input_schema["properties"]
+        is not SELECT_PATH_TOOL_PICK_ONLY.input_schema["properties"]
+    )

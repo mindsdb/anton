@@ -153,8 +153,10 @@ class LLMClient:
 
         Exposed so the session's truncation recovery can compare a
         response's ``output_tokens`` against the budget the call actually
-        ran with (ENG-1042) — the gateway's ``finish_reason`` can't be
-        trusted at the cap (ENG-1082).
+        ran with (ENG-1042). This gate was added because the gateway once
+        reported a normal stop at the cap (ENG-1082, fixed 2026-08-03); it is
+        kept because a token count needs no dialect mapping and no provider
+        can get it wrong.
         """
         return self._max_tokens
 
@@ -301,7 +303,15 @@ class LLMClient:
         # `planning`, defeating the split this exists to provide (#309 review).
         self._notify_usage(role, model, response.usage, listener)
 
-        if not response.tool_calls:
+        # No call at all, or one whose arguments were cut mid-value. `repaired`
+        # cannot wait for the validation branch below: the dict parses, and it
+        # validates whenever the missing field is optional or defaulted, so a
+        # half-written object would be returned as the model's answer.
+        #
+        # `parse_error` deliberately stays out of this check — it reaches the
+        # validation branch, which classifies it only when the budget ran out
+        # and otherwise lets the schema error through as itself.
+        if not response.tool_calls or any(tc.repaired for tc in response.tool_calls):
             # Shared with the scratchpad's sync twin so both paths classify the
             # failure identically — see `raise_unusable_tool_call` (ENG-1081).
             raise_unusable_tool_call(response, tool_name=tool["name"], budget=budget)
