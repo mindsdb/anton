@@ -41,6 +41,9 @@ on:
       cowork_ref:
         description: "cowork-server ref to build"
         default: staging
+      baseline_ref:
+        description: "anton ref to compare against"
+        default: staging
       evals_ref:
         description: "cowork_evals ref providing the run config and the report"
         default: pr-reporting
@@ -56,12 +59,14 @@ jobs:
   evals:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-evals'
     runs-on: ubuntu-latest
-    # A clean run is ~6 minutes plus the cowork-server build. Anything past this
-    # is hung rather than slow, and the GitHub default of 360 would hold a runner
-    # for six hours to establish that.
-    timeout-minutes: 60
+    # Two builds and two passes over the dataset: ~6 minutes of agent time each,
+    # plus a `uv sync` per harness build. Anything past this is hung rather than
+    # slow, and the GitHub default of 360 would hold a runner for six hours to
+    # establish that.
+    timeout-minutes: 120
     env:
       COWORK_REF: ${{ inputs.cowork_ref || 'staging' }}
+      BASELINE_REF: ${{ inputs.baseline_ref || 'staging' }}
       EVALS_REF: ${{ inputs.evals_ref || 'pr-reporting' }}
       REPEATS: ${{ inputs.repeats || '3' }}
       ANTON_SHA: ${{ github.event.pull_request.head.sha || inputs.anton_ref || github.sha }}
@@ -110,6 +115,23 @@ jobs:
           # the object present locally — a shallow clone does not have it.
           fetch-depth: 0
 
+      # Pinned to a commit, not a branch name, for two reasons:
+      #  - the eval compares the two refs to decide whether the baseline build is
+      #    a duplicate, and "staging" never equals a sha, so the check would never
+      #    fire on a PR that IS staging;
+      #  - a branch that moves mid-run would make the two halves of the comparison
+      #    disagree about what "baseline" meant.
+      - name: Resolve the baseline commit
+        id: baseline
+        if: steps.fork.outputs.skip != '1'
+        working-directory: anton
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin "$BASELINE_REF"
+          sha=$(git rev-parse --verify FETCH_HEAD^{commit})
+          echo "resolved $BASELINE_REF -> $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Check out cowork-server
         if: steps.fork.outputs.skip != '1'
         uses: actions/checkout@v4
@@ -150,6 +172,9 @@ jobs:
           CI_COWORK_REPO: ${{ github.workspace }}/cowork-server
           CI_ANTON_REF: ${{ env.ANTON_SHA }}
           CI_COWORK_REF: ${{ env.COWORK_REF }}
+          # The build to compare against. When it is the same commit as
+          # CI_ANTON_REF the eval drops the duplicate and reports a single row.
+          CI_BASELINE_REF: ${{ steps.baseline.outputs.sha }}
         run: |
           set -euo pipefail
           uv run eval run \
