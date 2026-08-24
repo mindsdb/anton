@@ -13,7 +13,7 @@ name: Anton evals
 #   LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
 #                      the project the PROD gateway writes to. A dev-project key
 #                      here yields empty token/cost columns, not an error.
-#   GH_PULL_REQUEST_READ_TOKEN
+#   GH_EVALS_READ_TOKEN
 #                      read access to mindsdb/cowork-server + mindsdb/cowork_evals.
 #                      The automatic GITHUB_TOKEN is scoped to this repository
 #                      alone — same-org membership does not extend it.
@@ -65,7 +65,7 @@ jobs:
       EVALS_REF: ${{ inputs.evals_ref || 'pr-reporting' }}
       REPEATS: ${{ inputs.repeats || '3' }}
       ANTON_SHA: ${{ github.event.pull_request.head.sha || inputs.anton_ref || github.sha }}
-      REPO_TOKEN: ${{ secrets.GH_PULL_REQUEST_READ_TOKEN }}
+      REPO_TOKEN: ${{ secrets.GH_EVALS_READ_TOKEN }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
@@ -97,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           : "${MINDS_API_KEY:?MINDSHUB_API_KEY secret is not set}"
-          : "${REPO_TOKEN:?no read token — set the GH_PULL_REQUEST_READ_TOKEN secret or pass repo_token}"
+          : "${REPO_TOKEN:?no read token — set the GH_EVALS_READ_TOKEN secret or pass repo_token}"
           : "${LANGFUSE_PUBLIC_KEY:?no Langfuse key — token and cost columns would be empty}"
 
       - name: Check out anton
