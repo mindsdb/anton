@@ -2116,8 +2116,11 @@ class ChatSession:
             # smaller `max_tokens` (or a distinct router model with a lower
             # output cap) would otherwise get a 400 on every compaction, and the
             # handler below logs only the exception type — proactive compaction
-            # would be dead and invisible.
-            budget = min(_SUMMARY_OUTPUT_BUDGET, self._llm.max_tokens)
+            # would be dead and invisible. Read through `_turn_max_tokens` for
+            # its defensive fallback: a client that doesn't expose the attribute
+            # would otherwise make `min()` raise, and the raise lands in that
+            # same blind `except`.
+            budget = min(_SUMMARY_OUTPUT_BUDGET, self._turn_max_tokens())
             summary_response = await self._llm.summarize(
                 system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],

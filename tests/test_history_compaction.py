@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from unittest.mock import AsyncMock
 
+from anton.core import session as session_mod
 from anton.core.session import (
     ChatSession,
     ChatSessionConfig,
@@ -119,6 +120,28 @@ class TestSummarizerInputBudget:
         # compacted_count = min(int(40*0.6), 40-4) = 24 → turns 0..23 are folded.
         assert "turn-0 " in sent
         assert "turn-23 " in sent
+
+    async def test_clip_keeps_the_tail_when_the_budget_binds(self, caplog, monkeypatch):
+        """The regime the fix is about: material larger than the budget. The old
+        head-cut kept turn 0 and dropped everything after it — the tail-biased
+        clip has to do the opposite, and say so in the log."""
+        history = [
+            _msg("user" if i % 2 == 0 else "assistant", f"turn-{i} " + "x" * 1200)
+            for i in range(40)
+        ]
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nx"))
+        monkeypatch.setattr(session_mod, "_summarizer_input_budget", lambda *a, **kw: 6000)
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        with caplog.at_level(logging.WARNING, logger="anton.core.session"):
+            assert await session._summarize_history() is True
+
+        sent = mock_llm.summarize.await_args.kwargs["messages"][0]["content"]
+        assert "turn-23 " in sent  # newest folded turn — what the head-cut lost
+        assert "turn-12 " not in sent  # the middle is what gets elided
+        assert "chars elided" in sent  # the drop is marked, not silent
+        assert "input clipped" in caplog.text
 
     def test_budget_scales_with_the_window(self):
         # 200k-token window vs the 128k default for an unknown id.
