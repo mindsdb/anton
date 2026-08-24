@@ -16,6 +16,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import truststore
+
 from anton.core.llm.openai import build_chat_completion_kwargs
 
 if TYPE_CHECKING:
@@ -82,9 +84,13 @@ def minds_request(
     req.add_header("Accept-Encoding", "identity")
     req.add_header("Connection", "keep-alive")
 
-    ctx = None
+    # truststore delegates verification to the OS-native trust APIs
+    # (SChannel on Windows, Security framework on macOS) instead of
+    # CPython's own cert-store enumeration, which some Windows machines
+    # behind a TLS-inspecting corporate proxy/AV don't pick up even though
+    # the injected root CA is trusted by the OS (and thus the browser).
+    ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     if not verify:
-        ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
