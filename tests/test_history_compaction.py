@@ -153,6 +153,29 @@ class TestTruncatedRecord:
         assert "half-writ" in session.history[0]["content"]
         assert "truncated" in caplog.text
 
+    async def test_last_resort_folds_behind_a_marker_instead_of_declining(self, caplog):
+        """The reactive callers run after the provider already rejected the
+        request. Declining there sends the retry into `hard_truncate_history`
+        (4 messages kept) — folding behind a marker keeps the newest ~40%."""
+        original = _alternating_history(10, "x" * 50)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=LLMResponse(
+            content="   \n  ",  # whitespace-only counts as empty
+            usage=Usage(input_tokens=10, output_tokens=8192),
+            stop_reason="max_tokens",
+        ))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=list(original),
+        ))
+        with caplog.at_level(logging.WARNING, logger="anton.core.session"):
+            assert await session._summarize_history(last_resort=True) is True
+
+        assert session.history[-4:] == original[6:]  # newest turns survive
+        assert "No summary of them is available" in session.history[0]["content"]
+        # The host must not replay a marker as the conversation's summary.
+        assert session.last_compaction is None
+
     async def test_empty_record_leaves_history_intact(self, caplog):
         """A generation cut off before any text is a "success" carrying no
         record — `raise_on_empty_response` returns early on any stop_reason.

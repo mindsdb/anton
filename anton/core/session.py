@@ -1955,7 +1955,7 @@ class ChatSession:
                 pass
         self._tracked_backends.clear()
 
-    async def _summarize_history(self) -> bool:
+    async def _summarize_history(self, *, last_resort: bool = False) -> bool:
         """Compress old conversation turns into a summary.
 
         Splits history into old (first 60%) and recent (last 40%), keeping at
@@ -1970,6 +1970,14 @@ class ChatSession:
         StreamContextCompacted event for a compaction that didn't happen. On a
         failure specifically, proactive callers also set
         `_compaction_failed_this_turn` so it isn't re-attempted every round.
+
+        ``last_resort`` marks the reactive callers, which run *after* the
+        provider already rejected the request as too long. There, declining to
+        compact is not free: the retry overflows again and drops to
+        `hard_truncate_history`, which keeps 4 messages. So a summariser that
+        answers with no text still folds the old turns — behind a factual
+        marker, and without recording a durable compaction the host would
+        replay as a summary.
         """
         if len(self._history) < 6:
             return False  # Too short to summarize
@@ -2131,20 +2139,39 @@ class ChatSession:
                 )
             # An empty 200 reaches here: `raise_on_empty_response` returns early
             # on any truthy stop_reason, so a cut-off-before-any-text generation
-            # is a "success" carrying no record. Substituting a placeholder would
-            # replace real turns with a fact-free line that can never self-heal
-            # (ENG-1274) — treat it as a failed summarisation instead.
-            if not summary_response.content:
+            # is a "success" carrying no record. Whitespace-only counts as empty,
+            # same as every other content check in this file.
+            if not (summary_response.content or "").strip():
+                if not last_resort:
+                    # Proactive: nothing is broken yet, so decline rather than
+                    # replace real turns with a fact-free line that can never
+                    # self-heal (ENG-1274).
+                    logger.warning(
+                        "history summarization: empty record (stop_reason=%s) — "
+                        "keeping %d turns intact",
+                        summary_response.stop_reason,
+                        len(old_turns),
+                    )
+                    return False
+                # Reactive: the request already overflowed. Folding the old turns
+                # behind a factual marker keeps the newest ~40%; declining sends
+                # the retry into `hard_truncate_history`, which keeps 4 messages.
                 logger.warning(
                     "history summarization: empty record (stop_reason=%s) — "
-                    "keeping %d turns intact",
+                    "folding %d turns behind a marker to survive the overflow",
                     summary_response.stop_reason,
                     len(old_turns),
                 )
-                return False
-            summary = summary_response.content
-            # Record the compaction ONLY on success.
-            self._last_compacted_count = compacted_count
+                summary = (
+                    f"{len(old_turns)} earlier turns were dropped to fit the "
+                    "context window. No summary of them is available."
+                )
+                # Deliberately no `_last_compacted_count`: the host must not
+                # persist and replay this as the conversation's summary.
+            else:
+                summary = summary_response.content
+                # Record the compaction ONLY on success.
+                self._last_compacted_count = compacted_count
         except Exception as exc:
             # Don't discard history on failure — losing the earlier turns is
             # worse than carrying them. Leave `self._history` untouched and let
@@ -2445,7 +2472,7 @@ class ChatSession:
         except ContextOverflowError:
             pass
 
-        compacted = await self._summarize_history()
+        compacted = await self._summarize_history(last_resort=True)
         self._compact_scratchpads()
         if compacted:
             self._compacted_this_turn = True
@@ -2829,7 +2856,7 @@ class ChatSession:
         except ContextOverflowError:
             pass
 
-        compacted = await self._summarize_history()
+        compacted = await self._summarize_history(last_resort=True)
         self._compact_scratchpads()
         if compacted:
             self._compacted_this_turn = True
