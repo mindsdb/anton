@@ -385,7 +385,11 @@ class ArtifactStore:
         for p in sorted(folder.rglob("*")):
             if not p.is_file() or p.is_symlink():
                 continue
-            rel = str(p.relative_to(folder))
+            # POSIX separators regardless of platform: FileEntry.path is
+            # persisted to metadata.json and compared against the stored
+            # fingerprint, so a Windows-written artifact must not disagree
+            # with the same artifact written anywhere else.
+            rel = p.relative_to(folder).as_posix()
             if rel in _HOUSEKEEPING_FILES:
                 continue
             try:
