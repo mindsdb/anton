@@ -575,15 +575,6 @@ def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     return f"{text[:head]}{marker}{text[-tail:]}"
 
 
-# 25% of a 200k window is ~12x the largest input measured in production (max
-# 17,078 chars), so real conversations pass whole and the clip is a backstop.
-# The old flat 8,000 sat below the median and fired on 81% of compactions.
-_SUMMARY_INPUT_WINDOW_SHARE = 0.25
-# ponytail: rule of thumb, not a tokenizer — only sizes a backstop. Two other
-# copies of this calibration live in the memory subsystem (hippocampus,
-# cortex); recalibrating for code-heavy or non-English corpora has to touch all
-# three.
-_CHARS_PER_TOKEN = 4
 # 2-4x what the prompt asks for (~1500 words — ~2000 tokens of English, should
 # fit in 8k limit for other languages), leaving room for reasoning and for the
 # preamble cheap models write before the record — both bill against this same
@@ -618,21 +609,27 @@ _SUMMARY_SYSTEM_PROMPT = (
 def _summarizer_input_budget(model: str, reserved: int = 0) -> int:
     """Char budget for the old turns handed to the history summariser.
 
-    Compaction fires at 70% pressure on the *coding* model, so with the default
-    config — router falls back to coding — the folded turns already fit the
-    summariser's window and a routine clip only discards readable material.
+    One char per window token: a quarter of the window at the ~4 chars/token
+    rule of thumb. Deliberately a backstop, not a fit — production summariser
+    inputs top out around 17k chars, ~12x under this, while the flat 8,000 it
+    replaces sat *below* the median and fired on 81% of compactions.
+
+    Compaction fires at 70% pressure on the model the turn runs on (planning),
+    so with the default config — one window size across roles — the folded
+    turns already fit the summariser's window and a routine clip only discards
+    readable material.
 
     ponytail: a configured `router_model` breaks that symmetry, since nothing
     reconciles a share of the router's window against material sized by the
-    coding model's trigger. A smaller router still gets its own share, so the
-    clip stays a bound, but the 25% intent no longer holds. Reconciling them
-    needs the two windows compared at the call site.
+    planning model's trigger. A smaller router still gets its own share, so the
+    clip stays a bound, but the quarter-window intent no longer holds.
+    Reconciling them needs the two windows compared at the call site.
 
     ``reserved`` is text sharing the request (the carried-forward summary and
-    the system prompt).
+    the system prompt) — a sub-percent correction inside an estimate whose own
+    error bar is a factor of several, kept only so the arithmetic isn't a lie.
     """
-    window_chars = int(context_window(model) * _SUMMARY_INPUT_WINDOW_SHARE) * _CHARS_PER_TOKEN
-    return max(window_chars - reserved, 0)
+    return max(context_window(model) - reserved, 0)
 
 
 def _render_tool_result_content(content, cap: int) -> str:
@@ -2084,18 +2081,18 @@ class ChatSession:
         #   what `## Active state` / `## Blocked` / `## Remaining` are built from
         # - folded turns are *replaced*, so a clip loses them permanently
         # - a summary built from part of the turns must be visible as such
-        budget = _summarizer_input_budget(
+        input_budget_chars = _summarizer_input_budget(
             self._llm.router_model,
             len(prior_summary) + len(_SUMMARY_SYSTEM_PROMPT),
         )
-        clipped = _clip_keep_cause(old_text, budget)
+        clipped = _clip_keep_cause(old_text, input_budget_chars)
         if clipped != old_text:
             logger.warning(
                 "history summarization: input clipped %d -> %d chars "
-                "(budget %d, %d turns folded)",
+                "(budget %d chars, %d turns folded)",
                 len(old_text),
                 len(clipped),
-                budget,
+                input_budget_chars,
                 len(old_turns),
             )
             old_text = clipped
@@ -2120,11 +2117,11 @@ class ChatSession:
             # its defensive fallback: a client that doesn't expose the attribute
             # would otherwise make `min()` raise, and the raise lands in that
             # same blind `except`.
-            budget = min(_SUMMARY_OUTPUT_BUDGET, self._turn_max_tokens())
+            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._turn_max_tokens())
             summary_response = await self._llm.summarize(
                 system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
-                max_tokens=budget,
+                max_tokens=output_budget_tokens,
             )
             # A truncated record is kept, not retried:
             # - hitting a cap 4x the requested length means the model ignored the
@@ -2133,11 +2130,11 @@ class ChatSession:
             #   still beats leaving compaction to the reactive overflow path,
             #   which discards history outright
             # Logged so a record built from a cut-off generation is identifiable.
-            if looks_truncated(summary_response, budget):
+            if looks_truncated(summary_response, output_budget_tokens):
                 logger.warning(
-                    "history summarization: record truncated at budget %d "
+                    "history summarization: record truncated at budget %d tokens "
                     "(output_tokens=%s) — keeping the partial record",
-                    budget,
+                    output_budget_tokens,
                     summary_response.usage.output_tokens,
                 )
             # An empty 200 reaches here: `raise_on_empty_response` returns early
