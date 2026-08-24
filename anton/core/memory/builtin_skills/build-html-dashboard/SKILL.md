@@ -49,7 +49,8 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   Files the user attached or pasted appear with ABSOLUTE paths in the conversation
   context (`.cowork/files/<uuid>/<name>` in the app, `.anton/uploads/clipboard_*.png`
   for a CLI paste). Use the path you were given — never guess one or scan directories.
-  If the user refers to a file whose path you cannot see, ask them for it.
+  If the user refers to a file whose path you cannot see, ask them to attach it
+  to the conversation — never ask for a filesystem path.
 
   Never point the HTML at that original path: it sits outside `<artifact_path>`, and
   only relative references to files INSIDE that folder are bundled on publish, so the
