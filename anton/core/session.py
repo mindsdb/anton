@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
+from anton.core.llm.endpoints import classify_endpoint
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -64,6 +65,7 @@ from anton.core.llm.thalamus import (
     gate_turn,
 )
 from anton.core.llm.tracing import (
+    VALID_SURFACES,
     TraceContext,
     reset_trace_context,
     set_trace_context,
@@ -512,6 +514,26 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+def _safe_error_type(exc: BaseException) -> str:
+    """The exception's class name, and nothing else, for analytics.
+
+    Deliberately narrower than its sibling `_safe_error_detail`, which appends
+    a status code or the offending pydantic field paths. That extra detail is
+    right for a log line a human reads and wrong for a PostHog property: the
+    point of `error_type` is to resolve one opaque bucket into a *groupable*
+    distribution, and a compound value would spread a single failure mode
+    across many rows. Both are content-free; they differ only in cardinality.
+
+    Never raises, for the same reason as `_safe_error_detail`: it runs inside
+    an `except` handler, where an escape would turn a handled failure into a
+    dead turn.
+    """
+    try:
+        return type(exc).__name__
+    except Exception:  # pragma: no cover - defensive
+        return "unavailable"
+
+
 def _is_provider_auth_error(exc: BaseException) -> bool:
     """A provider-auth 401 — anton's "Invalid API key — …" copy from
     `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
@@ -857,6 +879,36 @@ def _build_verify_request(
     return verifier_system, verify_messages
 
 
+def _validated_surface(value: str | None) -> str | None:
+    """Keep only a recognised surface; drop anything else with a warning.
+
+    Hosts supply this string, so it is treated as untrusted (ENG-1459). An
+    unrecognised value is dropped rather than forwarded for two reasons: it
+    would appear as a junk row in every surface breakdown, and a *wrong*
+    surface is worse than an absent one — an absent one is visibly unknown,
+    while a wrong one silently moves a turn into the population it is being
+    compared against.
+
+    Never raises. Telemetry must not be able to fail a turn.
+    """
+    if value is None:
+        return None
+    try:
+        cleaned = str(value).strip().lower()
+    except Exception:  # pragma: no cover - defensive: a pathological __str__
+        return None
+    if not cleaned:
+        return None
+    if cleaned not in VALID_SURFACES:
+        logger.warning(
+            "ignoring unrecognised surface %r (expected one of %s)",
+            value,
+            sorted(VALID_SURFACES),
+        )
+        return None
+    return cleaned
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -886,8 +938,8 @@ class ChatSessionConfig:
     # The values actually in use, which are NOT what this field's name suggests:
     #   "cli"     — anton's own interactive chat (chat_session.py, chat.py)
     #   "anton"   — cowork-server, which passes its *agent harness* id here;
-    #               desktop and hosted web are indistinguishable, both send
-    #               this (ENG-1459 is where that gets split)
+    #               this — see `surface` below, which is how they are now told
+    #               apart (ENG-1459)
     #   "cloud"   — the one-turn-per-pod cloud path
     #   None      — a host that did not identify itself
     #
@@ -895,6 +947,18 @@ class ChatSessionConfig:
     # unset, so "" meant both "CLI" and "unidentified" and nothing could tell
     # them apart.
     harness: str | None = None
+    # WHERE the user was, as opposed to which agent ran: one of
+    # `anton.core.llm.tracing.VALID_SURFACES` (`desktop` / `web` / `cli`), or
+    # None when the host did not say. Surfaced on langfuse traces as the
+    # `surface:<value>` tag plus a `surface` metadata key (ENG-1459).
+    #
+    # Hosts that serve more than one surface must resolve it themselves —
+    # cowork-server derives `web` from org tenancy and `desktop` otherwise,
+    # because only the host knows how it was deployed. An unrecognised value is
+    # dropped with a warning rather than forwarded: it would become a junk row
+    # in every surface breakdown, and a wrong surface is worse than an absent
+    # one.
+    surface: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
     # assumptions inline instead of stopping to ask ("do first, ask later").
@@ -1053,6 +1117,7 @@ class ChatSession:
         self._history_store = config.history_store
         self._session_id = config.session_id
         self._harness = config.harness
+        self._surface = _validated_surface(config.surface)
         # Per-turn token cost books (ENG-1288). Created and armed at each
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
@@ -1366,11 +1431,18 @@ class ChatSession:
         if tool_name != "scratchpad":
             return RESILIENCE_NUDGE
         low = result_text.lower()
-        # An install failure/kill is neither a size nor a liveness problem —
-        # checked before both: the mid-install kill wording also contains
-        # "liveness", and the worker's install errors contain "killed"/
-        # "timed out"-adjacent words (ENG-1275).
-        if "auto-install" in low:
+        # An install/missing-module failure is neither a size nor a liveness
+        # problem — checked before both: the legacy mid-install kill wording
+        # also contains "liveness", and install errors contain "killed"/
+        # "timed out"-adjacent words (ENG-1275). Keyed on the interpreter's
+        # own exception name and install_packages' message prefixes, never on
+        # the hint text — a hint reword must not silently kill this route
+        # (ENG-1635). "auto-install" keeps matching old-version workers.
+        if (
+            "modulenotfounderror" in low
+            or low.startswith(("install failed", "install timed out", "install refused"))
+            or "auto-install" in low
+        ):
             return SCRATCHPAD_INSTALL_NUDGE
         # A silence/liveness kill means the worker looked dead — "make the
         # cell smaller" is exactly the wrong advice there (ENG-578: it taught
@@ -1843,9 +1915,10 @@ class ChatSession:
         # prompt AND by the host's file-access policy, guessing forbidden. It
         # fabricated the data and reported a forecast from it (ENG-1357).
         #
-        # PICK mode does still work here — one match auto-resolves, and ≥2
-        # comes back with the candidate list to ask about — so this is a
-        # narrowing, not a removal.
+        # PICK mode does still work here — one pattern match auto-resolves, a
+        # single model-supplied candidate is confirmed with the user via a
+        # choice card (ENG-1852), and ≥2 comes back with the candidate list to
+        # ask about — so this is a narrowing, not a removal.
         if self.elicitor is not None and "path" in self.elicitor.supported_kinds:
             self.tool_registry.register_tool(SELECT_PATH_TOOL)
         else:
@@ -2554,8 +2627,19 @@ class ChatSession:
         # narrower case where the cancel lands exactly at a yield boundary.
         if isinstance(exc, (GeneratorExit, asyncio.CancelledError)) or cancelled:
             tc.ended_by = "cancelled"
+            # Clear any error_type an earlier terminal already stamped. The
+            # retry-exhausted site stamps one and then keeps going to produce
+            # its apology — and a user who has sat through failed retries is
+            # exactly the user who then presses Stop, so this path is ordinary,
+            # not exotic. Leaving the stale value would let plain Stops appear
+            # in an error-cause breakdown, which is the opposite of the point.
+            tc.error_type = ""
         elif exc is not None:
             tc.ended_by = "error"
+            # The exception was in scope here and thrown away until ENG-1689,
+            # so "error" covered a parse failure, a tool crash, a bad config
+            # and an anton bug alike — indistinguishable in any query.
+            tc.error_type = _safe_error_type(exc)
 
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
@@ -2590,6 +2674,58 @@ class ChatSession:
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
         )
 
+        # Script traffic never reaches the analytics sink (ENG-1692).
+        #
+        # A turn with NO session id AND zero LLM calls did nothing and belongs to
+        # nobody: it is an eval, replay or test driver. Measured over 14 days to
+        # 2026-08-20, that shape was 8,209 of 11,734 `turn_completed` events —
+        # **70% of all volume, carrying 0 tokens** — from 15 machines. It made
+        # the per-turn median come out at ZERO, which is impossible for a
+        # completed turn, and would have set ENG-1286's spend ceiling from a
+        # fabricated distribution.
+        #
+        # BOTH conditions are required, and each half alone deletes real data:
+        #   * `llm_calls == 0` alone would drop 338 real turns that failed
+        #     before reaching a model (ended_by error / retry_exhausted /
+        #     cancelled, 88 installs) — real users hitting real errors.
+        #   * a missing session id alone would drop cowork-server's connector
+        #     probe, which legitimately runs a turn without one and spent 4.8M
+        #     tokens over the same window.
+        #
+        # Two hosts run turns without a session id, not one (#379 review):
+        # cowork-server's connector probe, and `anton chat` when episodic memory
+        # is off — `chat.py`'s `current_session_id` is None whenever
+        # `settings.episodic_memory` is False (user-settable, default True). The
+        # probe survives on `llm_calls > 0`; a CLI turn that fails BEFORE its
+        # first model call has neither half and is dropped with the scripts.
+        #
+        # That collateral is accepted, and measured rather than assumed: over 14
+        # days, all 8,569 script-shaped events carry an EMPTY `harness`, while
+        # every `harness="cli"` turn (26) is kept. So the observed loss is zero.
+        #
+        # `harness` is therefore a discriminator that could narrow this guard if
+        # the loss ever becomes non-zero — deliberately not used yet, because it
+        # would make a fix worth 70% of the volume depend on a field ENG-1695
+        # flags as unreliable (33 turns already carry an empty harness from a
+        # host that should set one). Trading a measured zero for that brittleness
+        # is the wrong direction; revisit only with a real CLI case in hand.
+        #
+        # Deliberately BEHAVIOURAL, not a version test. The original plan gated
+        # on `.dev` in the version; re-measured, that catches only 2,907 of the
+        # 8,209 and misses the single largest contaminant (`2.26.8.18.1rc2`,
+        # 5,253 events, no `.dev` in it). A version says what the software IS,
+        # not who is running it — the same build is installed by a real tester
+        # AND driven by a script, so `2.26.8.18.1rc2` holds 5,253 fake turns and
+        # 16 real ones. No version rule can split that; this one does not try.
+        #
+        # No env override is needed to test the sink by hand: a developer running
+        # a REAL turn has a session id and LLM calls, so it still emits.
+        #
+        # The log line above is deliberately NOT gated — whoever is running the
+        # driver keeps full local diagnosability.
+        if not self._session_id and tc.llm_calls == 0:
+            return
+
         # Analytics sink — same settings-resolution pattern as the
         # ds_connect_* events (anton/tools.py): the session's settings when
         # the host provided AntonSettings, else a fresh resolve so
@@ -2598,6 +2734,19 @@ class ChatSession:
         # never conversation content (ENG-1288).
         try:
             settings = getattr(self, "_settings", None)
+            # Held separately from the fallback below. `endpoint_class` must
+            # describe THIS TURN's endpoint, and the fallback describes the
+            # process environment — which is not the same thing on any host
+            # that builds a session without passing settings (cowork-server's
+            # connector probe does exactly that, and it is a live path). Where
+            # the turn's own settings are absent, or are a `CoreSettings` that
+            # has no provider fields at all, the honest answer is "unknown",
+            # and `classify_endpoint` returns that for both.
+            #
+            # `llm_provider` below deliberately keeps reading the fallback:
+            # changing an existing field's source is ENG-1695's call, not a
+            # side effect of adding a new one.
+            _turn_settings = settings
             if settings is None or not hasattr(settings, "analytics_enabled"):
                 from anton.config.settings import AntonSettings
 
@@ -2615,6 +2764,9 @@ class ChatSession:
                 # classification is broken.
                 **_root_cause_fields,
                 ended_by=tc.ended_by,
+                # Empty unless the turn ended on an exception — see
+                # `TurnCost.error_type`.
+                error_type=tc.error_type,
                 # A completed-but-unverified turn (denied/latched verifier,
                 # ENG-1632) must be excludable from the honest-stop
                 # denominator without a per-conversation Langfuse hop.
@@ -2655,10 +2807,26 @@ class ChatSession:
                 # value is the alarm that some caller invented a role.
                 unknown_tokens=_role_tokens(tc, UNKNOWN_ROLE),
                 unknown_calls=_role_calls(tc, UNKNOWN_ROLE),
-                # Configured provider name (anthropic / openai /
-                # openai-compatible): separates gateway traffic from BYOK in
-                # queries. The finer per-model provider split is a follow-up.
+                # The provider label in the EMITTING HOST's own vocabulary,
+                # drawn from one of two registries that do not share a value
+                # space: anton's CLI dispatch has three values (anthropic /
+                # openai / openai-compatible), cowork-server's has five (plus
+                # gemini / minds-cloud). The same configuration therefore
+                # reports differently depending on which host wrote it, because
+                # a `@field_validator` rewrites `minds-cloud` on construction
+                # while cowork-server's `setattr` overlay bypasses validation
+                # (ENG-1695). An earlier comment here claimed this field
+                # "separates gateway traffic from BYOK in queries" — it cannot,
+                # and doing so undercounted the gateway by 18%. `endpoint_class`
+                # below is the field that answers that; this one is left
+                # deliberately un-normalised, since flattening the two
+                # vocabularies would destroy `minds-cloud`, the one label that
+                # is correct today.
                 llm_provider=str(getattr(settings, "planning_provider", "") or ""),
+                # Where the tokens actually went, from the resolved base-URL
+                # host: local / mindshub / third-party (ENG-1689). Never the
+                # URL itself — those carry internal corporate hostnames.
+                endpoint_class=classify_endpoint(_turn_settings),
                 harness=str(self._harness or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
@@ -2670,6 +2838,79 @@ class ChatSession:
             )
         except Exception:
             # Reporting must never affect the turn that just ran.
+            pass
+
+    def _emit_tool_completed(
+        self,
+        name: str,
+        ok: bool | None,
+        duration_ms: float,
+        error_type: str,
+    ) -> None:
+        """Per-tool-call analytics event (ENG-1486).
+
+        The verdict the dispatch loop already computes for the UI's
+        ``tool_done`` marker, sent where it can be aggregated: without this,
+        "which tools fail, how often, how slowly" is unanswerable — the
+        gateway's vantage point is structurally wrong (67% of its tool spans
+        are structured-output schemas that never return by design, and anton's
+        own retries hide failures from it).
+
+        ``ok`` is the definitive verdict, never a prose guess: ``True``/
+        ``False`` from a caught exception or the handler's own
+        ``ToolOutcome.ok``; ``None`` (an unmigrated handler, a cancelled exec)
+        is reported as ``"unknown"`` rather than coerced either way.
+
+        Payload is deliberately name + verdict + duration + exception CLASS
+        plus the two join keys, and nothing else. Arguments, result content
+        and ``str(exc)`` routinely carry file paths, user data and
+        credentials-adjacent strings — none of them may ever appear here.
+
+        ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
+        values exactly (same names, same derivation), so a tool failure spotted
+        in PostHog joins to its parent turn row there and, via
+        ``conversation_id`` → Langfuse ``sessionId``, to the gateway trace of
+        the turn it happened in. Both already ride ``turn_completed`` through
+        this same sink — no new privacy surface.
+        """
+        try:
+            # Same settings resolution as `_emit_turn_cost` above: the
+            # session's settings when the host provided AntonSettings, else a
+            # fresh resolve so analytics_enabled / the CI drop still apply.
+            settings = getattr(self, "_settings", None)
+            if settings is None or not hasattr(settings, "analytics_enabled"):
+                from anton.config.settings import AntonSettings
+
+                settings = AntonSettings()
+            from anton.analytics import send_event
+
+            # send_event takes STRING values only — every extra is a wire
+            # parameter (tests/test_ask_user.py:496 exists because a first
+            # draft assumed a (name, props) shape).
+            # The same derivation `_emit_turn_cost` uses at close-of-books:
+            # the live TurnCost carries the authoritative index (an explicit
+            # turn_id on the cloud path, the local counter otherwise), so the
+            # values here and on the turn's own row can never disagree.
+            _tc = getattr(self, "_turn_cost", None)
+            turn_index = (
+                getattr(_tc, "turn_index", 0) or (self._turn_count + 1)
+            )
+            send_event(
+                settings,
+                "tool_completed",
+                # `tc.name` is model-generated: a hallucinated tool name is
+                # real signal and SHOULD emit, but unbounded model output has
+                # no business being a property value verbatim. Same idiom as
+                # the dispatch loop's args_summary[:120].
+                name=name[:200],
+                ok="unknown" if ok is None else str(ok).lower(),
+                duration_ms=str(int(duration_ms)),
+                error_type=error_type,
+                conversation_id=str(self._session_id or ""),
+                turn_index=str(turn_index),
+            )
+        except Exception:
+            # Analytics must never affect the tool call that just ran.
             pass
 
     def _spend_ceiling_reached(self) -> bool:
@@ -3320,6 +3561,10 @@ class ChatSession:
                     tool_results.append(damaged)
                     continue
 
+                import time as _time  # same local-import idiom as turn_stream
+
+                _tool_t0 = _time.monotonic()
+                _tool_error_type = ""
                 try:
                     outcome = await self.tool_registry.dispatch_tool(
                         self, tc.name, tc.input, tool_call_id=tc.id,
@@ -3332,6 +3577,19 @@ class ChatSession:
                         ok=False,
                         reason=type(exc).__name__,
                     )
+                    _tool_error_type = _safe_error_type(exc)
+                # Same per-tool-call analytics as the streaming loop's tail
+                # (ENG-1486) — without this, a host on the non-streaming API
+                # silently undercounts. Raw elapsed, no human-wait deduction:
+                # elicitation is structurally unavailable on this path (no
+                # emitter to render a question), so there is no wait to
+                # subtract.
+                self._emit_tool_completed(
+                    name=tc.name,
+                    ok=outcome.ok,
+                    duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
+                    error_type=_tool_error_type,
+                )
                 result = outcome.content
 
                 if isinstance(result, list):
@@ -3624,6 +3882,7 @@ class ChatSession:
                 session_id=self._session_id,
                 turn_id=turn_id if turn_id is not None else self._turn_count + 1,
                 harness=self._harness,
+                surface=self._surface,
                 tags=tuple(trace_tags or ()),
                 metadata=trace_metadata or None,
             )
@@ -3859,6 +4118,10 @@ class ChatSession:
                         # mode in any error-rate query (#309 review).
                         if self._turn_cost is not None:
                             self._turn_cost.ended_by = "retry_exhausted"
+                            # Same exception the SYSTEM message below shows the
+                            # model and the user; it just never reached
+                            # telemetry (ENG-1689).
+                            self._turn_cost.error_type = _safe_error_type(_agent_exc)
                         self._append_history(
                             {
                                 "role": "user",
@@ -4335,6 +4598,15 @@ class ChatSession:
                         continue
 
                     _tool_t0 = _time.monotonic()
+                    # Reset alongside the timer, before ANY branch dispatches:
+                    # the tool_completed emit at the bottom of this block is
+                    # the first reader that runs for every branch, and every
+                    # branch can elicit() (which accumulates the wait). The
+                    # reset used to live on the general branch only — correct
+                    # while that branch was also the only subtractor, but the
+                    # cross-branch emit would have deducted another call's
+                    # leftover wait from this one's runtime.
+                    self.answer_wait_s = 0.0
 
                     # The handler's own failure verdict, when it gave one —
                     # drives the error streak instead of text matching
@@ -4343,6 +4615,19 @@ class ChatSession:
                     # ENG-1276 populated this and nothing ever read it; ENG-1492
                     # is what reads it.
                     tool_reason: str = ""
+                    # Exception class name when the verdict came from a raise,
+                    # "" otherwise, via the same `_safe_error_type` helper
+                    # `turn_completed`'s own error_type uses (ENG-1689) — one
+                    # definition of "class name only, never raises" for both
+                    # events. Kept apart from `tool_reason`, which on the
+                    # ToolOutcome path is prose (a traceback line, a handler
+                    # message) and so can carry paths and user input — this one
+                    # is the only failure detail analytics may see (ENG-1486).
+                    _tool_error_type: str = ""
+                    # Set by the branch that stops the clock at the moment the
+                    # tool finished. None = that branch didn't, so the emit
+                    # falls back to reading the clock itself. See the emit.
+                    _tool_elapsed: float | None = None
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
@@ -4504,7 +4789,7 @@ class ChatSession:
                             # itself via session.emitter — _dispatch_draining
                             # forwards them here as ordinary ("event", ev)
                             # tuples, no different from an ask_user event.
-                            self.answer_wait_s = 0.0
+                            # (answer_wait_s was reset with _tool_t0 above.)
                             _tool_error: Exception | None = None
                             agen = self._dispatch_draining(tc)
                             try:
@@ -4589,6 +4874,58 @@ class ChatSession:
                         result_text = f"Tool '{tc.name}' failed: {exc}"
                         tool_ok = False
                         tool_reason = type(exc).__name__
+                        _tool_error_type = _safe_error_type(exc)
+
+                    # Per-tool-call analytics (ENG-1486): the verdict computed
+                    # for the UI stream, finally aggregable. This is the one
+                    # point every EXECUTED call flows through — all three
+                    # dispatch branches, both the raise and the
+                    # ToolOutcome.ok=False failure shapes — and only executed
+                    # calls: discarded/damaged calls `continue` before
+                    # `_tool_t0`, and structured-output extractions
+                    # (`generate_object_code`) never enter tool dispatch at
+                    # all. Human wait is subtracted so an ask_user answered
+                    # after four minutes is not booked as a slow tool.
+                    # Prefer the duration the branch already stopped the clock
+                    # on — the same value `tool_done` displays. Re-reading the
+                    # clock here would bill the consumer's pull latency for
+                    # the events yielded in between (`tool_done`, and a
+                    # `StreamToolResult` for a scratchpad `dump`) to the tool.
+                    # Small and always upward, but it lands on exactly the
+                    # "how slowly" metric this event exists to answer, and it
+                    # would make the booked duration disagree with the
+                    # displayed one (#390 review). Branches that never stopped
+                    # the clock fall back to reading it now.
+                    #
+                    # The fallback's `- answer_wait_s` is inert TODAY and kept
+                    # for the day it isn't: `elicit()` is the only writer of
+                    # that counter, and its only callers (`handle_select_path`,
+                    # `handle_ask_user`) both route to the branch above, which
+                    # never reaches this fallback. Verified dynamically too —
+                    # asserting the counter is 0.0 here passes the whole suite,
+                    # across the 29 tests that do reach this line.
+                    #
+                    # KNOWN LIMIT, not covered by that subtraction: the
+                    # interactive branch's tools (`connect_new_datasource`,
+                    # `publish_or_preview` publish) collect human input via
+                    # `prompt_or_cancel`, which does NOT feed `answer_wait_s`.
+                    # Their duration therefore includes however long the human
+                    # spent typing — measured at 401ms for a 0.4s stand-in, so
+                    # minutes of real credential entry. Read p95 for those two
+                    # names as "wall-clock of an interactive flow", never as
+                    # tool performance. Fixing it needs a session-scoped
+                    # accumulator behind `prompt_or_cancel`, which is a change
+                    # to the CLI prompt path rather than to this event.
+                    self._emit_tool_completed(
+                        name=tc.name,
+                        ok=tool_ok,
+                        duration_ms=max(
+                            _tool_elapsed if _tool_elapsed is not None
+                            else _time.monotonic() - _tool_t0 - self.answer_wait_s,
+                            0.0,
+                        ) * 1000.0,
+                        error_type=_tool_error_type,
+                    )
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text

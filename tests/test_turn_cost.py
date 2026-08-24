@@ -593,3 +593,97 @@ class TestUnknownRoleReconciles:
             for r in ("planning", "coding", "router", "unknown")
         )
         assert per_role == int(kw["tokens_total"]) == 1886
+
+
+class TestScriptTrafficIsNotReported:
+    """A turn with no session id AND no LLM call is not a user turn (ENG-1692).
+
+    That shape was 8,209 of 11,734 `turn_completed` events over 14 days to
+    2026-08-20 — 70% of all volume, 0 tokens, 15 machines — and it dragged the
+    per-turn median to ZERO, which is impossible for a completed turn. ENG-1286's
+    spend ceiling would have been derived from it.
+
+    The four cases below are the 2x2 that made the discriminator measurable, and
+    they exist to stop the conjunction being "simplified" to one condition later:
+    each half alone deletes real data.
+    """
+
+    def test_no_session_and_no_llm_call_is_dropped(self):
+        # The script cohort: nothing ran, nobody owns it.
+        s = _bare_session(_session_id=None)
+        assert s._turn_cost.llm_calls == 0
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert not send.called
+
+    def test_the_log_line_still_records_the_dropped_turn(self, caplog):
+        # Dropping the EVENT must not cost local diagnosability for whoever is
+        # running the driver — that is why the guard sits after the log.
+        s = _bare_session(_session_id=None)
+        with patch("anton.analytics.send_event") as send:
+            with caplog.at_level(logging.INFO, logger="anton.core.session"):
+                s._emit_turn_cost()
+        assert not send.called
+        assert any("turn_cost" in r.message for r in caplog.records)
+
+    def test_no_session_but_a_real_llm_call_still_emits(self):
+        """cowork-server's connector probe runs a turn with no session id.
+
+        It spent 4.8M real tokens over the measured window. Gating on the
+        missing session id ALONE would have deleted all of it.
+        """
+        s = _bare_session(_session_id=None)
+        s._turn_cost.add("planning", "planner", _usage(100, 10, 0, 0))
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.called
+        assert send.call_args.kwargs["conversation_id"] == ""
+        assert send.call_args.kwargs["llm_calls"] == "1"
+
+    def test_a_real_turn_that_failed_before_any_llm_call_still_emits(self):
+        """338 real turns over the window ended error / retry_exhausted /
+        cancelled with zero LLM calls, across 88 installs. Gating on
+        `llm_calls == 0` ALONE would have deleted those users' failures — the
+        exact population a reliability question needs."""
+        s = _bare_session()          # session id present
+        s._turn_cost.ended_by = "error"
+        assert s._turn_cost.llm_calls == 0
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.called
+        assert send.call_args.kwargs["ended_by"] == "error"
+
+    def test_an_ordinary_turn_still_emits(self):
+        s = _bare_session()
+        s._turn_cost.add("planning", "planner", _usage(100, 10, 0, 0))
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.called
+
+    def test_a_dropped_turn_still_closes_its_books(self):
+        """Position matters: the guard must sit BELOW the books-closing block.
+
+        Dropping the event must not drop the cleanup. If the guard is ever moved
+        above `self._turn_cost = None` / `usage_listener = None`, a script turn
+        leaves the books open and the usage listener ARMED — which then attributes
+        the next turn's LLM calls to a dead ledger. That is a far worse failure
+        than a missing analytics event, and until this test existed it was caught
+        only incidentally, by the log-line assertion above.
+        """
+        s = _bare_session(_session_id=None)
+        assert s._turn_cost.llm_calls == 0
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert not send.called
+        assert s._turn_cost is None, "books left open — the guard skipped cleanup"
+        assert s._llm.usage_listener is None, "listener left armed — leaks into the next turn"
+
+    def test_a_dropped_turn_cannot_double_emit_later(self):
+        # The `tc.emitted` latch is also above the guard, so a dropped turn must
+        # not become a delivered one on a second finalizer pass.
+        s = _bare_session(_session_id=None)
+        with patch("anton.analytics.send_event"):
+            s._emit_turn_cost()
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert not send.called

@@ -4,6 +4,12 @@ Each test here corresponds to a #309 review finding that a real production
 exit filed the wrong ``ended_by`` (or emitted nothing at all). They drive the
 real ``turn_stream``/``turn`` rather than poking the classifier, because every
 one of these bugs lived in the wiring, not the arithmetic.
+
+Every session here carries a `session_id`, deliberately: a turn with NO session
+id and zero LLM calls is dropped before the analytics sink as script traffic
+(ENG-1692), and these tests assert on the event. A real turn always has one —
+both cowork-server and the CLI set it — so supplying it makes the fixture match
+production rather than working around the gate.
 """
 
 from __future__ import annotations
@@ -99,7 +105,7 @@ async def test_task_cancel_reports_cancelled_not_error(workspace):
         return _gen()
 
     mock_llm.plan_stream = _hang
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     with patch("anton.analytics.send_event") as send:
         async def _consume():
@@ -140,7 +146,7 @@ async def test_abandoned_generator_still_emits_exactly_once(workspace):
         return _gen()
 
     mock_llm.plan_stream = _stream
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     with patch("anton.analytics.send_event") as send:
         gen = session.turn_stream("start then abandon")
@@ -166,7 +172,7 @@ async def test_emit_survives_reset_trace_context_valueerror(workspace):
     timing-dependent and flaky by comparison (#309 fix-verification).
     """
     mock_llm = make_mock_llm()
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     def _boom(_token):
         raise ValueError("Token was created in a different Context")
@@ -226,7 +232,7 @@ async def test_exhausted_retries_is_not_reported_as_completed(workspace):
     """
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(side_effect=RuntimeError("provider down"))
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("do something"):
@@ -257,7 +263,7 @@ async def test_rounds_accumulate_across_verifier_continuations(workspace):
     ]
     mock_llm.generate_object_code = AsyncMock(side_effect=verdicts)
 
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("multi-step task"):
@@ -278,7 +284,7 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
     mock_llm.generate_object_code = AsyncMock(
         return_value=_VerifierVerdict(status="COMPLETE", reason="ok")
     )
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     session._max_tool_rounds = 2
 
@@ -294,7 +300,7 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
 async def test_non_streaming_turn_marks_round_cap(workspace):
     mock_llm = make_mock_llm()
     mock_llm.plan = AsyncMock(return_value=_tool_call())
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     session._max_tool_rounds = 1
     session._router_enabled = False
@@ -331,7 +337,7 @@ def _verdict_llm(status: str, *, tool_rounds: int = 1):
 
 async def test_stuck_verdict_reports_handback_stuck(workspace):
     session = ChatSession(
-        ChatSessionConfig(llm_client=_verdict_llm("STUCK"), workspace=workspace)
+        ChatSessionConfig(llm_client=_verdict_llm("STUCK"), workspace=workspace, session_id="conv-t")
     )
     _stub_tools(session)
     with patch("anton.analytics.send_event") as send:
@@ -344,7 +350,7 @@ async def test_exhausted_continuations_report_handback_budget(workspace):
     # INCOMPLETE forever + no continuation budget = the budget-exhausted
     # hand-back, the path ENG-1155 rewrote.
     session = ChatSession(
-        ChatSessionConfig(llm_client=_verdict_llm("INCOMPLETE"), workspace=workspace)
+        ChatSessionConfig(llm_client=_verdict_llm("INCOMPLETE"), workspace=workspace, session_id="conv-t")
     )
     _stub_tools(session)
     session._max_continuations = 0
@@ -358,7 +364,7 @@ async def test_verifier_failure_reports_handback_verifier_failure(workspace):
     # The verdict call itself failing (ENG-1079's fail-safe), not a verdict.
     mock_llm = _verdict_llm("COMPLETE")
     mock_llm.generate_object_code = AsyncMock(side_effect=RuntimeError("provider hiccup"))
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("run my script"):
@@ -380,7 +386,7 @@ async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
             "402: Your wallet has no balance to cover the model 'haiku'."
         )
     )
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("run my script"):
@@ -396,7 +402,7 @@ async def test_verified_turn_reports_verification_not_skipped(workspace):
     # The control for the flag above: a turn whose verdict actually ran
     # (COMPLETE) books verification_skipped="false".
     session = ChatSession(
-        ChatSessionConfig(llm_client=_verdict_llm("COMPLETE"), workspace=workspace)
+        ChatSessionConfig(llm_client=_verdict_llm("COMPLETE"), workspace=workspace, session_id="conv-t")
     )
     _stub_tools(session)
     with patch("anton.analytics.send_event") as send:
@@ -416,7 +422,7 @@ async def test_callers_already_handled_exception_is_not_reported_as_error(worksp
     mock_llm.plan_stream = MagicMock(
         side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
     )
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     with patch("anton.analytics.send_event") as send:
         try:
@@ -458,7 +464,7 @@ async def test_abandoned_turn_keeps_its_own_index_not_a_later_turns(workspace):
     def _quick(**kwargs):
         return _Iter([StreamComplete(response=_text("done"))])
 
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     with patch("anton.analytics.send_event") as send:
         mock_llm.plan_stream = _stream
@@ -532,7 +538,7 @@ async def test_host_supplied_turn_id_is_what_the_event_reports(workspace):
     mock_llm.plan_stream = MagicMock(
         side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
     )
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     with patch("anton.analytics.send_event") as send:
         async for _ in session.turn_stream("hello", turn_id=4242):
@@ -556,7 +562,7 @@ async def test_latched_skip_turns_also_stamp_verification_skipped(workspace):
             "402: Your wallet has no balance to cover the model 'haiku'."
         )
     )
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     rows = []
     with patch("anton.analytics.send_event") as send:
@@ -591,7 +597,7 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
     mock_llm.generate_object_code = AsyncMock(
         side_effect=RuntimeError("400 tool_choice not supported")
     )
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     rows = []
     with patch("anton.analytics.send_event") as send:
@@ -616,3 +622,205 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
     # Every later turn — the latched skips AND the failed re-probe that falls
     # inside this window — books completed and must carry the flag.
     assert all(r == ("completed", "true") for r in rows[2:]), rows[2:]
+
+
+# ─── error_type: naming the failure, not just counting it (ENG-1689) ─────────
+
+# Every session here carries a `session_id` deliberately: ENG-1692's guard
+# suppresses `turn_completed` for a turn with no session id AND zero LLM
+# calls (script traffic), which is exactly the shape of a pre-model failure.
+# Without it these tests pass alone and fail the moment anton#379 lands —
+# a break neither PR's CI can see, since each is green on its own base.
+def _error_type(send_event_mock) -> str:
+    assert send_event_mock.called, "no turn_completed event emitted"
+    return send_event_mock.call_args.kwargs["error_type"]
+
+
+async def test_retry_exhausted_names_the_exception_class(workspace):
+    """`retry_exhausted` was 6.7% of real turns with a median of ZERO LLM
+    calls — dying before the first model call — and said nothing about why.
+    The exception was already in hand: the retry loop formats it into a SYSTEM
+    message the model and the user both read, then dropped it.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=RuntimeError("provider down"))
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("do something"):
+            pass
+
+    assert _ended_by(send) == "retry_exhausted"
+    assert _error_type(send) == "RuntimeError"
+
+
+async def test_retry_exhausted_reports_the_specific_provider_exception(workspace):
+    """The value of the field is discriminating between causes, so a second
+    exception type must produce a different label rather than a generic one.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=TimeoutError("upstream stalled"))
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("do something"):
+            pass
+
+    assert _ended_by(send) == "retry_exhausted"
+    assert _error_type(send) == "TimeoutError"
+
+
+async def test_error_terminal_names_the_exception_class(workspace):
+    """The catch-all. `ended_by="error"` covered a parse failure, a tool
+    crash, a bad config and an anton bug alike, with the exception object in
+    scope at the assignment and discarded.
+
+    A `BaseException` is what reaches this branch — the retry loop catches
+    `Exception`, so only something outside that hierarchy escapes to the
+    outer handler. `KeyboardInterrupt` is the real-world instance of that
+    (Ctrl-C in the CLI) and is not one of the cancel shapes that would file
+    as `cancelled`.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=KeyboardInterrupt())
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
+
+    with patch("anton.analytics.send_event") as send:
+        with pytest.raises(KeyboardInterrupt):
+            async for _ in session.turn_stream("do something"):
+                pass
+
+    assert _ended_by(send) == "error"
+    assert _error_type(send) == "KeyboardInterrupt"
+
+
+async def test_completed_turn_carries_no_error_type(workspace):
+    """Empty, not "none" or "unknown" — a clean turn has no exception, and a
+    placeholder would pollute the distribution this field exists to produce.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(
+        side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
+    )
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("hello"):
+            pass
+
+    assert _ended_by(send) == "completed"
+    assert _error_type(send) == ""
+
+
+async def test_user_stop_carries_no_error_type(workspace):
+    """A user pressing Stop is not a failure. `CancelledError` takes the
+    `cancelled` branch, which deliberately does not stamp `error_type` — so
+    an error-cause breakdown cannot be inflated by ordinary stops.
+    """
+    mock_llm = make_mock_llm()
+    started = asyncio.Event()
+
+    def _hang(**kwargs):
+        async def _gen():
+            started.set()
+            await asyncio.sleep(3600)
+            yield StreamComplete(response=_text())
+
+        return _gen()
+
+    mock_llm.plan_stream = MagicMock(side_effect=_hang)
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
+
+    with patch("anton.analytics.send_event") as send:
+
+        async def _run():
+            async for _ in session.turn_stream("long one"):
+                pass
+
+        task = asyncio.create_task(_run())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert _ended_by(send) == "cancelled"
+    assert _error_type(send) == ""
+
+
+async def test_stop_after_exhausted_retries_does_not_report_an_error_type(workspace):
+    """A stale `error_type` must not survive into a `cancelled` turn.
+
+    The retry-exhausted site stamps `error_type` and then keeps going to
+    produce its apology — and a user who has sat through repeated failures is
+    precisely the one who then presses Stop. `ended_by` correctly flips to
+    `cancelled`; without clearing, `error_type` kept the old exception and
+    ordinary Stops showed up in an error-cause breakdown.
+    """
+    from anton.core.turn_cost import TurnCost
+
+    tc = TurnCost()
+    tc.ended_by = "retry_exhausted"
+    tc.error_type = "RuntimeError"
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=make_mock_llm(), workspace=workspace, session_id="conv-t"
+        )
+    )
+    session._turn_cost = tc
+
+    with patch("anton.analytics.send_event") as send:
+        session._emit_turn_cost(expected=tc, exc=asyncio.CancelledError())
+
+    assert _ended_by(send) == "cancelled"
+    assert _error_type(send) == ""
+
+
+async def test_session_without_settings_emits_no_endpoint_class(workspace):
+    """The emit-site half of the same defect, which the helper test cannot see.
+
+    `_emit_turn_cost` resolves a fresh `AntonSettings()` when the session
+    carries none, so passing THAT to the classifier would report the machine's
+    environment as if it were the turn's endpoint — confidently, and with no
+    way to tell it apart from a real answer. cowork-server's connector probe
+    builds a session with no `settings=`, so this path carries real traffic.
+
+    Driven through the real turn rather than the helper, because the defect is
+    which object the emit site hands over.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(
+        side_effect=lambda **kw: _Iter([StreamComplete(response=_text("hi"))])
+    )
+    session = ChatSession(
+        ChatSessionConfig(
+            llm_client=mock_llm, workspace=workspace, session_id="conv-t"
+        )
+    )
+    assert session._settings is None, "fixture must have no settings for this to bite"
+
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("hello"):
+            pass
+
+    assert send.called
+    assert send.call_args.kwargs["endpoint_class"] == ""

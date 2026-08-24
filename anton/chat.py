@@ -20,6 +20,7 @@ from anton.clipboard import (
     replace_at_image_paths,
     save_clipboard_image,
 )
+from anton.core.llm.tracing import SURFACE_CLI
 from anton.core.session import ChatSession, ChatSessionConfig, _is_provider_auth_error
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.core.llm.provider import (
@@ -1396,6 +1397,10 @@ async def _chat_loop(
         # ENG-1495: see the note on the same field in chat_session.py — an unset
         # `harness` is indistinguishable from a host that forgot to set one.
         harness="cli",
+        # WHERE this ran, as opposed to which agent ran (ENG-1459).
+        # ENG-1694 will move the host meaning out of `harness` entirely,
+        # at which point this becomes the only place "cli" is stated.
+        surface=SURFACE_CLI,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,

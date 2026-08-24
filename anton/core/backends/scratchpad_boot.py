@@ -9,6 +9,7 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
     heal_surrogate_source,
@@ -91,6 +92,17 @@ def _inject_helper(name: str, fn) -> None:
 # rebind to something picklable is retried rather than excluded forever.
 _UNPICKLABLE: dict = {}
 
+# Byte marker of dill's file-handle reconstructor inside a pickle stream. A pickled
+# file object is stored as a CALL to `dill._dill._create_filehandle(name, mode, …)`,
+# and that call runs `open(name, mode)` at LOAD time — for a `'w'` handle (even an
+# already-closed one, e.g. `f` surviving a `with open(path, 'w') as f:` block) the
+# open() itself truncates the file on disk. In cloud mode the snapshot is reloaded on
+# every turn, so one leftover handle wiped artifact files turn after turn (ENG-1726).
+# Scanning the serialised bytes instead of isinstance-checking the value catches
+# handles nested inside containers too, and leaves harmless io.StringIO/io.BytesIO
+# (which pickle by contents, not by reconstructor) alone.
+_FILEHANDLE_MARKER = b"_create_filehandle"
+
 # Persistence notes for the next cell's `logs`. Deliberately NOT `error` — a snapshot
 # problem must not make the cell look failed, or it would feed the consecutive-error
 # circuit breaker and the resilience nudge.
@@ -169,6 +181,12 @@ def _decode_values(blobs: dict) -> tuple[dict, dict]:
     ns: dict = {}
     dropped: dict = {}
     for name, blob in blobs.items():
+        if _FILEHANDLE_MARKER in blob:
+            # Snapshots written before ENG-1726 can still hold pickled file handles;
+            # materialising one re-opens the file in its original mode, truncating it
+            # when that mode is 'w'. Refuse to load rather than damage workspace files.
+            dropped[name] = "file handle: restoring would re-open (and truncate) the file"
+            continue
         try:
             ns[name] = dill.loads(blob)
         except Exception as exc:
@@ -315,6 +333,14 @@ def _encode_values(payload: dict) -> tuple[dict, list]:
             _UNPICKLABLE[key] = id(value)
             dropped.append(key)
             continue
+        if _FILEHANDLE_MARKER in blob:
+            # File handles pickle without error but must never be persisted: loading
+            # them re-runs open() and truncates 'w'-mode files (ENG-1726). Registered
+            # in _UNPICKLABLE like any live resource, so the warning fires once and a
+            # rebind to real data is retried.
+            _UNPICKLABLE[key] = id(value)
+            dropped.append(key)
+            continue
         total += len(blob)
         if total > SESSION_MAX_BYTES:
             raise _TooBig()
@@ -370,8 +396,8 @@ def _dump_namespace(ns: dict) -> str | None:
             "will be undefined if this scratchpad restarts: "
             + ", ".join(sorted(dropped))
             + ". Objects holding live resources (database connections, sockets, "
-            "generators) cannot be saved — recreate them rather than relying on them "
-            "persisting."
+            "generators, open or closed file handles) cannot be saved — recreate "
+            "them rather than relying on them persisting."
         )
     return None
 
@@ -822,8 +848,6 @@ import threading
 
 from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
-    INSTALL_END_MARKER,
-    INSTALL_START_MARKER,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
 )
@@ -842,19 +866,6 @@ try:
     )
 except ValueError:
     _HEARTBEAT_INTERVAL = 10.0
-
-# Budget for the in-cell auto-installer. The parent resolves
-# CoreSettings.cell_install_timeout and passes it through at spawn (see
-# LocalScratchpadRuntime.start), so the installer and the parent's kill
-# windows run off one number instead of two constants that can drift apart
-# (ENG-1275); the fallback mirrors that setting's default. Same
-# malformed-override guard as the heartbeat interval above.
-try:
-    _INSTALL_TIMEOUT = float(os.environ.get("ANTON_CELL_INSTALL_TIMEOUT", "120"))
-except ValueError:
-    _INSTALL_TIMEOUT = 120.0
-if _INSTALL_TIMEOUT <= 0:
-    _INSTALL_TIMEOUT = 120.0
 
 # Per-tick cap on salvage chunk size: bounds a single wire line even when a
 # cell floods stdout between ticks; the remainder ships on later ticks.
@@ -1170,8 +1181,6 @@ while True:
     # Liveness heartbeat: a daemon thread pings the real pipe while this cell
     # runs, so the parent's inactivity watchdog sees activity through a
     # deliberate sleep or a blocking call, not just through stdout/progress().
-    # Span covers the auto-install retry below too (ENG-1275: a silent
-    # in-cell install used to be indistinguishable from a wedged process).
     _hb_stop = threading.Event()
     _hb_thread = None
     if _HEARTBEAT_INTERVAL > 0:
@@ -1195,91 +1204,17 @@ while True:
 
         sys.stdout = out_buf
         sys.stderr = err_buf
-        _auto_installed = []
         try:
             compiled = compile(code, "<scratchpad>", "exec")
             exec(compiled, namespace)
         except ModuleNotFoundError as _mnf:
-            # Auto-install the missing module and retry the cell once
-            _missing = _mnf.name
-            if _missing:
-                sys.stdout = _real_stdout
-                sys.stderr = sys.__stderr__
-                _cell_log_handler.buf = None
-                # The parent turns this marker into the visible "Installing
-                # X..." progress line and defers its kill windows to the
-                # install budget while the install runs (ENG-1275).
-                with _wire_lock:
-                    _real_stdout.write(INSTALL_START_MARKER + " " + _missing + "\n")
-                    _real_stdout.flush()
-                import subprocess as _sp
-
-                _uv_path = os.environ.get("ANTON_UV_PATH", "")
-                _pip = None
-                _install_error = None
-                try:
-                    if _uv_path:
-                        _pip = _sp.run(
-                            [_uv_path, "pip", "install", "--python", sys.executable, _missing],
-                            capture_output=True,
-                            timeout=_INSTALL_TIMEOUT,
-                        )
-                    else:
-                        _pip = _sp.run(
-                            [sys.executable, "-m", "pip", "install", _missing],
-                            capture_output=True,
-                            timeout=_INSTALL_TIMEOUT,
-                        )
-                except _sp.TimeoutExpired:
-                    # An uncaught raise here used to take down the whole
-                    # worker, and the parent reported a generic process death
-                    # with no mention of the install (ENG-1275).
-                    _install_error = (
-                        f"ModuleNotFoundError: No module named '{_missing}'\n"
-                        f"Auto-install of '{_missing}' was killed after "
-                        f"{_INSTALL_TIMEOUT:.0f}s (cell_install_timeout) without "
-                        "finishing — the package is not installed. Retrying may "
-                        "complete it (downloads are cached); for a large package, "
-                        "run the scratchpad's install action first."
-                    )
-                except OSError as _exc:
-                    _install_error = (
-                        f"ModuleNotFoundError: No module named '{_missing}'\n"
-                        f"Auto-install of '{_missing}' could not run: {_exc}"
-                    )
-                # Deliberately not in a finally: if the install failed in a
-                # way not handled above the worker is going down, and the
-                # missing end marker is what lets the parent name the install
-                # in the death report.
-                with _wire_lock:
-                    _real_stdout.write(INSTALL_END_MARKER + " " + _missing + "\n")
-                    _real_stdout.flush()
-                # Reset buffers and retry
-                out_buf = io.StringIO()
-                err_buf = io.StringIO()
-                log_buf = io.StringIO()
-                # Same ordering rule as the first cell setup: shipped first,
-                # so the swap can only duplicate a chunk, never skip one.
-                _cell_out["shipped"] = 0
-                _cell_out["buf"] = out_buf
-                _cell_log_handler.buf = log_buf
-                sys.stdout = out_buf
-                sys.stderr = err_buf
-                if _pip is not None and _pip.returncode == 0:
-                    _auto_installed.append(_missing)
-                    try:
-                        exec(compiled, namespace)
-                    except Exception:
-                        error = traceback.format_exc()
-                elif _install_error is not None:
-                    error = _install_error
-                else:
-                    error = (
-                        f"ModuleNotFoundError: No module named '{_missing}'\n"
-                        f"Auto-install failed:\n{_pip.stderr.decode()}"
-                    )
-            else:
-                error = traceback.format_exc()
+            # Don't pip-install a name pulled from an exception — it may be a
+            # hallucinated import, and the string is attacker-controllable.
+            # Hint goes before the traceback: callers key off its last line.
+            hint = ""
+            if _mnf.name:
+                hint = MISSING_MODULE_HINT.format(name=_mnf.name)
+            error = hint + traceback.format_exc()
         except Exception:
             error = traceback.format_exc()
         finally:
@@ -1338,8 +1273,6 @@ while True:
         "error": error,
         "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
     }
-    if _auto_installed:
-        result["auto_installed"] = _auto_installed
     with _wire_lock:
         _real_stdout.write(RESULT_START + "\n")
         _real_stdout.write(json.dumps(result) + "\n")

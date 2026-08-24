@@ -88,6 +88,7 @@ def rebuild_session(
     """Rebuild LLMClient + ChatSession after settings change."""
     from anton.core.llm.client import LLMClient
     from anton.chat import ChatSession
+    from anton.core.llm.tracing import SURFACE_CLI
     from anton.core.session import ChatSessionConfig
     from anton.tools import DEFAULT_SESSION_TOOLS
 
@@ -121,6 +122,10 @@ def rebuild_session(
         # didn't identify itself", so the two could never be told apart and the
         # ambiguity got worse with every new host.
         harness="cli",
+        # WHERE this ran, as opposed to which agent ran (ENG-1459).
+        # ENG-1694 will move the host meaning out of `harness` entirely,
+        # at which point this becomes the only place "cli" is stated.
+        surface=SURFACE_CLI,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
