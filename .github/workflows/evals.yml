@@ -98,7 +98,12 @@ jobs:
           set -euo pipefail
           : "${MINDS_API_KEY:?MINDSHUB_API_KEY secret is not set}"
           : "${REPO_TOKEN:?no read token — set the GH_PULL_REQUEST_READ_TOKEN secret or pass repo_token}"
-          : "${LANGFUSE_PUBLIC_KEY:?no Langfuse key — token and cost columns would be empty}"
+          # Not required for now — Langfuse secrets aren't provisioned in CI yet.
+          # eval_service degrades to local-only scoring when they're absent, so
+          # this just means empty token/cost columns, not a failure.
+          if [ -z "${LANGFUSE_PUBLIC_KEY:-}" ]; then
+            echo "::warning::no Langfuse key — token and cost columns will be empty"
+          fi
 
       - name: Check out anton
         if: steps.fork.outputs.skip != '1'
