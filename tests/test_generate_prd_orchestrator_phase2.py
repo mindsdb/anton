@@ -352,10 +352,21 @@ def test_write_prd_instruction_also_forbids_process_meta_commentary():
 def test_draft_brief_instruction_asks_for_a_closing_continue_line():
     """Live-testing feedback (ENG-969): the brief used to end abruptly on
     "1. Accept / 2. Cancel" with no framing sentence. The model must add a
-    closing line, in-language, that explains a bare Enter continues."""
+    closing line, in-language, asking whether to continue."""
     lowered = orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
     assert "closing line" in lowered
-    assert "press enter" in lowered
+
+
+def test_draft_brief_instruction_forbids_describing_the_input_affordance():
+    """The brief is host-agnostic text: the same closing line is rendered in
+    the terminal (where `prompt_or_cancel` already prints the `(accept)`
+    default) and in a GUI (where the host draws Accept/Cancel buttons and
+    there is no Enter to press). Naming a key, a button or an option number
+    is therefore both redundant on one host and wrong on the other, so the
+    instruction must not ask the model for one."""
+    lowered = orchestrator._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "press enter" not in lowered
+    assert "do not describe how to answer" in lowered
 
 
 async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):
