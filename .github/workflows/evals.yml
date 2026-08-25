@@ -46,7 +46,7 @@ on:
         default: staging
       evals_ref:
         description: "cowork_evals ref providing the run config and the report"
-        default: pr-reporting
+        default: main
       repeats:
         description: "replicate passes per task"
         default: "3"
@@ -67,7 +67,7 @@ jobs:
     env:
       COWORK_REF: ${{ inputs.cowork_ref || 'staging' }}
       BASELINE_REF: ${{ inputs.baseline_ref || 'staging' }}
-      EVALS_REF: ${{ inputs.evals_ref || 'pr-reporting' }}
+      EVALS_REF: ${{ inputs.evals_ref || 'main' }}
       REPEATS: ${{ inputs.repeats || '3' }}
       ANTON_SHA: ${{ github.event.pull_request.head.sha || inputs.anton_ref || github.sha }}
       REPO_TOKEN: ${{ secrets.GH_EVALS_READ_TOKEN }}
