@@ -331,6 +331,75 @@ def test_reconcile_excludes_published_json(store: ArtifactStore):
     assert {f.path for f in opened.files} == {"dashboard.html"}
 
 
+def test_reconcile_excludes_the_backend_log(store: ArtifactStore):
+    """`launch_artifact_backend` writes backend.log into the artifact folder.
+    Every other copy of the housekeeping set already excluded it — cowork-server's
+    artifacts service, `publish_access`, and the publish bundle — so listing it
+    here made the agent's view disagree with the UI's."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    (folder / "backend.log").write_text("INFO: started")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"backend.py"}
+
+
+def test_reconcile_excludes_generation_inputs(store: ArtifactStore):
+    """prd.md / spec.md / openapi.json are what the generator built FROM, not
+    what it built. Listed among `files[]` they inflate file_count, show up in
+    the README, and invite the agent to hand the user a spec as a deliverable."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    (folder / "requirements.txt").write_text("fastapi")
+    (folder / "prd.md").write_text("## Goal\nx")
+    (folder / "spec.md").write_text("# Spec")
+    (folder / "openapi.json").write_text("{}")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"backend.py", "requirements.txt"}
+
+
+def test_excluded_set_covers_every_generation_input():
+    """The exclusion list is derived from the same constants the generators
+    write through — a fourth generation input added there must not need a
+    second edit here to stay out of `files[]`."""
+    from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
+    from anton.core.artifacts.store import _EXCLUDED_FROM_FILES
+
+    assert set(GENERATION_INPUT_FILES) <= _EXCLUDED_FROM_FILES
+
+
+def test_housekeeping_set_still_mirrors_cowork_server():
+    """The set is documented as mirroring cowork-server's artifacts service
+    (`cowork/services/artifacts.py:132`), and `publish_access` plus the publish
+    bundle carry their own copies. Drift means the agent and the UI disagree on
+    what an artifact contains — which is exactly how backend.log ended up
+    counted here and nowhere else."""
+    from anton.core.artifacts.store import _HOUSEKEEPING_FILES
+
+    assert _HOUSEKEEPING_FILES == {
+        "metadata.json", "README.md", "backend.log", ".published.json",
+    }
+
+
+def test_a_nested_file_named_like_a_generation_input_is_kept(store: ArtifactStore):
+    """The exclusion is by exact relative path, not by basename: a
+    `static/openapi.json` the artifact genuinely serves is its own content."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "static").mkdir()
+    (folder / "static" / "openapi.json").write_text("{}")
+    (folder / "openapi.json").write_text("{}")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"static/openapi.json"}
+
+
 def test_reconcile_on_read_is_idempotent(store: ArtifactStore):
     """A read with no on-disk change must not re-save or bump updatedAt."""
     artifact = store.create(name="Dash", description="x", type="html-app")

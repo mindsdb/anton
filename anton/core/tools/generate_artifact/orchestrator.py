@@ -9,6 +9,8 @@ from __future__ import annotations
 import inspect
 import re
 
+from anton.core.artifacts.internal_files import API_SPEC_FILENAME, TECH_SPEC_FILENAME
+
 from . import engine, prompts
 from .prompts import HTML_APP_DEFAULT_PRIMARY
 from .state import (
@@ -303,9 +305,9 @@ async def _write_tech_spec(state: GenState) -> str | None:
     if not body:
         state.error = "make_tech_spec: model returned an empty specification."
         return state.error
-    (state.artifact_path / "spec.md").write_text(body, encoding="utf-8")
-    if "spec.md" not in state.internal_files:
-        state.internal_files.append("spec.md")
+    (state.artifact_path / TECH_SPEC_FILENAME).write_text(body, encoding="utf-8")
+    if TECH_SPEC_FILENAME not in state.internal_files:
+        state.internal_files.append(TECH_SPEC_FILENAME)
     state.record("make_tech_spec", "done", "wrote spec.md")
     return None
 
@@ -319,7 +321,7 @@ def _spec_context(state: GenState) -> str:
         parts.append(prd)
     if state.data_notes.strip():
         parts.append("## Data\n" + state.data_notes.strip())
-    spec_path = state.artifact_path / "spec.md"
+    spec_path = state.artifact_path / TECH_SPEC_FILENAME
     if spec_path.is_file():
         parts.append("## Technical specification\n" + spec_path.read_text(encoding="utf-8"))
     journal = state.journal()
@@ -339,9 +341,9 @@ async def _make_api_spec(state: GenState) -> str | None:
         state.error = f"make_api_spec: {spec_or_err}"
         return state.error
     state.api_spec = spec_or_err
-    (state.artifact_path / "openapi.json").write_text(spec_or_err, encoding="utf-8")
-    if "openapi.json" not in state.internal_files:
-        state.internal_files.append("openapi.json")
+    (state.artifact_path / API_SPEC_FILENAME).write_text(spec_or_err, encoding="utf-8")
+    if API_SPEC_FILENAME not in state.internal_files:
+        state.internal_files.append(API_SPEC_FILENAME)
     state.record("make_api_spec", "done", "wrote openapi.json")
     return None
 

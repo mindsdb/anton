@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from anton.core.artifacts.prd import PRD_FILENAME
+from anton.core.artifacts.internal_files import PRD_FILENAME
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.state import DataVerdict, GenState
 

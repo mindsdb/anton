@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from anton.core.artifacts.prd import PRD_FILENAME
+from anton.core.artifacts.internal_files import PRD_FILENAME
 
 from . import sub_tools
 from .prompts import (

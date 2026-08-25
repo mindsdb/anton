@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from anton.core.artifacts.prd import PRD_FILENAME
+from anton.core.artifacts.internal_files import PRD_FILENAME
 
 from . import sub_tools
 from .prompts import build_phase2_system_prompt
@@ -260,7 +260,7 @@ async def write_prd(state: PrdState) -> str:
         )
     state.messages.append({"role": "assistant", "content": full_prd})
 
-    # Same constant `generate_artifact` reads back — see anton/core/artifacts/prd.py.
+    # Same constant `generate_artifact` reads back — see anton/core/artifacts/internal_files.py.
     (state.artifact_path / PRD_FILENAME).write_text(full_prd, encoding="utf-8")
 
     final_type = state.final_artifact_type or state.artifact_type
