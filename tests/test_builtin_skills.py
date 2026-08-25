@@ -265,6 +265,47 @@ class TestArtifactWorkflowPointsAtTheTool:
         assert "BEFORE" in ARTIFACTS_PROMPT
 
 
+class TestEveryPathNamesThePrdStep:
+    """`generate_prd` must appear, ahead of `generate_artifact`, in every
+    always-on block that describes building a web artifact.
+
+    The generator takes its requirements from the `prd.md` that `generate_prd`
+    leaves in the artifact folder. A block that sends the agent straight from
+    `create_artifact` to `generate_artifact` therefore does not merely omit a
+    step — it produces a run with no PRD at all, which silently falls back to
+    building from `context`. `generate_prd` also has no `ToolDef.prompt` of its
+    own, so these blocks and its tool description are the only places the model
+    can learn the step exists.
+    """
+
+    def _blocks(self) -> dict[str, str]:
+        from anton.core.llm.prompts import (
+            ARTIFACTS_PROMPT,
+            BACKEND_GENERATION_PROMPT,
+            VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+            VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+        )
+
+        return {
+            "artifacts": ARTIFACTS_PROMPT,
+            "backend": BACKEND_GENERATION_PROMPT,
+            "viz_html": VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+            "viz_markdown": VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+        }
+
+    def test_prd_step_is_named_before_the_generator(self):
+        for name, text in self._blocks().items():
+            assert "generate_prd" in text, name
+            assert text.index("generate_prd") < text.index("generate_artifact"), name
+
+    def test_the_generator_is_not_told_to_be_handed_the_prd(self):
+        """It reads the file itself; an agent that quotes or paraphrases the PRD
+        into `context` reintroduces the copy that could disagree with it."""
+        from anton.core.llm.prompts import ARTIFACTS_PROMPT
+
+        assert "reads `prd.md`" in ARTIFACTS_PROMPT
+
+
 class TestRecallIsConditionalNow:
     """`recall_skill` stays, but stops being an unconditional instruction."""
 
