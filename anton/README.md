@@ -831,7 +831,7 @@ The Cortex manages two Hippocampus instances and orchestrates all declarative me
 | `encode(engrams)` | Route engrams to correct hippocampus by scope. Returns action log. Called by `/memorize`, the consolidator, and the cerebellum. |
 | `encoding_gate(engram)` | Check if an engram needs user confirmation (mode-dependent) |
 | `needs_compaction()` | Check if any file exceeds the threshold |
-| `compact_all()` | LLM-assisted deduplication + merge on all oversized files. Uses `generate_object_code(_CompactionResult, ...)`. |
+| `compact_all()` | LLM-assisted deduplication on all oversized files. Uses `generate_object_code(_CompactionResult, ...)`. The model names survivors by index, so compaction drops entries — it never rewrites or merges them. |
 | `maybe_update_identity(message)` | Extract identity facts from user message via `generate_object_code(_IdentityFacts, ...)`. Background, fires every 5 turns. |
 
 ### `episodes.py` — Episodic Memory

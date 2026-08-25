@@ -689,7 +689,41 @@ _PARTIAL = Case(
     source="baseline (multi-part request, stopped after step 1)",
 )
 
-_CASES = [_RECOVERED, _IMPLIED_SUCCESS, _WAITING, _STUCK, _PARTIAL]
+# --- 6. A long, complete reply must not be judged truncated -----------------
+# ENG-1633. `_render_verify_transcript` clipped conversational text with a bare
+# `text[:2000]`, so any reply over the cap reached the verifier ending mid-word
+# with nothing saying it had been cut. Asked whether a complete answer was
+# delivered, the verifier reported what it was shown — and 31 percent of
+# anton's replies are over that cap.
+#
+# Measured on this exact fixture through this exact code path, 3 runs on each
+# model: INCOMPLETE 6/6 before the fix, COMPLETE 6/6 after, matching an
+# unclipped control at 6/6. Both models quoted the cut back verbatim — "cuts
+# off mid-sentence ('That is')" — and the 2,000-char slice ends exactly on
+# `That is`, at characters 1993-1999 of the reply below.
+#
+# The fixture is deliberately PROSE with no tool calls. Table and search-result
+# shapes were tried first and discarded: their unclipped controls also returned
+# INCOMPLETE, on invented-description and unverified-source grounds, so they
+# could not isolate the clip. A self-contained explanation leaves the verifier
+# nothing else to legitimately object to, which is what makes this a clean
+# 3-of-3 rather than a coin flip.
+
+_LONG_COMPLETE_REPLY = '`contextlib.contextmanager` turns a single-yield generator function into a full context manager, so you can write setup/teardown as straight-line code instead of a class with two methods.\n\n**The mechanics.** When you decorate a generator function with `@contextmanager`, calling it does not run any of your code — it builds a `_GeneratorContextManager` object holding the generator function and the arguments you passed. The body only starts running when `__enter__` is called, which is when the `with` statement executes. `__enter__` calls `next()` on the generator, which runs everything up to your `yield` and returns the yielded value — that is what lands in the `as` variable. Everything before the `yield` is your setup; everything after it is your teardown.\n\n**On the way out.** If the `with` block finishes normally, `__exit__` calls `next()` on the generator a second time. Your code after the `yield` runs, the generator hits its end and raises `StopIteration`, and `__exit__` swallows that as the expected signal that teardown finished. If the generator does *not* stop there — if it yields a second time — you get a `RuntimeError("generator didn\'t stop")`, because a context manager has exactly one enter and one exit.\n\n**On exceptions.** This is the part people get wrong. If the `with` block raises, `__exit__` does not call `next()`; it calls `gen.throw(exc)`, which re-raises the exception *at the point of the yield inside your generator*. That is why the idiomatic shape is a `try/finally` around the `yield`: the `finally` is what guarantees teardown runs whether the block succeeded or blew up. If you write the cleanup as bare statements after the `yield` with no `try`, an exception in the `with` block propagates out of the `throw` and your cleanup never runs at all.\n\nTwo subtleties follow from `throw`. First, if your generator catches the exception and returns normally, `__exit__` returns True and the exception is **suppressed** — the `with` statement swallows it. That is the mechanism behind `contextlib.suppress`, and it is easy to do by accident with a bare `except`. Second, if your generator re-raises the *same* exception object, `__exit__` detects that identity and returns False, letting the original propagate with its traceback intact rather than reporting a confusing secondary failure.\n\n**When to write a class instead.** Reach for `__enter__`/`__exit__` on a class when you need any of: reuse — a `@contextmanager` object is single-use and raises on a second `with`, whereas a class can be re-entered; state or methods that outlive the block, since a class instance is a real object you can query afterwards; inspection of the exception without the `throw` gymnastics, because `__exit__` receives the type, value and traceback as plain arguments; or an async and sync variant sharing implementation. The decorator is the better default for the common case — acquire a thing, hand it over, release it — and the class is what you graduate to when the manager itself needs to be an object.\n\nIn short: `@contextmanager` is a thin adapter that maps `__enter__` onto the first `next()` and `__exit__` onto either a second `next()` or a `throw()` into the generator, which is why `try/finally` around the `yield` is not a style preference but a correctness requirement.'
+
+
+_LONG_REPLY = Case(
+    name="long_complete_reply",
+    user_message="Explain in detail how Python's contextlib.contextmanager decorator works under the hood — the generator protocol, what happens on exceptions, and when you'd write a class-based context manager instead.",
+    history=[
+        {"role": "user", "content": "Explain in detail how Python's contextlib.contextmanager decorator works under the hood — the generator protocol, what happens on exceptions, and when you'd write a class-based context manager instead."},
+        {"role": "assistant", "content": _LONG_COMPLETE_REPLY},
+    ],
+    expected="COMPLETE",
+    source="ENG-1633 (clipped mid-word at text_cap; INCOMPLETE 6/6 pre-fix)",
+)
+
+_CASES = [_RECOVERED, _IMPLIED_SUCCESS, _WAITING, _STUCK, _PARTIAL, _LONG_REPLY]
 
 
 def _runs_for(case: Case) -> int:

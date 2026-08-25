@@ -163,8 +163,8 @@ async def launch_artifact_backend(
                 install_log.write(banner.encode("utf-8"))
                 install_log.write(install_result.encode("utf-8"))
                 install_log.write(b"\n")
-            if install_result.startswith("Install failed") or install_result.startswith(
-                "Install timed out"
+            if install_result.startswith(
+                ("Install failed", "Install timed out", "Install refused")
             ):
                 return (
                     "Error: dependency install failed for `requirements.txt`.\n"

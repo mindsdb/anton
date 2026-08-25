@@ -125,26 +125,26 @@ class _IdentityFacts(BaseModel):
 class _CompactionResult(BaseModel):
     """Result of the memory-compaction LLM call.
 
-    Returns the deduplicated entries to keep, plus optional metadata
-    about what was merged and pruned (purely for logging — the cortex
-    only acts on `kept`).
+    Survivors are named by INDEX, never echoed back as text. Two reasons, and
+    the first is why compaction was broken:
+
+    - Echoing entries made the response scale with the whole file, so a file
+      big enough to need compaction was also big enough to blow the output
+      budget. Because a failed compaction leaves the file untouched, it then
+      grew and failed again — once over the line, never compacted again.
+    - Model text never reaches the file, so compaction can drop an entry but
+      can never reword, truncate or corrupt one.
+
+    The cost is that compaction selects, it does not rewrite: two entries that
+    each hold a different detail can only both be kept, not combined.
     """
 
-    kept: list[str] = Field(
+    keep: list[int] = Field(
         ...,
         description=(
-            "Entry strings to keep after compaction. Preserve the "
-            "trailing `<!-- ... -->` metadata comment on each entry "
-            "exactly as it appears in the input."
+            "Indices of the numbered entries to keep. Any index left out is "
+            "deleted, so name every entry that should survive."
         ),
-    )
-    merged: list[str] = Field(
-        default_factory=list,
-        description="Strings describing what was merged (for logging).",
-    )
-    pruned: list[str] = Field(
-        default_factory=list,
-        description="Strings describing what was removed and why (for logging).",
     )
 
 
@@ -153,14 +153,19 @@ Extract identity facts from this user message — concise statements about the u
 """
 
 _COMPACTION_PROMPT = """\
-You are a memory compaction system. Review these memory entries and:
-1. Remove exact duplicates
-2. Merge entries that say the same thing differently — keep the clearest version
-3. Remove entries that are superseded by newer, more specific entries
-4. Keep all unique, useful entries
+You are a memory compaction system. The user message is a numbered list of memory entries. Report the indices of the entries to keep:
+1. Of exact duplicates, keep one
+2. Where several entries say the same thing differently, keep only the clearest of them — you cannot reword an entry, only choose between the ones you were given
+3. Drop entries superseded by newer, more specific ones
+4. Keep every unique, useful entry
 
-Be conservative — when in doubt, keep the entry. Preserve the trailing `<!-- ... -->` metadata comment on each kept entry exactly as it appears.
+An index you leave out is deleted. Be conservative — when in doubt, keep the entry: two overlapping entries cost less than losing what only one of them said.
 """
+
+# The `## ` headings of `rules.md`, in file order. `save_rules` writes exactly
+# these three and `get_rules` reads each entry's `kind` off them, so compaction
+# has to round-trip the same set. First one doubles as the fallback heading.
+_RULE_SECTIONS = ("always", "never", "when")
 
 
 class Cortex:
@@ -586,28 +591,54 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if not path.is_file():
             return
 
-        content = path.read_text(encoding="utf-8")
-        entries = [
-            ln.strip() for ln in content.splitlines() if ln.strip().startswith("- ")
-        ]
+        # Read with sections
+        sections: list[str] = []
+        entries: list[str] = []
+        # Entries above the first heading (a hand-edited file) are kept rather
+        # than dropped, under the same heading the keyword pass defaulted to.
+        section = _RULE_SECTIONS[0]
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                heading = stripped[3:].lower()
+                section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
+            elif stripped.startswith("- "):
+                sections.append(section)
+                entries.append(stripped)
 
         if len(entries) < 8:
             return
 
+        # Numbers replace the `- ` marker so each line carries one, and the
+        # `<!-- ... -->` comment stays: its `ts` is how the model can tell which
+        # of two overlapping entries supersedes the other.
+        numbered = "\n".join(
+            f"{i}. {entry.removeprefix('- ')}" for i, entry in enumerate(entries, 1)
+        )
+
         try:
-            # Compaction echoes the kept entries back, so its output scales
-            # with the file — the ladder starts at the old fixed budget and
-            # buys one doubling on truncation (ENG-1084).
+            # The response is a list of integers, so it no longer scales with
+            # the file. The ladder stays because the narration some models emit
+            # before the forced tool call does not shrink with it (ENG-1084).
             result: _CompactionResult = await generate_with_truncation_retry(
                 self._llm.generate_object_code,
                 _CompactionResult,
                 system=_COMPACTION_PROMPT + no_preamble_instruction(_CompactionResult),
-                messages=[{"role": "user", "content": "\n".join(entries)}],
+                messages=[{"role": "user", "content": numbered}],
                 budgets=(4096, 8192),
                 log=logger,
                 subsystem="memory-compaction",
             )
-            kept = result.kept or entries
+            # Entries are copied from `entries`, never from the response, so a
+            # bad index costs at most the entry it failed to name and can never
+            # alter one. Walking the file also bounds the indices for free:
+            # duplicates collapse into the set, invented ones never come up.
+            keep = set(result.keep)
+            kept = [
+                pair
+                for i, pair in enumerate(zip(sections, entries), 1)
+                if i in keep
+            ]
         except Exception as exc:
             # Don't corrupt memory on failure — but never silently: an
             # unlogged swallow made a dead memory subsystem indistinguishable
@@ -619,34 +650,37 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             )
             return
 
+        # Nothing usable came back — a model that named no valid index gets to
+        # leave memory alone, not to empty it.
         if not kept:
             return
 
-        # Rebuild the file
+        # Rebuild the file. Every entry still carries the `- ` prefix it was
+        # selected by, so nothing here has to re-add one.
         if kind == "rules":
-            # Preserve section structure
-            always = [
-                e
-                for e in kept
-                if "always" in e.lower()
-                or not any(k in e.lower() for k in ("never", "when", "if "))
-            ]
-            never = [e for e in kept if "never" in e.lower()]
-            when_rules = [e for e in kept if "when" in e.lower() or "if " in e.lower()]
-
-            lines = ["# Rules\n", "## Always"]
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in always)
-            lines.extend(["", "## Never"])
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in never)
-            lines.extend(["", "## When"])
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in when_rules)
-            new_content = "\n".join(lines) + "\n"
+            # Each entry goes back under its own heading and no other, so the
+            # rewrite is idempotent — a rule cannot be filed twice.
+            lines = ["# Rules\n"]
+            for name in _RULE_SECTIONS:
+                lines.append(f"## {name.capitalize()}")
+                lines.extend(e for s, e in kept if s == name)
+                lines.append("")
+            new_content = "\n".join(lines[:-1]) + "\n"
         else:
-            lines = ["# Lessons"]
-            lines.extend(f"- {e}" if not e.startswith("- ") else e for e in kept)
-            new_content = "\n".join(lines) + "\n"
+            new_content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
 
         hc._encode_with_lock(path, new_content, mode="write")
+
+        # The only record that the file changed size, and the only pressure
+        # against over-pruning: naming survivors by index makes dropping most
+        # of the file a *shorter* answer than keeping it, so the call itself no
+        # longer penalises it. Counts only — the entries are user content.
+        logger.info(
+            "memory-compaction: %s kept %d of %d entries",
+            path.name,
+            len(kept),
+            len(entries),
+        )
 
     async def maybe_update_identity(self, user_message: str) -> None:
         """Check if conversation reveals identity facts worth profiling.

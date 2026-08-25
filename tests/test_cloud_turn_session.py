@@ -71,6 +71,17 @@ def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypa
     assert cfg.session_id == "conv_1"
 
 
+def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
+    """ENG-1817: `.anton/anton.md` is cowork-server's staged copy of the project
+    instructions. If the pod creates a template there, the next staging pass
+    deletes it, and under gVisor the pod's cached NFS handle then fails every
+    stat with ESTALE. The cloud builder must set up the workspace without
+    creating that file."""
+    _build(tmp_path, monkeypatch)
+    assert (tmp_path / ".anton").is_dir()  # the rest of the workspace is set up
+    assert not (tmp_path / ".anton" / "anton.md").exists()
+
+
 def test_db_history_is_seeded_not_loaded(tmp_path, monkeypatch):
     _, cfg = _build(
         tmp_path, monkeypatch,
@@ -187,7 +198,7 @@ def test_apply_env_to_process_never_called(tmp_path, monkeypatch):
     real_apply = ws_mod.Workspace.apply_env_to_process
 
     monkeypatch.setattr(ws_mod.Workspace, "initialize",
-                        lambda self: (calls.__setitem__("init", calls["init"] + 1), real_init(self))[1])
+                        lambda self, *a, **kw: (calls.__setitem__("init", calls["init"] + 1), real_init(self, *a, **kw))[1])
     monkeypatch.setattr(ws_mod.Workspace, "apply_env_to_process",
                         lambda self: (calls.__setitem__("apply_env", calls["apply_env"] + 1), real_apply(self))[1])
 
@@ -557,6 +568,50 @@ def test_skills_root_is_a_fresh_dir_outside_the_workspace(tmp_path, monkeypatch,
     assert not str(cfg.settings.skills_root).startswith(str(cfg.workspace.base))
 
 
+def test_skill_drafts_root_is_on_the_workspace(tmp_path, monkeypatch, skills_tmp):
+    """The inverse of the staged skills above: drafts go ON the workspace, the
+    only per-conversation storage that outlives the pod."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    drafts = cfg.settings.skill_drafts_root
+    assert drafts.is_dir()
+    assert drafts.is_relative_to(cfg.workspace.base)
+    assert not drafts.is_relative_to(skills_tmp)
+
+
+def test_a_draft_survives_into_the_next_turn(tmp_path, monkeypatch, skills_tmp):
+    """Editing a skill spans turns, so unlike the staged skills root this path
+    must be stable and its contents must carry over."""
+    _, cfg1 = _build(tmp_path, monkeypatch)
+    (cfg1.settings.skill_drafts_root / "my-skill").mkdir()
+    (cfg1.settings.skill_drafts_root / "my-skill" / "SKILL.md").write_text("turn 1 work")
+
+    _, cfg2 = _build(tmp_path, monkeypatch)
+    assert cfg2.settings.skill_drafts_root == cfg1.settings.skill_drafts_root
+    carried = cfg2.settings.skill_drafts_root / "my-skill" / "SKILL.md"
+    assert carried.read_text() == "turn 1 work"
+
+
+def test_a_skill_the_agent_builds_comes_back_out(tmp_path, monkeypatch, skills_tmp):
+    """The whole point of the feature, end to end on a REAL session: the tool
+    claims a folder, the agent writes into it, and the drain reports it."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from anton.cloud_turn.session import drain_pending_skills
+    from anton.core.tools.skill_draft import handle_create_skill_draft
+
+    session = _real_cloud_session(tmp_path, monkeypatch)
+    claimed = json.loads(asyncio.run(
+        handle_create_skill_draft(session, {"name": "Competitive Analysis"})
+    ))
+    Path(claimed["skill_file"]).write_text("---\nname: competitive-analysis\n---\nsteps")
+
+    entries = drain_pending_skills(session)
+    assert [e["slug"] for e in entries] == ["competitive-analysis"]
+    assert "steps" in entries[0]["files"]["SKILL.md"]
+
+
 def test_recall_skill_survives_the_real_tool_build(tmp_path, monkeypatch, skills_tmp):
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     session._build_tools()
@@ -693,3 +748,30 @@ def test_conflicting_paths_do_not_fail_the_turn(tmp_path, monkeypatch, skills_tm
     }}}
     _, cfg = _build(tmp_path, monkeypatch, skills=skills)
     assert (cfg.settings.skills_root / "ok-skill" / "SKILL.md").is_file()
+
+
+# ── surface attribution (ENG-1459) ───────────────────────────────────────────
+#
+# The pod cannot derive any of this: cowork-server is not installed in the
+# `minds-anton-scratchpad` image, and only the deployment knows which surface it
+# serves. So it arrives on `TurnRequestV1.trace` and must reach the config —
+# mutation-testing showed the contract tests alone did NOT cover that hop.
+
+
+def test_the_surface_from_the_trace_block_reaches_the_config(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, trace={"surface": "web"})
+    assert cfg.surface == "web"
+
+
+def test_no_trace_block_leaves_the_surface_unset(tmp_path, monkeypatch):
+    # A pod driven directly rather than by cowork: nobody declared a surface,
+    # and unset is the honest answer rather than a guess.
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.surface is None
+
+
+def test_a_trace_block_without_a_surface_leaves_it_unset(tmp_path, monkeypatch):
+    # cowork may send build attribution and no surface (an override it could not
+    # resolve). That must not become a junk value.
+    _, cfg = _build(tmp_path, monkeypatch, trace={"install_channel": "hosted"})
+    assert cfg.surface is None

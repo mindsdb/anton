@@ -224,6 +224,29 @@ def test_turn_failure_is_terminal_and_scrubbed():
     assert session.closed is True  # closed even on failure
 
 
+class _BaseBoom(BaseException):
+    """A non-Exception failure, like the httpcore GeneratorExit->RuntimeError
+    teardown or a CancelledError, that escapes `except Exception`."""
+
+
+def test_baseexception_teardown_still_emits_a_terminal_event():
+    """Regression: a teardown crash after the turn body must not close the
+    stream with no terminal event (controller reports 'stream ended without a
+    terminal event' -> cowork shows a bare 'unexpected error'). The finally
+    guarantee emits turn_failed, then the BaseException re-propagates."""
+    session = _FakeSession(raise_on_stream=_BaseBoom("teardown"))
+    events = []
+    try:
+        asyncio.run(stream_turn(
+            '{"protocol_version":1,"conversation_id":"c","input":"hi"}',
+            events.append, session_builder=lambda r: session,
+        ))
+    except _BaseBoom:
+        pass  # re-propagates after finally emitted the terminal event
+    assert events and events[-1]["kind"] == "turn_failed"
+    assert session.closed is True
+
+
 def test_bad_request_is_a_single_turn_failed():
     events = []
     asyncio.run(stream_turn("{not valid json", events.append))
@@ -322,8 +345,232 @@ def test_failed_turn_emits_no_memory():
     assert kinds == ["turn_failed"]
 
 
+_DRAFT_MD = "---\nname: my-skill\ndescription: d\n---\nsteps"
+
+
+class _DraftSession(_FakeSession):
+    """A session that writes a skill draft mid-turn, like the tool would."""
+
+    def __init__(self, drafts_root, *, write=True, **kwargs):
+        super().__init__(**kwargs)
+        self._skill_drafts_root = drafts_root
+        self._skill_drafts_before = {}
+        self._write = write
+
+    async def turn_stream(self, user_input, **kwargs):
+        if self._write:
+            folder = self._skill_drafts_root / "my-skill"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "SKILL.md").write_text(_DRAFT_MD)
+        async for event in super().turn_stream(user_input, **kwargs):
+            yield event
+
+
+def test_skill_draft_emitted_before_the_terminal_event(tmp_path):
+    """Same reason as memory: cowork stops reading at the terminal reply."""
+    events = _drive(_DraftSession(tmp_path, deltas=["ok"]))
+    assert events == [
+        {"kind": "delta", "text": "ok"},
+        {"kind": "skill", "entries": [{"slug": "my-skill", "files": {"SKILL.md": _DRAFT_MD}}]},
+        {"kind": "turn_completed"},
+    ]
+
+
+def test_no_skill_event_when_no_draft_was_built(tmp_path):
+    events = _drive(_DraftSession(tmp_path, write=False, deltas=["ok"]))
+    assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
+
+
+def test_failed_turn_emits_no_skill_draft(tmp_path):
+    """A turn that raised has no trustworthy result — same rule as memory."""
+    session = _DraftSession(tmp_path, deltas=["ok"])
+    session._raise = RuntimeError("boom")
+    assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
+
+
 def test_untracked_late_write_is_not_awaited():
     """Settling is explicit: only registered writes are awaited, so the entrypoint
     never blocks on unrelated live tasks (scratchpad readers, the heartbeat)."""
     events = _drive(_MemorySession([], deltas=["ok"], encode_late=True, track=False))
     assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
+
+
+def test_entrypoint_wires_attachment_augmentation(tmp_path, monkeypatch):
+    """Removing the build_turn_content call in __main__ must fail a test: a
+    staged attachment has to reach the session as multimodal turn input."""
+    att = tmp_path / "attachments" / "fid"
+    att.mkdir(parents=True)
+    (att / "notes.txt").write_text("hi")
+    monkeypatch.setenv("ANTON_CLOUD_WORKSPACE_PATH", str(tmp_path))
+
+    captured = {}
+
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            captured["input"] = user_input
+            for d in self._deltas:
+                yield StreamTextDelta(text=d)
+
+    _drive(_S())
+    assert isinstance(captured["input"], list)            # augmented, not the bare "hi"
+    assert any(b.get("type") == "text" and "notes.txt" in b.get("text", "") for b in captured["input"])
+
+
+# ── turn-history rows ────────────────────────────────────────────────────────
+
+_HISTORY_TURN = [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "looking"},
+        {"type": "tool_use", "id": "t1", "name": "recall_skill", "input": {"name": "pdf"}},
+    ]},
+    {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"}]},
+    {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+]
+
+_EXPECTED_ROWS = [
+    {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "t1", "name": "recall_skill", "input": {"name": "pdf"}}]},
+    {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"}]},
+]
+
+
+class _HistorySession(_FakeSession):
+    """Grows `history` while the turn streams, like a real ChatSession.
+
+    `seed` is what the constructor would have loaded from `initial_history`;
+    `appended` is what `turn_stream` adds — including the current turn's user
+    input, which lands INSIDE the slice and must be trimmed away.
+    """
+
+    def __init__(self, seed, appended, deltas=("ok",), raise_on_stream=None,
+                 compact=False):
+        super().__init__(deltas=deltas, raise_on_stream=raise_on_stream)
+        self.history = list(seed)
+        self._appended = list(appended)
+        self._compact = compact
+
+    async def turn_stream(self, user_input, **kwargs):
+        self.history.extend(self._appended)
+        if self._compact:
+            yield StreamContextCompacted(message="squeezed")
+        if self._raise:
+            raise self._raise
+        for d in self._deltas:
+            yield StreamTextDelta(text=d)
+
+
+def _history_events(events):
+    return [e for e in events if e.get("kind") == "history"]
+
+
+def test_history_rows_emitted_before_the_terminal_event():
+    events = _drive(_HistorySession(seed=[], appended=_HISTORY_TURN))
+    assert events == [
+        {"kind": "delta", "text": "ok"},
+        {"kind": "history", "rows": _EXPECTED_ROWS},
+        {"kind": "turn_completed"},
+    ]
+
+
+def test_history_slice_starts_after_the_seeded_history():
+    """Rows from PREVIOUS turns (already in the DB) must not be re-sent."""
+    prior = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "old", "name": "x", "input": {}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "old", "content": "B"}]},
+    ]
+    events = _drive(_HistorySession(seed=prior, appended=_HISTORY_TURN))
+    assert _history_events(events) == [{"kind": "history", "rows": _EXPECTED_ROWS}]
+
+
+def test_history_rows_not_emitted_after_a_mid_turn_compaction():
+    """Compaction reassigns session.history, so seed_len no longer marks this
+    turn's start — slicing could surface an orphan tool_result."""
+    events = _drive(_HistorySession(seed=[], appended=_HISTORY_TURN, compact=True))
+    assert _history_events(events) == []
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_history_rows_not_emitted_when_the_turn_fails():
+    session = _HistorySession(
+        seed=[], appended=_HISTORY_TURN, raise_on_stream=RuntimeError("boom"),
+    )
+    events = _drive(session)
+    assert _history_events(events) == []
+    assert events[-1]["kind"] == "turn_failed"
+
+
+def test_no_history_event_when_the_turn_used_no_tools():
+    text_only = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    events = _drive(_HistorySession(seed=[], appended=text_only))
+    assert _history_events(events) == []
+
+
+def test_a_session_without_history_still_completes():
+    """Test doubles and older anton builds have no `.history`; capture is
+    skipped rather than raising."""
+    events = _drive(_FakeSession(deltas=["ok"]))
+    assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
+
+
+# ── build attribution rides the turn (ENG-1459 / ENG-1279) ───────────────────
+
+
+class _KwargCapturingSession(_FakeSession):
+    """Records the kwargs the entrypoint passes to turn_stream."""
+
+    def __init__(self):
+        super().__init__(deltas=["ok"])
+        self.turn_kwargs = None
+
+    async def turn_stream(self, user_input, **kwargs):
+        self.turn_kwargs = kwargs
+        for d in self._deltas:
+            yield StreamTextDelta(text=d)
+
+
+def _drive_with_trace(trace_json: str):
+    session = _KwargCapturingSession()
+    _drive(
+        session,
+        req_json='{"protocol_version":1,"conversation_id":"c","input":"hi",'
+                 f'"trace":{trace_json}}}',
+    )
+    return session.turn_kwargs
+
+
+def test_build_attribution_is_forwarded_onto_the_turn():
+    # `cowork_server_version` / `install_channel` are ENG-1279 fields the pod
+    # cannot self-report — 0 of 68 prod cloud traces carried them before this.
+    kwargs = _drive_with_trace(
+        '{"surface":"web","cowork_server_version":"0.26.8.17.1","install_channel":"hosted"}'
+    )
+    assert kwargs["trace_metadata"] == {
+        "cowork_server_version": "0.26.8.17.1",
+        "install_channel": "hosted",
+    }
+
+
+def test_surface_is_not_duplicated_into_the_turn_metadata():
+    # It rides the session config instead; stamping both would put two sources
+    # of truth for one value on the same trace.
+    kwargs = _drive_with_trace('{"surface":"web","install_channel":"hosted"}')
+    assert "surface" not in kwargs["trace_metadata"]
+
+
+def test_a_surface_only_block_forwards_no_metadata():
+    kwargs = _drive_with_trace('{"surface":"web"}')
+    assert kwargs["trace_metadata"] is None
+
+
+def test_no_trace_block_forwards_no_metadata():
+    session = _KwargCapturingSession()
+    _drive(session)
+    assert session.turn_kwargs["trace_metadata"] is None

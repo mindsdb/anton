@@ -1424,6 +1424,116 @@ class TestSessionPersistence:
         finally:
             await pad2.cleanup()
 
+    async def test_file_handle_does_not_truncate_its_file_on_restart(
+        self, tmp_path, monkeypatch
+    ):
+        """ENG-1726: a leftover `'w'` handle must never reach the snapshot.
+
+        dill reconstructs a pickled file object by re-calling `open()` with the
+        original mode — even for an already-closed handle — so loading a snapshot
+        holding `fh` from `with open(path, 'w') as fh:` truncated the file on disk.
+        In cloud mode the snapshot is reloaded on every turn, which wiped artifact
+        files turn after turn (empty index.html published to S3).
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        target = tmp_path / "index.html"
+        pad = make_scratchpad(name="writer", _venvs_base=venvs_base, session_id="c")
+        await pad.start()
+        cell = await pad.execute(
+            f"with open({str(target)!r}, 'w') as fh:\n"
+            "    fh.write('<html>content</html>')\n"
+            "kept = 'alive'\n"
+        )
+        assert cell.error is None, cell.error
+        # The casualty is reported by name, on `logs`, never on `error`.
+        assert "fh" in cell.logs and "could not be preserved" in cell.logs
+        assert target.read_text() == "<html>content</html>"
+        await pad.close()
+
+        pad2 = make_scratchpad(name="writer", _venvs_base=venvs_base, session_id="c")
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(kept, 'fh' in dir())")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "alive False"
+            # The point of the ticket: the file the handle pointed at is intact.
+            assert target.read_text() == "<html>content</html>"
+        finally:
+            await pad2.cleanup()
+
+    async def test_file_handle_nested_in_a_container_is_not_persisted(
+        self, tmp_path, monkeypatch
+    ):
+        """A handle hidden inside a container pickles without error too.
+
+        An isinstance check on the value would miss it; the byte-scan of the
+        serialised blob is what catches the nested case.
+        """
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        target = tmp_path / "log.txt"
+        target.write_text("first line\n")
+        pad = make_scratchpad(name="nested", _venvs_base=venvs_base, session_id="c")
+        await pad.start()
+        cell = await pad.execute(
+            f"box = {{'sink': open({str(target)!r}, 'w')}}\n"
+            "box['sink'].write('rewritten')\n"
+            "box['sink'].close()\n"
+            "safe = 7\n"
+        )
+        assert cell.error is None, cell.error
+        assert "box" in cell.logs and "could not be preserved" in cell.logs
+        await pad.close()
+
+        pad2 = make_scratchpad(name="nested", _venvs_base=venvs_base, session_id="c")
+        await pad2.start()
+        try:
+            cell = await pad2.execute("print(safe, 'box' in dir())")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "7 False"
+            assert target.read_text() == "rewritten"
+        finally:
+            await pad2.cleanup()
+
+    async def test_legacy_snapshot_with_a_file_handle_is_not_materialised(
+        self, tmp_path, monkeypatch
+    ):
+        """Snapshots written before the dump-side filter can still hold handles.
+
+        Loading such a snapshot must drop the handle instead of re-opening (and
+        truncating) its file — the load-side guard is what protects conversations
+        that carried a snapshot across the deploy of the fix.
+        """
+        import dill
+
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+        venvs_base = tmp_path / "venvs"
+        target = tmp_path / "victim.html"
+        legacy = open(target, "w")
+        legacy.write("precious")
+        legacy.close()
+        blob = dill.dumps(legacy)  # pickles fine: a closed 'w' handle
+
+        pad = make_scratchpad(name="legacy", _venvs_base=venvs_base, session_id="c")
+        snapshot = pad._session_snapshot_path(create=True)
+        assert snapshot is not None
+        # The on-disk envelope format of scratchpad_boot (magic, version, blobs).
+        envelope = ("__anton_snapshot__", 2, {"legacy": blob, "ok": dill.dumps(42)})
+        with open(snapshot, "wb") as f:
+            dill.dump(envelope, f)
+
+        await pad.start()
+        try:
+            cell = await pad.execute("print(ok, 'legacy' in dir())")
+            assert cell.error is None, cell.error
+            assert cell.stdout.strip() == "42 False"
+            # The handle was refused, so its file was not truncated by the load.
+            assert target.read_text() == "precious"
+            assert "legacy" in cell.logs and "file handle" in cell.logs
+        finally:
+            await pad.cleanup()
+
     async def test_unpicklable_warning_is_not_repeated_every_cell(self, tmp_path, monkeypatch):
         """Told once, not on every cell — and the per-key scan runs once, not per cell."""
         monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")

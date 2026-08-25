@@ -54,7 +54,7 @@ def test_create_writes_metadata_and_readme(store: ArtifactStore):
         description="Compares NVDA and BTC.",
         type="html-app",
     )
-    assert artifact.slug == "nvda-btc-dashboard"
+    assert artifact.slug == f"nvda-btc-dashboard-{artifact.id}"
     assert len(artifact.id) == 8
     folder = store.folder_for(artifact.slug)
     assert folder.is_dir()
@@ -83,24 +83,58 @@ def test_create_persists_round_trip(store: ArtifactStore):
 # ─── Slug uniqueness ────────────────────────────────────────────────────────
 
 
-def test_slug_collision_appends_suffix(store: ArtifactStore):
-    a = store.create(name="Dashboard", description="x", type="html-app")
-    b = store.create(name="Dashboard", description="x", type="html-app")
-    c = store.create(name="Dashboard", description="x", type="html-app")
-    assert a.slug == "dashboard"
-    assert b.slug == "dashboard-2"
-    assert c.slug == "dashboard-3"
+def test_same_name_yields_distinct_slugs(store: ArtifactStore):
+    """The id, not the `-2`/`-3` counter, is what separates them now. The
+    counter only ever saw one store, and on the cloud each conversation has its
+    own — so identical names in two conversations used to collide."""
+    slugs = {
+        store.create(name="Dashboard", description="x", type="html-app").slug
+        for _ in range(3)
+    }
+    assert len(slugs) == 3
+    assert all(s.startswith("dashboard-") for s in slugs)
 
 
 def test_slug_lowercases_and_sanitizes(store: ArtifactStore):
     artifact = store.create(name="Hello, World!", description="x", type="document")
     # Punctuation collapses to hyphens; runs deduped; lowercased.
-    assert artifact.slug == "hello-world"
+    assert artifact.slug == f"hello-world-{artifact.id}"
 
 
 def test_slug_falls_back_when_name_is_garbage(store: ArtifactStore):
     artifact = store.create(name="!!!", description="x", type="document")
-    assert artifact.slug == "untitled-artifact"
+    assert artifact.slug == f"untitled-artifact-{artifact.id}"
+
+
+def test_non_latin_names_still_get_distinct_folders(store: ArtifactStore):
+    """The character whitelist is ASCII, so a Cyrillic name sanitises to
+    nothing and every such artifact shares the `untitled-artifact` base. Before
+    the id suffix that made same-base collisions the NORM for a non-English
+    user, not an edge case."""
+    a = store.create(name="Текущее время", description="x", type="html-app")
+    b = store.create(name="Другой отчёт", description="x", type="html-app")
+
+    assert a.slug != b.slug
+    assert a.slug.startswith("untitled-artifact-")
+    assert b.slug.startswith("untitled-artifact-")
+
+
+def test_display_name_carries_no_id(store: ArtifactStore):
+    """The id belongs in the folder name, not on screen: `name` is what the UI
+    falls back to for a title when the caller supplied none."""
+    artifact = store.create(name="", description="x", type="document")
+
+    assert artifact.name == "untitled-artifact"
+    assert artifact.slug == f"untitled-artifact-{artifact.id}"
+
+
+def test_slug_stays_within_the_length_budget(store: ArtifactStore):
+    """The name is trimmed by the suffix width, so a long name plus the id
+    still respects the same 64-char ceiling folders had before."""
+    artifact = store.create(name="x" * 200, description="x", type="document")
+
+    assert len(artifact.slug) <= 64
+    assert artifact.slug.endswith(f"-{artifact.id}")
 
 
 # ─── List + open ────────────────────────────────────────────────────────────
@@ -124,8 +158,8 @@ def test_list_returns_artifacts_newest_first(store: ArtifactStore):
     record.updatedAt = "2099-01-01T00:00:00+00:00"
     store._save(record)  # type: ignore[attr-defined]
     listing = store.list()
-    assert listing[0].slug == "second"
-    assert {x.slug for x in listing} == {"first", "second"}
+    assert listing[0].slug == b.slug
+    assert {x.slug for x in listing} == {a.slug, b.slug}
 
 
 def test_open_returns_none_for_missing_slug(store: ArtifactStore):
@@ -363,6 +397,22 @@ def test_snapshot_lists_files(tmp_path: Path):
     snap = snapshot_dir(tmp_path)
     assert "a.txt" in snap
     assert "sub/b.txt" in snap
+
+
+def test_snapshot_keys_use_posix_separators(tmp_path: Path):
+    """Snapshot keys must be POSIX-separated on every platform.
+
+    The keys are split on "/" by `_files_by_artifact` and persisted in
+    provenance records, so a native-separator key silently groups to
+    nothing on Windows instead of failing loudly.
+    """
+    nested = tmp_path / "dashboard" / "data"
+    nested.mkdir(parents=True)
+    (nested / "prices.csv").write_text("a,b")
+    snap = snapshot_dir(tmp_path)
+    assert "dashboard/data/prices.csv" in snap
+    assert not any("\\" in key for key in snap)
+    assert diff_snapshots({}, snap) == ["dashboard/data/prices.csv"]
 
 
 def test_diff_picks_up_new_and_changed(tmp_path: Path):

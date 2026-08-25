@@ -66,6 +66,63 @@ def url_hostname(url: str) -> str:
         return ""
 
 
+def is_minds_host(base: str, minds_url: str = "") -> bool:
+    """Whether *base* points at MindsHub rather than an endpoint of the user's own.
+
+    Judged from the endpoint, never from whether a MindsHub key or URL happens to
+    be configured: signing in sets those, so a user running a local model has
+    them too. *minds_url* covers self-hosted gateways on a private host.
+
+    A schemeless base ("api.mindshub.ai/v1") names no host to ``urlparse`` and
+    so reads as not-MindsHub. Deliberate: this only picks a display label, and
+    declining to claim MindsHub is the safe direction. Cowork's equivalent
+    assumes a scheme, because there the answer decides routing.
+    """
+    from urllib.parse import urlparse
+
+    def _origin(url: str) -> tuple[str, int | None]:
+        try:
+            parsed = urlparse(url)
+            return (parsed.hostname or "", parsed.port)
+        except Exception:
+            return ("", None)
+
+    host, port = _origin(base)
+    if not host:
+        return False
+    # Host AND port: a self-hosted gateway and a local model server often share
+    # a machine and differ only by port.
+    if minds_url and (host, port) == _origin(minds_url):
+        return True
+    return host in ("mindshub.ai", "mdb.ai") or host.endswith(
+        (".mindshub.ai", ".mdb.ai")
+    )
+
+
+def openai_compatible_label(settings) -> str:
+    """Display label for an ``openai-compatible`` provider.
+
+    Names the endpoint that will actually serve requests, read from
+    ``openai_base_url``. Not from ``minds_url``: signing in to MindsHub sets
+    that, so a user pointed at a local model has it too and would be told their
+    prompts go to MindsHub when they do not.
+
+    Shared with the ``/setup`` summary so the two surfaces cannot disagree
+    about where requests go.
+    """
+    base = settings.openai_base_url or ""
+    if is_minds_host(base, settings.minds_url or ""):
+        return "MindsHub"
+    host = url_hostname(base)
+    if host == "generativelanguage.googleapis.com" or host.endswith(
+        ".generativelanguage.googleapis.com"
+    ):
+        return "Google Gemini"
+    if base:
+        return f"OpenAI-compatible ({base})"
+    return "OpenAI-compatible"
+
+
 def _reexec() -> None:
     """Re-execute the current process from scratch using the original binary."""
     # Prefer the installed `anton` binary so the uv tool wrapper re-runs correctly.
@@ -587,17 +644,7 @@ async def _animate_onboard(
     provider_label = settings.planning_provider
     model_label = settings.planning_model
     if provider_label == "openai-compatible":
-        base = settings.openai_base_url or ""
-        if settings.minds_url and (
-            "mindshub.ai" in settings.minds_url or "mdb.ai" in settings.minds_url
-        ):
-            provider_label = "MindsHub"
-        elif url_hostname(base) == "generativelanguage.googleapis.com":
-            provider_label = "Google Gemini"
-        elif base:
-            provider_label = f"OpenAI-compatible ({base})"
-        else:
-            provider_label = "OpenAI-compatible"
+        provider_label = openai_compatible_label(settings)
     console.print(f"  [anton.muted]Provider:[/] [anton.cyan]{provider_label}[/]")
     console.print(f"  [anton.muted]Model:[/]    [anton.cyan]{model_label}[/]")
     console.print()
