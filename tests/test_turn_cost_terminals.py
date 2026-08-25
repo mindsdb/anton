@@ -277,6 +277,10 @@ async def test_rounds_accumulate_across_verifier_continuations(workspace):
 
 
 async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
+    """Reports the *effective* cap — the configured cap plus the one-time
+    grace extension (ENG-1893) — not effective_cap + 1."""
+    from anton.core.session import _ROUND_CAP_GRACE_ROUNDS
+
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(
         side_effect=lambda **kw: _Iter([StreamComplete(response=_tool_call())])
@@ -294,7 +298,10 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
 
     kwargs = send.call_args.kwargs
     assert kwargs["ended_by"] == "round_cap"
-    assert kwargs["rounds"] == "2", f"cap is 2, reported {kwargs['rounds']}"
+    expected = 2 + _ROUND_CAP_GRACE_ROUNDS
+    assert kwargs["rounds"] == str(expected), (
+        f"effective cap is {expected}, reported {kwargs['rounds']}"
+    )
 
 
 async def test_non_streaming_turn_marks_round_cap(workspace):

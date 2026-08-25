@@ -351,6 +351,17 @@ class _VerifierVerdict(BaseModel):
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
+    close_to_done: bool = Field(
+        default=False,
+        description=(
+            "Only meaningful when status is INCOMPLETE: true if the "
+            "remaining work is small — roughly 1-3 more tool calls — with "
+            "nothing blocking or uncertain. False for anything that needs "
+            "substantially more work, or where you aren't sure. Defaults to "
+            "false, so an unsure model errs toward asking the user rather "
+            "than assuming it's almost done."
+        ),
+    )
 
 
 # Output budgets for the verdict call: first attempt, then the retry used when
@@ -437,6 +448,12 @@ _VERIFIER_LATCH_REPROBE_TURNS = 10
 # will cost, and ENG-1288 already tracks it. This floor only applies before any
 # call has reported usage.
 _SPEND_CEILING_RESERVE = 200_000
+
+# One-time round-cap extension (ENG-1893), granted the first time a turn
+# breaches max_tool_rounds. Sized to the "2-3 more tool calls" this exists
+# for — add a closing step, save, verify — not a way to talk past the cap
+# repeatedly: see the grant sites for the one-shot guard.
+_ROUND_CAP_GRACE_ROUNDS = 3
 
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
@@ -1039,6 +1056,13 @@ class ChatSession:
         # older settings object doesn't break — absent means "no ceiling",
         # matching the pre-ENG-1286 behaviour rather than silently applying one.
         self._max_turn_tokens = getattr(s, "max_turn_tokens", 0)
+        # One-time exception to the always-ask ceiling (ENG-1893): granted at
+        # most once per turn, and only when the verifier reports the
+        # remaining work as small. Reset per turn in turn_stream, not here —
+        # this is __init__ so a long CLI session gets it too.
+        self._spend_ceiling_grace_used = False
+        self._spend_ceiling_grace_tokens = 0
+        self._round_cap_grace_used = False
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
         # nothing reads this to change behaviour. The control that will
         # (ENG-1531) is deliberately unbuilt until this has reported real
@@ -2994,7 +3018,25 @@ class ChatSession:
             max(_SPEND_CEILING_RESERVE, 2 * peak),
             max(self._max_turn_tokens // 2, 1),
         )
-        return max(self._max_turn_tokens - reserve, 1)
+        return max(
+            self._max_turn_tokens + self._spend_ceiling_grace_tokens - reserve, 1
+        )
+
+    def _grant_spend_ceiling_grace(self) -> None:
+        """Raise the gate once this turn (ENG-1893), sized like one more call.
+
+        Reuses the reserve's own formula rather than a flat constant, for the
+        same reason the reserve does: a turn with a big context needs a bigger
+        exception to actually cover 1-3 more calls. Idempotent — a caller that
+        checks `_spend_ceiling_grace_used` first never calls this twice, but a
+        stray second call would just recompute the same amount, not stack it.
+        """
+        peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
+        self._spend_ceiling_grace_tokens = min(
+            max(_SPEND_CEILING_RESERVE, 2 * peak),
+            max(self._max_turn_tokens // 2, 1),
+        )
+        self._spend_ceiling_grace_used = True
 
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
@@ -4380,6 +4422,10 @@ class ChatSession:
         system = await self._build_system_prompt(user_message)
         self._compacted_this_turn = False
         self._compaction_failed_this_turn = False
+        # One-time cap grace (ENG-1893), reset per turn like the flags above.
+        self._spend_ceiling_grace_used = False
+        self._spend_ceiling_grace_tokens = 0
+        self._round_cap_grace_used = False
 
         response: StreamComplete | None = None
 
@@ -4456,15 +4502,26 @@ class ChatSession:
 
             while llm_response.tool_calls:
                 tool_round += 1
+                # One-time extension (ENG-1893), unconditional like the
+                # mid-loop spend-ceiling grace — no verdict exists yet at
+                # this point, so the grant is a single small window rather
+                # than a self-report. Decided before the accounting below so
+                # the granted round is counted like any other.
+                if tool_round > self._max_tool_rounds and not self._round_cap_grace_used:
+                    self._round_cap_grace_used = True
+                effective_round_cap = self._max_tool_rounds + (
+                    _ROUND_CAP_GRACE_ROUNDS if self._round_cap_grace_used else 0
+                )
                 # Accumulate, don't assign: `tool_round` is loop-local and
                 # resets to 0 on every verifier-forced continuation, so
                 # assigning reported only the last continuation's rounds —
                 # breaking the metric for exactly the expensive shape it
                 # exists to classify. Counted before the cap check so a
-                # capped turn reports the cap, not cap+1 (#309 review).
-                if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+                # capped turn reports the (possibly grace-extended) cap, not
+                # cap+1 (#309 review).
+                if self._turn_cost is not None and tool_round <= effective_round_cap:
                     self._turn_cost.rounds += 1
-                if tool_round > self._max_tool_rounds:
+                if tool_round > effective_round_cap:
                     _max_rounds_hit = True
                     if self._turn_cost is not None:
                         self._turn_cost.ended_by = "round_cap"
@@ -4481,7 +4538,7 @@ class ChatSession:
                         {
                             "role": "user",
                             "content": (
-                                f"SYSTEM: You have used {self._max_tool_rounds} tool-call rounds on this turn. "
+                                f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
@@ -4510,36 +4567,46 @@ class ChatSession:
                 # round cap so a turn that breaches both still reports
                 # `round_cap`, leaving that path's behaviour untouched.
                 if self._spend_ceiling_stops_the_tool_loop():
-                    _spend_ceiling_hit = True
-                    if self._turn_cost is not None:
-                        self._turn_cost.ended_by = "spend_ceiling"
-                    logger.info(
-                        "spend ceiling reached: tokens=%d ceiling=%d gate=%d "
-                        "tool_round=%d continuation=%d — pausing to ask the user",
-                        self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, self._spend_ceiling_gate(),
-                        tool_round, continuation,
-                    )
-                    self._append_history(
-                        {"role": "assistant", "content": llm_response.content or ""}
-                    )
-                    self._append_history(
-                        {"role": "user", "content": self._spend_ceiling_notice()}
-                    )
-                    # Same ENG-1155 capture the other four hand-back sites need:
-                    # the reply above is already in history, so without this the
-                    # post-loop fallback appends it again and the message the user
-                    # actually read is lost.
-                    _reply_persisted = True
-                    yield StreamTaskProgress(
-                        phase="analyzing",
-                        message="Reached this task's token budget — checking in with you...",
-                    )
-                    async for event in self._stream_handback_diagnosis(
-                        system=system, label="spend-ceiling"
-                    ):
-                        yield event
-                    break
+                    # One-time, unconditional extension (ENG-1893): no verdict
+                    # exists yet at this point in the loop — the model just
+                    # asked for more tools, it hasn't stopped to produce
+                    # anything judgeable — so grace here is a single small
+                    # window rather than a self-report. Whether it wraps up
+                    # inside that window is itself the evidence; if it
+                    # hasn't, the second trip below asks same as always.
+                    if not self._spend_ceiling_grace_used:
+                        self._grant_spend_ceiling_grace()
+                    if self._spend_ceiling_stops_the_tool_loop():
+                        _spend_ceiling_hit = True
+                        if self._turn_cost is not None:
+                            self._turn_cost.ended_by = "spend_ceiling"
+                        logger.info(
+                            "spend ceiling reached: tokens=%d ceiling=%d gate=%d "
+                            "tool_round=%d continuation=%d — pausing to ask the user",
+                            self._turn_cost.total_tokens if self._turn_cost else 0,
+                            self._max_turn_tokens, self._spend_ceiling_gate(),
+                            tool_round, continuation,
+                        )
+                        self._append_history(
+                            {"role": "assistant", "content": llm_response.content or ""}
+                        )
+                        self._append_history(
+                            {"role": "user", "content": self._spend_ceiling_notice()}
+                        )
+                        # Same ENG-1155 capture the other four hand-back sites need:
+                        # the reply above is already in history, so without this the
+                        # post-loop fallback appends it again and the message the user
+                        # actually read is lost.
+                        _reply_persisted = True
+                        yield StreamTaskProgress(
+                            phase="analyzing",
+                            message="Reached this task's token budget — checking in with you...",
+                        )
+                        async for event in self._stream_handback_diagnosis(
+                            system=system, label="spend-ceiling"
+                        ):
+                            yield event
+                        break
 
                 # Build assistant message with content blocks
                 assistant_content: list[dict] = []
@@ -5453,31 +5520,40 @@ class ChatSession:
             # reached and the turn would end `completed` with no hand-back at
             # all, however much it had spent (ENG-1286).
             if self._spend_ceiling_reached():
-                _spend_ceiling_hit = True
-                if self._turn_cost is not None:
-                    self._turn_cost.ended_by = "spend_ceiling"
-                logger.info(
-                    "spend ceiling reached at the continuation gate: tokens=%d "
-                    "ceiling=%d continuation=%d — pausing to ask the user",
-                    self._turn_cost.total_tokens if self._turn_cost else 0,
-                    self._max_turn_tokens, continuation,
-                )
-                self._append_history(
-                    {"role": "user", "content": self._spend_ceiling_notice()}
-                )
-                # `_reply_persisted` is already True here — the verification block
-                # appends the assistant reply before requesting a verdict — so the
-                # post-loop fallback is already suppressed and only the diagnosis
-                # needs capturing.
-                yield StreamTaskProgress(
-                    phase="analyzing",
-                    message="Reached this task's token budget — checking in with you...",
-                )
-                async for event in self._stream_handback_diagnosis(
-                    system=system, label="spend-ceiling"
-                ):
-                    yield event
-                break
+                # One-time exception (ENG-1893): the verifier we just ran
+                # already judged this INCOMPLETE, and it also said the
+                # remaining work is small — take that at its word once per
+                # turn and keep going instead of asking. A verdict that
+                # isn't confident (the default) falls straight through to
+                # the ask below, unchanged from before this existed.
+                if verdict.close_to_done and not self._spend_ceiling_grace_used:
+                    self._grant_spend_ceiling_grace()
+                if self._spend_ceiling_reached():
+                    _spend_ceiling_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "spend_ceiling"
+                    logger.info(
+                        "spend ceiling reached at the continuation gate: tokens=%d "
+                        "ceiling=%d continuation=%d — pausing to ask the user",
+                        self._turn_cost.total_tokens if self._turn_cost else 0,
+                        self._max_turn_tokens, continuation,
+                    )
+                    self._append_history(
+                        {"role": "user", "content": self._spend_ceiling_notice()}
+                    )
+                    # `_reply_persisted` is already True here — the verification block
+                    # appends the assistant reply before requesting a verdict — so the
+                    # post-loop fallback is already suppressed and only the diagnosis
+                    # needs capturing.
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's token budget — checking in with you...",
+                    )
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="spend-ceiling"
+                    ):
+                        yield event
+                    break
 
             continuation += 1
             if self._turn_cost is not None:

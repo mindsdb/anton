@@ -136,7 +136,8 @@ async def test_ceiling_stops_the_turn_and_marks_the_exit(workspace):
 
 
 async def test_total_is_bounded_by_the_ceiling(workspace):
-    """The turn's spend lands at the ceiling, give or take two output budgets.
+    """The turn's spend lands at the ceiling, give or take two output budgets
+    and one grace allotment.
 
     The reserve is what makes this hold at all: the hand-back diagnosis is
     itself an LLM call, so gating AT the ceiling would overshoot by that call.
@@ -148,13 +149,21 @@ async def test_total_is_bounded_by_the_ceiling(workspace):
     Asserting `<= CEILING` exactly passed only because the old fixture happened
     to land on 1,000,000 with zero margin; it reddened as soon as `per_call`
     moved. State the real bound instead of a knife-edge one.
+
+    The grace term is new (ENG-1893): this run's all-tool-calls shape trips
+    the mid-loop gate, and the first trip buys one silent extension sized like
+    the reserve itself (see `_grant_spend_ceiling_grace`) before the turn
+    actually stops.
     """
     session = _session(workspace, responses=[_tool_call(i) for i in range(1, 40)])
     with patch("anton.analytics.send_event") as send:
         await _run(session)
     slack = 2 * (PER_CALL // 4)  # `_usage` puts a quarter of each call in output
     # Analytics properties go over the wire as strings.
-    assert int(send.call_args.kwargs["tokens_total"]) <= CEILING + slack
+    assert (
+        int(send.call_args.kwargs["tokens_total"])
+        <= CEILING + slack + _SPEND_CEILING_RESERVE
+    )
 
 
 async def test_trips_inside_one_tool_loop_with_no_continuation(workspace):
@@ -391,6 +400,109 @@ async def test_ceiling_trips_at_the_continuation_gate(workspace):
     with patch("anton.analytics.send_event") as send:
         await _run(session)
     assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+
+
+# ── Judgment-gated grace at the ceiling (ENG-1893) ──────────────────────────
+#
+# The ceiling above is a deliberate "always ask" design (see
+# test_handback_asks_the_user_and_is_persisted_as_streamed). But the verifier
+# that runs right before this gate already carries a signal about how much
+# work is left — `close_to_done` — and today that signal is thrown away: the
+# ask fires the same whether the task is one tool call from finished or
+# nowhere close. These tests pin a small, one-time exception: a verdict that
+# says the remaining work is small lets the turn keep going seamlessly
+# instead of stopping to ask, exactly once per turn.
+
+
+async def test_close_to_done_verdict_skips_the_ask_and_keeps_going(workspace):
+    """An INCOMPLETE verdict with close_to_done=True continues past the gate.
+
+    Same shape as test_ceiling_trips_at_the_continuation_gate — one tool
+    round, then a text reply that trips the gate on the first verifier call —
+    but this verdict reports the remaining work as small.
+    """
+    from anton.core.session import _VerifierVerdict
+
+    session = _session(workspace, per_call=300_000,
+                       responses=[_tool_call(1), _text("partial")])
+    verdict = _VerifierVerdict(status="INCOMPLETE", reason="almost there",
+                               close_to_done=True)
+    generate = AsyncMock(return_value=verdict)
+    session._llm.generate_object_code = generate
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+    assert send.call_args.kwargs["ended_by"] != "spend_ceiling"
+    assert generate.call_count == 1, "grace must not re-verify — one call, one decision"
+    text = _history_text(session)
+    assert "ask if they'd like you to continue" not in text
+
+
+async def test_close_to_done_grace_is_granted_only_once_per_turn(workspace):
+    """A second ceiling breach in the same turn asks, even if close_to_done again.
+
+    Grace is a one-time exception, not a standing invitation to talk past the
+    ceiling — otherwise a model that always claims "almost done" would never
+    actually stop.
+    """
+    from anton.core.session import _VerifierVerdict
+
+    session = _session(workspace, per_call=300_000,
+                       responses=[_tool_call(1), _text("partial"),
+                                  _tool_call(2), _text("still going")])
+    verdict = _VerifierVerdict(status="INCOMPLETE", reason="almost there",
+                               close_to_done=True)
+    session._llm.generate_object_code = AsyncMock(return_value=verdict)
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+    assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+
+
+# ── Mid-loop grace (ENG-1893) ────────────────────────────────────────────────
+#
+# Inside the tool loop there is no verdict to read close_to_done off — the
+# model hasn't stopped to produce a judgeable reply, it just asked for more
+# tools. So this grace is unconditional rather than judgment-gated: the first
+# trip buys one small, one-time extension; whatever happens in that window is
+# itself the evidence. If the loop is still going after it, that is grounds
+# enough to ask — no self-report needed either way.
+
+
+def test_mid_loop_grace_raises_the_gate_once(workspace):
+    """`_grant_spend_ceiling_grace` lifts the gate; spending through the grace
+    trips it again — the bump is not renewed."""
+    from anton.core.turn_cost import TurnCost
+
+    session = _session(workspace)
+    session._turn_cost = TurnCost()
+    session._turn_cost.rounds = 5  # > 1, so the never-zero-tools guard is moot here
+    # peak_context_tokens is 0 here, so both the reserve and the grace land on
+    # the flat _SPEND_CEILING_RESERVE floor — the gate before grace is exactly
+    # CEILING - reserve, and after grace it is back at CEILING.
+    session._turn_cost.input_tokens = CEILING - _SPEND_CEILING_RESERVE
+    assert session._spend_ceiling_stops_the_tool_loop()
+    session._grant_spend_ceiling_grace()
+    assert not session._spend_ceiling_stops_the_tool_loop()
+    session._turn_cost.input_tokens = CEILING
+    assert session._spend_ceiling_stops_the_tool_loop(), (
+        "the one-time bump must not renew itself on a second trip"
+    )
+
+
+async def test_mid_loop_ceiling_grants_grace_once_then_stops(workspace):
+    """A long, all-tool-calls run gets one silent extension before it asks.
+
+    Mirrors test_trips_inside_one_tool_loop_with_no_continuation's shape
+    (consecutive tool calls, no continuation involved) with more responses
+    scripted, so the run survives the first, now-silent trip and reaches a
+    second one that still asks.
+    """
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 60)])
+    with patch("anton.analytics.send_event") as send:
+        await _run(session)
+    kwargs = send.call_args.kwargs
+    assert kwargs["ended_by"] == "spend_ceiling"
+    assert session._spend_ceiling_grace_used
+    assert int(kwargs["continuations"]) == 0, "still trips inside one tool loop"
 
 
 @pytest.mark.parametrize("ceiling", [CEILING, 100_000, 1])
