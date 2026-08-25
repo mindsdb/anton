@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import uuid
 from typing import TYPE_CHECKING
@@ -65,9 +66,12 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         if isinstance(raw_known, dict) else {}
     )
 
-    console = session._console
-    if console is None:
-        return "Cannot connect datasource — no console available."
+    # Mode (a) below needs no terminal — it writes straight to the vault. A
+    # quiet console swallows its status prints instead of crashing on
+    # `None.print()`. The real console (if any) is required only for mode
+    # (b)'s prompts, gated further down.
+    from rich.console import Console
+    console = session._console or Console(quiet=True)
 
     dropped_scrubbed = [
         k for k, v in known_variables.items() if SCRUBBED_VALUE_RE.match(v)
@@ -237,6 +241,18 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
                     f"in scratchpad code — never embed raw values."
                 )
 
+    # Below this point is mode (b), the interactive field-by-field prompt
+    # flow. It needs a real terminal (Rich prompts, Live spinners); a quiet
+    # console can't service it, so bail out with an actionable message
+    # instead of hanging or crashing on a prompt read.
+    if session._console is None:
+        return (
+            "Interactive connection setup isn't available in this environment "
+            "(no terminal to prompt in). Ask the user for the credential "
+            "values directly in chat, then call connect_new_datasource again "
+            "with known_variables set."
+        )
+
     console.print()
     console.print(
         f"[anton.prompt]anton>[/] I can help with that \u2014 let's connect [bold]{engine}[/] to Anton."
@@ -334,6 +350,22 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     )
 
 
+# Shared by both description variants below — everything that doesn't
+# depend on whether an interactive terminal is available.
+_CONNECT_DATASOURCE_DESCRIPTION_TAIL = (
+    "Supported engines: see the built-in registry (PostgreSQL, MySQL, Snowflake, "
+    "BigQuery, Redshift, Databricks, MariaDB, MSSQL, Oracle, HubSpot, Salesforce, "
+    "Shopify, Gmail, and more). Unknown engines (not in the built-in registry) "
+    "are also saved silently as ad-hoc connections when known_variables are "
+    "provided — no prompts, no auth-method interrogation. A minimal engine "
+    "definition is appended to ~/.anton/datasources.md so future sessions "
+    "recognize it. Reference credentials via DS_<ENGINE>_<NAME>__<FIELD> env "
+    "vars like any other connection.\n\n"
+    "Partial credentials are fine — save what the user provided. Ask for missing "
+    "pieces in a later turn only if needed. Never invent values.\n\n"
+    "Do NOT print any message before calling this tool — it handles the user-facing output."
+)
+
 CONNECT_DATASOURCE_TOOL = ToolDef(
     name = "connect_new_datasource",
     description = (
@@ -348,17 +380,7 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
         "(b) Interactive: call with just engine and no known_variables when the "
         "user has no credentials in context yet. Anton runs the same flow as "
         "/connect, prompting for fields one at a time.\n\n"
-        "Supported engines: see the built-in registry (PostgreSQL, MySQL, Snowflake, "
-        "BigQuery, Redshift, Databricks, MariaDB, MSSQL, Oracle, HubSpot, Salesforce, "
-        "Shopify, Gmail, and more). Unknown engines (not in the built-in registry) "
-        "are also saved silently as ad-hoc connections when known_variables are "
-        "provided — no prompts, no auth-method interrogation. A minimal engine "
-        "definition is appended to ~/.anton/datasources.md so future sessions "
-        "recognize it. Reference credentials via DS_<ENGINE>_<NAME>__<FIELD> env "
-        "vars like any other connection.\n\n"
-        "Partial credentials are fine — save what the user provided. Ask for missing "
-        "pieces in a later turn only if needed. Never invent values.\n\n"
-        "Do NOT print any message before calling this tool — it handles the user-facing output."
+        + _CONNECT_DATASOURCE_DESCRIPTION_TAIL
     ),
     input_schema = {
         "type": "object",
@@ -394,6 +416,32 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
         "required": ["engine"],
     },
     handler = handle_connect_datasource,
+)
+
+# Console-less hosts (Cowork desktop: session._console is None) can't service
+# mode (b) — there's no terminal to prompt in, and handle_connect_datasource
+# refuses it with an actionable error rather than crashing (ENG-1849). Don't
+# advertise a mode the model would then have to be told, mid-turn, doesn't
+# work here — swapped in by ChatSession.__init__ (anton/core/session.py)
+# once session._console is known.
+CONNECT_DATASOURCE_TOOL_NO_CONSOLE = dataclasses.replace(
+    CONNECT_DATASOURCE_TOOL,
+    description = (
+        "Connect a data source to Anton's Local Vault. Call this tool "
+        "IMMEDIATELY when the user shares credentials in chat (host, "
+        "password, API token, service account JSON, etc.). Pass all "
+        "extracted values as known_variables. The tool saves to the vault "
+        "without any prompts and returns a confirmation. This ensures "
+        "credentials are persisted before being used anywhere — never "
+        "reference chat-supplied credentials directly in scratchpad code; "
+        "always go through the vault.\n\n"
+        "There is no interactive prompt flow in this environment — do NOT "
+        "call this tool with just an engine and no known_variables; there is "
+        "nothing to prompt with and the call will fail. If the user hasn't "
+        "shared credentials yet, ask for them in chat first, then call this "
+        "tool once you have real values to pass.\n\n"
+        + _CONNECT_DATASOURCE_DESCRIPTION_TAIL
+    ),
 )
 
 
