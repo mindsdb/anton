@@ -1033,6 +1033,19 @@ class ChatSession:
         self._workspace = config.workspace
         self._data_vault = config.data_vault
         self._console = config.console
+        if self._console is None:
+            # connect_new_datasource's interactive mode needs a terminal to
+            # prompt in; without one, don't advertise it to the model (ENG-1849).
+            from anton.tools import (
+                CONNECT_DATASOURCE_TOOL,
+                CONNECT_DATASOURCE_TOOL_NO_CONSOLE,
+            )
+            self._extra_tools = [
+                CONNECT_DATASOURCE_TOOL_NO_CONSOLE
+                if tool.name == CONNECT_DATASOURCE_TOOL.name
+                else tool
+                for tool in self._extra_tools
+            ]
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
         )
