@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -56,6 +57,7 @@ def test_create_writes_metadata_and_readme(store: ArtifactStore):
     )
     assert artifact.slug == f"nvda-btc-dashboard-{artifact.id}"
     assert len(artifact.id) == 8
+    assert str(UUID(artifact.stableId)) == artifact.stableId
     folder = store.folder_for(artifact.slug)
     assert folder.is_dir()
     assert (folder / "metadata.json").is_file()
@@ -78,6 +80,25 @@ def test_create_persists_round_trip(store: ArtifactStore):
     assert on_disk["type"] == "document"
     assert on_disk["files"] == []
     assert on_disk["provenance"] == []
+    assert on_disk["stableId"] == artifact.stableId
+
+
+def test_legacy_metadata_gets_repeatable_stable_identity():
+    legacy = {
+        "id": "a1b2c3d4",
+        "slug": "legacy-a1b2c3d4",
+        "createdAt": "2026-08-25T12:00:00+00:00",
+        "updatedAt": "2026-08-25T12:00:00+00:00",
+        "name": "Legacy",
+        "description": "",
+        "type": "document",
+    }
+
+    first = Artifact.model_validate(legacy)
+    second = Artifact.model_validate(legacy)
+
+    assert first.stableId == second.stableId
+    assert str(UUID(first.stableId)) == first.stableId
 
 
 # ─── Slug uniqueness ────────────────────────────────────────────────────────
@@ -328,6 +349,19 @@ def test_reconcile_excludes_published_json(store: ArtifactStore):
     (folder / "dashboard.html").write_text("<html></html>")
     (folder / ".published.json").write_text("{}")
     opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"dashboard.html"}
+
+
+def test_reconcile_excludes_revision_journal(store: ArtifactStore):
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    folder = store.folder_for(artifact.slug)
+    (folder / "dashboard.html").write_text("<html></html>")
+    journal = folder / ".revisions" / "entries"
+    journal.mkdir(parents=True)
+    (journal / "private-source.md").write_text("must not surface")
+
+    opened = store.open(artifact.slug)
+
     assert {f.path for f in opened.files} == {"dashboard.html"}
 
 

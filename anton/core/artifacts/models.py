@@ -2,7 +2,7 @@
 
 Schema split:
   Server-managed (deterministic):
-    schemaVersion, id, slug, createdAt, updatedAt, files[], provenance[]
+    schemaVersion, id, stableId, slug, createdAt, updatedAt, files[], provenance[]
   Agent-supplied (validated at create_artifact / update_artifact time):
     name, description, type, primary, port, datasources[]
 
@@ -19,13 +19,24 @@ existed load as version 1 (the field default).
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID, uuid5
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # On-disk metadata.json layout version. Bump on incompatible changes
 # and add a migration keyed off the loaded `schemaVersion`.
 METADATA_SCHEMA_VERSION = 1
+
+# A legacy artifact predates ``stableId``. Derive its canonical identity from
+# fields that already survive folder/project moves instead of inventing a new
+# value on every read. New artifacts always receive a random UUID in the store.
+_LEGACY_ARTIFACT_NAMESPACE = UUID("4ba9bdf8-3f0e-4ce5-beb0-8f00a8d955e7")
+
+
+def legacy_stable_id(artifact_id: str, created_at: str) -> str:
+    """Deterministic UUID for metadata written before ``stableId`` existed."""
+    return str(uuid5(_LEGACY_ARTIFACT_NAMESPACE, f"{artifact_id}:{created_at}"))
 
 
 # Closed enum of artifact shapes. The renderer uses this to pick
@@ -134,6 +145,9 @@ class Artifact(BaseModel):
     # `METADATA_SCHEMA_VERSION` on fresh artifacts.
     schemaVersion: int = 1
     id: str  # short hex (uuid4().hex[:8]) — stable across folder renames
+    # Globally unique identity used by drafts, published versions, revisions,
+    # and comments. ``id`` remains for slug/backwards compatibility only.
+    stableId: str = ""
     slug: str  # matches folder name; sanitized from `name` with collision suffix
     createdAt: str
     updatedAt: str
@@ -163,3 +177,13 @@ class Artifact(BaseModel):
     # ── Server-managed contents ─────────────────────────────────
     files: list[FileEntry] = Field(default_factory=list)
     provenance: list[ProvenanceEntry] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _backfill_stable_id(self) -> "Artifact":
+        """Give legacy records one repeatable identity without a write-on-read."""
+        if not self.stableId:
+            self.stableId = legacy_stable_id(self.id, self.createdAt)
+        else:
+            # Reject malformed persisted identities at the metadata boundary.
+            self.stableId = str(UUID(self.stableId))
+        return self

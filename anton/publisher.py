@@ -39,7 +39,7 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
 
 # Filenames inside an artifact folder that are housekeeping — never bundled.
-_FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.json"}
+_FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.json", ".revisions"}
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
@@ -47,7 +47,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # Owner-side housekeeping files that must never enter the published
 # bundle. `.published.json` in particular holds the artifact's plaintext
 # access password (for the in-app eye-reveal) and must stay local.
-_BUNDLE_SKIP_NAMES = {".published.json"}
+_BUNDLE_SKIP_NAMES = {".published.json", ".revisions"}
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without
@@ -188,7 +188,8 @@ def _zip_html(path: Path) -> bytes:
             # (e.g. `.published.json`, which holds the plaintext access
             # password and must never be published).
             for f in sorted(path.rglob("*")):
-                if f.is_file() and f.name not in _BUNDLE_SKIP_NAMES:
+                rel = f.relative_to(path)
+                if f.is_file() and not any(part in _BUNDLE_SKIP_NAMES for part in rel.parts):
                     _write_scrubbed(zf, f, str(f.relative_to(path)))
     return buf.getvalue()
 
@@ -277,6 +278,7 @@ def publish(
     pwd_version: int = 1,
     access: dict | None = None,
     access_version: int = 1,
+    artifact_key: str | None = None,
     vault: DataVault | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
@@ -303,6 +305,8 @@ def publish(
                   See `build_access_payload` for the outbound shape.
         access_version: Monotonic version bumped whenever the restricted list/
                   org flag changes, invalidating previously issued grants.
+        artifact_key: Stable ``artifact/<uuid>`` identity shared by the draft,
+                  every published version, and its comment threads.
         vault: Credential store to resolve datasource secrets from. Defaults
                   to anton's local vault (`~/.anton/data_vault`); cowork-server
                   passes its own vault so published secrets match where the
@@ -325,12 +329,15 @@ def publish(
         payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
         if missing:
             payload_dict["missing_datasources"] = missing
+        artifact_key = artifact_key or f"artifact/{artifact.stableId}"
     else:
         zipped = _zip_html(file_path)
 
     payload_dict["file_payload"] = base64.b64encode(zipped).decode()
     if report_id:
         payload_dict["report_id"] = report_id
+    if artifact_key:
+        payload_dict["artifact_key"] = artifact_key
     # Access control: send the hash (never the plaintext) and, for restricted
     # mode, the normalized email list + org flag (auth is the source of truth;
     # neither the list nor the password plaintext enters the zip bundle). A

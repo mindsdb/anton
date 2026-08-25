@@ -45,6 +45,7 @@ PUBLISHED_FILENAME = ".published.json"
 # artifacts-service housekeeping set so the agent's view and the UI agree on
 # what counts as an artifact file.
 _HOUSEKEEPING_FILES = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
+_HOUSEKEEPING_DIRS = {".revisions"}
 
 # Same character whitelist projects_store uses — keeps slug shapes
 # consistent across antontron's project names AND artifact slugs.
@@ -216,6 +217,7 @@ class ArtifactStore:
         artifact = Artifact(
             schemaVersion=METADATA_SCHEMA_VERSION,
             id=artifact_id,
+            stableId=str(uuid.uuid4()),
             slug=slug,
             createdAt=now,
             updatedAt=now,
@@ -390,7 +392,7 @@ class ArtifactStore:
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
             rel = p.relative_to(folder).as_posix()
-            if rel in _HOUSEKEEPING_FILES:
+            if rel in _HOUSEKEEPING_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
                 continue
             try:
                 stat = p.stat()

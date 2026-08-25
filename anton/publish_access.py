@@ -21,7 +21,7 @@ _EMAIL_SPLIT_RE = re.compile(r"[\s,;]+")
 # Keep in sync with anton.publisher._FULLSTACK_EXCLUDED (publisher.py:42):
 # backend.log is the running backend's runtime log — excluded from the
 # published bundle there, so it must not count as user content here either.
-_HOUSEKEEPING_FILES = {"metadata.json", "README.md", "backend.log", ".published.json"}
+_HOUSEKEEPING_FILES = {"metadata.json", "README.md", "backend.log", ".published.json", ".revisions"}
 
 
 def normalize_emails(values) -> list[str]:
