@@ -87,6 +87,12 @@ class GenState:
     # Entry-file name from the artifact metadata. May be None — `create_artifact`
     # allows omitting it; HTML_APP_DEFAULT_PRIMARY then applies.
     primary: str | None = None
+    # Body of `prd.md` when `generate_prd` left one in the artifact folder
+    # (ENG-969 → ENG-968). This — not `brief` — is the requirements source on
+    # the normal path: it is the document the user actually reviewed and
+    # accepted, while `brief` is assembled by the calling agent. Empty when
+    # there is no PRD, and every reader treats empty as "fall back to brief".
+    prd: str = ""
     data_notes: str = ""
     data_iterations: int = 0
     api_spec: str | None = None

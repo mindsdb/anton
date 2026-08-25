@@ -21,6 +21,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anton.core.artifacts.prd import PRD_FILENAME
+
 from . import sub_tools
 from .prompts import (
     build_api_spec_prompt,
@@ -110,6 +112,38 @@ def _response_is_truncated(response, cap: int | None) -> bool:
     return isinstance(used, int) and used >= cap
 
 
+def _load_prd(state) -> None:
+    """Load the confirmed PRD from the artifact folder, when there is one.
+
+    Read here rather than accepted as a tool parameter: the handler already
+    resolves the artifact folder from `slug`, so the file needs no addressing
+    and the LLM-facing schema stays at `slug` + `context`. The calling agent
+    cannot forget to pass it, mis-transcribe it, or paraphrase it — the
+    document the user accepted is the one that arrives.
+
+    Every failure mode degrades to "no PRD" instead of stopping the run:
+    an agent may legitimately skip the PRD step, artifacts created before
+    ENG-969 have no `prd.md`, and a file that cannot be read must not cost a
+    generation that `context` alone can still complete. Which of the two
+    modes ran is recorded, so a wrong-looking artifact can be traced back to
+    the requirements it was actually built from.
+    """
+    path = state.artifact_path / PRD_FILENAME
+    try:
+        if not path.is_file():
+            state.record("read_prd", "skipped", f"no {PRD_FILENAME} in the artifact folder")
+            return
+        body = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        state.record("read_prd", "error", f"{PRD_FILENAME} could not be read: {exc}")
+        return
+    if not body:
+        state.record("read_prd", "skipped", f"{PRD_FILENAME} is empty")
+        return
+    state.prd = body
+    state.record("read_prd", "done", f"{len(body)} chars from {PRD_FILENAME}")
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -163,6 +197,7 @@ async def generate(
         trace_log=trace,
         progress=progress,
     )
+    _load_prd(state)
     result = await run(state)
     if isinstance(result, str):
         trace.run_result(ok=False, error=result)

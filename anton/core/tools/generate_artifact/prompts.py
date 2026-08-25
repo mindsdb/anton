@@ -601,8 +601,36 @@ _DATA_CONTEXT_HEADER = (
 )
 
 
+PRD_SECTION_HEADER = (
+    "## Product requirements (prd.md — reviewed and accepted by the user; "
+    "this is the authoritative requirements source)"
+)
+PRD_SECTION_FOOTER = "--- end of prd.md ---"
+
+
+def prd_section(state) -> str:
+    """The PRD block, or "" when this run has no PRD.
+
+    The header states the document's standing rather than leaving the node to
+    infer it from position: the same context also carries `## Brief`, written
+    by the calling agent, and on any disagreement the accepted PRD wins. One
+    renderer for every node, so no node reads a differently-framed PRD.
+
+    The footer marks where the quoted document ends. `prd.md` carries its own
+    `##` headings, which land as siblings of the wrapper's — without a closing
+    marker the PRD's last section and whatever follows it in the context are
+    indistinguishable. Demoting those headings instead would corrupt the
+    fenced connection-code examples the PRD is required to include.
+    """
+    body = (getattr(state, "prd", "") or "").strip()
+    return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
+
+
 def _brief_and_notes(state) -> str:
     parts = [f"## Brief\n{state.brief.strip()}"]
+    prd = prd_section(state)
+    if prd:
+        parts.append(prd)
     if state.data_notes.strip():
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:

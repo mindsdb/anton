@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from anton.core.artifacts.prd import PRD_FILENAME
+
 from . import sub_tools
 from .prompts import build_phase2_system_prompt
 from .state import PrdState
@@ -258,7 +260,8 @@ async def write_prd(state: PrdState) -> str:
         )
     state.messages.append({"role": "assistant", "content": full_prd})
 
-    (state.artifact_path / "prd.md").write_text(full_prd, encoding="utf-8")
+    # Same constant `generate_artifact` reads back — see anton/core/artifacts/prd.py.
+    (state.artifact_path / PRD_FILENAME).write_text(full_prd, encoding="utf-8")
 
     final_type = state.final_artifact_type or state.artifact_type
     if final_type != state.artifact_type:

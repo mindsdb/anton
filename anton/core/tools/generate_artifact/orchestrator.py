@@ -123,7 +123,8 @@ def _pads_dict(session) -> dict:
 
 
 def _pads_named_in_brief(session, brief: str) -> list[str]:
-    """Names of live scratchpads that the brief mentions.
+    """Names of live scratchpads mentioned in `brief` — the caller passes the
+    brief and the PRD joined, since either may be where a pad is named.
 
     Matching runs from the live pads to the brief text, not the other way round.
     Persistent pads cannot be enumerated (`Cell` does not store its pad name,
@@ -152,7 +153,7 @@ def _live_pad_names(session) -> list[str]:
 
 
 def _inspect_named_scratchpads(state: GenState) -> None:
-    """Read the cells of pads named in the brief into `data_notes`.
+    """Read the cells of pads named in the brief or the PRD into `data_notes`.
 
     Reads `pad.cells` directly (`base.py:52`) rather than going through `dump`:
     that returns a ready-made markdown string from `render_notebook()`, which
@@ -163,7 +164,14 @@ def _inspect_named_scratchpads(state: GenState) -> None:
     The step is synchronous and side-effect free: no `await`, no `get_or_create`.
     """
     state.step_started("inspect_scratchpads")
-    matched = _pads_named_in_brief(state.session, state.brief)
+    # The PRD is searched alongside the brief: `generate_prd` is required to
+    # cite the scratchpad and cell behind every data source it describes, so
+    # on the normal path the PRD is where a pad name actually appears — the
+    # brief may never mention one. Matching only the brief would re-fetch data
+    # the PRD already points at.
+    matched = _pads_named_in_brief(
+        state.session, "\n\n".join(p for p in (state.brief, state.prd) if p)
+    )
     if not matched:
         live = _live_pad_names(state.session)
         detail = (
@@ -306,6 +314,9 @@ def _spec_context(state: GenState) -> str:
     """Brief + gathered data + tech spec — the shared context handed to
     api-spec and generation nodes (explicit inter-node data flow)."""
     parts = [state.brief.strip()]
+    prd = prompts.prd_section(state)
+    if prd:
+        parts.append(prd)
     if state.data_notes.strip():
         parts.append("## Data\n" + state.data_notes.strip())
     spec_path = state.artifact_path / "spec.md"
