@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from anton.core.artifacts.internal_files import PRD_FILENAME
 
 from . import sub_tools
+from .state import SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
 from .prompts import (
     build_api_spec_prompt,
     build_backend_kickoff,
@@ -110,6 +111,73 @@ def _response_is_truncated(response, cap: int | None) -> bool:
         return False
     used = getattr(getattr(response, "usage", None), "output_tokens", None)
     return isinstance(used, int) and used >= cap
+
+
+_SPEC_COMPACT_NUDGE = (
+    "\n\nIMPORTANT: your previous answer was cut off by the output limit "
+    "before it reached the end, so it was discarded. Write the whole "
+    "specification again, and make it fit: no preamble, no restating the "
+    "brief or the PRD back at me, no worked examples, short lines. A complete "
+    "structure matters far more than depth in any one section."
+)
+
+
+async def _plan_whole_document(
+    session: "ChatSession",
+    *,
+    system: str,
+    user: str,
+    node_label: str,
+    trace=None,
+    on_retry=None,
+) -> tuple[str, str | None]:
+    """One planning call for a whole specification, retried once with more room.
+
+    Returns ``(body, error)``; exactly one of the two is set.
+
+    A spec is produced by a single call, so — unlike the file-writing loop —
+    there is no chunk boundary to append at and a cut answer cannot be
+    continued. It has to be re-asked, and the re-ask must CHANGE the call or it
+    dies identically (measured for the main loop's own recovery,
+    ``session._recover_truncated_stream``): the budget goes up AND the model is
+    told to write compactly.
+
+    A truncated document is never returned. Both generators consume the spec as
+    their requirements, and `_spec_context` hands it to them verbatim, so half a
+    spec means half a system built with nothing anywhere reporting that
+    something was lost — which is the actual damage ENG-1116 describes, not the
+    missing length.
+
+    Truncation is detected with the shared `looks_truncated`, which also honours
+    ``stop_reason`` — the gateway reports it correctly since 2026-08-03, and a
+    token count alone cannot see a cut that stopped just under the cap.
+    """
+    from anton.core.llm.structured import looks_truncated
+
+    response = None
+    extra = ""
+    for attempt, budget in enumerate((SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)):
+        if attempt > 0 and on_retry is not None:
+            on_retry()
+        messages = [{"role": "user", "content": user + extra}]
+        response = await session._llm.plan(
+            system=system, messages=messages, max_tokens=budget,
+        )
+        if trace is not None:
+            trace.llm_call(
+                node=node_label, method="plan", system=system,
+                messages=messages, response=response, attempt=attempt,
+            )
+        if not looks_truncated(response, budget):
+            return (response.content or "").strip(), None
+        extra = _SPEC_COMPACT_NUDGE
+
+    used = getattr(getattr(response, "usage", None), "output_tokens", None)
+    return "", (
+        f"{node_label}: the specification hit the output limit "
+        f"({used} tokens against a {SPEC_MAX_TOKENS_RETRY} budget) and was "
+        "still incomplete after a retry asking for a compact version."
+    )
 
 
 def _load_prd(state) -> None:
@@ -218,6 +286,7 @@ async def _generate_api_spec(
     stateless: bool = False,
     trace=None,
     node_label: str = "make_api_spec",
+    on_retry=None,
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
 
@@ -226,19 +295,16 @@ async def _generate_api_spec(
     is considered valid and the (normalized) JSON string is returned.
     """
     system, user = build_api_spec_prompt(context, stateless=stateless)
-    response = await session._llm.plan(
-        system=system,
-        messages=[{"role": "user", "content": user}],
+    body, error = await _plan_whole_document(
+        session, system=system, user=user, node_label=node_label, trace=trace,
+        on_retry=on_retry,
     )
-    if trace is not None:
-        trace.llm_call(
-            node=node_label,
-            method="plan",
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            response=response,
-        )
-    spec = _strip_code_fence((response.content or "").strip())
+    if error is not None:
+        # Already worded in terms of the output limit. Without this branch the
+        # cut JSON would fall through to `json.loads` below and be reported as
+        # "not valid JSON", pointing at the wrong cause entirely.
+        return f"Error: {error}"
+    spec = _strip_code_fence(body)
     if not spec:
         return "Error: API spec generation returned empty response."
     try:

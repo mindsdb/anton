@@ -28,6 +28,21 @@ RUNAPP_MAX_RETRIES: int = 1
 # a step's detail is long (full text still lives in data_notes / trace_log).
 JOURNAL_DETAIL_MAX: int = 300
 
+# Output budgets for the two whole-document calls (`make_tech_spec`,
+# `make_api_spec`), overriding the client default of 8192 — a specification is
+# among the longest single answers anton asks for, and reasoning models spend
+# their internal thinking from the same budget (stage-1a measured a 25 842-char
+# spec dying at 8192 output tokens, ENG-1116).
+#
+# The two values are what the MindsHub gateway actually accepts, not round
+# numbers: measured 2026-08-24 against `api.mindshub.ai/v1`, alias `opus` —
+# 8192/16384/20480 answer normally, 24576 and above return HTTP 500. That 500
+# is classified as a transient provider error, so an over-large budget does not
+# fail fast; it burns the retry ladder first. Raise both together, and re-measure
+# before doing so.
+SPEC_MAX_TOKENS: int = 16384
+SPEC_MAX_TOKENS_RETRY: int = 20480
+
 
 # ── Verdict schemas for diamond nodes (generate_object) ──────────────────────
 class DataVerdict(BaseModel):

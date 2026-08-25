@@ -293,15 +293,18 @@ from .state import GEN_VERIFY_MAX_RETRIES
 async def _write_tech_spec(state: GenState) -> str | None:
     state.step_started("make_tech_spec")
     system, user = prompts.build_tech_spec_prompt(state)
-    resp = await state.session._llm.plan(
-        system=system, messages=[{"role": "user", "content": user}]
+    body, trunc_err = await engine._plan_whole_document(
+        state.session, system=system, user=user, node_label="make_tech_spec",
+        trace=state.trace_log,
+        on_retry=lambda: state.step_started("make_tech_spec", attempt=1),
     )
-    state.trace_log.llm_call(
-        node="make_tech_spec", method="plan",
-        system=system, messages=[{"role": "user", "content": user}],
-        response=resp,
-    )
-    body = (getattr(resp, "content", "") or "").strip()
+    if trunc_err is not None:
+        # Deliberately terminal. Writing the cut spec would put it into
+        # `_spec_context` for both generators, which would then build half a
+        # system with nothing reporting the loss (ENG-1116).
+        state.record("make_tech_spec", "fail", trunc_err)
+        state.error = trunc_err
+        return state.error
     if not body:
         state.error = "make_tech_spec: model returned an empty specification."
         return state.error
@@ -336,6 +339,7 @@ async def _make_api_spec(state: GenState) -> str | None:
     spec_or_err = await engine._generate_api_spec(
         state.session, _spec_context(state), stateless=stateless,
         trace=state.trace_log, node_label="make_api_spec",
+        on_retry=lambda: state.step_started("make_api_spec", attempt=1),
     )
     if spec_or_err.startswith("Error:"):
         state.error = f"make_api_spec: {spec_or_err}"
