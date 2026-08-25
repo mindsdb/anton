@@ -6,6 +6,7 @@ return the Pydantic verdict models below. Verifiers return `VerifyResult`.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
+from .progress import label_for
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
@@ -95,10 +97,32 @@ class GenState:
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
+    # Progress channel to the tool handler (ENG-970). None when nobody is
+    # listening — the non-streaming path, `bench_generate.py`, most tests — so
+    # every call site stays unconditional. Must be UNBOUNDED: `step_started`
+    # is called from synchronous FSM code that cannot await a full queue, and
+    # `QueueFull` there would abort a generation over a progress line.
+    progress: "asyncio.Queue[str | None] | None" = None
 
     def record(self, node: str, outcome: str, detail: str = "") -> None:
         self.trace.append(StepResult(node=node, outcome=outcome, detail=detail))
         self.trace_log.node(node, outcome, detail)
+
+    def step_started(self, node: str, *, attempt: int = 0) -> None:
+        """Announce that `node` is STARTING, for the user's benefit.
+
+        Deliberately separate from `record`, which fires when a node is
+        already done: the two longest nodes (`make_tech_spec`, a single
+        minute-plus LLM call, and the generation loops) would otherwise
+        report only in hindsight, leaving exactly the silence this is meant
+        to remove. `record` stays the sole source of the journal and the
+        trace — nothing here feeds a prompt.
+        """
+        if self.progress is None:
+            return
+        text = label_for(node, is_fullstack=self.is_fullstack, attempt=attempt)
+        if text is not None:
+            self.progress.put_nowait(text)
 
     def journal(self) -> str:
         """Compact one-line-per-step log of everything the FSM did so far.

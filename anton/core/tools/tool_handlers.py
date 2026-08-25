@@ -424,7 +424,21 @@ def _generation_failed(reason: str) -> str:
     )
 
 
-async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> str:
+async def _generate_with_progress_close(coro, queue) -> "dict | str":
+    """Await `coro`, then close the progress channel exactly once.
+
+    The sentinel goes in a `finally` so the handler's drain loop terminates
+    on a crash or a cancellation too — otherwise it would sit awaiting a
+    queue nobody will ever write to again, turning any generator exception
+    into a hung turn instead of a reported failure.
+    """
+    try:
+        return await coro
+    finally:
+        queue.put_nowait(None)
+
+
+async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     """Generate every file for an already-registered artifact via the FSM.
 
     The handler loads artifact metadata to read its `type` (rejects types
@@ -434,51 +448,90 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict) -> st
     generation state machine and writes files into the artifact folder.
     Pipeline failures come back wrapped by `_generation_failed` so the agent
     surfaces them to the user instead of hand-building the artifact.
+
+    An async generator rather than a plain coroutine (ENG-970): a fullstack
+    run takes minutes, and a tool that emits nothing for minutes reads as a
+    hang. Every FSM step's start arrives on an `asyncio.Queue` and is yielded
+    as a `ToolProgress` marker; `ToolRegistry.dispatch_tool_stream` forwards
+    those and takes the LAST non-marker item as the tool result, so every
+    return path below yields exactly one — string or JSON, unchanged from
+    when this was a coroutine. The queue exists because the FSM cannot yield
+    from here: progress originates several frames down, including inside the
+    `asyncio.gather` that runs backend and frontend generation at once.
     """
+    import asyncio
     import json
+
+    from anton.core.tools.progress import ToolProgress
 
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        yield "Artifact store unavailable (no workspace bound to this session)."
+        return
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        yield "Error: `slug` is required."
+        return
     artifact = store.open(slug)
     if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
+        yield f"Error: no artifact found for slug `{slug}`."
+        return
 
     supported = {"html-app", "fullstack-stateless-app", "fullstack-stateful-app"}
     if artifact.type not in supported:
-        return (
+        yield (
             "Error: generate_artifact only supports html-app / "
             "fullstack-stateless-app / fullstack-stateful-app. "
             f"Got: {artifact.type}."
         )
+        return
 
     context = tc_input.get("context")
     if not isinstance(context, str) or not context.strip():
-        return "Error: `context` is required (markdown brief)."
+        yield "Error: `context` is required (markdown brief)."
+        return
 
     folder = store.folder_for(slug)
     from anton.core.tools.generate_artifact import generate
 
-    try:
-        result = await generate(
-            session=session,
-            artifact_type=artifact.type,
-            artifact_path=folder,
-            context=context,
-            slug=slug,
-            primary=artifact.primary,
+    queue: "asyncio.Queue[str | None]" = asyncio.Queue()
+    task = asyncio.create_task(
+        _generate_with_progress_close(
+            generate(
+                session=session,
+                artifact_type=artifact.type,
+                artifact_path=folder,
+                context=context,
+                slug=slug,
+                primary=artifact.primary,
+                progress=queue,
+            ),
+            queue,
         )
+    )
+    try:
+        while True:
+            line = await queue.get()
+            if line is None:  # generation finished, one way or another
+                break
+            yield ToolProgress(line)
+        result = await task
     except Exception as exc:  # last-resort: never escalate to the dispatcher
-        return _generation_failed(f"generator crashed: {exc}")
+        yield _generation_failed(f"generator crashed: {exc}")
+        return
+    finally:
+        # A no-op once the task is done. Reached with the task still running
+        # when the consumer abandons this generator mid-yield (turn cancelled
+        # → `aclose()` → GeneratorExit): without it, generation would carry on
+        # writing files into the artifact folder with nobody left to report to.
+        task.cancel()
 
     if isinstance(result, str):
-        return _generation_failed(result)
+        yield _generation_failed(result)
+        return
 
-    return json.dumps(
+    yield json.dumps(
         {"slug": slug, "path": str(folder), **result},
         indent=2,
     )

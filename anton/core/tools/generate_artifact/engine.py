@@ -123,11 +123,16 @@ async def generate(
     context: str,
     slug: str,
     primary: str | None = None,
+    progress: "asyncio.Queue[str | None] | None" = None,
 ) -> dict | str:
     """Drive the artifact-generation FSM to populate ``artifact_path``.
 
     Returns a result dict (with a step ``trace``) on success, or a single
     error string naming the node where the machine stopped.
+
+    ``progress``, when given, receives one user-facing line per step start
+    (see ``GenState.step_started``). Optional so the non-streaming callers —
+    ``bench_generate.py``, tests — need no channel to drain.
     """
     from .orchestrator import run
     from .state import GenState
@@ -156,6 +161,7 @@ async def generate(
         is_fullstack=artifact_type != "html-app",
         primary=primary,
         trace_log=trace,
+        progress=progress,
     )
     result = await run(state)
     if isinstance(result, str):

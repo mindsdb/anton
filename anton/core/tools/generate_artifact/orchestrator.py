@@ -162,6 +162,7 @@ def _inspect_named_scratchpads(state: GenState) -> None:
 
     The step is synchronous and side-effect free: no `await`, no `get_or_create`.
     """
+    state.step_started("inspect_scratchpads")
     matched = _pads_named_in_brief(state.session, state.brief)
     if not matched:
         live = _live_pad_names(state.session)
@@ -225,6 +226,7 @@ async def _data_phase(state: GenState) -> str | None:
     _inspect_named_scratchpads(state)
     last_reasoning = ""
     for _ in range(DATA_LOOP_MAX + 1):
+        state.step_started("is_data_enough")
         verdict: DataVerdict = await _decide(
             state, DataVerdict, prompts.build_data_enough_prompt(state), "is_data_enough"
         )
@@ -236,6 +238,7 @@ async def _data_phase(state: GenState) -> str | None:
         if state.data_iterations >= DATA_LOOP_MAX:
             break
 
+        state.step_started("define_required_data")
         required: RequiredData = await _decide(
             state, RequiredData, prompts.build_required_data_prompt(state), "define_required_data"
         )
@@ -245,6 +248,7 @@ async def _data_phase(state: GenState) -> str | None:
         state.record("define_required_data", "done", required_text)
         last_reasoning = required.reasoning
 
+        state.step_started("is_possible_to_fetch")
         can: FetchVerdict = await _decide(
             state, FetchVerdict, prompts.build_can_fetch_prompt(state, required_text), "is_possible_to_fetch"
         )
@@ -255,6 +259,7 @@ async def _data_phase(state: GenState) -> str | None:
         state.record("is_possible_to_fetch", "yes", can.reasoning)
         last_reasoning = can.reasoning
 
+        state.step_started("fetch_data_sample")
         notes = await _fetch_data_sample(state)
         state.data_iterations += 1
         state.data_notes = (state.data_notes + "\n\n" + notes).strip()
@@ -276,6 +281,7 @@ from .state import GEN_VERIFY_MAX_RETRIES
 
 
 async def _write_tech_spec(state: GenState) -> str | None:
+    state.step_started("make_tech_spec")
     system, user = prompts.build_tech_spec_prompt(state)
     resp = await state.session._llm.plan(
         system=system, messages=[{"role": "user", "content": user}]
@@ -312,6 +318,7 @@ def _spec_context(state: GenState) -> str:
 
 
 async def _make_api_spec(state: GenState) -> str | None:
+    state.step_started("make_api_spec")
     stateless = state.artifact_type == "fullstack-stateless-app"
     spec_or_err = await engine._generate_api_spec(
         state.session, _spec_context(state), stateless=stateless,
@@ -479,6 +486,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
     extra = ("\n\n" + extra_context) if extra_context else ""
     for attempt in range(GEN_VERIFY_MAX_RETRIES + 1):
+        state.step_started("generate_backend", attempt=attempt)
         kickoff = prompts.build_backend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
         result = await engine._run_loop(
             session=state.session, system=system, kickoff=kickoff,
@@ -500,6 +508,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                 state.files_written.append(f)
         state.record("generate_backend", "done", result.get("summary", ""))
 
+        state.step_started("verify_backend", attempt=attempt)
         verdict, ds_keys = await verifiers.verify_backend(
             scratchpad_pool=state.session._scratchpads,
             slug=state.slug, artifact_path=state.artifact_path,
@@ -575,6 +584,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
     last_loop_error: str | None = None
     extra = ""
     for attempt in range(GEN_VERIFY_MAX_RETRIES + 1):
+        state.step_started("generate_frontend", attempt=attempt)
         if attempt > 0:
             # With append, a retry would extend the truncated remains of the
             # previous attempt. Delete deterministically: the "first chunk is
@@ -606,6 +616,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                 state.files_written.append(f)
         state.record("generate_frontend", "done", result.get("summary", ""))
 
+        state.step_started("verify_frontend", attempt=attempt)
         html = _read_frontend_html(state, result["files_written"])
         if html is None:
             # One channel: this message rides on VerifyResult like every other
@@ -736,6 +747,7 @@ async def _run_and_verify_app(state: GenState) -> str | None:
         state.session._tracked_backends = tracked
     problem = ""
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
+        state.step_started("run_app", attempt=attempt)
         launch = await _launch_backend(
             slug=state.slug,
             artifact_folder=state.artifact_path,
@@ -754,6 +766,7 @@ async def _run_and_verify_app(state: GenState) -> str | None:
             if store is not None:
                 store.update(state.slug, port=port)
             state.record("run_app", "done", f"port {port}")
+            state.step_started("verify_fullstack", attempt=attempt)
             probe_err = await _probe_app(state, port)
             if probe_err is None:
                 state.record("verify_fullstack", "ok", f"port {port}")
