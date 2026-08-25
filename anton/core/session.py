@@ -2871,9 +2871,10 @@ class ChatSession:
         is reported as ``"unknown"`` rather than coerced either way.
 
         Payload is deliberately name + verdict + duration + exception CLASS
-        plus the two join keys, and nothing else. Arguments, result content
-        and ``str(exc)`` routinely carry file paths, user data and
-        credentials-adjacent strings — none of them may ever appear here.
+        + surface (a closed enum, ENG-1945) plus the two join keys, and
+        nothing else. Arguments, result content and ``str(exc)`` routinely
+        carry file paths, user data and credentials-adjacent strings — none
+        of them may ever appear here.
 
         ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
         values exactly (same names, same derivation), so a tool failure spotted
