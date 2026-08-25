@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from anton.commands.datasource.helpers import prompt_field_value
+from anton.core.backends.base import Cell
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry
 from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
@@ -15,6 +17,8 @@ from anton.utils.prompt import prompt_or_cancel
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.core.backends.manager import ScratchpadManager
+
+CONNECTION_TEST_TIMEOUT_SECONDS = 30
 
 
 async def run_connection_test(
@@ -57,7 +61,23 @@ async def run_connection_test(
 
             cell = None
             for attempt in range(3):
-                cell = await pad.execute(engine_def.test_snippet)
+                try:
+                    cell = await asyncio.wait_for(
+                        pad.execute(engine_def.test_snippet),
+                        timeout=CONNECTION_TEST_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    cell = Cell(
+                        code=engine_def.test_snippet,
+                        stdout="",
+                        stderr="",
+                        error=(
+                            f"Connection test timed out after "
+                            f"{CONNECTION_TEST_TIMEOUT_SECONDS}s — the server "
+                            f"did not respond."
+                        ),
+                    )
+                    break
                 if cell.error and "ModuleNotFoundError" in cell.error:
                     match = re.search(r"No module named '([^']+)'", cell.error)
                     if match:

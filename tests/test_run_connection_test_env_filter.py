@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -46,3 +47,47 @@ async def test_underscore_prefixed_credentials_not_injected_as_env(tmp_path):
     )
     assert "DS__USER_LABEL" not in captured
     assert captured.get("DS_HOST") == "db.example.com"
+
+
+@pytest.mark.asyncio
+async def test_hung_snippet_times_out_instead_of_blocking_forever(tmp_path):
+    """A test_snippet stuck on e.g. a dead TCP connect() must not hang the
+    caller forever — it's bounded by CONNECTION_TEST_TIMEOUT_SECONDS and
+    reported as a normal connection failure."""
+    vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    engine_def = DatasourceEngine(
+        engine="postgresql",
+        display_name="PostgreSQL",
+        fields=[DatasourceField(name="host", required=True, description="host")],
+        test_snippet="connect_forever()",
+    )
+    console = MagicMock()
+    scratchpads = MagicMock()
+    pad = AsyncMock()
+    pad.reset = AsyncMock()
+    pad.install_packages = AsyncMock(return_value="")
+
+    async def _execute_hangs(_snippet):
+        await asyncio.sleep(3600)  # simulates a wedged connect() to a dead host
+        raise AssertionError("should have been cancelled by the timeout")
+
+    pad.execute = AsyncMock(side_effect=_execute_hangs)
+    scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+    with (
+        patch("anton.commands.datasource.verify.CONNECTION_TEST_TIMEOUT_SECONDS", 0.05),
+        patch(
+            "anton.commands.datasource.verify.prompt_or_cancel",
+            new=AsyncMock(return_value="n"),  # decline the "retry?" prompt
+        ),
+    ):
+        ok = await asyncio.wait_for(
+            run_connection_test(
+                console, scratchpads, vault, engine_def,
+                {"host": "unreachable.example.com"}, engine_def.fields,
+            ),
+            timeout=5,
+        )
+    assert ok is False
+    printed = " ".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
+    assert "timed out" in printed
