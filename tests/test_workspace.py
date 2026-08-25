@@ -84,6 +84,26 @@ class TestInitialization:
     def test_artifacts_dir_property(self, ws, tmp_path):
         assert ws.artifacts_dir == tmp_path / ".anton" / "artifacts"
 
+    def test_artifacts_dir_override(self, tmp_path):
+        override = tmp_path / "conversations" / "abc123" / ".anton" / "artifacts"
+        ws = Workspace(tmp_path, artifacts_dir=override)
+        assert ws.artifacts_dir == override
+
+    def test_artifacts_dir_override_created_by_initialize(self, tmp_path):
+        override = tmp_path / "conversations" / "abc123" / ".anton" / "artifacts"
+        ws = Workspace(tmp_path, artifacts_dir=override)
+        ws.initialize()
+        assert override.is_dir()
+        # The default project-level artifacts dir is NOT created when overridden.
+        assert not (tmp_path / ".anton" / "artifacts").exists()
+
+    def test_artifacts_dir_override_does_not_affect_anton_md(self, tmp_path):
+        override = tmp_path / "conversations" / "abc123" / ".anton" / "artifacts"
+        ws = Workspace(tmp_path, artifacts_dir=override)
+        ws.initialize()
+        # anton.md/.env still resolve under `base`, not the override.
+        assert (tmp_path / ".anton" / "anton.md").is_file()
+
 
 class TestAntonMd:
     def test_read_none_when_missing(self, ws):

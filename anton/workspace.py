@@ -27,15 +27,21 @@ Created: {date}
 class Workspace:
     """Manages the .anton/ workspace directory and its files."""
 
-    def __init__(self, base: Path) -> None:
+    def __init__(self, base: Path, artifacts_dir: Path | None = None) -> None:
         self._base = base
         self._anton_dir = base / ".anton"
         self._anton_md = self._anton_dir / "anton.md"
         self._env_file = self._anton_dir / ".env"
         self._anton_md_last_read: datetime | None = None
 
-        settings = AntonSettings()
-        self._artifacts_dir = self._anton_dir / settings.artifacts_dir
+        if artifacts_dir is not None:
+            # Caller (e.g. a host embedding multiple conversations against one
+            # workspace) owns where artifacts live; secrets/anton.md/memory
+            # still resolve under `base` regardless.
+            self._artifacts_dir = artifacts_dir
+        else:
+            settings = AntonSettings()
+            self._artifacts_dir = self._anton_dir / settings.artifacts_dir
 
     @property
     def base(self) -> Path:
