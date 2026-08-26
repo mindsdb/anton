@@ -6,6 +6,7 @@ import inspect
 from pathlib import Path
 
 from anton.core.backends.base import Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
+from anton.core.datasources.data_vault import DataVault
 
 
 class ScratchpadManager:
@@ -21,6 +22,7 @@ class ScratchpadManager:
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
         session_id: str | None = None,
+        data_vault: DataVault | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -33,6 +35,7 @@ class ScratchpadManager:
         # Conversation id, forwarded to each runtime so its namespace snapshot is
         # scoped per conversation (ENG-1124).
         self._session_id = session_id
+        self._data_vault = data_vault
         # Only pass `session_id` to factories that accept it. A default on the Protocol
         # does not adapt an existing callable, so passing it unconditionally raises
         # `TypeError: unexpected keyword argument` for an out-of-tree factory written
@@ -40,6 +43,9 @@ class ScratchpadManager:
         # uses to stay compatible with older anton builds. Resolved once, not per call.
         self._factory_takes_session_id = self._probe_factory_kwarg(
             runtime_factory, "session_id"
+        )
+        self._factory_takes_scratchpad_ds_env = self._probe_factory_kwarg(
+            runtime_factory, "scratchpad_ds_env"
         )
         self._available_packages: list[str] = self.probe_packages()
 
@@ -167,6 +173,21 @@ class ScratchpadManager:
 
         return sorted({d.metadata["Name"] for d in distributions()})
 
+    def _scratchpad_ds_env(self) -> dict[str, str] | None:
+        """DS_* env values from the current vault state, or None without a vault.
+
+        Built fresh on every call, not cached, so a pad created after a
+        mid-session /connect sees the newly added connection — the same
+        timing LocalScratchpadRuntime's own os.environ-at-spawn-time
+        behaviour already has.
+        """
+        if self._data_vault is None:
+            return None
+        env: dict[str, str] = {}
+        for conn in self._data_vault.list_connections():
+            env.update(self._data_vault.env_for(conn["engine"], conn["name"]) or {})
+        return env
+
     async def get_or_create(self, name: str) -> ScratchpadRuntime:
         """Return existing pad or create + start a new one."""
         if name not in self._pads:
@@ -179,6 +200,11 @@ class ScratchpadManager:
                 coding_base_url=self._coding_base_url,
                 workspace_path=self._workspace_path,
                 **({"session_id": self._session_id} if self._factory_takes_session_id else {}),
+                **(
+                    {"scratchpad_ds_env": self._scratchpad_ds_env()}
+                    if self._factory_takes_scratchpad_ds_env
+                    else {}
+                ),
             )
             await pad.start()
             self._pads[name] = pad

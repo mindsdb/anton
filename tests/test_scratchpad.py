@@ -35,6 +35,20 @@ def make_manager(**kwargs) -> ScratchpadManager:
     return ScratchpadManager(**{**_MANAGER_DEFAULTS, **kwargs})
 
 
+class _FakeVault:
+    """Duck-typed DataVault stand-in — ScratchpadManager only calls
+    list_connections() and env_for()."""
+
+    def __init__(self, connections: dict[tuple[str, str], dict[str, str] | None]) -> None:
+        self._connections = connections
+
+    def list_connections(self) -> list[dict[str, str]]:
+        return [{"engine": e, "name": n} for e, n in self._connections]
+
+    def env_for(self, engine: str, name: str, *, flat: bool = False) -> dict[str, str] | None:
+        return self._connections[(engine, name)]
+
+
 class TestScratchpadBasicExecution:
     async def test_basic_execution(self):
         """print(42) should return '42' in stdout."""
@@ -319,6 +333,46 @@ class TestScratchpadManager:
         finally:
             await mgr.close_all()
         assert pad._proc is None, "close_all() must not restart the worker process"
+
+    async def test_get_or_create_derives_ds_env_from_vault(self):
+        """A new pad gets exactly this vault's current DS_* values."""
+        vault = _FakeVault({
+            ("postgres", "prod"): {"DS_POSTGRES_PROD__HOST": "db.example.com"},
+            ("slack", "main"): {"DS_SLACK_MAIN__BOT_TOKEN": "xoxb-123"},
+        })
+        mgr = make_manager(data_vault=vault)
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._scratchpad_ds_env == {
+                "DS_POSTGRES_PROD__HOST": "db.example.com",
+                "DS_SLACK_MAIN__BOT_TOKEN": "xoxb-123",
+            }
+        finally:
+            await mgr.close_all()
+
+    async def test_get_or_create_skips_connection_whose_env_for_fails(self):
+        """A connection whose env_for() returns None contributes nothing,
+        not a crash."""
+        vault = _FakeVault({
+            ("postgres", "gone"): None,
+            ("postgres", "prod"): {"DS_POSTGRES_PROD__HOST": "db.example.com"},
+        })
+        mgr = make_manager(data_vault=vault)
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._scratchpad_ds_env == {"DS_POSTGRES_PROD__HOST": "db.example.com"}
+        finally:
+            await mgr.close_all()
+
+    async def test_get_or_create_without_vault_passes_none(self):
+        """No data_vault (default) -> scratchpad_ds_env stays None, so
+        LocalScratchpadRuntime keeps its legacy full-copy behaviour."""
+        mgr = make_manager()  # no data_vault
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._scratchpad_ds_env is None
+        finally:
+            await mgr.close_all()
 
 
 class TestScratchpadRenderNotebook:
