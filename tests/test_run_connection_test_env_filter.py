@@ -180,13 +180,8 @@ async def test_non_interactive_skips_retry_prompt_on_failure(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_connection_test_scrubs_the_credential_under_test(tmp_path):
-    """The credential being tested must still be redacted from a scratchpad
-    cell's output even if a CONCURRENT turn wipes shared os.environ mid-test
-    (simulating another conversation's restore_namespaced_env/clear_ds_env
-    racing against this one) — proving the explicit _ds_env_values.set()
-    override survives independently of os.environ, not just the fallback."""
-    import os
-
+    """The credential under test survives redaction even if a concurrent
+    turn wipes os.environ mid-test — proves the explicit override, not just the os.environ fallback."""
     from anton.utils.datasources import scrub_credentials
 
     vault = LocalDataVault(vault_dir=tmp_path / "vault")
