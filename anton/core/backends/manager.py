@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from pathlib import Path
 
 from anton.core.backends.base import Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
 from anton.core.datasources.data_vault import DataVault
+
+logger = logging.getLogger(__name__)
 
 
 class ScratchpadManager:
@@ -173,17 +176,35 @@ class ScratchpadManager:
 
         return sorted({d.metadata["Name"] for d in distributions()})
 
-    def _scratchpad_ds_env(self) -> dict[str, str] | None:
+    def _derive_ds_env(self) -> dict[str, str] | None:
         """DS_* env values from the current vault state, fresh each call; None without a vault."""
         if self._data_vault is None:
             return None
         env: dict[str, str] = {}
-        for conn in self._data_vault.list_connections():
-            env.update(self._data_vault.env_for(conn["engine"], conn["name"]) or {})
+        try:
+            connections = self._data_vault.list_connections()
+        except Exception:
+            logger.debug("Could not list data vault connections", exc_info=True)
+            return env
+        for conn in connections:
+            # Per-connection try/except so one bad record can't abort
+            # building env for the rest.
+            engine = conn.get("engine")
+            name = conn.get("name")
+            if not (engine and name):
+                continue
+            try:
+                env.update(self._data_vault.env_for(engine, name) or {})
+            except Exception:
+                logger.debug(
+                    "Could not build scratchpad env for %s/%s", engine, name, exc_info=True
+                )
         return env
 
-    async def get_or_create(self, name: str) -> ScratchpadRuntime:
-        """Return existing pad or create + start a new one."""
+    async def get_or_create(
+        self, name: str, *, ds_env_override: dict[str, str] | None = None
+    ) -> ScratchpadRuntime:
+        """Return existing pad or create one; ds_env_override overrides its DS_* env for the next restart."""
         if name not in self._pads:
             pad = self._runtime_factory(
                 name=name,
@@ -195,13 +216,15 @@ class ScratchpadManager:
                 workspace_path=self._workspace_path,
                 **({"session_id": self._session_id} if self._factory_takes_session_id else {}),
                 **(
-                    {"scratchpad_ds_env": self._scratchpad_ds_env()}
+                    {"scratchpad_ds_env": self._derive_ds_env()}
                     if self._factory_takes_scratchpad_ds_env
                     else {}
                 ),
             )
             await pad.start()
             self._pads[name] = pad
+        if ds_env_override is not None:
+            self._pads[name].set_scratchpad_ds_env(ds_env_override)
         return self._pads[name]
 
     async def remove(self, name: str) -> str:

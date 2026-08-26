@@ -102,6 +102,9 @@ class ScratchpadRuntime(ABC):
         """
         return None
 
+    def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
+        """Override this pad's DS_* env for its next start()/reset(); no-op unless a backend supports it."""
+
     async def execute(
         self,
         code: str,
