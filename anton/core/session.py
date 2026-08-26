@@ -449,6 +449,13 @@ _VERIFIER_LATCH_REPROBE_TURNS = 10
 # call has reported usage.
 _SPEND_CEILING_RESERVE = 200_000
 
+# Floor for the one-time spend-ceiling grace — deliberately lower
+# than `_SPEND_CEILING_RESERVE`'s own floor. That reserve is sized to cover
+# TWO calls guaranteed to land after the gate trips; the grace is sized for
+# roughly ONE more, so granting it does not cancel the reserve outright and
+# put the turn back up near the ceiling. See `_grant_spend_ceiling_grace`.
+_SPEND_CEILING_GRACE_FLOOR = 100_000
+
 # One-time round-cap extension (ENG-1893), granted the first time a turn
 # breaches max_tool_rounds. Sized to the "2-3 more tool calls" this exists
 # for — add a closing step, save, verify — not a way to talk past the cap
@@ -847,6 +854,17 @@ def _role_tokens(tc: TurnCost, role: str) -> str:
 def _role_calls(tc: TurnCost, role: str) -> str:
     slice_ = tc.by_role.get(role)
     return str(slice_.calls if slice_ else 0)
+
+
+def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
+    """Append `tag` ("round" or "ceiling") to `turn_cost.grace_granted`,
+    comma-joined and deduplicated."""
+    if turn_cost is None:
+        return
+    tags = turn_cost.grace_granted.split(",") if turn_cost.grace_granted else []
+    if tag not in tags:
+        tags.append(tag)
+        turn_cost.grace_granted = ",".join(tags)
 
 
 def _build_verify_request(
@@ -2676,12 +2694,14 @@ class ChatSession:
             _root_cause_fields = {}
         logger.info(
             "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
+            "grace_granted=%s grace_tokens=%d "
             "tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
             "by_role=%s %s",
             self._session_id, turn_index, tc.ended_by,
-            str(tc.verification_skipped).lower(), tc.total_tokens,
+            str(tc.verification_skipped).lower(),
+            tc.grace_granted or "-", tc.grace_tokens, tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
             tc.continuations, tc.peak_context_tokens, tc.duration_ms,
@@ -2795,6 +2815,11 @@ class ChatSession:
                 # ENG-1632) must be excludable from the honest-stop
                 # denominator without a per-conversation Langfuse hop.
                 verification_skipped=str(tc.verification_skipped).lower(),
+                # One-time grace(s) granted this turn — see
+                # `TurnCost.grace_granted`. Empty string, not "-", to stay
+                # consistent with how other unset string properties go out.
+                grace_granted=tc.grace_granted,
+                grace_tokens=str(tc.grace_tokens),
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -3012,6 +3037,12 @@ class ChatSession:
         against `total_tokens`, which also counts output, so a turn can land
         over the ceiling by roughly two output budgets. See
         `test_total_is_bounded_by_the_ceiling` for the asserted form.
+
+        `_spend_ceiling_grace_tokens` adds on top of that bound, not inside it:
+        the reserve term above cancels out of the gate-plus-reserve landing
+        point, so a granted grace overshoots the ceiling by (approximately)
+        its own size, once per turn. See `_grant_spend_ceiling_grace` for why
+        that term is kept well under the reserve's own size.
         """
         peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
         reserve = min(
@@ -3023,20 +3054,30 @@ class ChatSession:
         )
 
     def _grant_spend_ceiling_grace(self) -> None:
-        """Raise the gate once this turn (ENG-1893), sized like one more call.
+        """Raise the gate once this turn, sized like ONE more call.
 
-        Reuses the reserve's own formula rather than a flat constant, for the
-        same reason the reserve does: a turn with a big context needs a bigger
-        exception to actually cover 1-3 more calls. Idempotent — a caller that
-        checks `_spend_ceiling_grace_used` first never calls this twice, but a
-        stray second call would just recompute the same amount, not stack it.
+        Deliberately smaller than the reserve `_spend_ceiling_gate` nets this
+        against: that reserve is sized for the TWO calls guaranteed to land
+        after the gate trips (the crossing call, the hand-back). Reusing that
+        same size for the grace cancelled the reserve outright and let a
+        granted turn land back up near the ceiling — measured up to 1.5x the
+        configured ceiling. Scaled by `peak_context_tokens` for the same
+        reason the reserve is (a big-context turn's next call costs more),
+        but at 1x peak and a lower floor, not 2x and the
+        reserve's own floor, so the grant stays closer to "a bit more room"
+        than "the reserve, again". Idempotent — a caller that checks
+        `_spend_ceiling_grace_used` first never calls this twice, but a stray
+        second call would just recompute the same amount, not stack it.
         """
         peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
         self._spend_ceiling_grace_tokens = min(
-            max(_SPEND_CEILING_RESERVE, 2 * peak),
-            max(self._max_turn_tokens // 2, 1),
+            max(_SPEND_CEILING_GRACE_FLOOR, peak),
+            max(self._max_turn_tokens // 4, 1),
         )
         self._spend_ceiling_grace_used = True
+        if self._turn_cost is not None:
+            self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
+        _record_grace(self._turn_cost, "ceiling")
 
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
@@ -3496,6 +3537,12 @@ class ChatSession:
         system = await self._build_system_prompt(user_msg_str)
         self._compacted_this_turn = False
         self._compaction_failed_this_turn = False
+        # Same reset turn_stream does — without it a grace granted in an
+        # earlier turn_stream call leaks into every later turn() call on
+        # this session, permanently widening its round cap / spend ceiling.
+        self._spend_ceiling_grace_used = False
+        self._spend_ceiling_grace_tokens = 0
+        self._round_cap_grace_used = False
 
         response = await self.plan_with_recovery(system=system, tools=tools)
 
@@ -3517,12 +3564,24 @@ class ChatSession:
         tool_round = 0
         error_streak: dict[str, int] = {}
         resilience_nudged: set[str] = set()
+        # Mirrors turn_stream's one-time grants, the same way the round-cap
+        # and spend-ceiling checks below already mirror it. This path has no
+        # continuation loop, so each grant is simply spent once for the
+        # whole call rather than once per continuation.
+        _round_cap_grace_active = False
 
         while response.tool_calls:
             tool_round += 1
-            if self._turn_cost is not None and tool_round <= self._max_tool_rounds:
+            if tool_round > self._max_tool_rounds and not self._round_cap_grace_used:
+                self._round_cap_grace_used = True
+                _round_cap_grace_active = True
+                _record_grace(self._turn_cost, "round")
+            effective_round_cap = self._max_tool_rounds + (
+                _ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0
+            )
+            if self._turn_cost is not None and tool_round <= effective_round_cap:
                 self._turn_cost.rounds += 1
-            if tool_round > self._max_tool_rounds:
+            if tool_round > effective_round_cap:
                 # Mirror turn_stream's cap mark (#309 review) — this path is
                 # public API even without in-repo callers, and the books are
                 # wired here too.
@@ -3535,7 +3594,7 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            f"SYSTEM: You have used {self._max_tool_rounds} tool-call rounds on this turn. "
+                            f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
                             "Pause here. Summarize what you have accomplished so far and what remains. "
                             "If you believe you are on a good track and can finish the task with more steps, "
                             "tell the user and ask if they'd like you to continue. "
@@ -3558,22 +3617,28 @@ class ChatSession:
             # all, so this path is exactly where a tiny ceiling would break the
             # loop on round 1 having run nothing (#344 review).
             if self._spend_ceiling_stops_the_tool_loop():
-                if self._turn_cost is not None:
-                    self._turn_cost.ended_by = "spend_ceiling"
-                logger.info(
-                    "spend ceiling reached (turn): tokens=%d ceiling=%d "
-                    "tool_round=%d — pausing to ask the user",
-                    self._turn_cost.total_tokens if self._turn_cost else 0,
-                    self._max_turn_tokens, tool_round,
-                )
-                self._append_history(
-                    {"role": "assistant", "content": response.content or ""}
-                )
-                self._append_history(
-                    {"role": "user", "content": self._spend_ceiling_notice()}
-                )
-                response = await self.plan_with_recovery(system=system)
-                break
+                # One-time, unconditional extension, mirroring turn_stream's
+                # mid-loop grant — no verdict exists on this verifier-less
+                # path either, so the grant is unconditional here too.
+                if not self._spend_ceiling_grace_used:
+                    self._grant_spend_ceiling_grace()
+                if self._spend_ceiling_stops_the_tool_loop():
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "spend_ceiling"
+                    logger.info(
+                        "spend ceiling reached (turn): tokens=%d ceiling=%d "
+                        "tool_round=%d — pausing to ask the user",
+                        self._turn_cost.total_tokens if self._turn_cost else 0,
+                        self._max_turn_tokens, tool_round,
+                    )
+                    self._append_history(
+                        {"role": "assistant", "content": response.content or ""}
+                    )
+                    self._append_history(
+                        {"role": "user", "content": self._spend_ceiling_notice()}
+                    )
+                    response = await self.plan_with_recovery(system=system)
+                    break
 
             # Build assistant message with content blocks
             assistant_content: list[dict] = []
@@ -4499,6 +4564,13 @@ class ChatSession:
             tool_round = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
+            # Per-continuation, unlike `_round_cap_grace_used`: only the
+            # continuation that actually earns the grant (the first ever
+            # breach this turn) gets the wider cap. Without this,
+            # `_round_cap_grace_used` staying True for the rest of the turn
+            # let EVERY later continuation start pre-extended to M+3, turning
+            # a one-shot +3 into +3 per continuation.
+            _round_cap_grace_active = False
 
             while llm_response.tool_calls:
                 tool_round += 1
@@ -4509,8 +4581,10 @@ class ChatSession:
                 # the granted round is counted like any other.
                 if tool_round > self._max_tool_rounds and not self._round_cap_grace_used:
                     self._round_cap_grace_used = True
+                    _round_cap_grace_active = True
+                    _record_grace(self._turn_cost, "round")
                 effective_round_cap = self._max_tool_rounds + (
-                    _ROUND_CAP_GRACE_ROUNDS if self._round_cap_grace_used else 0
+                    _ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0
                 )
                 # Accumulate, don't assign: `tool_round` is loop-local and
                 # resets to 0 on every verifier-forced continuation, so
@@ -4527,7 +4601,7 @@ class ChatSession:
                         self._turn_cost.ended_by = "round_cap"
                     self._acc_observe(
                         "cap_exhausted",
-                        {"cap": self._max_tool_rounds},
+                        {"cap": effective_round_cap, "configured_cap": self._max_tool_rounds},
                         severity=9,
                         round_idx=tool_round,
                     )

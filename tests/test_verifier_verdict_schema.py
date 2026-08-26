@@ -43,3 +43,15 @@ def test_recovered_error_rule_is_intact():
     desc = _status_description()
     assert "RECOVERED" in desc
     assert "do NOT mark a turn incomplete just because an earlier tool call failed" in desc
+
+
+def test_close_to_done_defaults_false_and_is_bounded():
+    # `close_to_done` unlocks extra spend on an INCOMPLETE verdict with no
+    # human in the loop, so an under-specified model self-report degrades the
+    # whole feature to a no-op: wording that stays a small, bounded claim
+    # (not "probably fine") is what keeps a model from defaulting to it.
+    desc = _VerifierVerdict.model_fields["close_to_done"].description
+    assert _VerifierVerdict.model_fields["close_to_done"].default is False
+    assert "roughly 1-3 more tool calls" in desc
+    assert "nothing blocking or uncertain" in desc
+    assert "an unsure model errs toward asking the user" in desc

@@ -25,7 +25,12 @@ from anton.core.llm.provider import (
     ToolCall,
     Usage,
 )
-from anton.core.session import ChatSession, ChatSessionConfig, _SPEND_CEILING_RESERVE
+from anton.core.session import (
+    ChatSession,
+    ChatSessionConfig,
+    _SPEND_CEILING_GRACE_FLOOR,
+    _SPEND_CEILING_RESERVE,
+)
 
 CEILING = 1_000_000
 # Sized so the trip needs SEVERAL rounds. The first version used 500_000, which
@@ -135,7 +140,8 @@ async def test_ceiling_stops_the_turn_and_marks_the_exit(workspace):
     assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
 
 
-async def test_total_is_bounded_by_the_ceiling(workspace):
+@pytest.mark.parametrize("per_call", [PER_CALL, 300_000])
+async def test_total_is_bounded_by_the_ceiling(workspace, per_call):
     """The turn's spend lands at the ceiling, give or take two output budgets
     and one grace allotment.
 
@@ -150,19 +156,24 @@ async def test_total_is_bounded_by_the_ceiling(workspace):
     to land on 1,000,000 with zero margin; it reddened as soon as `per_call`
     moved. State the real bound instead of a knife-edge one.
 
-    The grace term is new (ENG-1893): this run's all-tool-calls shape trips
-    the mid-loop gate, and the first trip buys one silent extension sized like
-    the reserve itself (see `_grant_spend_ceiling_grace`) before the turn
-    actually stops.
+    The grace term is new: this run's all-tool-calls shape trips the mid-loop
+    gate, and the first trip buys one silent extension before the turn
+    actually stops. Computed from the real `_grant_spend_ceiling_grace`
+    formula, not a flat constant — a flat `_SPEND_CEILING_RESERVE` slack only
+    held at this fixture's small `per_call`; parametrised over a second,
+    bigger `per_call` so the peak-scaled branch of the formula is pinned too.
     """
-    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 40)])
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 40)],
+                       per_call=per_call)
     with patch("anton.analytics.send_event") as send:
         await _run(session)
-    slack = 2 * (PER_CALL // 4)  # `_usage` puts a quarter of each call in output
+    slack = 2 * (per_call // 4)  # `_usage` puts a quarter of each call in output
+    peak = per_call - (per_call // 4)  # `_usage`'s context share of one call
+    grace = min(max(_SPEND_CEILING_GRACE_FLOOR, peak), CEILING // 4)
     # Analytics properties go over the wire as strings.
     assert (
         int(send.call_args.kwargs["tokens_total"])
-        <= CEILING + slack + _SPEND_CEILING_RESERVE
+        <= CEILING + slack + grace
     )
 
 
@@ -420,10 +431,16 @@ async def test_close_to_done_verdict_skips_the_ask_and_keeps_going(workspace):
     Same shape as test_ceiling_trips_at_the_continuation_gate — one tool
     round, then a text reply that trips the gate on the first verifier call —
     but this verdict reports the remaining work as small.
+
+    `per_call=240_000`, not 300_000: the text reply triggers a truncation
+    retry, so 3 calls land before this gate check. That total must clear the
+    pre-grace gate but stay under the smaller post-grace one now that the
+    grace is sized off 1x peak, not 2x — 300_000 no longer leaves enough
+    room after the resize.
     """
     from anton.core.session import _VerifierVerdict
 
-    session = _session(workspace, per_call=300_000,
+    session = _session(workspace, per_call=240_000,
                        responses=[_tool_call(1), _text("partial")])
     verdict = _VerifierVerdict(status="INCOMPLETE", reason="almost there",
                                close_to_done=True)
@@ -475,9 +492,11 @@ def test_mid_loop_grace_raises_the_gate_once(workspace):
     session = _session(workspace)
     session._turn_cost = TurnCost()
     session._turn_cost.rounds = 5  # > 1, so the never-zero-tools guard is moot here
-    # peak_context_tokens is 0 here, so both the reserve and the grace land on
-    # the flat _SPEND_CEILING_RESERVE floor — the gate before grace is exactly
-    # CEILING - reserve, and after grace it is back at CEILING.
+    # peak_context_tokens is 0 here, so both floors apply: the reserve lands on
+    # _SPEND_CEILING_RESERVE and the (deliberately smaller) grace lands on
+    # _SPEND_CEILING_GRACE_FLOOR — the gate before grace is exactly
+    # CEILING - reserve, and after grace it is CEILING - reserve + grace_floor,
+    # still below CEILING since grace_floor < reserve.
     session._turn_cost.input_tokens = CEILING - _SPEND_CEILING_RESERVE
     assert session._spend_ceiling_stops_the_tool_loop()
     session._grant_spend_ceiling_grace()

@@ -124,6 +124,15 @@ class TurnCost:
     # note below on stamped-at-open fields). Handback terminals don't need it:
     # their ended_by already distinguishes them.
     verification_skipped: bool = False
+    # One-time grace(s) granted this turn: "", "round", "ceiling", or
+    # "round,ceiling". Without this a turn that used a grace and finished is
+    # byte-identical in `turn_completed` to one that never neared a limit —
+    # `ended_by=round_cap`/`spend_ceiling` counts drop while actual spend
+    # rises, unmeasurably.
+    grace_granted: str = ""
+    # Size of the spend-ceiling grace actually granted, 0 if none. Queryable
+    # alongside `grace_granted` so the size of the concession is visible.
+    grace_tokens: int = 0
     started_monotonic: float = field(default_factory=time.monotonic)
     # Set when these books have been reported. Replaces "the shared slot is
     # None" as the double-emit guard, because a late finalizer now emits the
