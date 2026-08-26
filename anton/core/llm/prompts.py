@@ -256,7 +256,9 @@ writes across requests. Use ONLY when that state genuinely cannot live in an \
 external data source; prefer stateless when in doubt (see BACKEND & FULLSTACK \
 section) → `type="fullstack-stateful-app"`, `primary="static/index.html"`. \
 The frontend lives in a `static/` subfolder of the artifact, served by \
-`backend.py`.
+`backend.py`. Light durable state uses the platform `STATE` store (declare \
+`state_manifest.json`); heavy/relational data uses an external connected \
+database.
 
 WHEN NOT TO REGISTER:
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
