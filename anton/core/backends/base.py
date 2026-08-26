@@ -102,6 +102,9 @@ class ScratchpadRuntime(ABC):
         """
         return None
 
+    def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
+        """Override this pad's DS_* env for its next start()/reset(); no-op unless a backend supports it."""
+
     async def execute(
         self,
         code: str,
@@ -263,4 +266,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # pad name without reading each other's state (ENG-1124). Optional so hosts
         # and test doubles that predate it keep working.
         session_id: str | None = None,
+        # Explicit DS_* env values for this pad, when the host has a data vault
+        # to scope them from. Optional for hosts/test doubles that predate it.
+        scratchpad_ds_env: dict[str, str] | None = None,
     ) -> ScratchpadRuntime: ...

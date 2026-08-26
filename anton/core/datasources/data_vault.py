@@ -171,6 +171,10 @@ class DataVault(Protocol):
         """Return [{engine, name, created_at}] for all stored connections."""
         ...
 
+    def env_for(self, engine: str, name: str, *, flat: bool = False) -> dict[str, str] | None:
+        """Build the DS_* env mapping for a connection, without touching os.environ."""
+        ...
+
     def inject_env(self, engine: str, name: str, *, flat: bool = False) -> list[str] | None:
         """Load credentials and set DS_* environment variables."""
         ...
