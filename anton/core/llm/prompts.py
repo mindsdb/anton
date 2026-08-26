@@ -250,15 +250,15 @@ NO local state between requests; every request is self-contained and any \
 persistence goes to external data sources (see BACKEND & FULLSTACK section) → \
 `type="fullstack-stateless-app"`, `primary="static/index.html"`. The frontend \
 lives in a `static/` subfolder of the artifact, served by `backend.py`.
-- Fullstack web app (backend + frontend) that keeps local state between \
-requests — e.g. a SQLite DB or other on-disk store the backend reads and \
-writes across requests. Use ONLY when that state genuinely cannot live in an \
-external data source; prefer stateless when in doubt (see BACKEND & FULLSTACK \
-section) → `type="fullstack-stateful-app"`, `primary="static/index.html"`. \
-The frontend lives in a `static/` subfolder of the artifact, served by \
-`backend.py`. Light durable state uses the platform `STATE` store (declare \
-`state_manifest.json`); heavy/relational data uses an external connected \
-database.
+- Fullstack web app (backend + frontend) that owns durable state of its own — \
+persisted through the platform `STATE` store (declared via \
+`state_manifest.json`; works both locally and deployed). Use ONLY for LIGHT \
+app-owned state: counters, settings, sessions, user-created documents keyed \
+by id. Heavy or relational data (joins, transactions, analytics) belongs in \
+an external connected database — that usually means stateless; prefer \
+stateless when in doubt (see BACKEND & FULLSTACK section) → \
+`type="fullstack-stateful-app"`, `primary="static/index.html"`. The frontend \
+lives in a `static/` subfolder of the artifact, served by `backend.py`.
 
 WHEN NOT TO REGISTER:
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
@@ -384,7 +384,8 @@ Normal path: register the artifact (`fullstack-stateless-app` — prefer this �
 `fullstack-stateful-app`), then call `generate_prd(slug, …)` to agree the \
 requirements with the user, then `generate_artifact(slug, context)`. The \
 generator builds from the confirmed `prd.md` it finds in the artifact folder: it \
-writes `backend.py`, `requirements.txt` and `static/index.html` \
+writes `backend.py`, `requirements.txt` and `static/index.html` (plus \
+`state_manifest.json` for `fullstack-stateful-app`) \
 against a hard contract, verifies the backend by importing it and checking its \
 routes, then launches it and health-checks `/api/health`. You do NOT recall a \
 skill, write backend code, or call `launch_backend` yourself on this path.

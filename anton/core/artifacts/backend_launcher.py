@@ -57,13 +57,23 @@ def _anton_state_pythonpath_dir() -> str:
     return str(root)
 
 
-def _build_backend_env(extra_env: dict[str, str] | None) -> dict[str, str]:
-    """Subprocess env: inherited environ + extra_env, with anton_state on PYTHONPATH."""
+def build_backend_env(extra_env: dict[str, str] | None) -> dict[str, str]:
+    """Subprocess env: inherited environ + extra_env, with anton_state on PYTHONPATH.
+
+    Public: `generate_artifact.verifiers.verify_backend` imports the artifact
+    backend in the same venv (introspection subprocess) and must see the same
+    `anton_state` injection, or a correct stateful backend fails its import.
+    """
     env = {**os.environ, **(extra_env or {})}
     isolated = _anton_state_pythonpath_dir()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")
     return env
+
+
+# Backwards-compatible name: pre-existing callers/tests import the underscored
+# form; the function went public when verify_backend became its second caller.
+_build_backend_env = build_backend_env
 
 
 class ScratchpadPoolLike(Protocol):

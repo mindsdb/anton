@@ -51,8 +51,16 @@ BACKEND_LOG_FILENAME = "backend.log"
 # `backend.log` is here for that agreement: it is the launched backend's runtime
 # log, written into the artifact folder by `launch_artifact_backend`, and every
 # other copy of this set already excluded it.
+# The `.anton_state.db*` trio is the local STATE driver's SQLite database (the
+# -wal/-shm side files carry the freshest writes) and
+# `.state_manifest.published.json` is the publisher's schema snapshot — all
+# runtime/publish bookkeeping of a stateful backend, never authored content.
+# `state_manifest.json` itself is NOT here: it is a deliverable the publisher
+# bundles. NOTE: cowork-server's copy of this set does not know these names yet.
 _HOUSEKEEPING_FILES = {
     METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME, BACKEND_LOG_FILENAME,
+    ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
+    ".state_manifest.published.json",
 }
 
 # Kept separate from the housekeeping set rather than merged into it: these are

@@ -125,14 +125,19 @@ def test_stateless_and_stateful_rules_are_mutually_exclusive():
     stateless = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=True)
     stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
 
-    # stateless: no local storage at all
+    # stateless: no local storage at all, and no STATE SDK either
     assert "sqlite" in stateless.lower()
     assert "no local" in stateless.lower() or "must not persist" in stateless.lower()
+    assert "state_manifest.json" not in stateless
+    assert "Do NOT import `anton_state`" in stateless
 
-    # stateful: local state is explicitly allowed
-    assert "IS allowed" in stateful or "is allowed" in stateful
+    # stateful: durable state goes through the platform STATE store
+    assert "STATE = None" in stateful
+    assert "state_manifest.json" in stateful
+    assert "open_store" in stateful
     # ...and the stateless branch's prohibition does not leak into it
     assert "assume read-only at runtime" not in stateful
+    assert "Do NOT import `anton_state`" not in stateful
 
 
 def test_shared_backend_rules_no_longer_hardcode_statelessness():
@@ -142,11 +147,63 @@ def test_shared_backend_rules_no_longer_hardcode_statelessness():
     assert "assume read-only at runtime" not in rules
 
 
+def test_stateful_rules_carry_the_state_sdk_contract():
+    """The STATE contract markers the verifier rules point at (contract lock)."""
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    # module-level slot + point-of-use store construction
+    assert "STATE = None" in stateful
+    assert "POINT OF USE" in stateful
+    # manifest: flat object, never a CreateTable shape, collections registry
+    assert "FLAT JSON object" in stateful
+    assert "collections" in stateful
+    # never in requirements.txt
+    assert "NEVER list `anton_state`" in stateful
+    # no scan / no secondary indexes, atomics, no manual retries on mutations
+    assert "NO `scan()`" in stateful
+    assert "increment" in stateful
+    assert "retry loop" in stateful
+    # heavy/relational data belongs in an external DB
+    assert "EXTERNAL database" in stateful
+
+
 def test_stateful_block_says_when_local_state_survives():
-    """Otherwise we reproduce the very inconsistency the design doc fixes."""
+    """The STATE store must be described as working both locally and deployed."""
     stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
     assert "Lambda" in stateful
-    assert "launch_backend" in stateful or "locally" in stateful
+    assert "locally" in stateful
+    assert "SQLite" in stateful  # the local fallback driver
+
+
+def test_api_spec_prompt_state_constraints_by_type():
+    """Stateless and stateful each get their own persistence constraint block."""
+    _, stateless_user = prompts.build_api_spec_prompt("ctx", stateless=True)
+    _, stateful_user = prompts.build_api_spec_prompt("ctx", stateless=False)
+    assert "## Stateless constraint" in stateless_user
+    assert "## Durable state constraint" not in stateless_user
+    assert "## Durable state constraint" in stateful_user
+    assert "## Stateless constraint" not in stateful_user
+    # key design guidance for the endpoint shapes
+    assert "NO scan" in stateful_user
+    assert "partition-key query" in stateful_user
+    assert "atomic increment" in stateful_user
+
+
+def test_tech_spec_stack_pins_the_state_store():
+    """Without this the spec writer invents sqlite and the generators build it."""
+    stack = prompts._TECH_SPEC_STACK
+    assert "STATE store" in stack
+    assert "fullstack-stateful-app" in stack
+    assert "Do NOT propose sqlite" in stack
+    assert "EXTERNAL" in stack
+
+
+def test_stateful_task_demands_the_manifest_file():
+    """Stateful asks for three files (incl. state_manifest.json), stateless for two."""
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    stateless = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=True)
+    assert "exactly three files" in stateful
+    assert "state_manifest.json" in stateful
+    assert "exactly two files" in stateless
 
 
 def test_visual_rules_carry_the_frontend_verifier_contract():

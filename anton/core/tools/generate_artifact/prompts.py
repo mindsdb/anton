@@ -320,20 +320,84 @@ LOCAL STATE — this app MUST NOT persist anything between requests:
   request ends.
 - Connecting to an EXTERNAL database or API to read/write data IS allowed — that
   is a data source, not local state. Open a fresh connection per request and do
-  not cache results in memory across requests.\
+  not cache results in memory across requests.
+- Do NOT import `anton_state` — the platform STATE store belongs to
+  `fullstack-stateful-app` backends only; this app persists nothing of its own.\
 """
 
 _STATEFUL_RULES = """\
-LOCAL STATE — this app MAY keep local on-disk state between requests:
-- A sqlite file (or similar) IS allowed. Keep it in the artifact root, next to
-  `backend.py`. Every other rule above still applies.
-- Know where it survives: run locally via `launch_backend`, the backend is one
-  long-lived process and the file persists across requests. In AWS Lambda the
-  filesystem is ephemeral and nothing is guaranteed between invocations — so the
-  local store is a local-run feature, not a deployment guarantee. Do not build
-  logic that silently corrupts data when the file turns up missing.
-- Never keep state ONLY in module-level Python variables — write it to the file,
-  so a restarted process picks it back up.\
+DURABLE STATE — this app persists data through the platform `STATE` store:
+- Declare a module-level `STATE = None` right after `SECRETS`. It mirrors
+  SECRETS: in the cloud a shared runner overlays `{url, token}` (a short-lived
+  capability for the trusted state broker) onto `backend.STATE` before each
+  request; run locally the value stays `None` and the SDK falls back to a
+  SQLite file next to `backend.py`. One code path serves both — never branch
+  on the environment yourself.
+- Build the store AT POINT OF USE, inside a route — NEVER at import time (the
+  import runs before the cloud overlay, so a module-level store would bind to
+  the wrong driver, exactly like an import-time SECRETS copy). Use this helper:
+  ```python
+  from anton_state import open_store, Collection
+  _STATE_DIR = Path(__file__).resolve().parent
+
+  def get_store():
+      return open_store(
+          state=STATE,
+          manifest_path=str(_STATE_DIR / "state_manifest.json"),
+          local_path=str(_STATE_DIR / ".anton_state.db"),
+      )
+  ```
+- `anton_state` is an internal SDK injected at runtime. NEVER list `anton_state`
+  in `requirements.txt` — it is not a published package, so the dependency
+  install FAILS on it. The SDK needs pydantic v2, which the mandatory `fastapi`
+  line already provides. `from anton_state import open_store` just works.
+- STATE is a document/key-value store keyed by `(pk, sk)` — use it for LIGHT
+  state: counters, settings, sessions, simple documents keyed by id. For HEAVY
+  or relational needs (joins, transactions, analytics, large datasets) use an
+  EXTERNAL database via a connected data source instead — do not force it
+  into STATE.
+- Write `state_manifest.json` into the artifact root, next to `backend.py`.
+  It declares ONLY the key schema and the collection registry — never data
+  fields — as one FLAT JSON object:
+  ```json
+  {"version": 1,
+   "pk": {"name": "pk", "type": "S"},
+   "sk": {"name": "sk", "type": "S"},
+   "collections": ["todos", "counters"]}
+  ```
+  List EVERY `Collection(store, "<name>")` name used in the code under
+  `collections`. Keys are strings (`"type": "S"`) in v1. Do NOT wrap the
+  object in a DynamoDB-CreateTable shape (`entities`, `attributes`,
+  `partition_key` — all fail validation) and do NOT declare item fields:
+  values passed to `store.put({...})` need no schema entry.
+- PREFER the `Collection` helper for light state — it manages the keys:
+  ```python
+  todos = Collection(get_store(), "todos")   # built inside the route
+  await todos.put("id1", {"text": "buy milk"})
+  items = await todos.list()
+  n = await Collection(get_store(), "counters").increment("visits", field="n")
+  ```
+  Low-level `store` methods (all async; there is NO `scan()` and NO secondary
+  indexes — `query` has no `index=` argument):
+  * `await store.get(pk, sk=None)` → one item or `None`
+  * `await store.put(item)` — the dict MUST include `pk` (and `sk` if the
+    schema declares one); `_v` is set by the store, never set it yourself
+  * `await store.delete(pk, sk=None)`
+  * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)`
+  * `await store.increment(pk, sk=None, *, field, by=1)` — atomic counter;
+    do NOT hand-roll read-modify-write
+  * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
+    if_version=None)` — atomic partial update
+- DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
+  `query(pk=...)` call (or `Collection.list()`). Never call the store in a
+  loop to assemble a listing.
+- Do NOT wrap a STATE mutation (`put`/`delete`/`increment`/`update`) in your
+  own retry loop: on a timeout the outcome is unknown and a retry can
+  double-apply — surface the error instead.
+- Never keep state ONLY in module-level Python variables, and never invent
+  your own on-disk persistence (sqlite files, JSON files in the artifact
+  folder): the STATE store is the single durable layer, working both locally
+  and in AWS Lambda.\
 """
 
 
@@ -497,6 +561,22 @@ def build_api_spec_prompt(
             "accordingly — do NOT assume server-side sessions or mutable persisted "
             "collections."
         )
+    else:
+        parts.append(
+            "## Durable state constraint\n"
+            "The backend implementing this spec persists its own data through the "
+            "platform STATE store — a document/key-value store keyed by "
+            "(partition key, sort key), organised into named collections. It has "
+            "NO scan operation and NO secondary indexes, so design every listing "
+            "endpoint to map onto ONE partition-key query (one collection = one "
+            "listing); an endpoint that would need to read \"everything across "
+            "partitions\" cannot be implemented. Counters must be served by an "
+            "atomic increment, not read-modify-write. Keep the stored shapes to "
+            "LIGHT state: settings, sessions, counters, simple documents keyed by "
+            "id. If the requirements need joins, transactions or analytics over "
+            "large data, design those endpoints against an EXTERNAL connected "
+            "database instead of the STATE store."
+        )
 
     parts.append("Write the OpenAPI JSON specification now.")
     return _API_SPEC_SYSTEM, "\n\n".join(parts)
@@ -513,14 +593,27 @@ def build_backend_system_prompt(
     datasource_context: str = "",
 ) -> str:
     parts: list[str] = [_ROLE]
-    parts.append(
-        "## Your task\n"
-        "Produce exactly two files:\n"
-        "1. `backend.py` — FastAPI backend implementing the API Specification you receive.\n"
-        "2. `requirements.txt` — pip dependencies.\n"
-        "The frontend is being generated in parallel — focus ONLY on the backend.\n"
-        "Implement every endpoint in the spec exactly as described."
-    )
+    if stateless:
+        task = (
+            "## Your task\n"
+            "Produce exactly two files:\n"
+            "1. `backend.py` — FastAPI backend implementing the API Specification you receive.\n"
+            "2. `requirements.txt` — pip dependencies.\n"
+            "The frontend is being generated in parallel — focus ONLY on the backend.\n"
+            "Implement every endpoint in the spec exactly as described."
+        )
+    else:
+        task = (
+            "## Your task\n"
+            "Produce exactly three files:\n"
+            "1. `backend.py` — FastAPI backend implementing the API Specification you receive.\n"
+            "2. `state_manifest.json` — the STATE key schema and collection registry "
+            "(see DURABLE STATE below).\n"
+            "3. `requirements.txt` — pip dependencies.\n"
+            "The frontend is being generated in parallel — focus ONLY on the backend.\n"
+            "Implement every endpoint in the spec exactly as described."
+        )
+    parts.append(task)
     parts.append(_BACKEND_RULES)
     parts.append(_STATELESS_RULES if stateless else _STATEFUL_RULES)
     if datasource_context.strip():
@@ -744,7 +837,15 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
 - The launcher assigns the port at run time: never mention a port number or
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
-  types) with inline CSS/JS — vanilla JavaScript, Apache ECharts for charts.\
+  types) with inline CSS/JS — vanilla JavaScript, Apache ECharts for charts.
+- Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
+  document/key-value store keyed by (partition key, sort key) with named
+  collections, no scan, no secondary indexes, atomic counters. The spec must
+  name the collections and what each stores; every listing must come from one
+  partition-key query. Do NOT propose sqlite or local files as storage. Heavy
+  or relational data (joins, transactions, analytics) belongs in an EXTERNAL
+  connected database, not in the STATE store. For every other artifact type
+  there is no local persistence at all — data lives in external sources.\
 """
 
 

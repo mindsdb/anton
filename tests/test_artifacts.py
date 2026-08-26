@@ -378,12 +378,42 @@ def test_housekeeping_set_still_mirrors_cowork_server():
     (`cowork/services/artifacts.py:132`), and `publish_access` plus the publish
     bundle carry their own copies. Drift means the agent and the UI disagree on
     what an artifact contains — which is exactly how backend.log ended up
-    counted here and nowhere else."""
+    counted here and nowhere else. The STATE runtime entries (PR #259) are in
+    anton's three copies; cowork-server's copy does not know them yet."""
     from anton.core.artifacts.store import _HOUSEKEEPING_FILES
 
     assert _HOUSEKEEPING_FILES == {
         "metadata.json", "README.md", "backend.log", ".published.json",
+        ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
+        ".state_manifest.published.json",
     }
+
+
+def test_housekeeping_set_matches_publish_access_copy():
+    """anton's own two copies must never drift from each other."""
+    from anton.core.artifacts.store import _HOUSEKEEPING_FILES
+    from anton.publish_access import _HOUSEKEEPING_FILES as ACCESS_COPY
+
+    assert _HOUSEKEEPING_FILES == ACCESS_COPY
+
+
+def test_reconcile_excludes_state_runtime_files(store: ArtifactStore):
+    """A locally-run stateful backend writes its SQLite store (and WAL/SHM side
+    files) into the artifact folder; publishing adds the schema snapshot. All
+    of it is runtime bookkeeping. `state_manifest.json` itself is a deliverable
+    the publisher bundles — it stays visible."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateful-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    (folder / "state_manifest.json").write_text('{"version": 1}')
+    (folder / ".anton_state.db").write_text("sqlite")
+    (folder / ".anton_state.db-wal").write_text("wal")
+    (folder / ".anton_state.db-shm").write_text("shm")
+    (folder / ".state_manifest.published.json").write_text("{}")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"backend.py", "state_manifest.json"}
 
 
 def test_a_nested_file_named_like_a_generation_input_is_kept(store: ArtifactStore):

@@ -119,6 +119,54 @@ def _requirement_names(requirements: str) -> set[str]:
     return names
 
 
+def _imports_anton_state(source: str) -> bool:
+    """True if the module imports the anton_state SDK (any form)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name.split(".")[0] == "anton_state" for a in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] == "anton_state":
+                return True
+    return False
+
+
+# The functions whose module-level call means "STATE store built at import
+# time". `get_store` is the conventional helper name from the backend template;
+# calling it at module level defeats its whole purpose.
+_STORE_BUILDERS = ("open_store", "from_backend_state", "get_store")
+
+
+def _module_level_store_builds(source: str) -> list[str]:
+    """Names of store-builder functions called at module level (import time).
+
+    Mirrors `_module_level_secret_copies`: the cloud runner overlays
+    `backend.STATE` after import, so a store built at import time binds to the
+    local SQLite driver even in the cloud. Walks only statements outside
+    function/class bodies — a call inside a route is exactly what we want.
+    """
+    offenders: list[str] = []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return offenders
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name in _STORE_BUILDERS:
+                offenders.append(name)
+    return offenders
+
+
 def _module_level_secret_copies(source: str) -> list[str]:
     """Return names of module-level vars assigned directly from SECRETS[...]."""
     offenders: list[str] = []
@@ -149,8 +197,20 @@ def _module_level_secret_copies(source: str) -> list[str]:
 
 
 def evaluate_backend(
-    introspection: dict, source: str, requirements: str
+    introspection: dict,
+    source: str,
+    requirements: str,
+    *,
+    artifact_type: str = "",
+    state_manifest: str | None = None,
 ) -> tuple[VerifyResult, list[str]]:
+    """Pure contract evaluation of a generated backend.
+
+    `artifact_type` enables the type-specific STATE checks; the empty default
+    keeps the pre-stateful call shape (and its direct-call tests) intact.
+    `state_manifest` is the raw text of `state_manifest.json` (None = the file
+    does not exist) — read by the async glue, validated here to stay pure.
+    """
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -195,9 +255,69 @@ def evaluate_backend(
                 f"requirements.txt must list `{core}`. Parsed package names: "
                 + (", ".join(sorted(req_names)) or "(none)")
             )
+    if "anton-state" in req_names:
+        # Applies to every type: the package is not on any registry, so pip
+        # fails on the line. The install step filters it defensively, but the
+        # correct file simply does not carry it.
+        errors.append(
+            "requirements.txt must not list `anton_state` — the STATE SDK is "
+            "injected at runtime; remove that line."
+        )
+
+    if artifact_type == "fullstack-stateful-app":
+        if not introspection.get("state_defined"):
+            errors.append(
+                "backend.py must define a module-level `STATE = None` slot "
+                "(the cloud runner overlays it before each request)."
+            )
+        if state_manifest is None:
+            errors.append(
+                "state_manifest.json is missing — a stateful backend must "
+                "declare its STATE key schema next to backend.py."
+            )
+        else:
+            manifest_error = _validate_state_manifest(state_manifest)
+            if manifest_error:
+                errors.append("state_manifest.json is invalid: " + manifest_error)
+        for name in _module_level_store_builds(source):
+            errors.append(
+                f"STATE store built at import time via `{name}(...)` — build "
+                "it at point of use inside the route instead (the cloud "
+                "overlay of STATE happens after import)."
+            )
+    elif artifact_type == "fullstack-stateless-app":
+        if _imports_anton_state(source):
+            errors.append(
+                "anton_state imported in a stateless backend — the STATE "
+                "store is for fullstack-stateful-app only; persistence goes "
+                "to external data sources here."
+            )
 
     ds_keys = sorted(set(_DS_KEY.findall(source)))
     return VerifyResult(errors=errors, warnings=warnings), ds_keys
+
+
+def _validate_state_manifest(text: str) -> str | None:
+    """One-line validation error for state_manifest.json, or None if valid.
+
+    Delegates to `anton_state.schema.StateSchema` — the same model the SDK
+    loads at runtime — so the verifier can never accept a manifest the
+    backend would then fail on. Imported lazily: the anton process has the
+    package on its path (unlike the scratchpad venv), and the html-app path
+    never needs it.
+    """
+    from anton_state.schema import StateSchema
+    from pydantic import ValidationError
+
+    try:
+        StateSchema.model_validate_json(text)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        loc = ".".join(str(p) for p in first.get("loc", ())) or "(root)"
+        return f"{loc}: {first.get('msg', 'invalid')}"
+    except ValueError as exc:  # not JSON at all
+        return str(exc)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +334,8 @@ from pathlib import Path
 _INTROSPECT_SCRIPT = r'''
 import json, sys
 result = {"import_ok": False, "import_error": "", "handler_ok": False,
-          "app_ok": False, "secrets_ok": False, "api_routes": [], "root_routes": []}
+          "app_ok": False, "secrets_ok": False, "state_defined": False,
+          "api_routes": [], "root_routes": []}
 try:
     import importlib.util
     spec = importlib.util.spec_from_file_location("artifact_backend", "backend.py")
@@ -228,6 +349,7 @@ try:
     result["app_ok"] = isinstance(app, FastAPI)
     result["handler_ok"] = isinstance(getattr(mod, "handler", None), Mangum)
     result["secrets_ok"] = isinstance(getattr(mod, "SECRETS", None), dict)
+    result["state_defined"] = hasattr(mod, "STATE")
     _DOCS = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
     if result["app_ok"]:
         for r in app.routes:
@@ -249,12 +371,25 @@ def _parse_requirements(text: str) -> list[str]:
         line = raw.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
             continue
+        # `anton_state` is injected at runtime, never installable from a
+        # registry (same filter as backend_launcher). evaluate_backend flags
+        # the line as a contract error; skipping it here keeps the install
+        # step alive so that error actually reaches the retry loop instead of
+        # an opaque pip failure.
+        pkg_name = re.split(r"[<>=!~ \[]", line, maxsplit=1)[0].strip()
+        if pkg_name.replace("-", "_").lower() == "anton_state":
+            continue
         pkgs.append(line)
     return pkgs
 
 
 async def verify_backend(
-    *, scratchpad_pool, slug: str, artifact_path: Path, import_timeout: float = 15.0
+    *,
+    scratchpad_pool,
+    slug: str,
+    artifact_path: Path,
+    import_timeout: float = 15.0,
+    artifact_type: str = "",
 ) -> tuple[VerifyResult, list[str]]:
     backend_py = artifact_path / "backend.py"
     if not backend_py.is_file():
@@ -264,6 +399,10 @@ async def verify_backend(
     req_path = artifact_path / "requirements.txt"
     if req_path.is_file():
         req_text = req_path.read_text(encoding="utf-8")
+    state_manifest: str | None = None
+    manifest_path = artifact_path / "state_manifest.json"
+    if manifest_path.is_file():
+        state_manifest = manifest_path.read_text(encoding="utf-8")
 
     # Provision venv and install deps.
     pad = await scratchpad_pool.get_or_create(slug)
@@ -290,11 +429,17 @@ async def verify_backend(
         return VerifyResult(errors=[f"backend.py failed to compile:\n{cerr.decode(errors='replace')}"]), \
             sorted(set(_DS_KEY.findall(source)))
 
-    # Import + introspect in a subprocess with a timeout.
+    # Import + introspect in a subprocess with a timeout. The env matters:
+    # `build_backend_env` puts `anton_state` on PYTHONPATH exactly like the
+    # launcher does for the real backend process — without it a correct
+    # stateful backend fails right here on its own SDK import.
+    from anton.core.artifacts.backend_launcher import build_backend_env
+
     proc = await asyncio.create_subprocess_exec(
         venv_python, "-c", _INTROSPECT_SCRIPT,
         cwd=str(artifact_path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=build_backend_env(None),
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=import_timeout)
@@ -312,4 +457,7 @@ async def verify_backend(
             errors=["backend introspection produced no JSON. stderr:\n" + err.decode(errors="replace")]
         ), sorted(set(_DS_KEY.findall(source)))
 
-    return evaluate_backend(introspection, source, req_text)
+    return evaluate_backend(
+        introspection, source, req_text,
+        artifact_type=artifact_type, state_manifest=state_manifest,
+    )

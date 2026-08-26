@@ -505,15 +505,33 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
     for attempt in range(GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_backend", attempt=attempt)
         kickoff = prompts.build_backend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
+        if stateless:
+            injections = [(
+                "backend.py",
+                "backend.py written. Now write requirements.txt listing EVERY "
+                "package imported in backend.py (one per line). Then call finish.",
+            )]
+        else:
+            injections = [
+                (
+                    "backend.py",
+                    "backend.py written. Now write state_manifest.json — the flat "
+                    "key-schema object from the DURABLE STATE rules, with every "
+                    "Collection name the code uses listed in `collections`.",
+                ),
+                (
+                    "state_manifest.json",
+                    "state_manifest.json written. Now write requirements.txt "
+                    "listing EVERY package imported in backend.py (one per line, "
+                    "but NEVER `anton_state` — it is injected at runtime). Then "
+                    "call finish.",
+                ),
+            ]
         result = await engine._run_loop(
             session=state.session, system=system, kickoff=kickoff,
             artifact_path=state.artifact_path,
             node_label="generate_backend", attempt=attempt, trace=state.trace_log,
-            step_injections=[(
-                "backend.py",
-                "backend.py written. Now write requirements.txt listing EVERY "
-                "package imported in backend.py (one per line). Then call finish.",
-            )],
+            step_injections=injections,
         )
         if isinstance(result, str):
             extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
@@ -529,6 +547,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         verdict, ds_keys = await verifiers.verify_backend(
             scratchpad_pool=state.session._scratchpads,
             slug=state.slug, artifact_path=state.artifact_path,
+            artifact_type=state.artifact_type,
         )
         state.trace_log.verifier(
             node="verify_backend", ok=verdict.ok,
