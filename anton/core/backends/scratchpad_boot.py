@@ -443,22 +443,14 @@ if _scratchpad_model:
                 "ssl_verify": _llm_ssl_verify,
                 "api_version": _llm_api_version,
             }
-            # Only Minds / MindsHub / MDB.AI proxy Anthropic over the OpenAI HTTP
-            # envelope, so ONLY they need image blocks in Anthropic native format.
-            # Gate on the host, NOT on "openai-compatible" generally: other
-            # OpenAI-compatible endpoints (e.g. Gemini at
-            # generativelanguage.googleapis.com, or a generic proxy) expect
-            # standard OpenAI image_url blocks. Forcing anthropic format for all
-            # openai-compatible mangled images for Gemini. OpenAIProvider already
-            # defaults to supports_vision=True / vision_format="openai", so the
-            # non-proxy case needs no override.
-            _llm_url_lower = (_llm_base_url or "").lower()
-            _anthropic_proxy = any(
-                host in _llm_url_lower for host in ("mdb.ai", "mindshub.ai")
-            )
-            if _anthropic_proxy:
-                _llm_provider_kwargs["supports_vision"] = True
-                _llm_provider_kwargs["vision_format"] = "anthropic"
+            # OpenAIProvider already defaults to supports_vision=True /
+            # vision_format="openai" — every gateway we route openai-compatible
+            # requests through (MindsHub/mdb.ai included) normalizes a standard
+            # OpenAI image_url block into whatever the resolved backend natively
+            # needs, so no per-host override is needed here. Forcing
+            # vision_format="anthropic" for every mdb.ai/mindshub.ai host used
+            # to assume every model behind it was Claude, which broke non-Claude
+            # models sharing the same gateway (ENG-1992).
             # Resolve the OpenAI "flavor" so the injected web_search() helper can
             # route through whatever native web tooling the endpoint exposes.
             # Detect Minds/mdb.ai by HOST, not provider name (always "openai" for

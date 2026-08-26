@@ -428,18 +428,6 @@ class LLMClient:
 
         api_version = getattr(settings, "openai_api_version", None)
         compatible_flavor = _resolve_openai_compatible_flavor(settings)
-        # Only Minds / MindsHub / MDB.AI proxy Anthropic over the OpenAI HTTP
-        # envelope and need Anthropic-shaped image blocks. Gate on the base-URL
-        # host, NOT on the "openai-compatible" provider name — other compatible
-        # endpoints (Gemini at generativelanguage.googleapis.com, generic
-        # proxies) expect standard OpenAI image_url. Mirrors the scratchpad_boot
-        # gate; forcing anthropic format unconditionally mangled Gemini images.
-        _oc_base_host = (settings.openai_base_url or "").lower()
-        _oc_vision_format = (
-            "anthropic"
-            if any(h in _oc_base_host for h in ("mdb.ai", "mindshub.ai"))
-            else "openai"
-        )
         # Each factory takes the per-role effort so planning and coding stay
         # independent even when they resolve to the same provider type.
         providers = {
@@ -461,7 +449,16 @@ class LLMClient:
                 ssl_verify=settings.minds_ssl_verify,
                 api_version=api_version,
                 supports_vision=True,
-                vision_format=_oc_vision_format,
+                # vision_format defaults to "openai" — every gateway we route
+                # openai-compatible requests through (MindsHub/mdb.ai included)
+                # already normalizes a standard OpenAI image_url block into
+                # whatever the resolved backend natively needs (Anthropic,
+                # Responses API, ...). Guessing "anthropic" from the base-URL
+                # host here used to assume every model behind that host was
+                # Claude, which broke non-Claude models sharing the same
+                # gateway (ENG-1992: MindsHub Air screenshots 400'd because
+                # this sent Anthropic-shaped image blocks to an OpenAI
+                # Responses-backed model).
                 flavor=compatible_flavor,
                 reasoning_effort=effort,
             ),
