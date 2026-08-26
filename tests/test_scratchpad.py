@@ -428,6 +428,16 @@ class TestScratchpadManager:
         finally:
             await mgr.close_all()
 
+    async def test_get_or_create_passes_workspace_env_overlay_to_new_pad(self):
+        """A manager constructed with workspace_env_overlay hands it to
+        every new pad it creates."""
+        mgr = make_manager(workspace_env_overlay={"MY_PROJECT_VAR": "project-value"})
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._workspace_env_overlay == {"MY_PROJECT_VAR": "project-value"}
+        finally:
+            await mgr.close_all()
+
 
 class TestScratchpadRenderNotebook:
     async def test_render_notebook_basic(self):
