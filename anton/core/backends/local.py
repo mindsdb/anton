@@ -205,6 +205,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         workspace_path: Path | None = None,
         session_id: str | None = None,
         scratchpad_ds_env: dict[str, str] | None = None,
+        workspace_env_overlay: dict[str, str] | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -230,6 +231,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._session_id: str | None = session_id
         # DS_* overlay for this pad's subprocess; None keeps legacy full-copy behaviour.
         self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
+        self._workspace_env_overlay: dict[str, str] | None = workspace_env_overlay
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -612,6 +614,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             for key in [k for k in env if k.startswith("DS_")]:
                 del env[key]
             env.update(self._scratchpad_ds_env)
+        if self._workspace_env_overlay:
+            env.update(self._workspace_env_overlay)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         else:
@@ -1358,6 +1362,7 @@ def local_scratchpad_runtime_factory(
     workspace_path: Path | None,
     session_id: str | None = None,
     scratchpad_ds_env: dict[str, str] | None = None,
+    workspace_env_overlay: dict[str, str] | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1369,4 +1374,5 @@ def local_scratchpad_runtime_factory(
         workspace_path=workspace_path,
         session_id=session_id,
         scratchpad_ds_env=scratchpad_ds_env,
+        workspace_env_overlay=workspace_env_overlay,
     )

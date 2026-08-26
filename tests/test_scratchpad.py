@@ -777,6 +777,35 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
+    async def test_workspace_env_overlay_applied(self):
+        """workspace_env_overlay adds its keys to the subprocess env."""
+        pad = make_scratchpad(
+            name="workspace-env-test",
+            workspace_env_overlay={"MY_PROJECT_VAR": "project-value"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('MY_PROJECT_VAR', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "project-value"
+        finally:
+            await pad.close()
+
+    async def test_workspace_env_overlay_none_leaves_env_unchanged(self, monkeypatch):
+        """workspace_env_overlay=None (default) does not touch an unrelated
+        inherited var — no stripping happens for this overlay, unlike DS_*."""
+        monkeypatch.setenv("SOME_INHERITED_VAR", "inherited-value")
+        pad = make_scratchpad(name="workspace-env-none")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('SOME_INHERITED_VAR', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "inherited-value"
+        finally:
+            await pad.close()
+
     async def test_scratchpad_model_not_leaked_when_unconfigured(self, monkeypatch):
         """An inherited ANTON_SCRATCHPAD_MODEL must not reach a pad that has
         no coding model configured."""
