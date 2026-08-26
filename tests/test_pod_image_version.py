@@ -76,6 +76,60 @@ def test_an_empty_version_fails_the_build(dockerfile: str) -> None:
     assert "exit 1" in dockerfile
 
 
+def test_the_fallback_version_is_rejected_by_the_build(dockerfile: str) -> None:
+    """The hole a non-empty check leaves open, and the nastiest one here.
+
+    With no tags reachable hatch-vcs resolves ``2.0.0.dev1+g<sha>``, and with no
+    .git at all it resolves ``2.0.0-dev`` (both measured). Those are well-formed
+    versions that a non-empty guard happily accepts -- so losing the tags would
+    bake the 2.0.0 family straight back in, which is the entire bug.
+
+    anton is CalVer, so a 2.0.0 version is never legitimate and always means the
+    tags did not arrive. In the Dockerfile rather than only the workflow so it
+    holds however the image is built.
+    """
+    assert 'in 2.0.0*)' in dockerfile, (
+        "the fallback guard is gone; a tagless resolve would rebuild the exact "
+        "2.0.0 constant this change removes (ENG-1796)"
+    )
+
+
+def _resolve_step(workflow: dict) -> dict:
+    for step in workflow["jobs"]["version"]["steps"]:
+        if step.get("id") == "resolve":
+            return step
+    raise AssertionError("no `resolve` step in the version job")
+
+
+def test_the_resolved_version_is_validated_whole_line(workflow: dict) -> None:
+    """A prefix match is not enough, because the value reaches a shell unquoted.
+
+    The shared action expands ``extra-build-args`` unquoted into ``docker buildx
+    build``, so ``2.26.8 --build-arg EVIL=1`` passes a ``^[0-9]+\.[0-9]`` prefix
+    check and becomes extra arguments to that command. ``grep -Eqx`` anchors
+    both ends, which is what actually closes it.
+    """
+    run = _resolve_step(workflow).get("run", "")
+    assert "grep -Eqx" in run, (
+        "the version is no longer whole-line validated; a prefix match lets "
+        "whitespace through into an unquoted shell expansion"
+    )
+    assert "2.0.0*)" in run, "the workflow no longer rejects the hatch-vcs fallback"
+
+
+def test_only_one_line_is_captured(workflow: dict) -> None:
+    """A second stdout line would be parsed by $GITHUB_OUTPUT as another pair.
+
+    Asserted on the pipeline itself, not on the bare string: the comment above
+    it in the same ``run`` block names ``tail -n 1`` too, so a substring check
+    stayed green when the pipe was deleted -- caught by mutation, not by review.
+    """
+    run = _resolve_step(workflow).get("run", "")
+    assert "uvx hatch version | tail -n 1" in run, (
+        "a multi-line capture would corrupt $GITHUB_OUTPUT rather than fail"
+    )
+
+
 def _steps(workflow: dict, job: str) -> list[dict]:
     return workflow["jobs"][job]["steps"]
 

@@ -43,6 +43,12 @@ COPY . /app
 # which is the failure mode this whole change exists to remove.
 RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
     || { echo "ERROR: --build-arg ANTON_VERSION is required (ENG-1796)." >&2; exit 1; } \
+    && case "$SETUPTOOLS_SCM_PRETEND_VERSION" in 2.0.0*) \
+         echo "ERROR: ANTON_VERSION=$SETUPTOOLS_SCM_PRETEND_VERSION is the hatch-vcs" >&2; \
+         echo "       fallback, which means the resolver found no tags. Baking it would" >&2; \
+         echo "       restore the exact constant this guard exists to remove (ENG-1796)." >&2; \
+         exit 1 ;; \
+       esac \
     && uv venv "$VIRTUAL_ENV" \
     && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --frozen --no-dev --no-cache \
     && uv pip install --no-cache boto3 \

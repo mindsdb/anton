@@ -56,11 +56,34 @@ jobs:
         # class of failure this whole change exists to remove. Fail instead.
         run: |
           set -euo pipefail
-          version="$(uvx hatch version)"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]'; then
-            echo "::error::could not resolve an anton version (got: '$version')"
+          # `tail -n 1`: hatch prints progress to stderr today, but a stray line
+          # on stdout would otherwise ride along into $GITHUB_OUTPUT, where a
+          # second line is parsed as another key=value pair rather than failing.
+          version="$(uvx hatch version | tail -n 1)"
+
+          # Whole-line match, PEP 440 characters only. This is a boundary, not a
+          # formatting nicety: the shared action expands `extra-build-args`
+          # UNQUOTED into `docker buildx build`, so anything containing
+          # whitespace becomes additional arguments to that command.
+          if ! printf '%s' "$version" | grep -Eqx '[0-9]+\.[0-9][0-9A-Za-z.!+]*'; then
+            echo "::error::refusing to build: '$version' is not a bare PEP 440 version"
             exit 1
           fi
+
+          # Reject the fallback explicitly. With no tags reachable, hatch-vcs
+          # resolves `2.0.0.dev1+g<sha>` (and `2.0.0-dev` with no .git at all) —
+          # both well-formed, both accepted by the check above, and both the
+          # very 2.0.0 family this change exists to eliminate. anton is CalVer,
+          # so a 2.0.0 version is never legitimate and always means the tags did
+          # not arrive.
+          case "$version" in
+            2.0.0*)
+              echo "::error::'$version' is the hatch-vcs fallback — the checkout has no tags."
+              echo "::error::Building would bake a 2.0.0 version back into the image (ENG-1796)."
+              exit 1
+              ;;
+          esac
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "anton version: $version"
 
