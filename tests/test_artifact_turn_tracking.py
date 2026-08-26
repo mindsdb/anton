@@ -17,12 +17,15 @@ artifact's own metadata for everyone after that.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.tools.tool_handlers import (
+    _snapshot_existing_artifact_mtimes,
+    _track_edits_since,
     handle_create_artifact,
     handle_open_artifact,
     handle_update_artifact_metadata,
@@ -182,3 +185,105 @@ async def test_tracking_failure_never_fails_the_tool_call(session, root, monkeyp
 
     assert slug
     assert (root / slug / "metadata.json").is_file()
+
+
+# ─── edits made without re-opening (scratchpad mtime fallback) ─────────────
+#
+# `open_artifact` is how attribution is SUPPOSED to work, but nothing forces
+# the agent to call it again once it already has an artifact's path from
+# earlier in the conversation — it can (and in practice does) just write
+# straight into a remembered folder via the scratchpad. `_track_edits_since`
+# is the fallback: a before/after mtime diff scoped to one scratchpad cell's
+# own execution window, so that edit still gets attributed.
+
+
+def _bump_mtime(path: Path, delta_s: int = 2) -> None:
+    st = path.stat()
+    os.utime(path, (st.st_atime, st.st_mtime + delta_s))
+
+
+async def test_edit_without_reopening_is_tracked_via_mtime(session, root):
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = _snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    # The scratchpad writing straight into the folder, bypassing open_artifact.
+    index = root / slug / "index.html"
+    index.write_text("<html>v2</html>")
+    _bump_mtime(index)
+
+    _track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}
+
+
+async def test_housekeeping_only_mtime_bump_is_not_an_edit(session, root):
+    """metadata.json/README.md are the store's own bookkeeping, not artifact
+    content — touching only those must not read as the agent having edited
+    the artifact."""
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = _snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    _bump_mtime(root / slug / "README.md")
+
+    _track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == set()
+
+
+async def test_edit_without_reopening_stamps_provenance_too(session, root):
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = _snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    index = root / slug / "index.html"
+    index.write_text("<html>v2</html>")
+    _bump_mtime(index)
+
+    _track_edits_since(session, ArtifactStore(root), before)
+
+    assert [e["conversation"] for e in _provenance(root, slug)] == ["conv-1"]
+
+
+async def test_untouched_artifact_is_not_tracked_by_mtime_fallback(session, root):
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = _snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    # Nothing written this cell — the folder is exactly as it was.
+
+    _track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == set()
+
+
+async def test_a_slug_that_did_not_exist_before_is_not_claimed_as_an_edit(session, root):
+    """A folder the scratchpad creates from scratch (bypassing create_artifact
+    too) isn't in `before` at all, so the mtime fallback correctly leaves it
+    alone — this path only ever claims EDITS to already-existing artifacts."""
+    before: dict[str, float] = {}
+    (root / "brand-new").mkdir(parents=True)
+    (root / "brand-new" / "metadata.json").write_text("{}")
+    (root / "brand-new" / "index.html").write_text("<html></html>")
+
+    _track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == set()
+
+
+async def test_reopened_slug_is_not_double_tracked_by_the_fallback(session, root):
+    """When open_artifact WAS called this turn, the fallback is a no-op for
+    that slug — it only fills in what the tools missed."""
+    slug = await _create(session)
+    await handle_open_artifact(session, {"slug": slug})
+    assert session._artifacts_touched == {slug}
+
+    before = _snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    index = root / slug / "index.html"
+    index.write_text("<html>v2</html>")
+    _bump_mtime(index)
+
+    _track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}

@@ -126,6 +126,73 @@ def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = 
         _log.warning("could not record turn provenance for artifact %s", slug, exc_info=True)
 
 
+def _artifact_content_mtime(folder: Path) -> float:
+    """Max mtime across an artifact folder's user-content files.
+
+    Excludes the store's own housekeeping files, mirroring cowork-server's
+    `content_mtime` gate so both sides agree on what "changed" means.
+    """
+    from anton.core.artifacts.store import (
+        METADATA_FILENAME,
+        PUBLISHED_FILENAME,
+        README_FILENAME,
+    )
+
+    housekeeping = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
+    try:
+        return max(
+            (
+                p.stat().st_mtime
+                for p in folder.rglob("*")
+                if p.is_file()
+                and not p.is_symlink()
+                and str(p.relative_to(folder)) not in housekeeping
+            ),
+            default=0.0,
+        )
+    except OSError:
+        return 0.0
+
+
+def _snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
+    """slug -> content mtime, for every artifact folder that exists right now."""
+    root = store.root
+    if not root.is_dir():
+        return {}
+    mtimes: dict[str, float] = {}
+    for child in root.iterdir():
+        if child.is_dir() and (child / "metadata.json").is_file():
+            mtimes[child.name] = _artifact_content_mtime(child)
+    return mtimes
+
+
+def _track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
+    """Catch an artifact edit the agent made without calling `open_artifact`.
+
+    `open_artifact` is how attribution is SUPPOSED to work (see
+    `_track_artifact` above), but nothing forces the agent to call it again
+    once it already has an artifact's path from earlier in the conversation —
+    it can (and in practice does) just write straight into a remembered
+    folder via the scratchpad, skipping the tool call entirely. Without this,
+    that edit's `_artifacts_touched` stays empty and the host can never card
+    it, even though the file genuinely changed this turn (ENG-1933 follow-up).
+
+    Scoped to THIS cell's own execution window — the snapshot taken right
+    before `pad.execute` vs. right after — rather than the whole turn, to
+    keep the diff-based race this reintroduces (a concurrent sibling
+    conversation happening to bump some other artifact's mtime) as narrow as
+    possible: seconds, not minutes. Narrower than the pre-ENG-1933 exposure,
+    not zero — the same trade-off `index_turn_artifacts` already accepts for
+    Hermes's edits.
+    """
+    already_touched = getattr(session, "_artifacts_touched", None) or ()
+    after = _snapshot_existing_artifact_mtimes(store)
+    for slug, prev_mtime in before.items():
+        current = after.get(slug)
+        if current is not None and current > prev_mtime and slug not in already_touched:
+            _track_artifact(session, store, slug, summary="Edited via scratchpad")
+
+
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Create a fresh artifact folder + metadata.json + README.md.
 
@@ -567,6 +634,16 @@ async def handle_scratchpad(
         )
         await _fire_pre_execute(session, prelim_cell)
 
+        # Snapshot existing artifacts' content mtimes before the cell runs, so
+        # an edit the cell makes without a prior `open_artifact` call this
+        # turn still gets attributed below (see `_track_edits_since`).
+        artifact_store = _artifact_store(session)
+        before_artifact_mtimes = (
+            _snapshot_existing_artifact_mtimes(artifact_store)
+            if artifact_store is not None
+            else {}
+        )
+
         cell = await pad.execute(
             code,
             description=description,
@@ -581,6 +658,8 @@ async def handle_scratchpad(
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
+            if artifact_store is not None:
+                _track_edits_since(session, artifact_store, before_artifact_mtimes)
         # The runtime's verdict: a raised error/timeout/kill is a failure;
         # stderr-only output (warnings) is not, and stdout containing words
         # like "failed" is not either — the streak reads this flag, never the
