@@ -1113,6 +1113,13 @@ class ChatSession:
         # Where `create_skill_draft` stages skills the agent builds. None means
         # the host stages none, and the tool is not registered at all.
         self._skill_drafts_root = getattr(s, "skill_drafts_root", None)
+        # Slugs of artifacts this turn created or opened for editing, recorded
+        # by the artifact tool handlers as they run. A host builds the turn's
+        # artifact cards from this rather than diffing the artifacts directory:
+        # the set names what THIS turn actually touched, so a concurrent turn
+        # writing into the same (shared, project-wide) directory can never be
+        # mistaken for this turn's work. Reset at the top of every turn.
+        self._artifacts_touched: set[str] = set()
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
@@ -1208,6 +1215,15 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    @property
+    def artifacts_touched(self) -> set[str]:
+        """Slugs this turn created or opened for editing.
+
+        A copy: a host reads this after the turn to decide which artifacts to
+        surface, and must not be able to mutate the session's own record.
+        """
+        return set(self._artifacts_touched)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3645,6 +3661,10 @@ class ChatSession:
         self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
+        # Per-turn, so a long-lived session (the CLI reuses one across turns)
+        # reports only what the CURRENT turn touched. Hosts that build a fresh
+        # session per turn get the same result either way.
+        self._artifacts_touched = set()
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is

@@ -83,6 +83,49 @@ def _artifact_store(session: "ChatSession"):
     return ArtifactStore(workspace.artifacts_dir)
 
 
+def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = "") -> None:
+    """Record that THIS turn created or opened `slug`.
+
+    Two records, for two different readers:
+
+    * `session._artifacts_touched` — in-memory, per-turn. The host reads it
+      after the turn to build the turn's artifact cards. This is what makes
+      attribution correct without diffing the artifacts directory: several
+      turns can share one project-wide artifacts folder and each still knows
+      exactly what it touched.
+    * `provenance` in the artifact's own `metadata.json`, via
+      `record_turn()` — durable, and the only record that survives the
+      process. Answers "which conversations have ever worked on this?" for
+      any later reader.
+
+    Best-effort: attribution is bookkeeping, so a failure here must never
+    fail the tool call the agent actually made.
+    """
+    try:
+        session._artifacts_touched.add(slug)
+    except AttributeError:
+        # A session predating this field (or a test double) still gets
+        # durable provenance below.
+        pass
+    conversation_id = str(getattr(session, "_session_id", "") or "")
+    if not conversation_id:
+        # No host conversation to attribute to (a bare CLI session). The
+        # in-memory set above is still useful; provenance would be a row
+        # keyed by nothing.
+        return
+    try:
+        store.record_turn(
+            slug,
+            conversation_id=conversation_id,
+            conversation_title=None,
+            turn_index=getattr(session, "_turn_count", 0) + 1,
+            summary=summary,
+            files_touched=[],
+        )
+    except Exception:
+        _log.warning("could not record turn provenance for artifact %s", slug, exc_info=True)
+
+
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Create a fresh artifact folder + metadata.json + README.md.
 
@@ -122,6 +165,7 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
         primary=primary if isinstance(primary, str) else None,
     )
     folder = store.folder_for(artifact.slug)
+    _track_artifact(session, store, artifact.slug, summary=f"Created artifact: {name}")
     return SideEffectResult(
         success=True,
         message=(
@@ -217,6 +261,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
         )
     datasources = [d.slug for d in artifact.datasources]
+    _track_artifact(session, store, artifact.slug, summary=f"Updated artifact metadata: {artifact.name}")
     return SideEffectResult(
         success=True,
         message=(
@@ -368,6 +413,11 @@ async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
     if artifact is None:
         return f"Error: no artifact found for slug `{slug}`."
     folder = store.folder_for(artifact.slug)
+    # Opening is how the agent gets an artifact's path in order to write to
+    # it, so this is the turn's declaration of intent to modify. Tracked here
+    # rather than at write time because the writes themselves happen in
+    # scratchpad cells the tool layer never sees.
+    _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
     return json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
