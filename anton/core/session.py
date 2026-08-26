@@ -2828,6 +2828,15 @@ class ChatSession:
                 # URL itself — those carry internal corporate hostnames.
                 endpoint_class=classify_endpoint(_turn_settings),
                 harness=str(self._harness or ""),
+                # WHERE the user was (desktop / web / cli), as opposed to which
+                # agent ran (`harness`). Same value the Langfuse `surface:` tag
+                # carries (ENG-1459); it was deliberately left off this event
+                # then, on the grounds that PostHog's renderer events already
+                # had it — but those ride a different distinct_id and cannot
+                # split this row, and this row is where cost and outcome live
+                # (ENG-1945). "" when the host did not say; never a guess —
+                # `_validated_surface` already rejected anything unrecognised.
+                surface=str(getattr(self, "_surface", None) or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
                 # trace headers carry, so an analytics row links back to
@@ -2862,9 +2871,10 @@ class ChatSession:
         is reported as ``"unknown"`` rather than coerced either way.
 
         Payload is deliberately name + verdict + duration + exception CLASS
-        plus the two join keys, and nothing else. Arguments, result content
-        and ``str(exc)`` routinely carry file paths, user data and
-        credentials-adjacent strings — none of them may ever appear here.
+        + surface (a closed enum, ENG-1945) plus the two join keys, and
+        nothing else. Arguments, result content and ``str(exc)`` routinely
+        carry file paths, user data and credentials-adjacent strings — none
+        of them may ever appear here.
 
         ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
         values exactly (same names, same derivation), so a tool failure spotted
@@ -2906,6 +2916,10 @@ class ChatSession:
                 ok="unknown" if ok is None else str(ok).lower(),
                 duration_ms=str(int(duration_ms)),
                 error_type=error_type,
+                # Same derivation as `turn_completed`'s `surface` (ENG-1945),
+                # so a tool row can be split by desktop / web without joining
+                # to its parent turn first.
+                surface=str(getattr(self, "_surface", None) or ""),
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
             )

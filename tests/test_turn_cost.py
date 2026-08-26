@@ -161,6 +161,7 @@ def _bare_session(**overrides) -> ChatSession:
     s._llm.coding_model = "coder"
     s._session_id = "conv-123"
     s._harness = "cowork"
+    s._surface = "desktop"
     s._turn_count = 4
     s._cancel_event = overrides.pop("cancel_event", MagicMock(is_set=lambda: False))
     s._settings = overrides.pop("settings", None)
@@ -187,6 +188,22 @@ class TestEmitTurnCost:
         # Numbers, names, and IDs only — nothing that could carry content.
         for value in kwargs.values():
             assert isinstance(value, str) and len(value) < 200
+
+    def test_surface_is_stamped_and_empty_when_the_host_did_not_say(self):
+        """ENG-1945: WHERE the user was rides the cost row. It was left off
+        deliberately in ENG-1459 (renderer events "already had it") — but those
+        ride a different distinct_id and cannot split this row. Unset must be
+        "", never a guess, matching `harness`'s rule."""
+        s = _bare_session()
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.call_args.kwargs["surface"] == "desktop"
+        assert send.call_args.kwargs["harness"] == "cowork"
+
+        s = _bare_session(_surface=None)
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.call_args.kwargs["surface"] == ""
 
     def test_books_close_and_listener_disarms(self):
         s = _bare_session()
