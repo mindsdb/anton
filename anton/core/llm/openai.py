@@ -13,6 +13,7 @@ from anton.utils.datasources import scrub_credentials
 
 from .provider import safe_parse_tool_input
 from .provider import (
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMProvider,
@@ -214,6 +215,31 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         raise classify_404(
             model, message=provider_msg, code=code, status=status_str,
         ) from exc
+
+    # A permanent, content-SHAPED rejection: some block in conversation history
+    # reached the provider in a shape it doesn't parse — not a provider-
+    # availability issue, so retrying the identical request fails identically
+    # every time (ENG-1992). Two dialects recognized: OpenAI Responses' "Invalid
+    # value: 'x'. Supported values are: ..." (param names the offending content
+    # index) and Anthropic's "Input tag 'x' found using 'type' does not match
+    # any of the expected tags". cowork-server's turn-error mapping detects this
+    # type (or its scrubbed class name on the remote path) and repairs the
+    # offending content in the conversation's stored history so the next turn
+    # doesn't resend the same poison — see ContentValidationError's docstring.
+    if etype == "invalid_request_error":
+        provider_msg = str(envelope.get("message") or body.get("message") or "").lower()
+        param = str(envelope.get("param") or body.get("param") or "").lower()
+        _content_shape_error = (
+            (".content[" in param or param.endswith(".content"))
+            or "supported values are" in provider_msg
+            or "does not match any of the expected tags" in provider_msg
+        )
+        if _content_shape_error:
+            raise ContentValidationError(
+                "The model provider rejected part of this conversation's content "
+                "(an attachment or image in an unsupported format). That content "
+                "will be removed automatically so the conversation can continue."
+            ) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
