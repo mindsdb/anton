@@ -204,6 +204,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
         session_id: str | None = None,
+        scratchpad_ds_env: dict[str, str] | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -227,6 +228,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # conversation's UUID as `session_id`). Only used to scope the namespace
         # snapshot — see `_session_snapshot_path`.
         self._session_id: str | None = session_id
+        # Explicit DS_* values for this pad's subprocess, computed by
+        # ScratchpadManager from the current data vault. None (default)
+        # leaves DS_* handling exactly as before — the parent env's own
+        # copy, whatever it holds.
+        self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -600,6 +606,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
+        if self._scratchpad_ds_env is not None:
+            # Never trust inherited DS_* values — they may belong to a
+            # different conversation/connection set than this vault's
+            # current state. Strip whatever the parent process is
+            # holding, then overlay exactly what this pad should see.
+            for key in [k for k in env if k.startswith("DS_")]:
+                del env[key]
+            env.update(self._scratchpad_ds_env)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         if self._coding_provider:

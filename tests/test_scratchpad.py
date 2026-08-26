@@ -602,6 +602,56 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
+    async def test_scratchpad_ds_env_none_preserves_inherited_ds_vars(self, monkeypatch):
+        """scratchpad_ds_env=None (default) keeps today's behaviour: inherited
+        DS_* vars pass through untouched."""
+        monkeypatch.setenv("DS_POSTGRES_PROD__PASSWORD", "inherited-secret")
+        pad = make_scratchpad(name="ds-env-none")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "inherited-secret"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_ds_env_empty_strips_all_inherited_ds_vars(self, monkeypatch):
+        """An explicit empty dict (empty vault / all connections disabled)
+        strips every inherited DS_* var — none are added back."""
+        monkeypatch.setenv("DS_POSTGRES_PROD__PASSWORD", "should-not-leak")
+        pad = make_scratchpad(name="ds-env-empty", scratchpad_ds_env={})
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_ds_env_only_exposes_explicit_keys(self, monkeypatch):
+        """Only the DS_* pairs in scratchpad_ds_env are visible — a DS_* var
+        inherited for a different connection is stripped even though a
+        DIFFERENT DS_* var was explicitly allowed."""
+        monkeypatch.setenv("DS_SLACK_MAIN__BOT_TOKEN", "wrong-conversation-token")
+        pad = make_scratchpad(
+            name="ds-env-scoped",
+            scratchpad_ds_env={"DS_POSTGRES_PROD__PASSWORD": "right-conversation-secret"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os\n"
+                "print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))\n"
+                "print(os.environ.get('DS_SLACK_MAIN__BOT_TOKEN', 'NOT_FOUND'))"
+            )
+            lines = cell.stdout.strip().splitlines()
+            assert lines[0] == "right-conversation-secret"
+            assert lines[1] == "NOT_FOUND"
+        finally:
+            await pad.close()
+
 
 class TestScratchpadVenv:
     async def test_venv_created_on_start(self):
