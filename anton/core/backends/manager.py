@@ -174,13 +174,7 @@ class ScratchpadManager:
         return sorted({d.metadata["Name"] for d in distributions()})
 
     def _scratchpad_ds_env(self) -> dict[str, str] | None:
-        """DS_* env values from the current vault state, or None without a vault.
-
-        Built fresh on every call, not cached, so a pad created after a
-        mid-session /connect sees the newly added connection — the same
-        timing LocalScratchpadRuntime's own os.environ-at-spawn-time
-        behaviour already has.
-        """
+        """DS_* env values from the current vault state, fresh each call; None without a vault."""
         if self._data_vault is None:
             return None
         env: dict[str, str] = {}
