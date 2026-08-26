@@ -5,7 +5,10 @@ import os
 import re
 import shutil
 import yaml
+from collections.abc import Mapping
+from contextvars import ContextVar
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from anton.core.datasources.data_vault import (
@@ -19,12 +22,71 @@ from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML
 if TYPE_CHECKING:
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
 
+
+class _ContextScopedSet:
+    """A set[str]-like object isolated per asyncio context (one per turn),
+    backed by a ContextVar. Callers use add()/clear()/`in`/len()/iteration
+    exactly like a plain set; a concurrently-running turn's context never
+    sees this turn's writes.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._cv: ContextVar[frozenset[str]] = ContextVar(name, default=frozenset())
+
+    def add(self, item: str) -> None:
+        self._cv.set(self._cv.get() | {item})
+
+    def clear(self) -> None:
+        self._cv.set(frozenset())
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._cv.get()
+
+    def __iter__(self):
+        return iter(self._cv.get())
+
+    def __len__(self) -> int:
+        return len(self._cv.get())
+
+
+class _ContextScopedEnvValues:
+    """Per-turn DS_* name -> value overrides, falling back to os.environ
+    when a key has no explicit per-turn value. The explicit override — set
+    by restore_namespaced_env() — is what closes the concurrent-turn race;
+    the fallback keeps CLI (which never calls set()) and any caller that
+    still just does monkeypatch.setenv()/os.environ writes working exactly
+    as before.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._cv: ContextVar[Mapping[str, str]] = ContextVar(
+            name, default=MappingProxyType({})
+        )
+
+    def set(self, values: dict[str, str]) -> None:
+        self._cv.set(MappingProxyType(dict(values)))
+
+    def get(self, key: str, default: str = "") -> str:
+        overrides = self._cv.get()
+        if key in overrides:
+            return overrides[key]
+        return os.environ.get(key, default)
+
+    def items(self):
+        merged = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+        merged.update(self._cv.get())
+        return merged.items()
+
+
 # DS_* var names whose values are known to be secret (passwords, tokens, keys).
 # Populated at startup and after each successful connect.
-_DS_SECRET_VARS: set[str] = set()
+_DS_SECRET_VARS = _ContextScopedSet("ds_secret_vars")
 
 # DS_* var names for **ALL** fields of registered engines.
-_DS_KNOWN_VARS: set[str] = set()
+_DS_KNOWN_VARS = _ContextScopedSet("ds_known_vars")
+
+# DS_* name -> value overrides for the current turn (see _ContextScopedEnvValues).
+_ds_env_values = _ContextScopedEnvValues("ds_env_values")
 
 # Provider credential env vars injected into the scratchpad execution env for
 # the code to USE. Their values must never reach the LLM (ENG-463): a model can
@@ -151,12 +213,12 @@ def scrub_credentials(text: str) -> str:
         result, traceback, or settings echo.
     """
     for key in _DS_SECRET_VARS:
-        value = os.environ.get(key, "")
+        value = _ds_env_values.get(key)
         if not value:
             continue
         text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
-    for key, value in os.environ.items():
-        if not key.startswith("DS_") or key in _DS_KNOWN_VARS:
+    for key, value in _ds_env_values.items():
+        if key in _DS_KNOWN_VARS:
             continue
         # Length guard only for unknown DS_* vars (not registered secrets).
         # Unknown vars are matched heuristically — a short value like "on"
@@ -387,6 +449,7 @@ def restore_namespaced_env(vault: DataVault) -> None:
     _reset_registered_ds_vars()
     vault.clear_ds_env()
     dreg = DatasourceRegistry()
+    env_values: dict[str, str] = {}
     for conn in vault.list_connections():
         vault.inject_env(conn["engine"], conn["name"])  # flat=False by default
         edef = dreg.get(conn["engine"])
@@ -394,6 +457,13 @@ def restore_namespaced_env(vault: DataVault) -> None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
         else:
             _register_unregistered_connection_vars(vault, conn["engine"], conn["name"])
+        try:
+            env_values.update(vault.env_for(conn["engine"], conn["name"]) or {})
+        except Exception:
+            # One bad connection's value lookup must not block the rest —
+            # it just won't be in this turn's scrub-value map.
+            pass
+    _ds_env_values.set(env_values)
 
 
 def find_matching_connection(
