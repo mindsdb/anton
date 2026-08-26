@@ -2,14 +2,17 @@
 
 Assembles a :class:`~anton.core.session.ChatSession` scoped to the tenant's
 mounted workspace with the desktop-only, tenant-leaky behaviours OFF. It does
-NOT call the desktop ``build_chat_session`` (which loads workspace ``.env``,
-uses ``~/.anton`` personal memory, and injects vault creds into ``os.environ``).
+NOT call the desktop ``build_chat_session`` (which loads workspace ``.env``
+and uses ``~/.anton`` personal memory).
 
 Safety posture (all internal — nothing here is on the wire):
 
 * Trusted pod-side workspace mount, never taken from the request.
 * No dotenv loading (``AntonSettings(_env_file=None)``, shared into Workspace).
-* Connectors / data-vault / disk history OFF.
+* Data vault is a live :class:`~anton.core.datasources.data_vault.TurnKeyDataVault`
+  only when the turn carries an ``oauth`` block (Google Drive/Gmail via
+  auth's turn-key endpoint) — ``None`` (connectors OFF) otherwise. Disk
+  history stays OFF regardless.
 * Memory never persists pod-side: cowork sends the tenant's slots per turn, and
   writes are reported back for cowork to apply (see :func:`_build_cortex`).
 * Only reviewed, headless-safe tools are exposed (scratchpad + artifacts).
@@ -582,6 +585,20 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
 
     cortex = _build_cortex(request.memory, llm_client)
 
+    # Connectors ON only when this turn carries an oauth block (Google
+    # Drive/Gmail today). restore_namespaced_env() is the exact same
+    # function desktop's harness.py already calls for LocalDataVault: it
+    # clears+reinjects DS_* env vars and registers them for credential
+    # scrubbing (so a token can't leak into LLM-visible output) before the
+    # sandbox subprocess inherits this process's env via runtime_factory.
+    data_vault = None
+    if request.oauth:
+        from anton.core.datasources.data_vault import TurnKeyDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        data_vault = TurnKeyDataVault(request.oauth)
+        restore_namespaced_env(data_vault)
+
     config = ChatSessionConfig(
         llm_client=llm_client,
         settings=settings,
@@ -599,7 +616,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         cortex=cortex,                      # org memory; writes are reported, not stored
         episodic=None,
         self_awareness=None,
-        data_vault=None,                    # connectors OFF
+        data_vault=data_vault,              # connectors ON iff request.oauth is set
         history_store=None,                 # disk history OFF (DB authoritative)
         tools=[],                           # no host connector/publish tools
         tool_allowlist=CLOUD_TOOL_ALLOWLIST,  # only reviewed tools survive the build

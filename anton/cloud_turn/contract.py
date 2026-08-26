@@ -64,6 +64,11 @@ class TurnRequestV1:
     #: needs declaring in three repos (cowork-server -> scratchpad-controller's
     #: allowlist -> here), so a block keeps the next key to two.
     trace: dict | None = None
+    #: Optional turn-key OAuth credential set by cowork-server:
+    #: {"turn_key": str, "connections": [{"engine", "name"}, ...]}. Absent or
+    #: empty means no connectors for this turn — see cloud_turn/session.py's
+    #: build_cloud_chat_session, which is the only place this is read.
+    oauth: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -81,4 +86,6 @@ class TurnRequestV1:
             # A controller too old to forward it simply yields None, which reads
             # as "no attribution" rather than failing the turn.
             trace=d.get("trace") if isinstance(d.get("trace"), dict) else None,
+            # Same defensive isinstance check as trace, for the same reason.
+            oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
         )

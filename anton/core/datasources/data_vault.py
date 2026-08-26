@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 
 # Sentinel used in modify-flow round-trips. The renderer fetches the
@@ -378,3 +382,150 @@ class LocalDataVault:
             if suffix.isdigit():
                 max_n = max(max_n, int(suffix))
         return max_n + 1
+
+
+#: Deployment-side override for auth's base URL (never taken from the wire
+#: request — same trust posture as ANTON_CLOUD_WORKSPACE_PATH etc. in
+#: cloud_turn/session.py). Lets a PR/staging pod point at a non-prod auth.
+ANTON_CLOUD_AUTH_BASE_URL_ENV = "ANTON_CLOUD_AUTH_BASE_URL"
+_DEFAULT_AUTH_BASE_URL = "https://auth.mindshub.ai"
+
+#: Non-secret fields the turn-key endpoint returns alongside access_token,
+#: same field names LocalDataVault already persists for these engines
+#: (cowork-server/cowork/services/connectors/oauth/google.py) — kept
+#: identical so scratchpad code sees the same DS_* var names on cloud and
+#: desktop.
+_TURNKEY_RESPONSE_FIELDS = ("access_token", "account_email", "token_type", "scope", "expires_at")
+
+
+class TurnKeyDataVault:
+    """Read-only DataVault backed by a live call to auth's turn-key token
+    endpoint (POST /v1/oauth/{engine}/token), for cloud turns only.
+
+    Connections are exactly what cowork-server resolved at enqueue time
+    (the turn's `oauth["connections"]` block) — this class never discovers
+    or persists connections on its own; `save`/`delete` are no-ops/errors,
+    matching the fact that a cloud turn never edits connections mid-turn.
+    """
+
+    def __init__(self, oauth: dict[str, Any], *, base_url: str | None = None) -> None:
+        self._turn_key = str(oauth.get("turn_key") or "")
+        self._connections: list[dict[str, str]] = [
+            {"engine": str(c["engine"]), "name": str(c["name"])}
+            for c in (oauth.get("connections") or [])
+            if isinstance(c, dict) and c.get("engine") and c.get("name")
+        ]
+        self._base_url = (
+            base_url
+            or os.environ.get(ANTON_CLOUD_AUTH_BASE_URL_ENV)
+            or _DEFAULT_AUTH_BASE_URL
+        ).rstrip("/")
+        # Per-turn cache: the loop in restore_namespaced_env() calls
+        # inject_env() once per connection already, but read_record()/load()
+        # may also be called for the same connection within the same turn
+        # (e.g. system-prompt building) — one token fetch per connection,
+        # not one per call.
+        self._cache: dict[tuple[str, str], dict[str, str] | None] = {}
+
+    def list_connections(self) -> list[dict[str, str]]:
+        """Return [{engine, name, created_at}] — created_at is unknown here,
+        so it's always empty; nothing reads it for OAuth connections today."""
+        return [{**c, "created_at": ""} for c in self._connections]
+
+    def load(self, engine: str, name: str) -> dict[str, str] | None:
+        return self._fetch(engine, name)
+
+    def read_record(self, engine: str, name: str) -> dict[str, Any] | None:
+        fields = self._fetch(engine, name)
+        if fields is None:
+            return None
+        return {
+            "engine": engine,
+            "name": name,
+            "created_at": "",
+            "updated_at": "",
+            "fields": fields,
+            "secure_keys": ["access_token"],
+        }
+
+    def save(
+        self,
+        engine: str,
+        name: str,
+        credentials: dict[str, str],
+        *,
+        secure_keys: list[str] | None = None,
+    ) -> object:
+        raise NotImplementedError("TurnKeyDataVault is read-only for the life of a turn")
+
+    def delete(self, engine: str, name: str) -> bool:
+        return False
+
+    def next_connection_number(self, engine: str) -> int:
+        return 1
+
+    def env_for(self, engine: str, name: str, *, flat: bool = False) -> dict[str, str] | None:
+        """Same contract as LocalDataVault.env_for() — see its docstring."""
+        fields = self._fetch(engine, name)
+        if fields is None:
+            return None
+        env: dict[str, str] = {}
+        if flat:
+            for key, value in fields.items():
+                env[f"DS_{key.upper()}"] = value
+        else:
+            prefix = _slug_env_prefix(engine, name)
+            for key, value in fields.items():
+                env[f"{prefix}__{key.upper()}"] = value
+        return env
+
+    def inject_env(self, engine: str, name: str, *, flat: bool = False) -> list[str] | None:
+        env = self.env_for(engine, name, flat=flat)
+        if env is None:
+            return None
+        os.environ.update(env)
+        return list(env)
+
+    def clear_ds_env(self) -> None:
+        for key in [k for k in os.environ if k.startswith("DS_")]:
+            del os.environ[key]
+
+    def _fetch(self, engine: str, name: str) -> dict[str, str] | None:
+        cache_key = (engine, name)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        fields = self._fetch_uncached(engine, name)
+        self._cache[cache_key] = fields
+        return fields
+
+    def _fetch_uncached(self, engine: str, name: str) -> dict[str, str] | None:
+        if not self._turn_key:
+            logger.warning("TurnKeyDataVault: no turn key available for %s/%s", engine, name)
+            return None
+        from anton.minds_client import minds_request  # local: avoid a module-load-time dep from core.datasources
+
+        url = f"{self._base_url}/v1/oauth/{engine}/token"
+        try:
+            raw = minds_request(url, self._turn_key, method="POST", timeout=15)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                # Clean, expected outcome — the connector needs reconnecting.
+                # Never a raw error or a hang: this just yields "no creds",
+                # same as a connection that was never made.
+                logger.info("connector %s/%s needs reconnecting (auth returned HTTP %s)", engine, name, e.code)
+            else:
+                logger.warning("turn-key token fetch failed for %s/%s: HTTP %s", engine, name, e.code)
+            return None
+        except Exception:
+            logger.warning("turn-key token fetch failed for %s/%s", engine, name, exc_info=True)
+            return None
+
+        try:
+            data = json.loads(raw.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning("turn-key token fetch for %s/%s returned unparseable JSON", engine, name)
+            return None
+        if not isinstance(data, dict) or not data.get("access_token"):
+            logger.warning("turn-key token fetch for %s/%s returned no access_token", engine, name)
+            return None
+        return {k: str(data[k]) for k in _TURNKEY_RESPONSE_FIELDS if data.get(k) is not None}
