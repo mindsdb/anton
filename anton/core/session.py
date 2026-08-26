@@ -928,6 +928,7 @@ class ChatSessionConfig:
     system_prompt_context: SystemPromptContext = field(default_factory=SystemPromptContext)
     workspace: Workspace | None = None
     data_vault: DataVault | None = None
+    workspace_env_overlay: dict[str, str] | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1181,6 +1182,7 @@ class ChatSession:
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
             data_vault=config.data_vault,
+            workspace_env_overlay=config.workspace_env_overlay,
         )
 
         self.tool_registry = ToolRegistry()
