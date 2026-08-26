@@ -1359,6 +1359,7 @@ def local_scratchpad_runtime_factory(
     cells: list[Cell] | None,
     workspace_path: Path | None,
     session_id: str | None = None,
+    scratchpad_ds_env: dict[str, str] | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1369,4 +1370,5 @@ def local_scratchpad_runtime_factory(
         cells=cells,
         workspace_path=workspace_path,
         session_id=session_id,
+        scratchpad_ds_env=scratchpad_ds_env,
     )
