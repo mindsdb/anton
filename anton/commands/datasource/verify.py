@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from anton.commands.datasource.helpers import prompt_field_value
+from anton.core.backends.base import Cell
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry
 from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
@@ -15,6 +17,12 @@ from anton.utils.prompt import prompt_or_cancel
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.core.backends.manager import ScratchpadManager
+
+# Bounds only the connect attempt itself (pad.execute of the test_snippet).
+# A ModuleNotFoundError retry's pad.install_packages() call is not covered —
+# it has its own, separate cell_install_timeout (default 120s) — so the
+# worst-case wall clock for a full test is higher than this number suggests.
+CONNECTION_TEST_TIMEOUT_SECONDS = 30
 
 
 async def run_connection_test(
@@ -25,11 +33,17 @@ async def run_connection_test(
     credentials: dict[str, str],
     retry_fields: "list[DatasourceField]",
     retry_edit_callback: "Callable[[], Awaitable[bool]] | None" = None,
+    *,
+    interactive: bool = True,
 ) -> bool:
     """Inject flat DS_* vars, run engine_def.test_snippet, restore env.
 
     Returns True on success, False if the user declines retry after failure.
     Mutates credentials in-place when the user re-enters secrets on retry.
+    `interactive=False` (mode (a) callers with no terminal to prompt in)
+    skips the "retry?" prompt entirely and fails closed on the first error —
+    prompt_or_cancel drives a real terminal regardless of the `console`
+    passed in, so it must never be reached without one.
     """
     while True:
         console.print()
@@ -57,7 +71,35 @@ async def run_connection_test(
 
             cell = None
             for attempt in range(3):
-                cell = await pad.execute(engine_def.test_snippet)
+                task = asyncio.ensure_future(pad.execute(engine_def.test_snippet))
+                done, _pending = await asyncio.wait(
+                    {task}, timeout=CONNECTION_TEST_TIMEOUT_SECONDS
+                )
+                if task not in done:
+                    # The local backend catches its own internal
+                    # CancelledError and returns a Cell instead of
+                    # re-raising, so `await task` here would silently hand
+                    # back that Cell (with a generic kill-tree message)
+                    # rather than surfacing our timeout — cancel and
+                    # discard its result/exception either way, and always
+                    # report our own message.
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    cell = Cell(
+                        code=engine_def.test_snippet,
+                        stdout="",
+                        stderr="",
+                        error=(
+                            f"Connection test timed out after "
+                            f"{CONNECTION_TEST_TIMEOUT_SECONDS}s — the server "
+                            f"did not respond."
+                        ),
+                    )
+                    break
+                cell = task.result()
                 if cell.error and "ModuleNotFoundError" in cell.error:
                     match = re.search(r"No module named '([^']+)'", cell.error)
                     if match:
@@ -78,6 +120,8 @@ async def run_connection_test(
             console.print()
             console.print(f"        Error: {last_line}")
             console.print()
+            if not interactive:
+                return False
             retry = await prompt_or_cancel(
                 "(anton) Would you like to re-enter your credentials?",
                 choices=["y", "n"], default="n",
