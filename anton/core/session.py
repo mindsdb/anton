@@ -1042,7 +1042,7 @@ class ChatSession:
             )
             self._extra_tools = [
                 CONNECT_DATASOURCE_TOOL_NO_CONSOLE
-                if tool.name == CONNECT_DATASOURCE_TOOL.name
+                if tool is CONNECT_DATASOURCE_TOOL
                 else tool
                 for tool in self._extra_tools
             ]

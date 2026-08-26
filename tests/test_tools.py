@@ -100,6 +100,18 @@ class TestConnectDatasourceToolDescriptionGating:
         assert tool.description == CONNECT_DATASOURCE_TOOL.description
         assert "(b) Interactive" in tool.description
 
+    def test_no_console_variant_requires_known_variables(self, vault_dir):
+        """The no-console tool has no prompt flow to fall back on, so its
+        schema must require known_variables — not just say so in prose."""
+        session = _make_session(vault_dir, console=None)
+        registered = {t.name: t for t in session._extra_tools}
+        tool = registered["connect_new_datasource"]
+        assert tool.input_schema["required"] == ["engine", "known_variables"]
+        # Sharing engine/properties by reference is fine — only `required`
+        # needs to differ from the full-description variant.
+        assert tool.input_schema is not CONNECT_DATASOURCE_TOOL.input_schema
+        assert CONNECT_DATASOURCE_TOOL.input_schema["required"] == ["engine"]
+
 
 class TestNonInteractiveSave:
     @pytest.mark.asyncio
@@ -531,6 +543,11 @@ class TestNoConsole:
         # password was dropped as a scrub-marker, so it's a missing required
         # field → falls through to interactive, which also has no console.
         assert "Interactive connection setup isn't available" in result
+        # The model gets no other channel for this (console output isn't
+        # visible to it) — the bail-out message must name the rejected
+        # field itself, not just say "interactive setup unavailable".
+        assert "password" in result
+        assert "scrub" in result.lower()
 
     @pytest.mark.asyncio
     async def test_interactive_fallback_without_console_returns_actionable_message(

@@ -91,3 +91,88 @@ async def test_hung_snippet_times_out_instead_of_blocking_forever(tmp_path):
     assert ok is False
     printed = " ".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
     assert "timed out" in printed
+
+
+@pytest.mark.asyncio
+async def test_timeout_message_survives_a_backend_that_swallows_cancellation(tmp_path):
+    """LocalScratchpadRuntime.execute_streaming catches its own
+    CancelledError and returns a Cell instead of re-raising it, so a bare
+    `asyncio.wait_for(pad.execute(...))` would silently hand back that
+    Cell's generic kill-tree message rather than raising TimeoutError. The
+    friendly "timed out after Ns" message must still win."""
+    vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    engine_def = DatasourceEngine(
+        engine="postgresql",
+        display_name="PostgreSQL",
+        fields=[DatasourceField(name="host", required=True, description="host")],
+        test_snippet="connect_forever()",
+    )
+    console = MagicMock()
+    scratchpads = MagicMock()
+    pad = AsyncMock()
+    pad.reset = AsyncMock()
+    pad.install_packages = AsyncMock(return_value="")
+
+    async def _execute_swallows_cancellation(_snippet):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # What the real local backend does on cancellation: catch it and
+            # return a Cell instead of letting it propagate.
+            return MagicMock(stdout="", stderr="", error="Killed: cancelled by caller.")
+        raise AssertionError("should have been cancelled by the timeout")
+
+    pad.execute = AsyncMock(side_effect=_execute_swallows_cancellation)
+    scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+    with (
+        patch("anton.commands.datasource.verify.CONNECTION_TEST_TIMEOUT_SECONDS", 0.05),
+        patch(
+            "anton.commands.datasource.verify.prompt_or_cancel",
+            new=AsyncMock(return_value="n"),
+        ),
+    ):
+        ok = await asyncio.wait_for(
+            run_connection_test(
+                console, scratchpads, vault, engine_def,
+                {"host": "unreachable.example.com"}, engine_def.fields,
+            ),
+            timeout=5,
+        )
+    assert ok is False
+    printed = " ".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
+    assert "timed out after" in printed
+    assert "Killed: cancelled by caller" not in printed
+
+
+@pytest.mark.asyncio
+async def test_non_interactive_skips_retry_prompt_on_failure(tmp_path):
+    """Mode (a) callers pass interactive=False — there's no human present to
+    answer "retry?", so a failed test must fail closed without prompting.
+    prompt_or_cancel drives a real terminal regardless of `console`, so
+    reaching it here would hang/crash in a console-less host."""
+    vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    engine_def = DatasourceEngine(
+        engine="postgresql",
+        display_name="PostgreSQL",
+        fields=[DatasourceField(name="host", required=True, description="host")],
+        test_snippet="print('fail')",
+    )
+    console = MagicMock()
+    scratchpads = MagicMock()
+    pad = AsyncMock()
+    pad.reset = AsyncMock()
+    pad.install_packages = AsyncMock(return_value="")
+    pad.execute = AsyncMock(return_value=MagicMock(stdout="", stderr="boom", error=None))
+    scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+    with patch(
+        "anton.commands.datasource.verify.prompt_or_cancel",
+        new=AsyncMock(side_effect=AssertionError("must not prompt when non-interactive")),
+    ):
+        ok = await run_connection_test(
+            console, scratchpads, vault, engine_def,
+            {"host": "db.example.com"}, engine_def.fields,
+            interactive=False,
+        )
+    assert ok is False

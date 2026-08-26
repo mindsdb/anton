@@ -176,6 +176,11 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
                         engine_def,
                         test_credentials,
                         active_fields,
+                        # Mode (a) is driven by the model, not a human at a
+                        # keyboard — there's no one to answer a "retry?"
+                        # prompt, and prompt_or_cancel would otherwise drive
+                        # a real terminal regardless of `console`.
+                        interactive=False,
                     )
                     if not ok:
                         if _settings:
@@ -246,11 +251,23 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     # console can't service it, so bail out with an actionable message
     # instead of hanging or crashing on a prompt read.
     if session._console is None:
+        # dropped_scrubbed's console.print warning above never reaches the
+        # model (nor, in this no-console host, anyone else) — repeat it here
+        # so the model knows *why* known_variables wasn't enough, rather
+        # than re-sending the same scrub-marker placeholder again.
+        note = ""
+        if dropped_scrubbed:
+            note = (
+                f" Scrubbed-placeholder values for "
+                f"{', '.join(sorted(dropped_scrubbed))} were ignored — those "
+                f"are not real credentials; pass the actual secret values "
+                f"instead."
+            )
         return (
             "Interactive connection setup isn't available in this environment "
-            "(no terminal to prompt in). Ask the user for the credential "
-            "values directly in chat, then call connect_new_datasource again "
-            "with known_variables set."
+            "(no terminal to prompt in)." + note + " Ask the user for the "
+            "credential values directly in chat, then call "
+            "connect_new_datasource again with known_variables set."
         )
 
     console.print()
@@ -350,6 +367,17 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     )
 
 
+# Shared by both description variants below — what mode (a) actually does.
+# One copy so the two descriptions can't drift out of sync with each other.
+_CONNECT_DATASOURCE_MODE_A_BODY = (
+    "this tool IMMEDIATELY when the user shares credentials in chat (host, "
+    "password, API token, service account JSON, etc.). Pass all extracted "
+    "values as known_variables. The tool saves to the vault without any "
+    "prompts and returns a confirmation. This ensures credentials are "
+    "persisted before being used anywhere — never reference chat-supplied "
+    "credentials directly in scratchpad code; always go through the vault."
+)
+
 # Shared by both description variants below — everything that doesn't
 # depend on whether an interactive terminal is available.
 _CONNECT_DATASOURCE_DESCRIPTION_TAIL = (
@@ -370,13 +398,7 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
     name = "connect_new_datasource",
     description = (
         "Connect a data source to Anton's Local Vault. Two modes:\n\n"
-        "(a) Non-interactive: call this tool IMMEDIATELY when the user shares "
-        "credentials in chat (host, password, API token, service account JSON, "
-        "etc.). Pass all extracted values as known_variables. The tool saves "
-        "to the vault without any prompts and returns a confirmation. This "
-        "ensures credentials are persisted before being used anywhere — never "
-        "reference chat-supplied credentials directly in scratchpad code; always "
-        "go through the vault.\n\n"
+        "(a) Non-interactive: call " + _CONNECT_DATASOURCE_MODE_A_BODY + "\n\n"
         "(b) Interactive: call with just engine and no known_variables when the "
         "user has no credentials in context yet. Anton runs the same flow as "
         "/connect, prompting for fields one at a time.\n\n"
@@ -427,14 +449,8 @@ CONNECT_DATASOURCE_TOOL = ToolDef(
 CONNECT_DATASOURCE_TOOL_NO_CONSOLE = dataclasses.replace(
     CONNECT_DATASOURCE_TOOL,
     description = (
-        "Connect a data source to Anton's Local Vault. Call this tool "
-        "IMMEDIATELY when the user shares credentials in chat (host, "
-        "password, API token, service account JSON, etc.). Pass all "
-        "extracted values as known_variables. The tool saves to the vault "
-        "without any prompts and returns a confirmation. This ensures "
-        "credentials are persisted before being used anywhere — never "
-        "reference chat-supplied credentials directly in scratchpad code; "
-        "always go through the vault.\n\n"
+        "Connect a data source to Anton's Local Vault. Call "
+        + _CONNECT_DATASOURCE_MODE_A_BODY + "\n\n"
         "There is no interactive prompt flow in this environment — do NOT "
         "call this tool with just an engine and no known_variables; there is "
         "nothing to prompt with and the call will fail. If the user hasn't "
@@ -442,6 +458,13 @@ CONNECT_DATASOURCE_TOOL_NO_CONSOLE = dataclasses.replace(
         "tool once you have real values to pass.\n\n"
         + _CONNECT_DATASOURCE_DESCRIPTION_TAIL
     ),
+    # Own copy, not shared with CONNECT_DATASOURCE_TOOL: this variant has no
+    # prompt flow to fall back on, so known_variables is mandatory here,
+    # matching the description above.
+    input_schema = {
+        **CONNECT_DATASOURCE_TOOL.input_schema,
+        "required": ["engine", "known_variables"],
+    },
 )
 
 
