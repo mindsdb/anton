@@ -652,6 +652,34 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
+    async def test_scratchpad_model_not_leaked_when_unconfigured(self, monkeypatch):
+        """An inherited ANTON_SCRATCHPAD_MODEL must not reach a pad that has
+        no coding model configured."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_MODEL", "inherited-model")
+        pad = make_scratchpad(name="ds-env-no-model")  # coding_model="" by default
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('ANTON_SCRATCHPAD_MODEL', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_provider_not_leaked_when_unconfigured(self, monkeypatch):
+        """An inherited ANTON_SCRATCHPAD_PROVIDER must not reach a pad that
+        has no coding provider configured."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PROVIDER", "inherited-provider")
+        pad = make_scratchpad(name="ds-env-no-provider", coding_provider="")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('ANTON_SCRATCHPAD_PROVIDER', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
 
 class TestScratchpadVenv:
     async def test_venv_created_on_start(self):

@@ -616,8 +616,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env.update(self._scratchpad_ds_env)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
+        else:
+            env.pop("ANTON_SCRATCHPAD_MODEL", None)
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
+        else:
+            env.pop("ANTON_SCRATCHPAD_PROVIDER", None)
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
