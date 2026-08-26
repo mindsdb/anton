@@ -11,7 +11,12 @@ from anton.commands.datasource.helpers import prompt_field_value
 from anton.core.backends.base import Cell
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry
-from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
+from anton.utils.datasources import (
+    _ds_env_values,
+    parse_connection_slug,
+    register_secret_vars,
+    restore_namespaced_env,
+)
 from anton.utils.prompt import prompt_or_cancel
 
 if TYPE_CHECKING:
@@ -57,6 +62,7 @@ async def run_connection_test(
             os.environ[f"DS_{key.upper()}"] = value
             flat_ds_env[f"DS_{key.upper()}"] = value
         register_secret_vars(engine_def)  # flat mode, for scrubbing during test
+        _ds_env_values.set(flat_ds_env)
 
         try:
             pad = await scratchpads.get_or_create(
@@ -202,6 +208,7 @@ async def handle_test_datasource(
     vault.inject_env(engine, name, flat=True)
     register_secret_vars(engine_def)  # flat names for scrubbing during test
     flat_ds_env = vault.env_for(engine, name, flat=True) or {}
+    _ds_env_values.set(flat_ds_env)
 
     cell = None
     try:

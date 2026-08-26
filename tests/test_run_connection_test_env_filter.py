@@ -176,3 +176,52 @@ async def test_non_interactive_skips_retry_prompt_on_failure(tmp_path):
             interactive=False,
         )
     assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_run_connection_test_scrubs_the_credential_under_test(tmp_path):
+    """The credential being tested must still be redacted from a scratchpad
+    cell's output even if a CONCURRENT turn wipes shared os.environ mid-test
+    (simulating another conversation's restore_namespaced_env/clear_ds_env
+    racing against this one) — proving the explicit _ds_env_values.set()
+    override survives independently of os.environ, not just the fallback."""
+    import os
+
+    from anton.utils.datasources import scrub_credentials
+
+    vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    engine_def = DatasourceEngine(
+        engine="postgresql",
+        display_name="PostgreSQL",
+        fields=[
+            DatasourceField(name="host", required=True, description="host"),
+            DatasourceField(name="password", required=True, description="password", secret=True),
+        ],
+        test_snippet="print('ok')",
+    )
+    console = MagicMock()
+    scratchpads = MagicMock()
+    pad = AsyncMock()
+    pad.reset = AsyncMock()
+    pad.install_packages = AsyncMock(return_value="")
+
+    captured = {}
+
+    async def _execute(_snippet):
+        # Simulate a concurrent turn's clear_ds_env() wiping shared
+        # os.environ mid-test — the exact race this fix closes.
+        for key in [k for k in os.environ if k.startswith("DS_")]:
+            del os.environ[key]
+        captured["scrubbed"] = scrub_credentials("connecting with password s3cr3t_under_test")
+        return MagicMock(stdout="ok", stderr="", error=None)
+
+    pad.execute = AsyncMock(side_effect=_execute)
+    scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+    credentials = {"host": "db.example.com", "password": "s3cr3t_under_test"}
+    await run_connection_test(
+        console, scratchpads, vault, engine_def, credentials, engine_def.fields
+    )
+
+    assert "s3cr3t_under_test" not in captured["scrubbed"]
+    assert "[DS_PASSWORD]" in captured["scrubbed"]
