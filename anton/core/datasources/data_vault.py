@@ -171,6 +171,16 @@ class DataVault(Protocol):
         """Return [{engine, name, created_at}] for all stored connections."""
         ...
 
+    def env_for(self, engine: str, name: str, *, flat: bool = False) -> dict[str, str] | None:
+        """Build the DS_* env mapping for a connection WITHOUT mutating os.environ.
+
+        Returns the {var: value} mapping, or None if the connection isn't
+        found. Use this when the env should reach only a specific
+        subprocess; use `inject_env` when the variables must be visible in
+        the current process.
+        """
+        ...
+
     def inject_env(self, engine: str, name: str, *, flat: bool = False) -> list[str] | None:
         """Load credentials and set DS_* environment variables."""
         ...
