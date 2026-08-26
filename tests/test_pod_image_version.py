@@ -94,6 +94,47 @@ def test_the_fallback_version_is_rejected_by_the_build(dockerfile: str) -> None:
     )
 
 
+def test_git_is_excluded_from_the_build_context() -> None:
+    """anton is SINGLE-STAGE, so .dockerignore is the only thing keeping history out.
+
+    This is the wrong-quietly case, and it is worse here than the version bug it
+    accompanies. Un-ignoring ``.git`` produces no signal whatsoever:
+    ``SETUPTOOLS_SCM_PRETEND_VERSION`` wins over VCS discovery (measured: it
+    overrides a real ``2.26.8.12.1rc6.dev8+g19c6e7515`` with whatever it is set
+    to), so the version stays correct, every guard passes, and the build is
+    green -- while ``COPY . /app`` puts the repo's entire history into the
+    runtime image of every scratchpad pod.
+
+    cowork-server is multi-stage and deletes ``.git`` in the builder, so its
+    equivalent mistake is caught by a boundary that does not exist here. The
+    exclusion is load-bearing in this repo and was the only unguarded thing in
+    it.
+    """
+    lines = [ln.strip() for ln in (_ROOT / ".dockerignore").read_text().splitlines()]
+    assert ".git" in lines, (
+        ".git is no longer excluded from the build context. This image is "
+        "single-stage, so the full history would ship in every pod — and "
+        "nothing at build or run time would report it (ENG-1796)."
+    )
+
+
+def test_the_build_refuses_a_context_containing_git() -> None:
+    """Belt for the above: catches .git arriving by any route, not just this file.
+
+    A negation pattern, a different context, or a build that bypasses
+    .dockerignore would all defeat the assertion above. Mirrors the reasoning
+    behind cowork-server's 0.0.0 guard -- the check belongs where the mistake
+    happens, not only where one spelling of it is written down.
+    """
+    assert "test ! -e /app/.git" in _DOCKERFILE_TEXT(), (
+        "the build no longer refuses a context containing .git"
+    )
+
+
+def _DOCKERFILE_TEXT() -> str:
+    return _DOCKERFILE.read_text()
+
+
 def _resolve_step(workflow: dict) -> dict:
     for step in workflow["jobs"]["version"]["steps"]:
         if step.get("id") == "resolve":

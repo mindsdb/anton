@@ -49,6 +49,12 @@ RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
          echo "       restore the exact constant this guard exists to remove (ENG-1796)." >&2; \
          exit 1 ;; \
        esac \
+    && { test ! -e /app/.git \
+         || { echo "ERROR: .git entered the build context (ENG-1796). This image is" >&2; \
+              echo "       SINGLE-STAGE, so it would ship the repo's full history to every" >&2; \
+              echo "       pod — and the pretend-version hides it: the version stays correct," >&2; \
+              echo "       so nothing else would ever fail. Keep .git in .dockerignore." >&2; \
+              exit 1; }; } \
     && uv venv "$VIRTUAL_ENV" \
     && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --frozen --no-dev --no-cache \
     && uv pip install --no-cache boto3 \
