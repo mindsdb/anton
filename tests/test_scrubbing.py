@@ -207,3 +207,39 @@ class TestCustomEngineRegistration:
         assert "https://legacy.acme-crm.example" in result
         assert passphrase not in result
         assert "[DS_ACME_CRM_LEGACY__PASSPHRASE]" in result
+
+
+class TestConcurrentTurnIsolation:
+    """The ticket's own acceptance criterion: two turns running concurrently
+    on divergent vaults must never cross-contaminate scrub state."""
+
+    def _vault(self, tmp_path, subdir: str):
+        from anton.core.datasources.data_vault import LocalDataVault
+
+        return LocalDataVault(tmp_path / subdir)
+
+    async def test_two_concurrent_turns_scrub_only_their_own_secret(self, tmp_path):
+        import asyncio
+
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault_a = self._vault(tmp_path, "vault_a")
+        vault_a.save("acme_crm", "prod", {"token": "secret-for-turn-a"}, secure_keys=["token"])
+
+        vault_b = self._vault(tmp_path, "vault_b")
+        vault_b.save("acme_crm", "prod", {"token": "secret-for-turn-b"}, secure_keys=["token"])
+
+        async def turn(vault, own_secret: str, other_secret: str) -> str:
+            restore_namespaced_env(vault)
+            await asyncio.sleep(0)  # yield, so the other turn's setup interleaves here
+            return scrub_credentials(f"own={own_secret} other={other_secret}")
+
+        result_a, result_b = await asyncio.gather(
+            turn(vault_a, "secret-for-turn-a", "secret-for-turn-b"),
+            turn(vault_b, "secret-for-turn-b", "secret-for-turn-a"),
+        )
+
+        assert "secret-for-turn-a" not in result_a
+        assert "[DS_ACME_CRM_PROD__TOKEN]" in result_a
+        assert "secret-for-turn-b" not in result_b
+        assert "[DS_ACME_CRM_PROD__TOKEN]" in result_b
