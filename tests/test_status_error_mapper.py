@@ -29,6 +29,7 @@ import pytest
 from anton.core.llm.anthropic import _raise_for_status_error as _raise_anthropic
 from anton.core.llm.openai import _raise_for_status_error
 from anton.core.llm.provider import (
+    ContentValidationError,
     EndpointConfigurationError,
     ModelUnavailableError,
     TokenLimitExceeded,
@@ -425,6 +426,66 @@ def test_404_model_message_without_terminator_is_normalized():
         _raise_for_status_error(exc, "foo")
     assert "available. Switch models" in str(err.value)
     assert "available Switch" not in str(err.value)
+
+
+# ── content-shaped rejections (ENG-1992) ──────────────────────────────
+# The provider permanently rejects a request because some content BLOCK in
+# history reached it in a shape it can't parse — not an availability issue,
+# so retrying the identical request fails identically every time.
+
+def test_openai_responses_dialect_maps_to_content_validation():
+    # The exact body from the live ENG-1992 incident (MindsHub Air / OpenAI
+    # Responses API): a stray Anthropic-shaped image block reached the real
+    # upstream and got rejected by its own content-type enum.
+    exc = _sdk_error(400, json_body={"error": {
+        "message": (
+            "Invalid value: 'image'. Supported values are: 'input_text', "
+            "'input_image', 'input_audio', 'output_text', 'refusal', "
+            "'input_file', 'computer_screenshot', 'summary_text', and "
+            "'encrypted_content'."
+        ),
+        "type": "invalid_request_error",
+        "param": "input[70].content[0].type",
+        "code": "invalid_value",
+    }})
+    with pytest.raises(ContentValidationError):
+        _raise_for_status_error(exc, "mindshub_air")
+
+
+def test_anthropic_dialect_maps_to_content_validation():
+    # The earlier incident this bug class is a recurrence of (turn_errors.py's
+    # is_image_format_error): an OpenAI-shaped image_url block reaching a
+    # Claude-backed model.
+    exc = _sdk_error(400, json_body={"error": {
+        "message": (
+            "Input tag 'image_url' found using 'type' does not match any of "
+            "the expected tags: 'image'"
+        ),
+        "type": "invalid_request_error",
+    }})
+    with pytest.raises(ContentValidationError):
+        _raise_for_status_error(exc, "sonnet")
+
+
+def test_unrelated_invalid_request_error_falls_through_to_generic():
+    # A 400 invalid_request_error that has nothing to do with content shape
+    # (a plain bad-parameter error) must not be misclassified as a
+    # content-validation failure — that would trigger a conversation repair
+    # for a problem no repair can fix.
+    exc = _sdk_error(400, json_body={"error": {
+        "message": "'model' is a required property",
+        "type": "invalid_request_error",
+        "param": "model",
+    }})
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, ContentValidationError)
+
+
+def test_content_validation_error_is_a_connection_error():
+    # Subclasses ConnectionError so call sites that only know the legacy
+    # mapping (string-matching "invalid api key" etc.) keep working unchanged.
+    assert issubclass(ContentValidationError, ConnectionError)
 
 
 # ── the M3 wallet taxonomy (ENG-1169) ─────────────────────────────────
