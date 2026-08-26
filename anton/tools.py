@@ -534,9 +534,17 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
             req_access["password"] = pw
         elif access_mode == "restricted":
             from anton.publish_access import parse_emails
-            valid, _invalid = parse_emails(tc_input.get("emails") or [])
+            valid, invalid = parse_emails(tc_input.get("emails") or [])
+            if invalid:
+                # Silently dropping these would collapse the selection and
+                # publish PUBLICLY (or owner-only) behind the user's back.
+                return (
+                    "INVALID: these are not valid email addresses: "
+                    f"{', '.join(invalid)}. Fix them or omit them, then call the tool again."
+                )
             req_access["emails"] = valid
             req_access["org_allowed"] = bool(tc_input.get("org_allowed"))
+            req_access["owner_only"] = bool(tc_input.get("owner_only"))
     elif isinstance(prev, dict) and prev.get("report_id"):
         req_access = access_from_owner_side(prev)  # preserve previous, do NOT reset to public
     else:
@@ -667,6 +675,15 @@ PUBLISH_TOOL = ToolDef(
             "org_allowed": {
                 "type": "boolean",
                 "description": "Whether the whole organization may view (access_mode='restricted').",
+            },
+            "owner_only": {
+                "type": "boolean",
+                "description": (
+                    "For access_mode='restricted': publish so that ONLY the user themselves "
+                    "can open it. Set true ONLY when the user explicitly asked for the artifact "
+                    "to be private to them. Leaving emails empty WITHOUT this flag publishes "
+                    "PUBLICLY."
+                ),
             },
         },
         "required": ["file_path"],
