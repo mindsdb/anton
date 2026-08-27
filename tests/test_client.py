@@ -156,12 +156,16 @@ class TestLLMClientFromSettings:
         )
         return LLMClient.from_settings(settings)._planning_provider._vision_format
 
-    def test_openai_compatible_vision_format_gated_on_host(self):
-        # Minds/MindsHub proxy Anthropic → anthropic image blocks.
-        assert self._oc_vision_format("https://api.mindshub.ai/v1") == "anthropic"
-        assert self._oc_vision_format("https://mdb.ai/api/v1") == "anthropic"
-        # Gemini + generic OpenAI-compatible endpoints expect OpenAI image_url —
-        # NOT anthropic (the bug: unconditional anthropic mangled Gemini images).
+    def test_openai_compatible_vision_format_is_always_openai(self):
+        # ENG-1992: this used to guess "anthropic" for any mdb.ai/mindshub.ai
+        # host, which assumed every model behind that gateway was Claude — it
+        # broke non-Claude models sharing the same host (MindsHub Air routed
+        # to an OpenAI Responses-backed model got Anthropic-shaped image
+        # blocks and 400'd). The gateway itself already normalizes a standard
+        # OpenAI image_url block into whatever the resolved backend needs, so
+        # anton just sends OpenAI shape unconditionally now.
+        assert self._oc_vision_format("https://api.mindshub.ai/v1") == "openai"
+        assert self._oc_vision_format("https://mdb.ai/api/v1") == "openai"
         assert self._oc_vision_format(
             "https://generativelanguage.googleapis.com/v1beta/openai/"
         ) == "openai"

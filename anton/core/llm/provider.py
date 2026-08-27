@@ -918,6 +918,31 @@ class ModelUnavailableError(ConnectionError):
         self.model = model
 
 
+class ContentValidationError(ConnectionError):
+    """Raised when the provider permanently rejects a request over content
+    already in conversation history — a schema/shape mismatch (e.g. an image
+    block built for the wrong provider), not a provider-availability issue.
+
+    Distinct from every other permanent-failure type here in one way that
+    matters: retrying the IDENTICAL request fails identically every time,
+    because the translation that produced the bad block runs fresh from
+    valid stored history on every call — the request never changes between
+    attempts, so "try again" (the generic ConnectionError copy) is actively
+    wrong (ENG-1992). cowork-server's turn-error mapping detects this type
+    (or its scrubbed class name, on the remote/pod path — see
+    ``cloud_turn._scrub``) and both surfaces honest copy AND repairs the
+    offending content in the conversation's stored history, so the next turn
+    doesn't resend the same poison.
+
+    Subclasses ConnectionError so call sites that only know the legacy
+    ConnectionError mapping keep working unchanged.
+    """
+
+    def __init__(self, message: str, *, code: str = "content_validation") -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def classify_404(
     model: str,
     *,

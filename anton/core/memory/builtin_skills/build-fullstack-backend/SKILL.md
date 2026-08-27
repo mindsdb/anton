@@ -86,11 +86,35 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
       # "DS_POSTGRES_PROD_DB__PASSWORD": os.environ.get("DS_POSTGRES_PROD_DB__PASSWORD"),
   }
 
+  # === State (durable storage) — INCLUDE THIS BLOCK ONLY FOR
+  # `fullstack-stateful-app`; OMIT it entirely for `fullstack-stateless-app`.
+  # STATE mirrors SECRETS: the cloud runner overlays {url, token} (a short-lived
+  # capability for the trusted state broker) before each request; locally it stays
+  # None and the SQLite driver is used. Declare the state KEY schema in
+  # `state_manifest.json` next to this file — generate it from the anton_state
+  # model, do NOT hand-write the JSON (see STATE MANIFEST below). Build the store
+  # AT POINT OF USE (inside a route), reading the current STATE — never at import time.
+  STATE = None
+
+  from anton_state import open_store
+  _STATE_DIR = Path(__file__).resolve().parent
+
+  def get_store():
+      return open_store(
+          state=STATE,
+          manifest_path=str(_STATE_DIR / "state_manifest.json"),
+          local_path=str(_STATE_DIR / ".anton_state.db"),
+      )
+
   # === API routes ===
   @app.get("/api/hello")
   async def hello():
       # Example secret use (read at point of use, not at import):
       #   pw = SECRETS["DS_POSTGRES_PROD_DB__PASSWORD"]
+      # Example STATE use (stateful only; build the store at point of use):
+      #   store = get_store()
+      #   await store.put({"pk": user_id, "sk": "profile", "name": name})
+      #   item = await store.get(user_id, "profile")
       return {"hello": "world"}
 
   # Static mount MUST come AFTER all API routes (mount at "/" catches every
@@ -123,7 +147,7 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
   - Prefer `async def` for I/O-bound routes (DB queries, external HTTP calls via `httpx.AsyncClient`). Sync `def` is fine for trivial CPU work, but sync blocking I/O inside an async app stalls the event loop.
   - LOCAL STATE (the ONE rule that differs between the two fullstack types):
     * `fullstack-stateless-app`: no local state of any kind survives a request. No module-level mutable caches that matter across requests (`USERS = {}`, `SESSIONS = []`) — in Lambda these globals may or may not survive between invocations, never rely on them. Treat the filesystem as read-only and non-persistent: anything written is lost between requests and may fail outright depending on the host (Linux, Windows, or a read-only cloud sandbox). NEVER write to `<artifact_path>` at runtime, and never rely on a file surviving to a later request. If a request genuinely needs scratch space, use the OS temp dir via `tempfile` and treat it as ephemeral (gone the moment the request ends). ALL persistence goes through external data sources.
-    * `fullstack-stateful-app`: local on-disk state (e.g. a SQLite file) IS allowed — keep it in the artifact root (`<artifact_path>/`, next to `backend.py`). Every other rule in this list still applies.
+    * `fullstack-stateful-app`: durable state goes through the platform `STATE` store (module-level `STATE`, built via `get_store()`), which is a document/key-value model — suitable for LIGHT state (counters, settings, sessions, simple documents keyed by id). Declare the state KEY schema in `state_manifest.json` next to `backend.py` (see STATE MANIFEST below for the exact format — do NOT hand-invent it). For HEAVY/relational needs (joins, transactions, analytics, large data) use an EXTERNAL database via a connected data source instead — do not force it into `STATE`. The `anton_state` SDK is injected at runtime (do NOT add it to `requirements.txt` — see REQUIREMENTS below) and needs pydantic v2, which the mandatory `fastapi` dependency provides — always keep `fastapi` in `requirements.txt`. Every other rule in this list still applies.
   - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
   - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at minimum:
     ```
@@ -132,8 +156,35 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
     uvicorn
     ```
     Add any other libraries the backend imports (one per line: `pkg` or `pkg==1.2`). `launch_backend` reads this file and installs everything into the slug-named scratchpad's venv before spawning the process. Only simple lines are supported — `-r`, `-e`, `--index-url`, blank lines and `#` comments are ignored.
+    NEVER list `anton_state` in `requirements.txt` — it is NOT a published package and the install will FAIL to resolve it (`anton-state was not found in the package registry`), aborting the launch. The STATE SDK is provided to the backend automatically at runtime, so `from anton_state import open_store` just works without any dependency line. This is the ONLY import you leave out of `requirements.txt`.
   - Do NOT start the server inside the scratchpad — use `launch_backend` in step 6.
   - DECLARE DATASOURCES: if `backend.py` reads any `DS_<ENGINE>_<NAME>__<FIELD>` env var, call `update_artifact(slug=<slug>, datasources=[...])` immediately after writing the file. Pass a flat list of connection slugs (e.g. `["postgres-prod_db", "hubspot-main"]`); each slug MUST match a connection from the `Connected Data Sources` section of this prompt. This records the deployable's credential dependencies in `metadata.json` so the artifact can be redeployed with the right env vars later. Skip this call only when the backend uses no `DS_*` vars at all.
+  - STATE MANIFEST (`fullstack-stateful-app` ONLY): `state_manifest.json` is a SINGLE universal contract read by the local SQLite driver AND (client-side) by the cloud HTTP driver — the trusted broker is schema-agnostic. GENERATE it from the `anton_state` model instead of hand-writing JSON (this makes a malformed manifest impossible):
+    ```python
+    from anton_state.schema import StateSchema, Attr
+    StateSchema(
+        pk=Attr(name="pk"),            # partition key (always type "S")
+        sk=Attr(name="sk"),            # sort key — omit entirely if unused
+        collections=["comments", "users"],  # every Collection(store, "<name>") you use
+    ).to_manifest(f"{artifact_path}/state_manifest.json")
+    ```
+    The manifest describes ONLY the KEY schema, never data fields. The resulting JSON is a FLAT object `{version, pk, sk?, gsis?, ttl_attribute?, collections?}` where `pk`/`sk` are `{"name": ..., "type": "S"}` — string keys only in v1. Do NOT wrap it in `entities`/`attributes`/`partition_key`/`sort_key` (a DynamoDB-CreateTable-style shape) and do NOT declare non-key attributes: those fail validation (`StateSchema ... pk Field required`) at the first request. Store the actual values freely via `store.put({...})` at runtime — they need no schema entry. List every `Collection(store, "<name>")` name in `collections` (this is NOT declaring data fields — it is the collection registry). Removing a name here when UPDATING an already-published artifact BLOCKS the publish (its stored data would be orphaned) — to change the set you must /unpublish first and publish again.
+  - STATE STORE API (`fullstack-stateful-app` ONLY): the `store` from `get_store()` is a key-value store keyed by `(pk, sk)`. PREFER the `Collection` helper for light state — it manages the sort key and defaults the partition:
+    ```python
+    from anton_state import Collection
+    todos = Collection(get_store(), "todos")
+    await todos.put("id1", {"text": "buy milk"})     # pk defaults to one partition
+    items = await todos.list()                          # all items in the collection
+    n = await Collection(get_store(), "counters").increment("visits", field="n")
+    ```
+    Low-level `store` methods (all async; NO `scan()` / "list everything"):
+    * `await store.get(pk, sk=None)` → one item or `None`
+    * `await store.put(item)` → write (dict MUST include `pk` and, if the schema has a sort key, `sk`); `_v` is set by the store — never set it yourself
+    * `await store.delete(pk, sk=None)`
+    * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)` → items sharing partition key `pk` (NO secondary indexes in v1 — there is no `index=` argument)
+    * `await store.increment(pk, sk=None, *, field, by=1)` → atomic counter (use this for counters; do NOT hand-roll read-modify-write)
+    * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None, if_version=None)` → atomic partial update
+    DESIGN KEYS AROUND ACCESS PATTERNS: every "list" must map to a single `query(pk=...)` (or `Collection.list()`). Do NOT call the store in a loop — collect with one `query`. Do NOT wrap a STATE mutation (`put`/`delete`/`increment`/`update`) in your own retry loop: on a timeout the outcome is unknown and a retry can double-apply — surface the error instead.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
