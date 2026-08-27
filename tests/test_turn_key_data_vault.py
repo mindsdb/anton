@@ -49,8 +49,25 @@ def test_load_fetches_and_shapes_the_token_response(monkeypatch):
 
     monkeypatch.setattr("anton.minds_client.minds_request", fake)
     fields = _vault().load("google_drive", "primary")
-    assert fields == {"access_token": "tok", "account_email": "a@b.com"}
+    assert fields == {"access_token": "tok", "account_email": "a@b.com", "auth_type": "oauth"}
     assert "refresh_token" not in fields
+
+
+def test_load_sends_the_connection_name_so_auth_can_disambiguate(monkeypatch):
+    """A name-less request auto-resolves only when an org has exactly one
+    connection for the engine — auth 400s on more than one. Sending name
+    always avoids that instead of depending on org-specific connection counts."""
+    import json as _json
+
+    seen = {}
+
+    def fake(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        seen["payload"] = _json.loads(payload.decode()) if payload else None
+        return b'{"access_token": "tok"}'
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake)
+    _vault().load("google_drive", "primary")
+    assert seen["payload"] == {"name": "primary"}
 
 
 def test_second_fetch_for_the_same_connection_is_cached(monkeypatch):
@@ -101,6 +118,7 @@ def test_env_for_namespaces_like_local_data_vault(monkeypatch):
     assert env == {
         "DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN": "tok",
         "DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL": "a@b.com",
+        "DS_GOOGLE_DRIVE_PRIMARY__AUTH_TYPE": "oauth",
     }
 
 
@@ -110,7 +128,7 @@ def test_env_for_flat_mode(monkeypatch):
 
     monkeypatch.setattr("anton.minds_client.minds_request", fake)
     env = _vault().env_for("google_drive", "primary", flat=True)
-    assert env == {"DS_ACCESS_TOKEN": "tok"}
+    assert env == {"DS_ACCESS_TOKEN": "tok", "DS_AUTH_TYPE": "oauth"}
 
 
 def test_read_record_marks_only_access_token_as_secret(monkeypatch):
@@ -121,6 +139,31 @@ def test_read_record_marks_only_access_token_as_secret(monkeypatch):
     record = _vault().read_record("google_drive", "primary")
     assert record["secure_keys"] == ["access_token"]
     assert record["fields"]["token_type"] == "Bearer"
+
+
+def test_auth_type_is_always_synthesized_as_oauth(monkeypatch):
+    """Every credential this vault serves is OAuth-backed by construction —
+    auth's response doesn't need to say so for build_datasource_context()
+    (anton/utils/datasources.py) to recognize a connected account."""
+    def fake(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        return b'{"access_token": "tok"}'
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake)
+    fields = _vault().load("google_drive", "primary")
+    assert fields["auth_type"] == "oauth"
+
+
+def test_picked_files_passes_through_as_a_json_string(monkeypatch):
+    """Forward-compat: auth doesn't send `_picked_files` yet, but once it
+    does, this must land in the same JSON-string-in-a-field shape
+    _parse_picked_files() (anton/utils/datasources.py) reads from
+    LocalDataVault, not as a native list."""
+    def fake(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        return b'{"access_token": "tok", "_picked_files": [{"id": "f1", "name": "doc.pdf"}]}'
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake)
+    fields = _vault().load("google_drive", "primary")
+    assert fields["_picked_files"] == '[{"id": "f1", "name": "doc.pdf"}]'
 
 
 def test_save_and_delete_are_never_valid_mid_turn():

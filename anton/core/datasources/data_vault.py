@@ -505,8 +505,13 @@ class TurnKeyDataVault:
         from anton.minds_client import minds_request  # local: avoid a module-load-time dep from core.datasources
 
         url = f"{self._base_url}/v1/oauth/{engine}/token"
+        # `name` disambiguates when an org has more than one connection for
+        # this engine — the endpoint auto-resolves a lone connection without
+        # it, but 400s on an ambiguous one. Sent as JSON body, matching
+        # auth's request.data.get("name") read.
+        payload = json.dumps({"name": name}).encode()
         try:
-            raw = minds_request(url, self._turn_key, method="POST", timeout=15)
+            raw = minds_request(url, self._turn_key, method="POST", payload=payload, timeout=15)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 # Clean, expected outcome — the connector needs reconnecting.
@@ -528,4 +533,17 @@ class TurnKeyDataVault:
         if not isinstance(data, dict) or not data.get("access_token"):
             logger.warning("turn-key token fetch for %s/%s returned no access_token", engine, name)
             return None
-        return {k: str(data[k]) for k in _TURNKEY_RESPONSE_FIELDS if data.get(k) is not None}
+        fields = {k: str(data[k]) for k in _TURNKEY_RESPONSE_FIELDS if data.get(k) is not None}
+        # Every credential this vault serves is OAuth-backed by construction
+        # (the turn-key endpoint only exists for OAuth connectors) — this is
+        # the same signal LocalDataVault's own stored `auth_type` field gives
+        # build_datasource_context() on desktop, so synthesize it rather than
+        # depend on auth's response carrying it.
+        fields["auth_type"] = "oauth"
+        picked_files = data.get("_picked_files")
+        if picked_files:
+            # Auth doesn't send this yet (ENG follow-up), but the shape is
+            # ready: same JSON-string-in-a-field convention _parse_picked_files
+            # (anton/utils/datasources.py) reads from LocalDataVault.
+            fields["_picked_files"] = picked_files if isinstance(picked_files, str) else json.dumps(picked_files)
+        return fields

@@ -382,6 +382,20 @@ def _connection_identity(fields: dict, secure_keys: list | None = None) -> str |
     return None
 
 
+def _is_oauth_connection(vault: DataVault, engine: str, name: str) -> bool:
+    """True when this connection's own stored fields say auth_type=oauth.
+
+    An OAuth connection's engine name can collide with an unrelated registry
+    entry of the same name (gmail's registry entry is the legacy IMAP
+    connector) — its field schema never matches, so it must not be
+    classified against that registry entry. Cheap: TurnKeyDataVault caches
+    per (engine, name), so this never costs a second network fetch.
+    """
+    record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
+    fields = (record or {}).get("fields") or {}
+    return fields.get("auth_type") == "oauth"
+
+
 def restore_namespaced_env(vault: DataVault) -> None:
     """Clear all DS_* vars, then reinject every saved connection as namespaced."""
     _reset_registered_ds_vars()
@@ -390,7 +404,7 @@ def restore_namespaced_env(vault: DataVault) -> None:
     for conn in vault.list_connections():
         vault.inject_env(conn["engine"], conn["name"])  # flat=False by default
         edef = dreg.get(conn["engine"])
-        if edef is not None:
+        if edef is not None and not _is_oauth_connection(vault, conn["engine"], conn["name"]):
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
         else:
             _register_unregistered_connection_vars(vault, conn["engine"], conn["name"])

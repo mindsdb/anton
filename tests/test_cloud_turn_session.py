@@ -828,6 +828,7 @@ def test_oauth_block_populates_ds_env_from_the_turn_key_endpoint(tmp_path, monke
     os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__TOKEN_TYPE", None)
     os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__SCOPE", None)
     os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__EXPIRES_AT", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__AUTH_TYPE", None)
 
 
 def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
