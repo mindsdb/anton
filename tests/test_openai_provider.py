@@ -888,3 +888,115 @@ class TestChatCompletionsReasoningContent:
         from anton.core.llm.provider import StreamReasoningDelta, StreamTextDelta
         assert [e for e in yielded if isinstance(e, StreamReasoningDelta)] == []
         assert [e for e in yielded if isinstance(e, StreamTextDelta)] == [StreamTextDelta(text="hi")]
+
+
+class TestMindshubScriptTagEscaping:
+    """ENG-1986: api.mindshub.ai's WAF 403s any request body containing the
+    literal `<script`/`</script`. Only the mdb.ai/mindshub passthrough flavor
+    talks to that gateway, so escaping is scoped to FLAVOR_MINDS_PASSTHROUGH
+    and must round-trip transparently for every other flavor."""
+
+    async def test_complete_escapes_outgoing_script_tags(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_make_mock_response(content="ok")
+            )
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+            await provider.complete(
+                model="m",
+                system="wrap JS in a <script> block, closed with </script>",
+                messages=[{"role": "user", "content": "write <SCRIPT>x()</SCRIPT>"}],
+            )
+
+            sent = json.dumps(mock_client.chat.completions.create.call_args.kwargs["messages"])
+            assert "<script" not in sent.lower()
+            assert "</script" not in sent.lower()
+            assert "<_script" in sent
+            assert "<_/script" in sent.lower()
+
+    async def test_complete_unescapes_incoming_content_and_tool_input(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+
+            tc = MagicMock()
+            tc.id = "call_1"
+            tc.function.name = "write_file"
+            tc.function.arguments = json.dumps(
+                {"path": "index.html", "content": "<_script>x()<_/script>"}
+            )
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_make_mock_response(
+                    content="Wrote a <_script> tag", tool_calls=[tc], finish_reason="tool_calls",
+                )
+            )
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+            result = await provider.complete(
+                model="m", system="s", messages=[{"role": "user", "content": "go"}],
+            )
+
+            assert result.content == "Wrote a <script> tag"
+            assert result.tool_calls[0].input["content"] == "<script>x()</script>"
+
+    async def test_complete_does_not_touch_other_flavors(self):
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_make_mock_response(content="<script>ok</script>")
+            )
+
+            provider = OpenAIProvider(api_key="k")  # default: FLAVOR_OPENAI_COMPATIBLE_GENERIC
+            result = await provider.complete(
+                model="m", system="s",
+                messages=[{"role": "user", "content": "<script>hi</script>"}],
+            )
+
+            sent = json.dumps(mock_client.chat.completions.create.call_args.kwargs["messages"])
+            assert "<script>hi</script>" in sent
+            assert result.content == "<script>ok</script>"
+
+    async def test_stream_escapes_outgoing_and_unescapes_incoming(self):
+        from anton.core.llm.provider import StreamComplete
+
+        text_chunk = MagicMock()
+        text_chunk.usage = None
+        text_chunk.choices = [MagicMock(delta=MagicMock(content="<_script> tag", tool_calls=None), finish_reason=None)]
+        text_chunk.choices[0].delta.reasoning_content = None
+
+        tc_delta = MagicMock()
+        tc_delta.index = 0
+        tc_delta.id = "call_1"
+        tc_delta.function.name = "write_file"
+        tc_delta.function.arguments = json.dumps({"content": "<_script>x()<_/script>"})
+
+        tool_chunk = MagicMock()
+        tool_chunk.usage = None
+        tool_chunk.choices = [MagicMock(delta=MagicMock(content=None, tool_calls=[tc_delta]), finish_reason="tool_calls")]
+        tool_chunk.choices[0].delta.reasoning_content = None
+
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            mock_client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = mock_client
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=_fake_async_iter([text_chunk, tool_chunk])
+            )
+
+            provider = OpenAIProvider(api_key="k", flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+            events = [
+                e async for e in provider.stream(
+                    model="m", system="write a <script> block",
+                    messages=[{"role": "user", "content": "go"}],
+                )
+            ]
+
+            sent = json.dumps(mock_client.chat.completions.create.call_args.kwargs["messages"])
+            assert "<script" not in sent.lower()
+
+        complete = next(e for e in events if isinstance(e, StreamComplete))
+        assert complete.response.content == "<script> tag"
+        assert complete.response.tool_calls[0].input["content"] == "<script>x()</script>"
