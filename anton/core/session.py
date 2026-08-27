@@ -934,20 +934,27 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
-    # Identifier for the host driving this session. Surfaced on telemetry /
-    # langfuse traces so the host that produced a given trace is filterable.
+    # WHICH AGENT ran this session. Surfaced on telemetry / langfuse traces, and
+    # the gateway composes the trace's display name from it as
+    # "{harness}:turn-{turn_id}".
     #
-    # The values actually in use, which are NOT what this field's name suggests:
-    #   "cli"     — anton's own interactive chat (chat_session.py, chat.py)
-    #   "anton"   — cowork-server, which passes its *agent harness* id here;
-    #               this — see `surface` below, which is how they are now told
-    #               apart (ENG-1459)
-    #   "cloud"   — the one-turn-per-pod cloud path
-    #   None      — a host that did not identify itself
+    #   "anton"   — the anton agent. Every first-party caller today: the CLI,
+    #               cowork-server (desktop and web), and the cloud pod.
+    #   "hermes"  — the hermes agent (cowork-server's other harness). Note it
+    #               emits no langfuse traces yet, so this value has no volume —
+    #               a query showing 100% anton is NOT evidence hermes is unused.
+    #   None      — a host that did not identify itself.
     #
     # None must stay reserved for that last case: until ENG-1495 the CLI left it
     # unset, so "" meant both "CLI" and "unidentified" and nothing could tell
     # them apart.
+    #
+    # WHERE it ran is `surface`, below — a separate axis. Until ENG-1694 this one
+    # field carried both, holding "cli" and "cloud" (places) alongside "anton"
+    # and "hermes" (agents), so it could answer neither question: a "cli" trace
+    # could not say which agent ran, and an "anton" trace could not say where.
+    # Keep the vocabularies apart. A value that answers "where" belongs in
+    # `surface`; if a third question ever needs answering, it gets a third field.
     harness: str | None = None
     # WHERE the user was, as opposed to which agent ran: one of
     # `anton.core.llm.tracing.VALID_SURFACES` (`desktop` / `web` / `cli`), or
@@ -1102,6 +1109,19 @@ class ChatSession:
         self._workspace = config.workspace
         self._data_vault = config.data_vault
         self._console = config.console
+        if self._console is None:
+            # connect_new_datasource's interactive mode needs a terminal to
+            # prompt in; without one, don't advertise it to the model (ENG-1849).
+            from anton.tools import (
+                CONNECT_DATASOURCE_TOOL,
+                CONNECT_DATASOURCE_TOOL_NO_CONSOLE,
+            )
+            self._extra_tools = [
+                CONNECT_DATASOURCE_TOOL_NO_CONSOLE
+                if tool is CONNECT_DATASOURCE_TOOL
+                else tool
+                for tool in self._extra_tools
+            ]
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
         )
@@ -1169,6 +1189,7 @@ class ChatSession:
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
+            data_vault=config.data_vault,
         )
 
         self.tool_registry = ToolRegistry()
@@ -1182,6 +1203,13 @@ class ChatSession:
         # Where `create_skill_draft` stages skills the agent builds. None means
         # the host stages none, and the tool is not registered at all.
         self._skill_drafts_root = getattr(s, "skill_drafts_root", None)
+        # Slugs of artifacts this turn created or opened for editing, recorded
+        # by the artifact tool handlers as they run. A host builds the turn's
+        # artifact cards from this rather than diffing the artifacts directory:
+        # the set names what THIS turn actually touched, so a concurrent turn
+        # writing into the same (shared, project-wide) directory can never be
+        # mistaken for this turn's work. Reset at the top of every turn.
+        self._artifacts_touched: set[str] = set()
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
@@ -1277,6 +1305,15 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    @property
+    def artifacts_touched(self) -> set[str]:
+        """Slugs this turn created or opened for editing.
+
+        A copy: a host reads this after the turn to decide which artifacts to
+        surface, and must not be able to mutate the session's own record.
+        """
+        return set(self._artifacts_touched)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -2832,6 +2869,15 @@ class ChatSession:
                 # URL itself — those carry internal corporate hostnames.
                 endpoint_class=classify_endpoint(_turn_settings),
                 harness=str(self._harness or ""),
+                # WHERE the user was (desktop / web / cli), as opposed to which
+                # agent ran (`harness`). Same value the Langfuse `surface:` tag
+                # carries (ENG-1459); it was deliberately left off this event
+                # then, on the grounds that PostHog's renderer events already
+                # had it — but those ride a different distinct_id and cannot
+                # split this row, and this row is where cost and outcome live
+                # (ENG-1945). "" when the host did not say; never a guess —
+                # `_validated_surface` already rejected anything unrecognised.
+                surface=str(getattr(self, "_surface", None) or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
                 # trace headers carry, so an analytics row links back to
@@ -2866,9 +2912,10 @@ class ChatSession:
         is reported as ``"unknown"`` rather than coerced either way.
 
         Payload is deliberately name + verdict + duration + exception CLASS
-        plus the two join keys, and nothing else. Arguments, result content
-        and ``str(exc)`` routinely carry file paths, user data and
-        credentials-adjacent strings — none of them may ever appear here.
+        + surface (a closed enum, ENG-1945) plus the two join keys, and
+        nothing else. Arguments, result content and ``str(exc)`` routinely
+        carry file paths, user data and credentials-adjacent strings — none
+        of them may ever appear here.
 
         ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
         values exactly (same names, same derivation), so a tool failure spotted
@@ -2910,6 +2957,10 @@ class ChatSession:
                 ok="unknown" if ok is None else str(ok).lower(),
                 duration_ms=str(int(duration_ms)),
                 error_type=error_type,
+                # Same derivation as `turn_completed`'s `surface` (ENG-1945),
+                # so a tool row can be split by desktop / web without joining
+                # to its parent turn first.
+                surface=str(getattr(self, "_surface", None) or ""),
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
             )
@@ -3779,6 +3830,10 @@ class ChatSession:
         self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
+        # Per-turn, so a long-lived session (the CLI reuses one across turns)
+        # reports only what the CURRENT turn touched. Hosts that build a fresh
+        # session per turn get the same result either way.
+        self._artifacts_touched = set()
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is

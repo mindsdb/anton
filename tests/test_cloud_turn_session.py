@@ -67,7 +67,13 @@ def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypa
     _, cfg = _build(tmp_path, monkeypatch)
     assert cfg.runtime_factory is local_scratchpad_runtime_factory
     assert cfg.workspace is not None
-    assert cfg.harness == "cloud"
+    # ENG-1694: `harness` names WHICH AGENT, and this pod image is "anton +
+    # boot" — so the agent here IS anton. It said "cloud" until then, which
+    # described the execution and left "anton or hermes?" unanswerable. Where
+    # it ran is `surface`, sent by cowork (see the surface tests below); unset
+    # here because this fixture builds a request with no trace block.
+    assert cfg.harness == "anton"
+    assert cfg.surface is None
     assert cfg.session_id == "conv_1"
 
 

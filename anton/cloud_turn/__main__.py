@@ -335,7 +335,13 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         if not terminal_emitted:
             logger.warning("cloud turn ended without a terminal event; emitting turn_failed")
             with contextlib.suppress(Exception):
-                emit({"kind": "turn_failed", "error": "The turn ended unexpectedly. Please try again."})
+                # Shaped like a scrubbed exception ("TypeName: message"), same as
+                # UNRESPONSIVE_WORKER_ERROR on the cowork-server side, so
+                # remote_turn_error can classify it instead of discarding it for
+                # the fully generic message — a bare sentence with no colon reads
+                # as an unrecognized type name and gets thrown away.
+                emit({"kind": "turn_failed",
+                      "error": "TurnInterrupted: The turn ended unexpectedly. Please try again."})
         hb.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await hb

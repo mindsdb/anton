@@ -23,6 +23,26 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 
 
+# WHICH AGENT ran the turn (ENG-1694). The canonical definition, alongside the
+# surface vocabulary below — the two are orthogonal and must stay so.
+#
+#   HARNESS_ANTON   the anton agent. Every first-party caller today: the CLI,
+#                   cowork-server (desktop and web), and the cloud pod.
+#   HARNESS_HERMES  cowork-server's other harness. Emits no langfuse traces yet
+#                   (`hermes_harness/harness.py` accepts trace_tags/metadata and
+#                   ignores them), so this value has NO volume — a query showing
+#                   100% anton is not evidence hermes is unused.
+#
+# Until ENG-1694 this field also held "cli" and "cloud", which name *places*.
+# One field with two vocabularies could answer neither question: a "cli" trace
+# could not say which agent ran, and an "anton" trace could not say where. If a
+# value answers "where", it belongs in `surface`; a third question gets a third
+# field rather than a third meaning here.
+HARNESS_ANTON = "anton"
+HARNESS_HERMES = "hermes"
+VALID_HARNESSES = frozenset({HARNESS_ANTON, HARNESS_HERMES})
+
+
 # Where the user was when the turn happened (ENG-1459). This is the CANONICAL
 # definition; cowork-server imports these rather than repeating the strings, so
 # the field cannot pick up a second vocabulary the way ``harness`` did.

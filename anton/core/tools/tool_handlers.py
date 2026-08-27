@@ -164,9 +164,123 @@ async def handle_generate_prd(session: "ChatSession", tc_input: dict) -> str:
     status = result.get("status")
     if status == "cancelled":
         return json.dumps({**result, "instruction": _PRD_CANCELLED_INSTRUCTION}, indent=2)
+    # Both remaining statuses wrote prd.md into the artifact folder, so this
+    # turn touched the artifact (see _track_artifact) — `create_artifact` may
+    # have happened in an earlier turn.
+    _track_artifact(session, store, slug, summary="Drafted PRD")
     if status == "prd_written_unconfirmed":
         return json.dumps({**result, "instruction": _PRD_UNCONFIRMED_INSTRUCTION}, indent=2)
     return json.dumps(result, indent=2)
+
+
+def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = "") -> None:
+    """Record that THIS turn created or opened `slug`.
+
+    Two records, for two different readers:
+
+    * `session._artifacts_touched` — in-memory, per-turn. The host reads it
+      after the turn to build the turn's artifact cards. This is what makes
+      attribution correct without diffing the artifacts directory: several
+      turns can share one project-wide artifacts folder and each still knows
+      exactly what it touched.
+    * `provenance` in the artifact's own `metadata.json`, via
+      `record_turn()` — durable, and the only record that survives the
+      process. Answers "which conversations have ever worked on this?" for
+      any later reader.
+
+    Best-effort: attribution is bookkeeping, so a failure here must never
+    fail the tool call the agent actually made.
+    """
+    try:
+        session._artifacts_touched.add(slug)
+    except AttributeError:
+        # A session predating this field (or a test double) still gets
+        # durable provenance below.
+        pass
+    conversation_id = str(getattr(session, "_session_id", "") or "")
+    if not conversation_id:
+        # No host conversation to attribute to (a bare CLI session). The
+        # in-memory set above is still useful; provenance would be a row
+        # keyed by nothing.
+        return
+    try:
+        store.record_turn(
+            slug,
+            conversation_id=conversation_id,
+            conversation_title=None,
+            turn_index=getattr(session, "_turn_count", 0) + 1,
+            summary=summary,
+            files_touched=[],
+        )
+    except Exception:
+        _log.warning("could not record turn provenance for artifact %s", slug, exc_info=True)
+
+
+def _artifact_content_mtime(folder: Path) -> float:
+    """Max mtime across an artifact folder's user-content files.
+
+    Excludes the store's own housekeeping files, mirroring cowork-server's
+    `content_mtime` gate so both sides agree on what "changed" means.
+    """
+    from anton.core.artifacts.store import (
+        METADATA_FILENAME,
+        PUBLISHED_FILENAME,
+        README_FILENAME,
+    )
+
+    housekeeping = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
+    try:
+        return max(
+            (
+                p.stat().st_mtime
+                for p in folder.rglob("*")
+                if p.is_file()
+                and not p.is_symlink()
+                and str(p.relative_to(folder)) not in housekeeping
+            ),
+            default=0.0,
+        )
+    except OSError:
+        return 0.0
+
+
+def _snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
+    """slug -> content mtime, for every artifact folder that exists right now."""
+    root = store.root
+    if not root.is_dir():
+        return {}
+    mtimes: dict[str, float] = {}
+    for child in root.iterdir():
+        if child.is_dir() and (child / "metadata.json").is_file():
+            mtimes[child.name] = _artifact_content_mtime(child)
+    return mtimes
+
+
+def _track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
+    """Catch an artifact edit the agent made without calling `open_artifact`.
+
+    `open_artifact` is how attribution is SUPPOSED to work (see
+    `_track_artifact` above), but nothing forces the agent to call it again
+    once it already has an artifact's path from earlier in the conversation —
+    it can (and in practice does) just write straight into a remembered
+    folder via the scratchpad, skipping the tool call entirely. Without this,
+    that edit's `_artifacts_touched` stays empty and the host can never card
+    it, even though the file genuinely changed this turn (ENG-1933 follow-up).
+
+    Scoped to THIS cell's own execution window — the snapshot taken right
+    before `pad.execute` vs. right after — rather than the whole turn, to
+    keep the diff-based race this reintroduces (a concurrent sibling
+    conversation happening to bump some other artifact's mtime) as narrow as
+    possible: seconds, not minutes. Narrower than the pre-ENG-1933 exposure,
+    not zero — the same trade-off `index_turn_artifacts` already accepts for
+    Hermes's edits.
+    """
+    already_touched = getattr(session, "_artifacts_touched", None) or ()
+    after = _snapshot_existing_artifact_mtimes(store)
+    for slug, prev_mtime in before.items():
+        current = after.get(slug)
+        if current is not None and current > prev_mtime and slug not in already_touched:
+            _track_artifact(session, store, slug, summary="Edited via scratchpad")
 
 
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
@@ -208,6 +322,7 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
         primary=primary if isinstance(primary, str) else None,
     )
     folder = store.folder_for(artifact.slug)
+    _track_artifact(session, store, artifact.slug, summary=f"Created artifact: {name}")
     return SideEffectResult(
         success=True,
         message=(
@@ -303,6 +418,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
         )
     datasources = [d.slug for d in artifact.datasources]
+    _track_artifact(session, store, artifact.slug, summary=f"Updated artifact metadata: {artifact.name}")
     return SideEffectResult(
         success=True,
         message=(
@@ -527,6 +643,12 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         # writing files into the artifact folder with nobody left to report to.
         task.cancel()
 
+    # Success or FSM failure alike, the generation wrote into the artifact
+    # folder (at minimum spec.md), so this turn touched the artifact — and
+    # `create_artifact` may have happened in an earlier turn, leaving this
+    # one otherwise unattributed. Only the crash path above skips tracking.
+    _track_artifact(session, store, slug, summary="Generated artifact files")
+
     if isinstance(result, str):
         yield _generation_failed(result)
         return
@@ -600,6 +722,11 @@ async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
     if artifact is None:
         return f"Error: no artifact found for slug `{slug}`."
     folder = store.folder_for(artifact.slug)
+    # Opening is how the agent gets an artifact's path in order to write to
+    # it, so this is the turn's declaration of intent to modify. Tracked here
+    # rather than at write time because the writes themselves happen in
+    # scratchpad cells the tool layer never sees.
+    _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
     return json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
@@ -749,6 +876,16 @@ async def handle_scratchpad(
         )
         await _fire_pre_execute(session, prelim_cell)
 
+        # Snapshot existing artifacts' content mtimes before the cell runs, so
+        # an edit the cell makes without a prior `open_artifact` call this
+        # turn still gets attributed below (see `_track_edits_since`).
+        artifact_store = _artifact_store(session)
+        before_artifact_mtimes = (
+            _snapshot_existing_artifact_mtimes(artifact_store)
+            if artifact_store is not None
+            else {}
+        )
+
         cell = await pad.execute(
             code,
             description=description,
@@ -763,6 +900,8 @@ async def handle_scratchpad(
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
+            if artifact_store is not None:
+                _track_edits_since(session, artifact_store, before_artifact_mtimes)
         # The runtime's verdict: a raised error/timeout/kill is a failure;
         # stderr-only output (warnings) is not, and stdout containing words
         # like "failed" is not either — the streak reads this flag, never the
