@@ -16,5 +16,5 @@ jobs:
   CLAssistant:
     uses: mindsdb/github-actions/.github/workflows/cla-assistant.yml@main
     with:
-      path-to-document: 'https://github.com/mindsdb/mindsdb/blob/main/assets/contributions-agreement/individual-contributor.md'
+      path-to-document: 'https://github.com/mindsdb/mindshub/blob/main/assets/contributions-agreement/individual-contributor.md'
       allowlist: bot*, ZoranPandovski, torrmal, Stpmax, mindsdbadmin, ea-rus, hamishfagg, MinuraPunchihewa, martyna-mindsdb, tino097, lucas-koontz
