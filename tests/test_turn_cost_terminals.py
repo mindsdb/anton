@@ -647,6 +647,7 @@ async def test_latched_skip_turns_also_stamp_verification_skipped(workspace):
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     rows = []
+    why = []
     with patch("anton.analytics.send_event") as send:
         for i in range(2):
             # _verdict_llm's plan list is consumed by turn 1; re-arm per turn.
@@ -663,8 +664,13 @@ async def test_latched_skip_turns_also_stamp_verification_skipped(workspace):
                 pass
             k = send.call_args.kwargs
             rows.append((k["ended_by"], k["verification_skipped"]))
+            why.append((k["verifier_failure"], k["verifier_error_type"]))
     # Turn 1 = the denied-latch site; turn 2 = the latched-skip site.
     assert rows == [("completed", "true"), ("completed", "true")]
+    # ENG-1858: turn 1 made the call and was denied (class + type); turn 2
+    # made no call, so it carries the latch reason and no type. This is the
+    # one `latched_*` value the hard-latch test cannot reach.
+    assert why == [("denied", "TokenLimitExceeded"), ("latched_denied", "")]
 
 
 async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipped(workspace):
