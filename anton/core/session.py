@@ -534,6 +534,26 @@ def _safe_error_type(exc: BaseException) -> str:
         return "unavailable"
 
 
+def _verifier_error_type(exc: BaseException | None) -> str:
+    """`_safe_error_type` for the verdict call, with the one split it needs.
+
+    A non-truncated `StructuredOutputError` is two different failures that
+    ENG-1095 pulls apart: the model never produced the forced tool call at all
+    (`:no_call` — the shape a model without reliable tool-calling shows), or it
+    produced one the schema rejected (`:unusable_call` — fable's `{}` at 8
+    output tokens). Same class name, opposite cures, so the type alone would
+    merge them back into one PostHog row (ENG-1858). Content-free: the suffix
+    is derived from a boolean, never from the message. Cannot raise: the only
+    attribute read is a plain bool set in `StructuredOutputError.__init__`.
+    """
+    if exc is None:
+        return ""
+    name = _safe_error_type(exc)
+    if isinstance(exc, StructuredOutputError):
+        return name + (":unusable_call" if exc.reached_tool_call else ":no_call")
+    return name
+
+
 def _is_provider_auth_error(exc: BaseException) -> bool:
     """A provider-auth 401 — anton's "Invalid API key — …" copy from
     `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
@@ -2689,12 +2709,13 @@ class ChatSession:
             _root_cause_fields = {}
         logger.info(
             "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
-            "tokens_total=%d "
+            "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
             "by_role=%s %s",
             self._session_id, turn_index, tc.ended_by,
-            str(tc.verification_skipped).lower(), tc.total_tokens,
+            str(tc.verification_skipped).lower(),
+            tc.verifier_failure, tc.verifier_error_type, tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
             tc.continuations, tc.peak_context_tokens, tc.duration_ms,
@@ -2808,6 +2829,12 @@ class ChatSession:
                 # ENG-1632) must be excludable from the honest-stop
                 # denominator without a per-conversation Langfuse hop.
                 verification_skipped=str(tc.verification_skipped).lower(),
+                # WHY the verifier produced no verdict (ENG-1858): the loop's
+                # own truncated/transient/hard/denied class plus the content-
+                # free exception type. Empty on verified turns. See
+                # `TurnCost.verifier_failure`.
+                verifier_failure=tc.verifier_failure,
+                verifier_error_type=tc.verifier_error_type,
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -5240,6 +5267,12 @@ class ChatSession:
                     # emit (late finalizers would see a later turn's state).
                     if self._turn_cost is not None:
                         self._turn_cost.verification_skipped = True
+                        # ...and WHY it was skipped (ENG-1858): no call was
+                        # made this turn, so there is no exception type — the
+                        # latch reason is the whole story.
+                        self._turn_cost.verifier_failure = (
+                            f"latched_{self._verifier_latch_reason or 'hard'}"
+                        )
                     break
                 _verifier_log.info(
                     "completion-verifier re-probing after %d skipped verifications",
@@ -5258,6 +5291,10 @@ class ChatSession:
             # latch: a blown budget is a tail sample of one model's verbosity,
             # an identical hard error twice is a capability problem (ENG-1155).
             verdict_failure: str | None = None
+            # The last attempt's exception, kept only long enough to stamp
+            # its TYPE on the turn books below (ENG-1858). `except ... as exc`
+            # unbinds `exc` at the end of each clause, hence the copy.
+            verdict_exc: BaseException | None = None
             for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
                 try:
                     verdict = await self._llm.generate_object_code(
@@ -5276,6 +5313,7 @@ class ChatSession:
                         _VERIFIER_TOKEN_BUDGETS
                     )
                     verdict_failure = "truncated" if exc.truncated else "hard"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s retrying=%s",
@@ -5290,6 +5328,7 @@ class ChatSession:
                     # transient tuple). Retrying, diagnosing, or telling the
                     # user buys nothing: handled below by latching silently.
                     verdict_failure = "denied"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=DENIED budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -5306,6 +5345,7 @@ class ChatSession:
                     # still gets its honest diagnosis (ENG-1079); it just doesn't
                     # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=TRANSIENT budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -5317,6 +5357,7 @@ class ChatSession:
                     # the exception message, which can carry conversation
                     # content (ENG-1081).
                     verdict_failure = "hard"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -5333,6 +5374,17 @@ class ChatSession:
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
+                # Every no-verdict exit below — denied latch, hard latch,
+                # failed re-probe, honest handback — books the SAME two
+                # facts, so stamp them once here rather than at each site
+                # (ENG-1858). Class + exception type only; the exception
+                # message can quote conversation content and never leaves
+                # the process.
+                if self._turn_cost is not None:
+                    self._turn_cost.verifier_failure = verdict_failure or "hard"
+                    self._turn_cost.verifier_error_type = _verifier_error_type(
+                        verdict_exc
+                    )
                 if verdict_failure == "denied":
                     # A denied verdict recurs every turn by construction, so
                     # don't wait for a second sample: latch NOW and end the

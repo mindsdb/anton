@@ -495,6 +495,12 @@ class StructuredOutputError(ValueError):
       arguments. A bigger budget only helps until the payload grows again; the
       cure is a smaller response (ENG-1523).
 
+    The flag is meaningful on NON-truncated errors too — it is computed from
+    whether the response carried any tool call, independent of truncation. There
+    it separates a model that answered in prose instead of calling the tool
+    (``False``) from one whose call the schema rejected (``True``); the verifier
+    reports that split as ``:no_call`` / ``:unusable_call`` (ENG-1858).
+
     Subclasses ``ValueError`` so call sites catching the documented ``ValueError``
     from ``generate_object``/``generate_object_code`` keep working.
     """
