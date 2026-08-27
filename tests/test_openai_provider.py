@@ -1000,3 +1000,38 @@ class TestMindshubScriptTagEscaping:
         complete = next(e for e in events if isinstance(e, StreamComplete))
         assert complete.response.content == "<script> tag"
         assert complete.response.tool_calls[0].input["content"] == "<script>x()</script>"
+
+
+class TestScriptTagUnescapeMutations:
+    """ENG-1986 follow-up: the model reads the escaped forms in its prompt and
+    reproduces the underscore in mutated positions. Live run 2026-08-27: a
+    generator closed its only script block with `</_script>` — outside the
+    strict reverse pattern — and the mangled tag reached the file on disk,
+    silently disabling all of the page's JavaScript. The unescape must be
+    wider than the escape."""
+
+    def test_unescape_covers_mutated_variants(self):
+        from anton.core.llm.openai import _unescape_script_tag
+
+        cases = {
+            "<_script>": "<script>",            # canonical escape
+            "<_/script>": "</script>",          # canonical escape
+            "</_script>": "</script>",          # measured mutation
+            "<__script>": "<script>",           # double underscore
+            "<_/_script>": "</script>",         # underscore on both sides
+            "<_SCRIPT>": "<SCRIPT>",            # case preserved
+        }
+        for src, expected in cases.items():
+            assert _unescape_script_tag(src) == expected, src
+
+    def test_unescape_leaves_normal_text_alone(self):
+        from anton.core.llm.openai import _unescape_script_tag
+
+        for text in ("<script>", "</script>", "a _script variable", "x < _y"):
+            assert _unescape_script_tag(text) == text
+
+    def test_escape_then_unescape_round_trips(self):
+        from anton.core.llm.openai import _escape_script_tag, _unescape_script_tag
+
+        src = 'wrap it: <script src="x.js"></script> and <SCRIPT>y()</SCRIPT>'
+        assert _unescape_script_tag(_escape_script_tag(src)) == src

@@ -797,7 +797,15 @@ def _split_cached_input(usage) -> tuple[int, int, int]:
 # a request body. Scoped to FLAVOR_MINDS_PASSTHROUGH only: no other flavor
 # talks to this gateway.
 _SCRIPT_TAG_RE = re.compile(r"</?script", re.IGNORECASE)
-_ESCAPED_SCRIPT_TAG_RE = re.compile(r"<_/?script", re.IGNORECASE)
+# The unescape must be WIDER than the escape: the model reads the escaped
+# forms in its prompt (system rules, its own echoed chunks) and reproduces
+# the underscore in mutated positions. Measured 2026-08-27: a generator
+# emitted `</_script>` (underscore after the slash) for the closing tag —
+# outside the strict reverse pattern — and the mangled tag reached the file
+# on disk, silently disabling all of its JavaScript. Neither `<_script` nor
+# `</_script` is meaningful anywhere else, so normalising every underscore
+# variant is safe.
+_ESCAPED_SCRIPT_TAG_RE = re.compile(r"<_/?_?script|</?_script", re.IGNORECASE)
 
 
 def _escape_script_tag(value):
@@ -813,9 +821,9 @@ def _escape_script_tag(value):
 
 
 def _unescape_script_tag(value):
-    """Reverse of `_escape_script_tag`. See ENG-1986 above."""
+    """Reverse of `_escape_script_tag`, plus model-mutated variants. See above."""
     if isinstance(value, str):
-        return _ESCAPED_SCRIPT_TAG_RE.sub(lambda m: m.group(0)[0] + m.group(0)[2:], value)
+        return _ESCAPED_SCRIPT_TAG_RE.sub(lambda m: m.group(0).replace("_", ""), value)
     if isinstance(value, dict):
         return {k: _unescape_script_tag(v) for k, v in value.items()}
     if isinstance(value, list):
