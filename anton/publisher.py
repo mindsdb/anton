@@ -13,7 +13,7 @@ import secrets
 import zipfile
 from pathlib import Path
 
-from anton.core.artifacts.models import Artifact
+from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
@@ -454,7 +454,7 @@ def publish(
             payload_dict["state_manifest"] = state_manifest
         if missing:
             payload_dict["missing_datasources"] = missing
-        artifact_key = artifact_key or f"artifact/{artifact.stableId}"
+        artifact_key = artifact_key or artifact_key_for(artifact.id)
     else:
         zipped = _zip_html(file_path)
 
