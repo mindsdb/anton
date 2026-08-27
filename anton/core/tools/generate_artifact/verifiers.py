@@ -15,6 +15,39 @@ _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
 _BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
 _ECHARTS_CDN = "cdn.jsdelivr.net/npm/echarts"
 
+_UNIVERSAL_IMPORTANT = re.compile(r"\*\s*\{[^}]*!important")
+# Media queries whose universal `!important` blocks are legitimate practice
+# rather than a global style override: the reduced-motion accessibility reset
+# (`* { animation: none !important; }`) and print stylesheets. The rule this
+# feeds exists to stop a page from fighting the host application's styles;
+# neither of these contexts can do that. Measured 2026-08-27: the reset is
+# something models emit reflexively, and flagging it failed an otherwise
+# valid artifact.
+_EXEMPT_MEDIA_HEADER = re.compile(
+    r"@media[^{]*(?:prefers-reduced-motion|\bprint\b)[^{]*\{", re.I
+)
+
+
+def _exempt_media_spans(html: str) -> list[tuple[int, int]]:
+    """(start, end) spans of @media blocks exempt from the `* { !important }` rule.
+
+    The block end is found by brace counting from the header's opening brace —
+    CSS inside `@media` nests rule blocks, so a non-greedy regex would stop at
+    the first `}` and truncate the span.
+    """
+    spans: list[tuple[int, int]] = []
+    for m in _EXEMPT_MEDIA_HEADER.finditer(html):
+        depth = 1
+        i = m.end()
+        while i < len(html) and depth:
+            if html[i] == "{":
+                depth += 1
+            elif html[i] == "}":
+                depth -= 1
+            i += 1
+        spans.append((m.start(), i))
+    return spans
+
 
 def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
     errors: list[str] = []
@@ -63,8 +96,12 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:
         errors.append("Frontend must not use the global name window.__antonCommentsLayer.")
-    if re.search(r"\*\s*\{[^}]*!important", html):
+    exempt_spans = _exempt_media_spans(html)
+    for m in _UNIVERSAL_IMPORTANT.finditer(html):
+        if any(start <= m.start() < end for start, end in exempt_spans):
+            continue
         errors.append("Frontend must not use universal `* { ... !important }` rules.")
+        break
     for m in re.finditer(r"z-index\s*:\s*(\d+)", low):
         if int(m.group(1)) > 1000:
             errors.append("Frontend uses an extreme z-index (> 1000); keep it within a sane range.")

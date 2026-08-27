@@ -74,3 +74,56 @@ def test_html_app_does_not_require_api_base():
     html = GOOD.replace('<meta name="api-base" content="">', "").replace("fetch(api('/api/items'));", "")
     r = verify_frontend(html, is_fullstack=False)
     assert r.ok, r.errors
+
+
+def test_universal_important_at_top_level_is_error():
+    html = GOOD.replace(
+        "</head>", "<style>* { margin: 0 !important; }</style></head>"
+    )
+    r = verify_frontend(html, is_fullstack=True)
+    assert not r.ok
+    assert any("!important" in e for e in r.errors)
+
+
+def test_universal_important_in_reduced_motion_media_is_allowed():
+    """The standard accessibility reset must not fail the artifact (2026-08-27)."""
+    html = GOOD.replace(
+        "</head>",
+        "<style>@media (prefers-reduced-motion: reduce) {\n"
+        "  * { animation: none !important; transition: none !important; }\n"
+        "}</style></head>",
+    )
+    r = verify_frontend(html, is_fullstack=True)
+    assert r.ok, r.errors
+
+
+def test_universal_important_in_print_media_is_allowed():
+    html = GOOD.replace(
+        "</head>",
+        "<style>@media print { * { background: none !important; } }</style></head>",
+    )
+    r = verify_frontend(html, is_fullstack=True)
+    assert r.ok, r.errors
+
+
+def test_universal_important_in_other_media_is_still_error():
+    html = GOOD.replace(
+        "</head>",
+        "<style>@media (max-width: 600px) { * { display: block !important; } }</style></head>",
+    )
+    r = verify_frontend(html, is_fullstack=True)
+    assert not r.ok
+    assert any("!important" in e for e in r.errors)
+
+
+def test_universal_important_after_exempt_media_block_is_still_error():
+    """The exemption must end where the @media block's braces end — a nested
+    rule block inside the media query must not extend the span."""
+    html = GOOD.replace(
+        "</head>",
+        "<style>@media print { .slide { display: flex !important; } }\n"
+        "* { color: red !important; }</style></head>",
+    )
+    r = verify_frontend(html, is_fullstack=True)
+    assert not r.ok
+    assert any("!important" in e for e in r.errors)
