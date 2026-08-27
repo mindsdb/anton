@@ -207,3 +207,36 @@ class TestCustomEngineRegistration:
         assert "https://legacy.acme-crm.example" in result
         assert passphrase not in result
         assert "[DS_ACME_CRM_LEGACY__PASSPHRASE]" in result
+
+
+class TestOAuthEngineRegistryCollision:
+    """A cloud gmail OAuth connection shares its engine name with the
+    registry's legacy IMAP gmail connector (datasources.md) — its OAuth
+    fields (access_token, account_email, ...) must classify against the
+    vault's own secure_keys, not the IMAP entry's (email, app_password)."""
+
+    def test_gmail_oauth_fields_classify_against_the_vault_not_the_imap_registry_entry(self, monkeypatch):
+        from anton.core.datasources.data_vault import TurnKeyDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        # Long enough (> 8 chars) to actually exercise the coarse "unknown
+        # DS_* var" bucket if misclassified — a short value dodges it either
+        # way and would pass this test for the wrong reason.
+        email = "someone@example.com"
+
+        def fake(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+            return f'{{"access_token": "ya29.live-token", "account_email": "{email}", "scope": "gmail.readonly"}}'.encode()
+
+        monkeypatch.setattr("anton.minds_client.minds_request", fake)
+        vault = TurnKeyDataVault({"turn_key": "tk_abc", "connections": [{"engine": "gmail", "name": "primary"}]})
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials(f"token ya29.live-token for {email} scope gmail.readonly")
+        assert "ya29.live-token" not in result
+        assert "[DS_GMAIL_PRIMARY__ACCESS_TOKEN]" in result
+        # Non-secret metadata must stay visible — before the fix, both fell
+        # into the coarse "unknown DS_* var, len > 8" bucket instead, since
+        # the IMAP registry entry's fields (email, app_password) never
+        # registered these as known.
+        assert email in result
+        assert "gmail.readonly" in result

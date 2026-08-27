@@ -10,6 +10,8 @@ Two layers:
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import anton.core.llm.client as llm_client_mod
@@ -781,3 +783,70 @@ def test_a_trace_block_without_a_surface_leaves_it_unset(tmp_path, monkeypatch):
     # resolve). That must not become a junk value.
     _, cfg = _build(tmp_path, monkeypatch, trace={"install_channel": "hosted"})
     assert cfg.surface is None
+
+
+# ── turn-key OAuth data vault ────────────────────────────────────────────────
+# Turn-Key Token Handoff: a cloud turn with connectors gets a live
+# TurnKeyDataVault instead of None, and DS_* env is (re)populated for it the
+# same way desktop's harness.py does for LocalDataVault.
+
+def test_no_oauth_block_leaves_data_vault_none(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.data_vault is None
+
+
+def test_oauth_block_produces_a_turn_key_data_vault(tmp_path, monkeypatch):
+    from anton.core.datasources.data_vault import TurnKeyDataVault
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "google_drive", "name": "primary"}]}
+    _, cfg = _build(tmp_path, monkeypatch, oauth=oauth)
+    assert isinstance(cfg.data_vault, TurnKeyDataVault)
+    assert cfg.data_vault.list_connections() == [
+        {"engine": "google_drive", "name": "primary", "created_at": ""}
+    ]
+
+
+def test_oauth_block_populates_ds_env_from_the_turn_key_endpoint(tmp_path, monkeypatch):
+    import anton.core.datasources.data_vault as data_vault_mod
+
+    calls: list[str] = []
+
+    def fake_minds_request(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        calls.append(url)
+        assert api_key == "tk_abc"
+        assert method == "POST"
+        return b'{"access_token": "live-token", "account_email": "a@b.com", "token_type": "Bearer", "scope": "drive.file", "expires_at": "2026-08-26T00:00:00Z"}'
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+    monkeypatch.delenv("DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN", raising=False)
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "google_drive", "name": "primary"}]}
+    _build(tmp_path, monkeypatch, oauth=oauth)
+
+    assert os.environ["DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN"] == "live-token"
+    assert os.environ["DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL"] == "a@b.com"
+    # One fetch to build the env, and restore_namespaced_env's secret-var
+    # registration reuses the same cached result rather than fetching again.
+    assert calls == [f"{data_vault_mod._DEFAULT_AUTH_BASE_URL}/v1/oauth/google_drive/token"]
+
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__TOKEN_TYPE", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__SCOPE", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__EXPIRES_AT", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__AUTH_TYPE", None)
+
+
+def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
+    import urllib.error
+
+    def fake_minds_request(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "gmail", "name": "primary"}]}
+    _, cfg = _build(tmp_path, monkeypatch, oauth=oauth)
+
+    assert cfg.data_vault.load("gmail", "primary") is None
+    assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ

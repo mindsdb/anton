@@ -191,7 +191,11 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     terminal_emitted = False
     try:
         req = TurnRequestV1.from_json(raw_line)
-        session = builder(req)
+        # build_cloud_chat_session() can block synchronously for several
+        # seconds (a turn-key OAuth token fetch per connector) — run it off
+        # the event loop thread so the heartbeat ticker above keeps firing
+        # instead of the controller seeing the turn go silent and stall it.
+        session = await asyncio.get_running_loop().run_in_executor(None, builder, req)
         # Length of the seeded history — everything anton appends past this
         # index belongs to this turn. Captured BEFORE turn_stream, so the
         # current turn's user input lands inside the slice and is trimmed off
