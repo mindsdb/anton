@@ -1,7 +1,7 @@
 name: "MindsDB Anton CLA Assistant"
 
 permissions:
-  actions: write
+  actions: read
   contents: write
   pull-requests: write
   statuses: write
