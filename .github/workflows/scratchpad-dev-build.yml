@@ -22,7 +22,73 @@ concurrency:
 
 jobs:
 
+  # The version the image will report, resolved from tags (ENG-1796).
+  #
+  # Its own job, on ubuntu-latest, for two reasons. The build runs on the
+  # self-hosted mdb-dev runner and nothing in this repo has ever run setup-uv
+  # there, so resolving the version in the build job would put an unproven
+  # dependency in front of the image. And keeping it separate leaves the build's
+  # checkout shallow: .git never enters the docker context (see .dockerignore),
+  # so only this job needs the history.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version by describing against tags, and the
+          # default fetch-depth of 1 fetches none of them.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - id: resolve
+        name: Resolve the anton version from tags
+        # The image reported a hardcoded 2.0.0 until 2026-08-26, so a pod turn
+        # could not say which anton served it and bumping the image pin produced
+        # no observable change at all.
+        #
+        # `hatch version` prints the version to stdout and its progress to
+        # stderr, so the capture is exactly the version. The shape check is a
+        # belt against that ever changing: a malformed value here would be baked
+        # into the image and reported by every turn it serves, which is the
+        # class of failure this whole change exists to remove. Fail instead.
+        run: |
+          set -euo pipefail
+          # `tail -n 1`: hatch prints progress to stderr today, but a stray line
+          # on stdout would otherwise ride along into $GITHUB_OUTPUT, where a
+          # second line is parsed as another key=value pair rather than failing.
+          version="$(uvx hatch version | tail -n 1)"
+
+          # Whole-line match, PEP 440 characters only. This is a boundary, not a
+          # formatting nicety: the shared action expands `extra-build-args`
+          # UNQUOTED into `docker buildx build`, so anything containing
+          # whitespace becomes additional arguments to that command.
+          if ! printf '%s' "$version" | grep -Eqx '[0-9]+\.[0-9][0-9A-Za-z.!+]*'; then
+            echo "::error::refusing to build: '$version' is not a bare PEP 440 version"
+            exit 1
+          fi
+
+          # Reject the fallback explicitly. With no tags reachable, hatch-vcs
+          # resolves `2.0.0.dev1+g<sha>` (and `2.0.0-dev` with no .git at all) —
+          # both well-formed, both accepted by the check above, and both the
+          # very 2.0.0 family this change exists to eliminate. anton is CalVer,
+          # so a 2.0.0 version is never legitimate and always means the tags did
+          # not arrive.
+          case "$version" in
+            2.0.0*)
+              echo "::error::'$version' is the hatch-vcs fallback — the checkout has no tags."
+              echo "::error::Building would bake a 2.0.0 version back into the image (ENG-1796)."
+              exit 1
+              ;;
+          esac
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "anton version: $version"
+
   build:
+    needs: version
     runs-on: mdb-dev
     outputs:
       image: ${{ steps.build.outputs.image }}
@@ -38,3 +104,7 @@ jobs:
           # Override the repo-slug default so the image lands at .../minds-anton-scratchpad.
           module-name: minds-anton-scratchpad
           build-for-environment: development
+          # Expanded unquoted by the shared action, so the value must not contain
+          # whitespace — a PEP 440 version never does, and the shape check in the
+          # `version` job would have rejected it.
+          extra-build-args: --build-arg ANTON_VERSION=${{ needs.version.outputs.version }}
