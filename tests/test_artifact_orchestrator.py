@@ -800,3 +800,129 @@ def test_public_data_sources_skill_is_defensive():
     session = AsyncMock()
     session._skill_store = _MissingStore()
     assert orchestrator._public_data_sources_skill(session) == ""
+
+
+# ── Separate retry budgets: loop failures vs verification failures ───────────
+
+_VALID_HTML = (
+    '<html><head><meta name="viewport" content="width=device-width">'
+    '</head><body><div id="a"></div></body></html>'
+)
+
+
+async def test_frontend_loop_failure_does_not_consume_the_verify_retry(
+    tmp_path: Path, monkeypatch
+):
+    """Live run 2026-08-27: attempt 0 died on the round budget, attempt 1
+    failed verification — and the trivially fixable CSS was terminal, because
+    the loop failure had already burned the only retry."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    st.primary = "dashboard.html"
+    calls = {"n": 0}
+
+    async def fake_loop(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "generator exceeded round budget (20) without writing any files."
+        target = tmp_path / "dashboard.html"
+        if calls["n"] == 2:  # verifiable but invalid
+            target.write_text("<html><body>no viewport</body></html>")
+        else:  # fixed after the verifier's feedback
+            target.write_text(_VALID_HTML)
+        return {"files_written": ["dashboard.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert err is None
+    assert calls["n"] == 3  # loop retry + verify retry, each from its own budget
+
+
+async def test_frontend_two_loop_failures_are_terminal_and_named_as_generation(
+    tmp_path: Path, monkeypatch
+):
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+
+    async def fake_loop(**kw):
+        return "generator stopped without writing files (round 1/20). Last output: ''"
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert err is not None
+    assert err.startswith("Frontend generation failed")
+    assert "verification failed" not in err.lower()
+
+
+async def test_frontend_two_verify_failures_are_terminal_with_honest_count(
+    tmp_path: Path, monkeypatch
+):
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    st.primary = "dashboard.html"
+
+    async def fake_loop(**kw):
+        (tmp_path / "dashboard.html").write_text("<html><body>no viewport</body></html>")
+        return {"files_written": ["dashboard.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert err is not None
+    assert "Frontend verification failed after 2 attempt(s)" in err
+
+
+async def test_unfinished_loop_output_is_still_verified(tmp_path: Path, monkeypatch):
+    """A dict with finished=False (round budget exhausted, files on disk) must
+    reach the verifier instead of being treated as a failed attempt."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    st.primary = "dashboard.html"
+    calls = {"n": 0}
+
+    async def fake_loop(**kw):
+        calls["n"] += 1
+        (tmp_path / "dashboard.html").write_text(_VALID_HTML)
+        return {
+            "files_written": ["dashboard.html"], "rounds_used": 20,
+            "summary": "(round budget 20 exhausted before finish was called)",
+            "finished": False,
+        }
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert err is None
+    assert calls["n"] == 1  # verified on the spot, no regeneration
+
+
+async def test_backend_loop_failure_does_not_consume_the_verify_retry(
+    tmp_path: Path, monkeypatch
+):
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = "{}"
+    calls = {"gen": 0, "verify": 0}
+
+    async def fake_loop(**kw):
+        calls["gen"] += 1
+        if calls["gen"] == 1:
+            return "generator exceeded round budget (20) without writing any files."
+        (tmp_path / "backend.py").write_text("x")
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        calls["verify"] += 1
+        if calls["verify"] == 1:
+            return VerifyResult(errors=["missing /api/health"]), []
+        return VerifyResult(errors=[]), []
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
+
+    err = await orchestrator._gen_verify_backend(st)
+
+    assert err is None
+    assert calls["gen"] == 3

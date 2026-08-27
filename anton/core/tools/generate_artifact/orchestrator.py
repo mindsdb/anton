@@ -287,7 +287,7 @@ async def _data_phase(state: GenState) -> str | None:
 # ---------------------------------------------------------------------------
 
 from . import verifiers
-from .state import GEN_VERIFY_MAX_RETRIES
+from .state import GEN_LOOP_MAX_RETRIES, GEN_VERIFY_MAX_RETRIES
 
 
 async def _write_tech_spec(state: GenState) -> str | None:
@@ -501,8 +501,10 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
     )
     verdict = None  # guards the terminal message when no attempt ever verified
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
+    loop_failures = 0  # separate budgets — see _gen_verify_frontend
+    verify_failures = 0
     extra = ("\n\n" + extra_context) if extra_context else ""
-    for attempt in range(GEN_VERIFY_MAX_RETRIES + 1):
+    for attempt in range(GEN_LOOP_MAX_RETRIES + GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_backend", attempt=attempt)
         kickoff = prompts.build_backend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
         if stateless:
@@ -534,9 +536,12 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
             step_injections=injections,
         )
         if isinstance(result, str):
-            extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             state.record("generate_backend", "error", result)
             last_loop_error = result
+            loop_failures += 1
+            if loop_failures > GEN_LOOP_MAX_RETRIES:
+                break
+            extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             continue
         for f in result["files_written"]:
             if f not in state.files_written:
@@ -567,23 +572,33 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                 )
                 state.record("verify_backend", "fail", msg)
                 verdict.errors.append(msg)
+                verify_failures += 1
+                if verify_failures > GEN_VERIFY_MAX_RETRIES:
+                    break
                 extra = "\n\n## Verification failed — fix these\n- " + msg
                 continue
             state.record("verify_backend", "ok", "; ".join(verdict.warnings))
             await _declare_datasources(state, refs)
             return None
         state.record("verify_backend", "fail", "; ".join(verdict.errors))
+        verify_failures += 1
+        if verify_failures > GEN_VERIFY_MAX_RETRIES:
+            break
         extra = (
             "\n\n## Verification failed — fix these\n"
             + "\n".join(f"- {e}" for e in verdict.errors)
             + ("\nWarnings:\n" + "\n".join(f"- {w}" for w in verdict.warnings) if verdict.warnings else "")
         )
-    detail = (
-        "; ".join(verdict.errors)
-        if verdict is not None
-        else (last_loop_error or "generation did not produce a verifiable backend")
-    )
-    state.error = "Backend verification failed after retry: " + detail
+    # See the twin comment in _gen_verify_frontend.
+    if verify_failures > GEN_VERIFY_MAX_RETRIES and verdict is not None:
+        state.error = (
+            f"Backend verification failed after {verify_failures} attempt(s): "
+            + "; ".join(verdict.errors)
+        )
+    else:
+        state.error = "Backend generation failed: " + (
+            last_loop_error or "generation did not produce a verifiable backend"
+        )
     return state.error
 
 
@@ -618,8 +633,14 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
     # it cannot ride on VerifyResult — a variable argument breaks the contract
     # lock's AST walk (test_no_unresolvable_rule_literals).
     last_loop_error: str | None = None
+    # Separate budgets: a loop failure must not consume the retry reserved for
+    # fixing verifier findings (and vice versa). The range bound is the sum —
+    # each iteration spends exactly one of the two budgets, and the inner
+    # checks break as soon as either is exhausted.
+    loop_failures = 0
+    verify_failures = 0
     extra = ""
-    for attempt in range(GEN_VERIFY_MAX_RETRIES + 1):
+    for attempt in range(GEN_LOOP_MAX_RETRIES + GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_frontend", attempt=attempt)
         if attempt > 0:
             # With append, a retry would extend the truncated remains of the
@@ -643,9 +664,12 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             node_label="generate_frontend", attempt=attempt, trace=state.trace_log,
         )
         if isinstance(result, str):
-            extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             state.record("generate_frontend", "error", result)
             last_loop_error = result
+            loop_failures += 1
+            if loop_failures > GEN_LOOP_MAX_RETRIES:
+                break
+            extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             continue
         for f in result["files_written"]:
             if f not in state.files_written:
@@ -687,17 +711,27 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             state.record("verify_frontend", "ok", "; ".join(verdict.warnings))
             return None
         state.record("verify_frontend", "fail", "; ".join(verdict.errors))
+        verify_failures += 1
+        if verify_failures > GEN_VERIFY_MAX_RETRIES:
+            break
         extra = (
             "\n\n## Verification failed — fix these\n"
             + "\n".join(f"- {e}" for e in verdict.errors)
             + ("\nWarnings:\n" + "\n".join(f"- {w}" for w in verdict.warnings) if verdict.warnings else "")
         )
-    detail = (
-        "; ".join(verdict.errors)
-        if verdict is not None
-        else (last_loop_error or "generation did not produce a verifiable frontend")
-    )
-    state.error = "Frontend verification failed after retry: " + detail
+    # Name the cause that actually exhausted its budget: "verification failed"
+    # only when the verifier's own retry budget ran out. The old single wording
+    # claimed a verification retry that, on the loop-failure path, never
+    # happened.
+    if verify_failures > GEN_VERIFY_MAX_RETRIES and verdict is not None:
+        state.error = (
+            f"Frontend verification failed after {verify_failures} attempt(s): "
+            + "; ".join(verdict.errors)
+        )
+    else:
+        state.error = "Frontend generation failed: " + (
+            last_loop_error or "generation did not produce a verifiable frontend"
+        )
     return state.error
 
 

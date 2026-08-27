@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
 DATA_LOOP_MAX: int = 3
+# Generation-loop failures (round budget, no tool calls) and verification
+# failures get SEPARATE retry budgets. With a single shared counter a loop
+# failure consumed the retry reserved for fixing verifier findings, and a
+# trivially fixable verification error became terminal (live run 2026-08-27).
+GEN_LOOP_MAX_RETRIES: int = 1
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
 
