@@ -84,8 +84,14 @@ _WRITE_PRD_INSTRUCTION = (
     "app-owned, so they have no scratchpad citation and no connection "
     "code), Functional requirements (omit for static artifacts), UI/UX "
     "requirements (layout, components, style, and any known user "
-    "preferences). Reply with the PRD document only, as markdown, no other "
-    "text."
+    "preferences).\n\n"
+    "Do NOT copy long-form source content (article text, document bodies, "
+    "fetched pages) into the PRD when it already lives in a scratchpad cell: "
+    "the generator reads those cells directly. Describe the STRUCTURE and "
+    "cite the scratchpad and cell instead — e.g. for a presentation, a slide "
+    "outline with one line per slide, not the slide texts. Short samples "
+    "(a few rows, a title list) are fine.\n\n"
+    "Reply with the PRD document only, as markdown, no other text."
 )
 
 

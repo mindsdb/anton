@@ -402,3 +402,13 @@ async def test_show_and_confirm_requests_compact_rendering(monkeypatch):
     state.brief_markdown = "## Goal\n..."
     await orchestrator.show_and_confirm(state)
     assert seen_requests[0].compact is True
+
+
+def test_write_prd_instruction_forbids_copying_long_form_source_content():
+    """The 2026-08-27 live run retold one article three times (pad → prd.md →
+    spec.md → index.html). The PRD must reference the scratchpad cell and give
+    the structure, not the content."""
+    text = orchestrator._WRITE_PRD_INSTRUCTION
+    assert "Do NOT copy long-form source content" in text
+    assert "cite the scratchpad and cell" in text
+    assert "slide outline" in text
