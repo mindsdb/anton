@@ -193,6 +193,8 @@ fails the step and costs a regeneration):
   CDN library tag.
 - NEVER use the global name `window.__antonCommentsLayer`; it is reserved by the
   host app.
+- Write script tags as plain `<script>` and `</script>` — never any underscore
+  variant, and every opened script block must be closed with `</script>`.
 - NEVER write a universal `* { ... !important }` rule.
 - Keep every `z-index` at 1000 or below.
 - Give significant block containers (`div`, `section`, `table`, `main`,

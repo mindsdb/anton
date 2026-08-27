@@ -93,6 +93,21 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
                 errors.append(f"Backend call must use the /api/* prefix, got: {path!r}")
                 break
 
+    # 5b. Script-tag integrity. The gateway WAF workaround (ENG-1986) shows the
+    # model `<_script`-style escaped tags in its prompt, and the model sometimes
+    # reproduces the underscore in mutated positions the provider-level unescape
+    # may not recognise (measured 2026-08-27: `</_script>` closed a real page's
+    # only script block and silently disabled all of its JavaScript). Residue
+    # of any underscore variant is an error, and so is an opening `<script`
+    # with no closing `</script` anywhere — the "JS never runs" class.
+    if re.search(r"<_/?_?script|</?_script", html, re.I):
+        errors.append(
+            "Frontend contains a mangled script tag (an underscore variant like "
+            "`<_script` or `</_script`); write plain `<script>`/`</script>`."
+        )
+    elif "<script" in low and "</script" not in low:
+        errors.append("Frontend opens a <script> block but never closes it with </script>.")
+
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:
         errors.append("Frontend must not use the global name window.__antonCommentsLayer.")

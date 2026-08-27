@@ -371,6 +371,11 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "resource reference")),
     Rule("errors", "Frontend must not use the global name window.__antonCommentsLayer.",
          _both(_FRONT_BOTH, "__antonCommentsLayer")),
+    Rule("errors", "Frontend contains a mangled script tag (an underscore variant like "
+                    "`<_script` or `</_script`); write plain `<script>`/`</script>`.",
+         _both(_FRONT_BOTH, "underscore")),
+    Rule("errors", "Frontend opens a <script> block but never closes it with </script>.",
+         _both(_FRONT_BOTH, "must be closed")),
     Rule("errors", "Frontend must not use universal `* { ... !important }` rules.",
          _both(_FRONT_BOTH, "!important")),
     Rule("errors", "Frontend uses an extreme z-index (> 1000); keep it within a sane range.",
