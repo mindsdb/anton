@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
-from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
 from anton.core.tools.generate_artifact.engine import _run_loop
 
 
@@ -12,11 +12,26 @@ def _resp(tool_calls):
                        usage=Usage(input_tokens=1, output_tokens=1), stop_reason="tool_use")
 
 
+async def _one_event_stream(response):
+    yield StreamComplete(response=response)
+
+
+def _stream_mock(*responses):
+    """`plan_stream`/`code_stream` fake: each call returns a fresh one-event
+    stream. A single response repeats on every call (mirrors
+    `AsyncMock(return_value=...)`); several are consumed one per call
+    (mirrors `AsyncMock(side_effect=[...])`)."""
+    if len(responses) == 1:
+        response = responses[0]
+        return Mock(side_effect=lambda **kw: _one_event_stream(response))
+    return Mock(side_effect=[_one_event_stream(r) for r in responses])
+
+
 async def test_run_loop_allows_no_files_when_not_required(tmp_path: Path):
     session = AsyncMock()
     # Round 0 (plan): call finish immediately, writing nothing.
-    session._llm.plan = AsyncMock(
-        return_value=_resp([ToolCall(id="1", name="finish", input={"summary": "pad `a` cell 2: 100 rows"})])
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="finish", input={"summary": "pad `a` cell 2: 100 rows"})])
     )
     result = await _run_loop(
         session=session,
@@ -33,8 +48,8 @@ async def test_run_loop_allows_no_files_when_not_required(tmp_path: Path):
 
 async def test_run_loop_still_requires_files_by_default(tmp_path: Path):
     session = AsyncMock()
-    session._llm.plan = AsyncMock(
-        return_value=_resp([ToolCall(id="1", name="finish", input={"summary": "done"})])
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="finish", input={"summary": "done"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -51,8 +66,8 @@ async def test_run_loop_records_scratchpad_execs(tmp_path: Path, monkeypatch):
         tool_handlers, "handle_scratchpad", AsyncMock(return_value="cell 1 ok: 100 rows")
     )
     session = AsyncMock()
-    session._llm.plan = AsyncMock(
-        return_value=_resp([
+    session._llm.plan_stream = _stream_mock(
+        _resp([
             ToolCall(
                 id="1", name="scratchpad",
                 input={"action": "exec", "name": "pad", "code": "print(df.head())"},
@@ -83,11 +98,11 @@ def _resp_capped(tool_calls, *, output_tokens: int):
 async def test_run_loop_rejects_write_file_without_content(tmp_path: Path):
     """Cut off before `content`: the key is absent. This used to write a 0-byte file and report success."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(
-        return_value=_resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})])
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})])
     )
-    session._llm.code = AsyncMock(
-        return_value=_resp([ToolCall(id="2", name="finish", input={"summary": "gave up"})])
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "gave up"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -101,12 +116,12 @@ async def test_run_loop_rejects_write_file_without_content(tmp_path: Path):
 async def test_run_loop_rejects_write_file_with_empty_content(tmp_path: Path):
     """Cut off right after the opening quote: content == ""."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(
-        return_value=_resp([ToolCall(id="1", name="write_file",
-                                     input={"path": "index.html", "content": ""})])
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="write_file",
+                        input={"path": "index.html", "content": ""})])
     )
-    session._llm.code = AsyncMock(
-        return_value=_resp([ToolCall(id="2", name="finish", input={"summary": "gave up"})])
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "gave up"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -126,8 +141,8 @@ async def test_run_loop_rejects_only_the_last_call_of_a_truncated_response(tmp_p
     """
     session = AsyncMock()
     session._llm._max_tokens = 100
-    session._llm.plan = AsyncMock(
-        return_value=_resp_capped(
+    session._llm.plan_stream = _stream_mock(
+        _resp_capped(
             [
                 ToolCall(id="1", name="write_file",
                          input={"path": "d.html", "content": "<head></head>", "mode": "w"}),
@@ -137,8 +152,8 @@ async def test_run_loop_rejects_only_the_last_call_of_a_truncated_response(tmp_p
             output_tokens=100,
         )
     )
-    session._llm.code = AsyncMock(
-        return_value=_resp([ToolCall(id="3", name="finish", input={"summary": "stopped"})])
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="3", name="finish", input={"summary": "stopped"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -162,15 +177,15 @@ async def test_run_loop_writes_when_response_is_not_capped(tmp_path: Path):
     """The same call goes through when the output is not capped — the detection must not be blanket."""
     session = AsyncMock()
     session._llm._max_tokens = 100
-    session._llm.plan = AsyncMock(
-        return_value=_resp_capped(
+    session._llm.plan_stream = _stream_mock(
+        _resp_capped(
             [ToolCall(id="1", name="write_file",
                       input={"path": "index.html", "content": "<html></html>"})],
             output_tokens=42,
         )
     )
-    session._llm.code = AsyncMock(
-        return_value=_resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -188,12 +203,12 @@ async def test_run_loop_ignores_unknown_token_cap(tmp_path: Path):
     AsyncMock session and must not suddenly start getting write rejections.
     """
     session = AsyncMock()  # _max_tokens will be a mock, not a number
-    session._llm.plan = AsyncMock(
-        return_value=_resp([ToolCall(id="1", name="write_file",
-                                     input={"path": "index.html", "content": "<html></html>"})])
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="write_file",
+                        input={"path": "index.html", "content": "<html></html>"})])
     )
-    session._llm.code = AsyncMock(
-        return_value=_resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -206,8 +221,8 @@ async def test_run_loop_ignores_unknown_token_cap(tmp_path: Path):
 async def test_run_loop_passes_append_mode_through(tmp_path: Path):
     """Chunked assembly: two calls in one round build the file."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(
-        return_value=_resp([
+    session._llm.plan_stream = _stream_mock(
+        _resp([
             ToolCall(id="1", name="write_file",
                      input={"path": "d.html", "content": "<head>", "mode": "w"}),
             ToolCall(id="2", name="write_file",

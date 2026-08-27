@@ -37,6 +37,7 @@ from .prompts import (
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.llm.provider import LLMResponse
 
 
 # Higher than the old 12 because the sub-generator also spends rounds on
@@ -85,6 +86,33 @@ def _unwrap_outcome(result):
     from anton.core.tools.registry import ToolOutcome
 
     return result.content if isinstance(result, ToolOutcome) else result
+
+
+async def _drain_stream(events) -> "LLMResponse":
+    """Consume a `plan_stream()`/`code_stream()` iterator, discarding the
+    token-level deltas, and return the final assembled response.
+
+    Used in place of the one-shot `plan()`/`code()` calls. This pipeline runs
+    headless — its own progress surface is the step-level `ToolProgress`
+    protocol, not per-token UX — so nothing needs the intermediate
+    `StreamTextDelta`/`StreamToolUse*` events, only the terminal
+    `StreamComplete`. The reason to stream at all is transport, not UX: a
+    non-streaming call sends no bytes over the wire until the whole response
+    is ready, and `api.mindshub.ai` sits behind Cloudflare, which kills a
+    connection that has been silent for ~100s with a 524 — a real failure on
+    long spec/code generations. Streaming keeps bytes flowing continuously so
+    the proxy never observes silence, regardless of how long the full
+    generation takes.
+    """
+    from anton.core.llm.provider import StreamComplete
+
+    result = None
+    async for event in events:
+        if isinstance(event, StreamComplete):
+            result = event.response
+    if result is None:
+        raise RuntimeError("LLM stream ended without a StreamComplete event")
+    return result
 
 
 def _output_token_cap(session) -> int | None:
@@ -160,9 +188,9 @@ async def _plan_whole_document(
         if attempt > 0 and on_retry is not None:
             on_retry()
         messages = [{"role": "user", "content": user + extra}]
-        response = await session._llm.plan(
+        response = await _drain_stream(session._llm.plan_stream(
             system=system, messages=messages, max_tokens=budget,
-        )
+        ))
         if trace is not None:
             trace.llm_call(
                 node=node_label, method="plan", system=system,
@@ -370,12 +398,12 @@ async def _run_loop(
     for round_idx in range(MAX_ROUNDS):
         # First round: use the planning model for highest-quality initial generation.
         # Subsequent rounds (retries, read_file refinements) use the coding model.
-        llm_call = session._llm.plan if round_idx == 0 else session._llm.code
-        response = await llm_call(
+        llm_call = session._llm.plan_stream if round_idx == 0 else session._llm.code_stream
+        response = await _drain_stream(llm_call(
             system=system,
             messages=messages,
             tools=tools,
-        )
+        ))
 
         if trace is not None:
             trace.llm_call(

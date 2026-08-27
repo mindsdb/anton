@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import orchestrator
 from anton.core.tools.generate_artifact.state import (
     DataVerdict, FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
 )
+
+
+async def _one_event_stream(response):
+    yield StreamComplete(response=response)
+
+
+def _stream_mock(response):
+    """`plan_stream` fake: every call returns a fresh one-event stream of the
+    same response (mirrors `AsyncMock(return_value=...)`)."""
+    return Mock(side_effect=lambda **kw: _one_event_stream(response))
 
 
 def _state(tmp_path, **kw):
@@ -229,7 +240,7 @@ async def test_gen_verify_backend_terminal_after_second_failure(tmp_path: Path, 
 
 async def test_write_tech_spec_writes_spec_md(tmp_path: Path):
     st = _state(tmp_path)
-    st.session._llm.plan = AsyncMock(return_value=type("R", (), {"content": "# Spec\nbody"})())
+    st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec\nbody"})())
     err = await orchestrator._write_tech_spec(st)
     assert err is None
     assert (tmp_path / "spec.md").read_text().startswith("# Spec")
@@ -242,7 +253,7 @@ async def test_run_html_app_happy_path(tmp_path: Path, monkeypatch):
     st.session._llm.generate_object = AsyncMock(
         return_value=DataVerdict(enough=True, reasoning="no data needed")
     )
-    st.session._llm.plan = AsyncMock(return_value=type("R", (), {"content": "# Spec"})())
+    st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
     async def fake_front(state):
         (tmp_path / "dashboard.html").write_text("<body><div id=x></div></body>")
@@ -276,7 +287,7 @@ async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
     st.session._llm.generate_object = AsyncMock(
         return_value=DataVerdict(enough=True, reasoning="have data")
     )
-    st.session._llm.plan = AsyncMock(return_value=type("R", (), {"content": "# Spec"})())
+    st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
     async def fake_api(state):
         state.api_spec = '{"paths": {"/api/items": {"get": {"parameters": []}}}}'
@@ -548,7 +559,7 @@ async def test_spec_files_are_reported_separately(tmp_path: Path, monkeypatch):
     st.session._llm.generate_object = AsyncMock(
         return_value=DataVerdict(enough=True, reasoning="no data needed")
     )
-    st.session._llm.plan = AsyncMock(return_value=type("R", (), {"content": "# Spec"})())
+    st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
     async def fake_front(state):
         (tmp_path / "dashboard.html").write_text("<body><div id=x></div></body>")

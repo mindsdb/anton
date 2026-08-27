@@ -9,11 +9,22 @@ from __future__ import annotations
 import ast
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import orchestrator
 from anton.core.tools.generate_artifact.progress import STEP_LABELS, label_for
 from anton.core.tools.generate_artifact.state import DataVerdict, GenState, VerifyResult
+
+
+async def _one_event_stream(response):
+    yield StreamComplete(response=response)
+
+
+def _stream_mock(response):
+    """`plan_stream` fake: every call returns a fresh one-event stream of the
+    same response (mirrors `AsyncMock(return_value=...)`)."""
+    return Mock(side_effect=lambda **kw: _one_event_stream(response))
 
 
 def _state(tmp_path, **kw):
@@ -125,7 +136,7 @@ async def test_data_phase_and_tech_spec_report_before_they_run(tmp_path: Path):
     st.session._llm.generate_object = AsyncMock(
         return_value=DataVerdict(enough=True, reasoning="no data needed")
     )
-    st.session._llm.plan = AsyncMock(return_value=type("R", (), {"content": "# Spec"})())
+    st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
     assert await orchestrator._data_phase(st) is None
     assert _drain(st) == [

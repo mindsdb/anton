@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from anton.config.settings import AntonSettings
 from anton.core.llm.client import LLMClient
-from anton.core.llm.provider import LLMProvider, LLMResponse, Usage
+from anton.core.llm.provider import LLMProvider, LLMResponse, StreamComplete, Usage
+
+
+async def _stream_of(response):
+    yield StreamComplete(response=response)
 
 
 @pytest.fixture()
@@ -18,6 +22,12 @@ def mock_providers():
     )
     coding.complete = AsyncMock(
         return_value=LLMResponse(content="code", usage=Usage())
+    )
+    planning.stream = Mock(
+        side_effect=lambda **kw: _stream_of(LLMResponse(content="plan-stream", usage=Usage()))
+    )
+    coding.stream = Mock(
+        side_effect=lambda **kw: _stream_of(LLMResponse(content="code-stream", usage=Usage()))
     )
     return planning, coding
 
@@ -71,6 +81,26 @@ class TestLLMClient:
         )
         call_kwargs = planning.complete.call_args.kwargs
         assert call_kwargs["tools"] == tools
+
+    async def test_code_stream_delegates_to_coding_provider(self, mock_providers):
+        planning, coding = mock_providers
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+        events = [
+            event
+            async for event in client.code_stream(
+                system="sys", messages=[{"role": "user", "content": "code this"}]
+            )
+        ]
+        coding.stream.assert_called_once()
+        call_kwargs = coding.stream.call_args.kwargs
+        assert call_kwargs["model"] == "model-b"
+        assert isinstance(events[-1], StreamComplete)
+        assert events[-1].response.content == "code-stream"
 
 
 class TestRouterRole:

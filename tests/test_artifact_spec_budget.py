@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator
 from anton.core.tools.generate_artifact.state import (
     SPEC_MAX_TOKENS,
@@ -26,6 +27,16 @@ def _response(content: str, *, output_tokens: int, stop_reason: str | None = Non
         stop_reason=stop_reason,
         usage=SimpleNamespace(output_tokens=output_tokens),
     )
+
+
+async def _one_event_stream(response):
+    yield StreamComplete(response=response)
+
+
+def _stream_mock(*responses):
+    """`plan_stream` fake: each call returns a fresh one-event stream, one
+    queued response at a time (mirrors `AsyncMock(side_effect=[...])`)."""
+    return Mock(side_effect=[_one_event_stream(r) for r in responses])
 
 
 def _state(tmp_path, **kw):
@@ -56,21 +67,21 @@ async def test_first_call_uses_the_spec_budget_not_the_client_default(tmp_path: 
     answers anton asks for, and reasoning models spend their thinking from the
     same budget."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(return_value=_response("# Spec", output_tokens=10))
+    session._llm.plan_stream = _stream_mock(_response("# Spec", output_tokens=10))
     body, err = await engine._plan_whole_document(
         session, system="s", user="u", node_label="make_tech_spec",
     )
     assert (body, err) == ("# Spec", None)
-    assert session._llm.plan.await_args.kwargs["max_tokens"] == SPEC_MAX_TOKENS
+    assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == SPEC_MAX_TOKENS
 
 
 async def test_an_untruncated_answer_makes_exactly_one_call(tmp_path: Path):
     session = AsyncMock()
-    session._llm.plan = AsyncMock(return_value=_response("# Spec", output_tokens=10))
+    session._llm.plan_stream = _stream_mock(_response("# Spec", output_tokens=10))
     await engine._plan_whole_document(
         session, system="s", user="u", node_label="make_tech_spec",
     )
-    assert session._llm.plan.await_count == 1
+    assert session._llm.plan_stream.call_count == 1
 
 
 # ── retry ───────────────────────────────────────────────────────────────────
@@ -79,15 +90,15 @@ async def test_a_cut_answer_is_retried_with_more_room_and_a_compact_nudge():
     """The re-ask must CHANGE the call: an identical re-issue dies identically
     (measured for the main loop's own recovery)."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(side_effect=[
+    session._llm.plan_stream = _stream_mock(
         _response("# Spec (half", output_tokens=SPEC_MAX_TOKENS),
         _response("# Spec, complete", output_tokens=200),
-    ])
+    )
     body, err = await engine._plan_whole_document(
         session, system="s", user="the brief", node_label="make_tech_spec",
     )
     assert (body, err) == ("# Spec, complete", None)
-    calls = session._llm.plan.await_args_list
+    calls = session._llm.plan_stream.call_args_list
     assert calls[0].kwargs["max_tokens"] == SPEC_MAX_TOKENS
     assert calls[1].kwargs["max_tokens"] == SPEC_MAX_TOKENS_RETRY
     retry_user = calls[1].kwargs["messages"][0]["content"]
@@ -99,25 +110,25 @@ async def test_truncation_is_detected_by_stop_reason_too():
     """A cut that stops just under the cap is invisible to a token count; the
     gateway has reported `stop_reason` correctly since 2026-08-03."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(side_effect=[
+    session._llm.plan_stream = _stream_mock(
         _response("# half", output_tokens=12, stop_reason="length"),
         _response("# whole", output_tokens=20),
-    ])
+    )
     body, err = await engine._plan_whole_document(
         session, system="s", user="u", node_label="make_tech_spec",
     )
     assert (body, err) == ("# whole", None)
-    assert session._llm.plan.await_count == 2
+    assert session._llm.plan_stream.call_count == 2
 
 
 async def test_the_retry_is_announced_as_progress():
     """A second whole-document call at a 20k budget is minutes of silence
     otherwise."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(side_effect=[
+    session._llm.plan_stream = _stream_mock(
         _response("half", output_tokens=SPEC_MAX_TOKENS),
         _response("whole", output_tokens=10),
-    ])
+    )
     seen = []
     await engine._plan_whole_document(
         session, system="s", user="u", node_label="make_tech_spec",
@@ -130,10 +141,10 @@ async def test_the_retry_is_announced_as_progress():
 
 async def test_two_cut_answers_produce_an_error_not_a_body():
     session = AsyncMock()
-    session._llm.plan = AsyncMock(side_effect=[
+    session._llm.plan_stream = _stream_mock(
         _response("# half", output_tokens=SPEC_MAX_TOKENS),
         _response("# still half", output_tokens=SPEC_MAX_TOKENS_RETRY),
-    ])
+    )
     body, err = await engine._plan_whole_document(
         session, system="s", user="u", node_label="make_tech_spec",
     )
@@ -147,10 +158,10 @@ async def test_a_truncated_tech_spec_is_never_written_to_disk(tmp_path: Path):
     """The whole point: `_spec_context` reads spec.md back and hands it to both
     generators, so a half spec on disk means half a system built silently."""
     st = _state(tmp_path)
-    st.session._llm.plan = AsyncMock(side_effect=[
+    st.session._llm.plan_stream = _stream_mock(
         _response("# half", output_tokens=SPEC_MAX_TOKENS),
         _response("# still half", output_tokens=SPEC_MAX_TOKENS_RETRY),
-    ])
+    )
     err = await orchestrator._write_tech_spec(st)
     assert err is not None and "output limit" in err
     assert not (tmp_path / "spec.md").exists()
@@ -162,10 +173,10 @@ async def test_a_truncated_api_spec_is_not_reported_as_invalid_json(tmp_path: Pa
     """A cut JSON document fails `json.loads`, so before the truncation check
     the run blamed the model's syntax for what was really an output-cap hit."""
     session = AsyncMock()
-    session._llm.plan = AsyncMock(side_effect=[
+    session._llm.plan_stream = _stream_mock(
         _response('{"paths": {"/api/i', output_tokens=SPEC_MAX_TOKENS),
         _response('{"paths": {"/api/i', output_tokens=SPEC_MAX_TOKENS_RETRY),
-    ])
+    )
     out = await engine._generate_api_spec(session, "ctx")
     assert out.startswith("Error:")
     assert "output limit" in out
@@ -174,10 +185,10 @@ async def test_a_truncated_api_spec_is_not_reported_as_invalid_json(tmp_path: Pa
 
 async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):
     st = _state(tmp_path)
-    st.session._llm.plan = AsyncMock(side_effect=[
+    st.session._llm.plan_stream = _stream_mock(
         _response("# half", output_tokens=SPEC_MAX_TOKENS),
         _response("# Spec\nbody", output_tokens=100),
-    ])
+    )
     assert await orchestrator._write_tech_spec(st) is None
     assert (tmp_path / "spec.md").read_text(encoding="utf-8") == "# Spec\nbody"
     assert st.internal_files == ["spec.md"]
