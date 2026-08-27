@@ -378,3 +378,49 @@ def test_role_is_the_composition_of_both_halves():
     """The _ROLE name is preserved: three stage-1c tests read it directly."""
     assert prompts._ROLE_COMMON in prompts._ROLE
     assert prompts._ROLE_WRITE in prompts._ROLE
+
+
+def test_tech_spec_is_compact_for_html_app_with_prd():
+    """A full spec next to a confirmed PRD is near-pure duplication (measured
+    2026-08-27: 190 s / 13k output tokens restating a 20 KB PRD), and
+    `_spec_context` then carries both into every generation prompt."""
+    system, _ = prompts.build_tech_spec_prompt(
+        _state(artifact_type="html-app", is_fullstack=False, prd="# PRD\nGoal: x")
+    )
+    assert "do\nNOT restate it" in system or "do NOT restate it" in system
+    assert "Implementation notes" in system
+
+
+def test_tech_spec_stays_full_without_prd():
+    system, _ = prompts.build_tech_spec_prompt(
+        _state(artifact_type="html-app", is_fullstack=False)
+    )
+    assert "Implementation notes" not in system
+
+
+def test_tech_spec_stays_full_for_fullstack_even_with_prd():
+    """Fullstack specs feed the API design — the compact form is html-app only."""
+    system, _ = prompts.build_tech_spec_prompt(
+        _state(artifact_type="fullstack-stateless-app", is_fullstack=True, prd="# PRD")
+    )
+    assert "Implementation notes" not in system
+
+
+def test_role_says_verification_is_not_the_models_job():
+    """Nine of twenty rounds of the 2026-08-27 live run went to self-checks the
+    deterministic verifier repeats anyway — and the round budget died of it."""
+    role = prompts._ROLE_WRITE
+    assert "VERIFICATION IS NOT YOUR JOB" in role
+    assert "finish" in role
+
+
+def test_role_forbids_new_scratchpad_names():
+    assert "NEVER create a scratchpad with a new name" in prompts._ROLE_COMMON
+
+
+def test_write_discipline_names_a_hard_chunk_limit():
+    """"Well under ~6 KB" held neither the first chunk (24 KB) nor the first
+    append (cut at the output cap) in both live-run attempts."""
+    d = prompts._WRITE_DISCIPLINE
+    assert "6,000 characters" in d
+    assert "mode=\"w\"` chunk and the first" in d

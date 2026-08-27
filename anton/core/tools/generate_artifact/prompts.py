@@ -98,8 +98,9 @@ USING DATA:
 - Use `scratchpad(action="exec", name="<pad>", code=...)` to pull or rebuild the
   data you need (re-query, aggregate, reshape). Provide
   `one_line_description` and `estimated_execution_time_seconds` on every `exec`.
-  Reuse the scratchpad name the brief gives you — a new name is an isolated
-  environment with none of the existing variables, imports or connection code.\
+  NEVER create a scratchpad with a new name: reuse the pad named in the brief
+  or the PRD — a new name is an isolated empty environment with none of the
+  existing variables, imports or connection code, and the call may be rejected.\
 """
 
 # Write half: only for nodes that actually produce files. NOT mixed into the
@@ -114,6 +115,11 @@ HARD RULES:
   carrying a whole file is cut off by the output limit and rejected.
 - All `path` values are RELATIVE to the artifact folder — never write outside it.
 - Call `finish(summary="<one line>")` exactly once when all files are written.
+- VERIFICATION IS NOT YOUR JOB. After you call `finish`, a deterministic
+  verifier checks your output (structure, required tags, forbidden patterns),
+  and on failure you get another attempt with the exact errors. Do NOT spend
+  rounds re-reading, re-counting or re-checking what you wrote — the moment the
+  last chunk closes every open tag, call `finish`.
 
 FILE TOOLS:
 - `write_file(path, content, mode="w"|"a")` — write a UTF-8 text file at
@@ -446,11 +452,13 @@ written and the round is wasted. Build the file in chunks instead:
 - Every next chunk: `write_file(path, content, mode="a")` — one section per call:
   the data block, then each chart's markup, then the scripts, then the closing
   tags.
-- Keep each call's `content` well under ~6 KB. Several small calls in one reply
-  are fine and cost one round together.
+- HARD CHUNK LIMIT: at most 6,000 characters of `content` per call — the FIRST
+  `mode="w"` chunk and the first `mode="a"` chunk included; those are exactly
+  where oversized calls get cut off. A 40 KB page is 8-10 chunks. Several small
+  calls in one reply are fine and cost one round together.
 - Do NOT re-emit the whole file to "fix" something — append the remaining part.
-  To check what landed, `read_file` the path and look at its size, don't re-send
-  the content.
+  To check what landed, `read_file` the path — it returns the size and the tail,
+  which is all you need.
 - The final chunk must close every tag you opened, `</body></html>` included.
 
 PYTHON → JS STRING SAFETY (only when you build content inside a scratchpad cell):
@@ -849,6 +857,23 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
 """
 
 
+# html-app with a confirmed PRD: the PRD already fixes goal, data model,
+# functional and UI/UX requirements, and `_spec_context` hands it to the
+# generator verbatim NEXT TO this document. A full spec there is almost pure
+# duplication — measured 2026-08-27: 190 s and 13k output tokens to restate a
+# 20 KB PRD as a 35 KB spec, which then rode into every generation prompt.
+_TECH_SPEC_COMPACT = """\
+A user-confirmed PRD is provided below. It is the authoritative requirements
+source, and the generator receives it VERBATIM alongside your document — so do
+NOT restate it: no retelling of its content, requirements, data, copy or
+structure. Write ONLY what the PRD does not already say:
+- `## Insights` — as described above, when the artifact shows data.
+- `## Implementation notes` — component breakdown, rendering and interaction
+  details, tricky parts, edge cases. Terse bullet points, no prose.
+Keep the whole document SHORT — it complements the PRD instead of replacing
+it, and every line you write is context the generator must carry."""
+
+
 def build_tech_spec_prompt(state) -> tuple[str, str]:
     system = (
         _DATA_CONTEXT_HEADER
@@ -865,6 +890,11 @@ def build_tech_spec_prompt(state) -> tuple[str, str]:
         "matters>`. Terse — a checklist, not prose, no design discussion. It "
         "tells the frontend generator what each visual is FOR, which is the "
         "difference between a polished page and a pile of charts.\n\n"
+        + (
+            _TECH_SPEC_COMPACT + "\n\n"
+            if state.artifact_type == "html-app" and getattr(state, "prd", "")
+            else ""
+        )
         + _TECH_SPEC_STACK
     )
     user = _brief_and_notes(state) + (
