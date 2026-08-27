@@ -61,14 +61,15 @@ _TRUNCATED_MSG = (
     "Error: THIS tool call was cut off by the output limit and wrote nothing. "
     "The earlier tool calls in this same reply DID take effect — do NOT re-send "
     "them, or `mode=\"a\"` will duplicate their content. Continue from where the "
-    "file now ends, appending with `mode=\"a\"` and keeping each call's "
-    "`content` well under ~6 KB."
+    "file now ends, appending with `mode=\"a\"`. Your next chunk must be at most "
+    "4,000 characters of `content`; split the remaining work into as many "
+    "chunks as it takes."
 )
 
 _NO_CONTENT_MSG = (
     "Error: `content` was not delivered, so nothing was written. Re-emit this "
-    "chunk with a non-empty `content`, well under ~6 KB, appending with "
-    "`mode=\"a\"` if the file already has earlier chunks."
+    "chunk with a non-empty `content` of at most 4,000 characters, appending "
+    "with `mode=\"a\"` if the file already has earlier chunks."
 )
 
 
@@ -118,23 +119,28 @@ async def _drain_stream(events) -> "LLMResponse":
 def _output_token_cap(session) -> int | None:
     """The client's effective output cap, or None when it cannot be read.
 
-    `LLMClient` exposes no public accessor — only the private `_max_tokens`
-    (`anton/core/llm/client.py:58`). In tests the session is an `AsyncMock` where
-    the attribute exists and is truthy but is not a number, so the type check is
-    mandatory: without it the detection would fire on every test.
+    Reads the public `max_tokens` property (`anton/core/llm/client.py:151`,
+    added by ENG-1042 for exactly this comparison). In tests the session is an
+    `AsyncMock` where the attribute exists and is truthy but is not a number,
+    so the type check is mandatory: without it the detection would fire on
+    every test.
     """
-    cap = getattr(getattr(session, "_llm", None), "_max_tokens", None)
+    cap = getattr(getattr(session, "_llm", None), "max_tokens", None)
     return cap if isinstance(cap, int) and cap > 0 else None
 
 
 def _response_is_truncated(response, cap: int | None) -> bool:
     """The reply hit the output cap, so its last tool call was not delivered.
 
-    `stop_reason` cannot be relied on: the gateway reports `'stop'` on truncation
-    too (stage-1a measurement, findings 2-3). `output_tokens` is sometimes None —
-    then the signal is unknown and we do NOT flag: a false rejection is worse than
-    a miss.
+    Same semantics as the shared `looks_truncated` (`llm/structured.py`), which
+    honours both `stop_reason` and the token count — the gateway reports
+    `stop_reason` correctly since 2026-08-03. Kept local because mock sessions
+    make type strictness mandatory here: `usage.output_tokens` on an AsyncMock
+    is a truthy Mock, and comparing it against the cap would flag every test
+    round as truncated.
     """
+    if getattr(response, "stop_reason", None) in ("length", "max_tokens"):
+        return True
     if not cap:
         return False
     used = getattr(getattr(response, "usage", None), "output_tokens", None)
@@ -524,7 +530,10 @@ async def _run_loop(
                     }
                 )
             elif name == "read_file":
-                res = sub_tools.read_file(artifact_path, inp.get("path", ""))
+                res = sub_tools.read_file(
+                    artifact_path, inp.get("path", ""),
+                    full=bool(inp.get("full", False)),
+                )
                 result_blocks.append(
                     {
                         "type": "tool_result",
@@ -568,15 +577,45 @@ async def _run_loop(
                     }
                 )
 
-        messages.append({"role": "user", "content": result_blocks})
+        # Round accounting rides on the same user message as the tool results.
+        # The model has no other way to see the budget, and without it the
+        # measured failure mode is spending the last rounds on self-checks and
+        # dying at the cap with a finished file (live run 2026-08-27). Appended
+        # as a trailing text block: both providers accept text after
+        # tool_result blocks, and appending never invalidates the prefix cache.
+        rounds_left = MAX_ROUNDS - round_idx - 1
+        note = f"[{rounds_left} round(s) left in this task"
+        if 0 < rounds_left <= 5:
+            note += (
+                " — wrap up NOW: close any open tags and call `finish`. "
+                "Do not spend the remaining rounds on checks"
+            )
+        note += "]"
+        messages.append(
+            {"role": "user", "content": result_blocks + [{"type": "text", "text": note}]}
+        )
 
         if finished_summary is not None:
             break
     else:
-        return (
-            f"generator exceeded round budget ({MAX_ROUNDS}) after writing "
-            f"{len(files_written)} file(s): {files_written}."
-        )
+        # Budget exhausted without `finish`. A missing `finish` call is not
+        # evidence the files are bad — when the loop DID write files, hand
+        # them to the caller and let the verifier judge them (live run
+        # 2026-08-27: a complete 48 KB page was deleted and regenerated
+        # because the model burned its last rounds self-checking). The
+        # `finished` flag tells the caller how the loop ended.
+        if not files_written:
+            return (
+                f"generator exceeded round budget ({MAX_ROUNDS}) without "
+                "writing any files."
+            )
+        return {
+            "files_written": files_written,
+            "rounds_used": MAX_ROUNDS,
+            "summary": f"(round budget {MAX_ROUNDS} exhausted before finish was called)",
+            "scratchpad_execs": scratchpad_execs,
+            "finished": False,
+        }
 
     if require_files and not files_written:
         return "generator finished without writing any files."
@@ -586,4 +625,5 @@ async def _run_loop(
         "rounds_used": round_idx + 1,
         "summary": finished_summary,
         "scratchpad_execs": scratchpad_execs,
+        "finished": True,
     }
