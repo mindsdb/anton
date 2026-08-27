@@ -68,7 +68,8 @@ READ_FILE_SCHEMA: dict = {
         "returns the file's size and its tail — enough to see what landed and "
         "whether the file is closed. Pass `full=true` ONLY when you must "
         "re-read the entire content (expensive: the whole file enters your "
-        "context). Path is relative to the artifact root."
+        "context) — never to verify finished work, the pipeline verifier does "
+        "that after `finish`. Path is relative to the artifact root."
     ),
     "input_schema": {
         "type": "object",

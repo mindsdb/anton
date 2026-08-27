@@ -224,3 +224,18 @@ async def test_validation_errors_yield_no_progress(tmp_path: Path):
     progress, out = await _collect(_session(tmp_path), {"context": "b"})
     assert progress == []
     assert out == "Error: `slug` is required."
+
+
+async def test_success_tells_the_agent_not_to_reverify(tmp_path: Path, monkeypatch):
+    """Without this instruction the calling agent re-verifies the pipeline's
+    work by hand — a measured 2026-08-27 run spent 11 planning-model calls
+    re-reading an artifact the generator had already verified."""
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        return {"files_written": ["backend.py"], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "context": "brief"})
+    assert '"instruction"' in out
+    assert "Do NOT re-read" in out
