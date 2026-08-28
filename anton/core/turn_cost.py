@@ -64,9 +64,11 @@ class RoleCost:
     event can carry this as flat properties instead of a nested blob.
 
     ``model`` is the alias anton REQUESTED. The gateway may resolve or fail
-    over to a different model server-side and does not report that back on the
-    response (``LLMResponse`` carries no model field), so this is the client's
-    intent, not proof of what served the call — Langfuse holds the latter.
+    over to a different model server-side; it does echo the resolved id on the
+    response (``LLMResponse.model``, ENG-1638 — verified live: ``mindshub_air``
+    comes back as ``gpt-5.6-luna``), but this field deliberately keeps the
+    requested alias so the per-model dollar math stays keyed on what the user
+    picked and can be joined to the catalog. Langfuse holds the served id.
     Normally one model per role per turn; if a role somehow sees more, they are
     joined with ``|`` so the ambiguity is visible rather than silently dropping
     one (a joined value means per-model dollar math for that role is unsafe).

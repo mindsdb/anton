@@ -528,7 +528,8 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     from anton.config.settings import AntonSettings
     from anton.core.backends.local import local_scratchpad_runtime_factory
     from anton.core.llm.client import LLMClient
-    from anton.core.session import ChatSession, ChatSessionConfig
+    from anton.core.llm.identity import build_runtime_context
+    from anton.core.session import ChatSession, ChatSessionConfig, SystemPromptContext
     from anton.workspace import Workspace
 
     base = resolve_trusted_workspace_path()
@@ -611,6 +612,14 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # sends; every web turn executes in a pod and only web turns do, so
         # "ran in a pod" needs no field of its own today.
         harness=HARNESS_ANTON,
+        # ENG-1638: the pod used to pass no prompt context, so RUNTIME IDENTITY
+        # rendered empty while still telling the model it "already knows" its
+        # model — and a Grok session answered "No — I'm Anton, not Grok". The
+        # configured block is the same one desktop injects; the serving-model
+        # line is derived by the session from the provider's response.
+        system_prompt_context=SystemPromptContext(
+            runtime_context=build_runtime_context(settings),
+        ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
         # driven directly rather than by cowork; an unset surface reads as

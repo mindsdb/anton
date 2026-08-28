@@ -850,3 +850,20 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
 
     assert cfg.data_vault.load("gmail", "primary") is None
     assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ
+
+
+# ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────
+
+def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, monkeypatch):
+    """Before the fix the pod passed no system_prompt_context, so RUNTIME
+    IDENTITY rendered empty under a "you already know" mandate and a Grok
+    session denied being Grok. The pod now injects the same configured block
+    desktop does; the serving-model line is derived by the session."""
+    _, cfg = _build(
+        tmp_path, monkeypatch, model="grok",
+        llm={"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"},
+    )
+    ctx = cfg.system_prompt_context.runtime_context
+    assert "Planning model: grok" in ctx
+    assert "Provider: openai-compatible" in ctx  # minds-cloud → openai-compatible derivation
+    assert str(tmp_path) not in ctx  # the workspace path never rides along (security note)

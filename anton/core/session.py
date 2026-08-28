@@ -20,6 +20,7 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.endpoints import classify_endpoint
+from anton.core.llm.identity import serving_model_lines
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -1787,10 +1788,23 @@ class ChatSession:
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
 
+        # Which model is serving THIS conversation (ENG-1638): what the planning
+        # provider reported on its last response, else the id we requested,
+        # labelled unconfirmed. Read via getattr/isinstance so a host that
+        # passes a mock or an older client without these attributes gets the
+        # cannot-verify fallback rather than a Mock repr in the prompt. Lives in
+        # the cache-stable prefix on purpose: it changes at most once per
+        # session (turn 1 requested → turn 2 served) and is otherwise stable.
+        identity_lines = serving_model_lines(
+            requested=getattr(self._llm, "planning_model", None),
+            served=getattr(self._llm, "last_served_model", None),
+        )
+
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
             conversation_started=_conversation_started,
             system_prompt_context=self._system_prompt_context,
+            runtime_identity_lines=identity_lines,
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
