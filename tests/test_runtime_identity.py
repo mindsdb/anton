@@ -72,6 +72,19 @@ class TestServingModelLines:
     def test_only_air_is_opaque_today(self):
         assert OPAQUE_ALIAS_LABELS == {"mindshub_air": "MindsHub Air"}
 
+    def test_legacy_latest_prefix_still_hits_the_air_rule(self):
+        # cowork-server still resolves the deprecated `latest:` pin and overlays
+        # the stored string verbatim; a stale `latest:mindshub_air` must not leak
+        # the served vendor id (self-review finding on anton#410).
+        lines = serving_model_lines(requested="latest:mindshub_air", served="gpt-5.6-luna")
+        assert "MindsHub Air" in "\n".join(lines)
+        assert "gpt-5.6-luna" not in "\n".join(lines)
+
+    def test_legacy_latest_prefix_is_not_shown_to_the_user(self):
+        (line,) = serving_model_lines(requested="latest:sonnet", served=None)
+        assert line.startswith("- Serving model: sonnet ")
+        assert "latest:" not in line
+
 
 class TestSanitizeModelName:
     def test_strips_control_characters_and_newlines(self):

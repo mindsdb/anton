@@ -60,16 +60,27 @@ OPAQUE_ALIAS_LABELS: dict[str, str] = {MINDSHUB_AIR_ALIAS: "MindsHub Air"}
 _MAX_MODEL_NAME_LEN = 80
 
 
+#: The deprecated pin prefix cowork-server still resolves (``latest:sonnet``).
+#: A stale ``latest:mindshub_air`` pin is overlaid onto settings verbatim, so
+#: without stripping it the Air rule would miss and the served vendor id would
+#: leak — the exact thing this module exists to prevent.
+_LEGACY_PIN_PREFIX = "latest:"
+
+
 def sanitize_model_name(value: object) -> str | None:
     """A model id safe to interpolate into the prompt, or ``None``.
 
     Non-strings (a Mock in tests, ``None`` from an SDK that omitted the field)
     are dropped rather than stringified. Newlines and control characters are
-    removed so the value cannot start a new prompt line; the length is capped.
+    removed so the value cannot start a new prompt line; the length is capped;
+    the deprecated ``latest:`` pin prefix is dropped so an alias compares (and
+    reads) the same however it was stored.
     """
     if not isinstance(value, str):
         return None
     cleaned = "".join(ch for ch in value if ch.isprintable() and ch not in "\r\n").strip()
+    if cleaned.lower().startswith(_LEGACY_PIN_PREFIX):
+        cleaned = cleaned[len(_LEGACY_PIN_PREFIX):].strip()
     if not cleaned:
         return None
     return cleaned[:_MAX_MODEL_NAME_LEN]
