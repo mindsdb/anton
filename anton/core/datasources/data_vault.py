@@ -117,6 +117,16 @@ def resolve_modify_merge(
     return merged, secure_keys
 
 
+def _sweep_ds_env_vars() -> None:
+    """Remove every DS_* variable from os.environ.
+
+    Shared by every clear_ds_env() implementation (module-level and both
+    vault classes) so the sweep logic lives in exactly one place.
+    """
+    for key in [k for k in os.environ if k.startswith("DS_")]:
+        del os.environ[key]
+
+
 def _slug_env_prefix(engine: str, name: str) -> str:
     """Return the DS_ prefix for a namespaced connection env var.
 
@@ -363,9 +373,7 @@ class LocalDataVault:
 
     def clear_ds_env(self) -> None:
         """Remove all DS_* variables from os.environ."""
-        ds_keys = [k for k in os.environ if k.startswith("DS_")]
-        for key in ds_keys:
-            del os.environ[key]
+        _sweep_ds_env_vars()
 
     def next_connection_number(self, engine: str) -> int:
         """Return the next auto-increment number for an engine (1-based).
@@ -419,6 +427,7 @@ class TurnKeyDataVault:
             for c in (oauth.get("connections") or [])
             if isinstance(c, dict) and c.get("engine") and c.get("name")
         ]
+        self._connection_keys = frozenset((c["engine"], c["name"]) for c in self._connections)
         self._base_url = (
             base_url
             or os.environ.get(ANTON_CLOUD_AUTH_BASE_URL_ENV)
@@ -491,8 +500,11 @@ class TurnKeyDataVault:
         return list(env)
 
     def clear_ds_env(self) -> None:
-        for key in [k for k in os.environ if k.startswith("DS_")]:
-            del os.environ[key]
+        """Remove all DS_* variables from os.environ and drop this vault's
+        per-connection token cache, so a later fetch can't return stale
+        pre-clear credentials."""
+        _sweep_ds_env_vars()
+        self._cache.clear()
 
     def _fetch(self, engine: str, name: str) -> dict[str, str] | None:
         cache_key = (engine, name)
@@ -505,6 +517,11 @@ class TurnKeyDataVault:
     def _fetch_uncached(self, engine: str, name: str) -> dict[str, str] | None:
         if not self._turn_key:
             logger.warning("TurnKeyDataVault: no turn key available for %s/%s", engine, name)
+            return None
+        # Defense in depth: don't rely solely on auth's own org-scoped query —
+        # never fetch a connection cowork-server didn't list for this turn.
+        if (engine, name) not in self._connection_keys:
+            logger.warning("TurnKeyDataVault: %s/%s not in this turn's connection list; refusing", engine, name)
             return None
         from anton.minds_client import minds_request  # local: avoid a module-load-time dep from core.datasources
 

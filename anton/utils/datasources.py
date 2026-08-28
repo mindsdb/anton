@@ -12,6 +12,7 @@ from anton.core.datasources.data_vault import (
     DataVault,
     LocalDataVault,
     _slug_env_prefix,
+    _sweep_ds_env_vars,
     is_secret_key,
 )
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
@@ -396,8 +397,24 @@ def _is_oauth_connection(vault: DataVault, engine: str, name: str) -> bool:
     return fields.get("auth_type") == "oauth"
 
 
+def clear_ds_env() -> None:
+    """Unconditionally clear every DS_* env var and reset the known/secret
+    registries — call this even on a turn with nothing to reinject (e.g. no
+    oauth block this turn), so a var from a prior call can never survive into
+    a turn that has no vault of its own to reset it. This is the version
+    callers with no vault instance in hand can use; callers that do have one
+    should call `restore_namespaced_env()` so any vault-specific override of
+    `clear_ds_env()` (e.g. cache invalidation) still runs."""
+    _reset_registered_ds_vars()
+    _sweep_ds_env_vars()
+
+
 def restore_namespaced_env(vault: DataVault) -> None:
-    """Clear all DS_* vars, then reinject every saved connection as namespaced."""
+    """Clear all DS_* vars, then reinject every saved connection as namespaced.
+
+    Clears via `vault.clear_ds_env()` rather than the module-level
+    `clear_ds_env()` so a vault implementation's own override runs.
+    """
     _reset_registered_ds_vars()
     vault.clear_ds_env()
     dreg = DatasourceRegistry()

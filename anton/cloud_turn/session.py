@@ -588,11 +588,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     cortex = _build_cortex(request.memory, llm_client)
 
     # Connectors ON only when this turn carries an oauth block (Google
-    # Drive/Gmail today). restore_namespaced_env() is the exact same
-    # function desktop's harness.py already calls for LocalDataVault: it
-    # clears+reinjects DS_* env vars and registers them for credential
-    # scrubbing (so a token can't leak into LLM-visible output) before the
-    # sandbox subprocess inherits this process's env via runtime_factory.
+    # Drive/Gmail today) — clears+reinjects DS_* env before the sandbox subprocess inherits it.
     data_vault = None
     if request.oauth:
         from anton.core.datasources.data_vault import TurnKeyDataVault
@@ -600,6 +596,12 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
 
         data_vault = TurnKeyDataVault(request.oauth)
         restore_namespaced_env(data_vault)
+    else:
+        # No vault this turn — still clear, so a prior call's DS_* vars
+        # can never survive into a turn with nothing of its own to reset them.
+        from anton.utils.datasources import clear_ds_env
+
+        clear_ds_env()
 
     config = ChatSessionConfig(
         llm_client=llm_client,

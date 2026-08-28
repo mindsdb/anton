@@ -795,6 +795,15 @@ def test_no_oauth_block_leaves_data_vault_none(tmp_path, monkeypatch):
     assert cfg.data_vault is None
 
 
+def test_no_oauth_block_still_clears_a_leftover_ds_env_var(tmp_path, monkeypatch):
+    """A DS_* var left over from a prior call (e.g. if a process were ever
+    reused across turns) must never survive into a turn that has no oauth
+    block of its own to reset it via restore_namespaced_env()."""
+    monkeypatch.setenv("DS_LEFTOVER_FROM_PRIOR_TURN", "should-be-cleared")
+    _build(tmp_path, monkeypatch)
+    assert "DS_LEFTOVER_FROM_PRIOR_TURN" not in os.environ
+
+
 def test_oauth_block_produces_a_turn_key_data_vault(tmp_path, monkeypatch):
     from anton.core.datasources.data_vault import TurnKeyDataVault
 
