@@ -71,6 +71,12 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str | None = None
+    #: The model the provider reported SERVING this response (`model` on the
+    #: SDK response / stream), not the id anton requested. MindsHub resolves
+    #: aliases server-side (`mindshub_air` → `gpt-5.6-luna`) and echoes the
+    #: resolved id here; local servers echo their own name. None when the
+    #: provider omitted it. Feeds the RUNTIME IDENTITY prompt block (ENG-1638).
+    model: str | None = None
 
 
 @dataclass

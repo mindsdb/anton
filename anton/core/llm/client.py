@@ -66,6 +66,12 @@ class LLMClient:
         self._router_provider = router_provider or coding_provider
         self._router_model = router_model or coding_model
         self._max_tokens = max_tokens
+        # ENG-1638: the model the planning provider last reported SERVING (the
+        # `model` on its response), not the id we asked for. The session reads
+        # it when building the RUNTIME IDENTITY block so the agent's answer to
+        # "which model are you?" is what actually answered, not the alias in
+        # settings. None until the first planning response arrives.
+        self.last_served_model: str | None = None
         # ENG-1288: optional per-call usage observer. Every LLM call this
         # client makes — plan/plan_stream (planning), code + structured
         # coding calls like the completion verifier (coding), summarize/gate
@@ -116,6 +122,7 @@ class LLMClient:
             native_web_tools=native_web_tools,
         )
         self._notify_usage("planning", self._planning_model, response.usage, listener)
+        self._record_served(response)
         return response
 
     async def plan_stream(
@@ -140,7 +147,19 @@ class LLMClient:
                 self._notify_usage(
                     "planning", self._planning_model, event.response.usage, listener
                 )
+                self._record_served(event.response)
             yield event
+
+    def _record_served(self, response) -> None:
+        """Keep the last served model the planning provider reported.
+
+        Only the planning role: it is the one talking to the user, so it is the
+        one "which model are you?" is about. A response without the field
+        leaves the previous value in place rather than erasing a known answer.
+        """
+        served = getattr(response, "model", None)
+        if isinstance(served, str) and served.strip():
+            self.last_served_model = served.strip()
 
     @property
     def planning_provider(self) -> LLMProvider:
