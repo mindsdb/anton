@@ -35,6 +35,14 @@ jobs:
   # PR, and the approval a maintainer clicks is a courtesy extended before anyone
   # has read the Dockerfile.
   #
+  # Three answers, not two. `HEAD_REPO` is read from the pull request payload, so
+  # on any other event it is the empty string and compares unequal, which would
+  # skip the build and tell the run page that a fork was responsible. The same
+  # trap is written up on the `Decide whether live mode is required` step in
+  # verifier-eval.yml, which met it from the other direction. So the event is
+  # checked first and gets its own message: adding a trigger to this workflow
+  # stops the build until somebody says how the gate should read it.
+  #
   # The `version` job below stays ungated on purpose. It runs on a GitHub-hosted
   # runner holding no credentials, and a hosted runner executing a fork's code is
   # what every fork pull request in the world already does.
@@ -52,11 +60,21 @@ jobs:
       - name: Decide whether this pull request may reach the runner
         id: decide
         env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           THIS_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+          if [ "$IS_PR" != "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Build skipped: this run is not a pull request"
+              echo
+              echo "The gate decides from the pull request payload, and this event carries"
+              echo "none, so it cannot tell whose branch it is about to build."
+              echo "Whoever added this trigger needs to say how the gate should read it."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$HEAD_REPO" != "$THIS_REPO" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             {
               echo "### Build skipped: fork pull request"
