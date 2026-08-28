@@ -25,7 +25,9 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 # ENG-1692's script-traffic guard does not cover this. It lives inside
 # _emit_turn_cost alone, so three of those four families have no guard at all, and
 # it only takes effect once a developer updates their installed build. This line
-# is the one that works on every build, immediately.
+# is read from the checkout, so it takes effect on the next test run after a pull
+# or rebase — cheaper than a reinstall, but a long-lived branch cut before this
+# landed does not get it automatically.
 #
 # The escape hatch is removed deliberately. Nothing loses coverage: the tests that
 # exercise the analytics layer build their own settings objects and never read the

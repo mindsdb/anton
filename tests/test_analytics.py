@@ -827,12 +827,15 @@ sys.stdout.write("enabled=%s" % AntonSettings().analytics_enabled)
 
 
 def _resolve_analytics_enabled_in_child(**env_overrides: str) -> str:
+    # No CI-marker scrub here, unlike `_run_child` above. That scrub is
+    # load-bearing there because the child calls `send_event`, which consults
+    # `_is_ci()`. This child does not: it resolves `AntonSettings`, and
+    # `analytics_enabled` comes from `ANTON_ANALYTICS_ENABLED` alone. Verified
+    # in both directions — with every marker in `_CI_MARKERS` set, the fix still
+    # reports `enabled=False` and the `setdefault` mutant still reports
+    # `enabled=True`. Scrubbing here would be a no-op dressed as a guard, which
+    # is the exact defect this test exists to prevent.
     env = dict(os.environ)
-    # The suite may itself run under GitHub Actions. `_is_ci()` is a *separate*
-    # guard that would drop the traffic anyway, so leaving a marker set would
-    # make this pass for the wrong reason on CI and fail locally.
-    for marker in _CI_MARKERS:
-        env.pop(marker, None)
     env.update(env_overrides)
     tests_dir = os.path.dirname(os.path.abspath(__file__))
     result = subprocess.run(
