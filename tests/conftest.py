@@ -8,12 +8,33 @@ import pytest
 
 from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCall, Usage
 
-# Tests that drive full turns now reach the turn-cost analytics sink
-# (ENG-1288): _emit_turn_cost falls back to a fresh AntonSettings(), whose
-# default analytics_url is the real collector. Kill analytics for the whole
-# suite so no test run — local or CI — ever fires a real event. (CI is also
-# dropped by send_event's own CI detection; this covers local dev runs.)
-os.environ.setdefault("ANTON_ANALYTICS_ENABLED", "false")
+# Tests that drive full turns reach the turn-cost analytics sink (ENG-1288):
+# _emit_turn_cost falls back to a fresh AntonSettings(), whose default sinks are
+# the real collector and the real PostHog project. Kill analytics for the whole
+# suite so no test run ever fires a real event. (CI is also dropped by
+# send_event's own CI detection; this covers local dev runs.)
+#
+# Assignment, not setdefault (ENG-2055). setdefault writes only when the key is
+# absent, so a developer with ANTON_ANALYTICS_ENABLED exported — which is exactly
+# what someone working on an analytics ticket sets — cancelled this line without
+# any warning, and the suite shipped real events to production for four months.
+# Measured 2026-08-28 against a local capture server: one run with the variable
+# exported emitted 254 events — tool_completed 147, ds_connect_* 89, ask_user_* 16,
+# turn_completed 2.
+#
+# ENG-1692's script-traffic guard does not cover this. It lives inside
+# _emit_turn_cost alone, so three of those four families have no guard at all, and
+# it only takes effect once a developer updates their installed build. This line
+# is the one that works on every build, immediately.
+#
+# The escape hatch is removed deliberately. Nothing loses coverage: the tests that
+# exercise the analytics layer build their own settings objects and never read the
+# environment (test_analytics.py::_Settings and ::S, test_tool_completed.py::
+# _PosthogSettings, test_tool_outcome_tracking.py's SimpleNamespace), and
+# tests/e2e/harness.py sets the variable explicitly per subprocess rather than
+# relying on inheritance. Same call cowork-server's own conftest already makes for
+# the database: "Force isolation (assignment, not setdefault, never touch a real DB)."
+os.environ["ANTON_ANALYTICS_ENABLED"] = "false"
 
 
 def make_mock_llm() -> AsyncMock:
