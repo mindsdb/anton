@@ -503,6 +503,14 @@ class TurnKeyDataVault:
         return fields
 
     def _fetch_uncached(self, engine: str, name: str) -> dict[str, str] | None:
+        # Defense in depth: auth's own org+user-scoped query already prevents
+        # crossing an org boundary, but this vault should never even attempt a
+        # fetch for a connection cowork-server didn't list for this turn (e.g.
+        # one the caller's own disabled_connections filter deliberately
+        # excluded) — don't rely solely on a different repo's scoping.
+        if not any(c["engine"] == engine and c["name"] == name for c in self._connections):
+            logger.warning("TurnKeyDataVault: %s/%s not in this turn's connection list; refusing", engine, name)
+            return None
         if not self._turn_key:
             logger.warning("TurnKeyDataVault: no turn key available for %s/%s", engine, name)
             return None

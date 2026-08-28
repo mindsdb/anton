@@ -586,6 +586,14 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
 
     cortex = _build_cortex(request.memory, llm_client)
 
+    # Unconditional, even when this turn has no oauth block: a prior call's
+    # DS_* vars (and known/secret registrations) must never survive into a
+    # turn that has no vault of its own to reset them — see clear_ds_env()'s
+    # docstring. Safe to call twice; restore_namespaced_env() below re-clears.
+    from anton.utils.datasources import clear_ds_env
+
+    clear_ds_env()
+
     # Connectors ON only when this turn carries an oauth block (Google
     # Drive/Gmail today). restore_namespaced_env() is the exact same
     # function desktop's harness.py already calls for LocalDataVault: it

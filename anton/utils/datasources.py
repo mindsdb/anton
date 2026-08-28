@@ -396,10 +396,21 @@ def _is_oauth_connection(vault: DataVault, engine: str, name: str) -> bool:
     return fields.get("auth_type") == "oauth"
 
 
+def clear_ds_env() -> None:
+    """Unconditionally clear every DS_* env var and reset the known/secret
+    registries — call this even on a turn with nothing to reinject (e.g. no
+    oauth block this turn), so a var from a prior call can never survive into
+    a turn that has no vault of its own to reset it. Every DataVault
+    implementation's own clear_ds_env() does this same os.environ sweep; this
+    is the version callers with no vault instance in hand can still use."""
+    _reset_registered_ds_vars()
+    for key in [k for k in os.environ if k.startswith("DS_")]:
+        del os.environ[key]
+
+
 def restore_namespaced_env(vault: DataVault) -> None:
     """Clear all DS_* vars, then reinject every saved connection as namespaced."""
-    _reset_registered_ds_vars()
-    vault.clear_ds_env()
+    clear_ds_env()
     dreg = DatasourceRegistry()
     for conn in vault.list_connections():
         vault.inject_env(conn["engine"], conn["name"])  # flat=False by default
