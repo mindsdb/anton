@@ -42,6 +42,16 @@ DEFAULT_CLOUD_WORKSPACE_PATH = "/workspace"
 #: Operator/CI override for the mount path (pod-side env var, not request data).
 _WORKSPACE_PATH_ENV = "ANTON_CLOUD_WORKSPACE_PATH"
 
+#: Pod-side mount of the PROJECT's shared artifacts directory (ENG-2056). The
+#: workspace mount is per-CONVERSATION, so the derived
+#: ``<workspace>/.anton/artifacts`` only ever shows a task its own artifacts.
+#: The scratchpad controller mounts the project-level artifacts dir as a second
+#: mount OUTSIDE the workspace (so it can never land on sys.path) and sets this
+#: env var to tell anton where it is. When set, it replaces the derived default
+#: so sibling tasks in one project share a single artifacts tree. Same trust
+#: posture as _WORKSPACE_PATH_ENV: pod-side config, never from the wire request.
+_ARTIFACTS_ROOT_ENV = "ANTON_CLOUD_ARTIFACTS_ROOT"
+
 #: The only tools exposed in a cloud turn: scratchpad + the workspace-scoped
 #: artifact tools. Everything else core registers is dropped.
 CLOUD_TOOL_ALLOWLIST = frozenset(
@@ -425,6 +435,32 @@ def resolve_trusted_workspace_path() -> Path:
     return resolved
 
 
+def resolve_trusted_artifacts_root() -> Path | None:
+    """Resolve the project-artifacts mount (ENG-2056), or None when not set.
+
+    Reads :data:`_ARTIFACTS_ROOT_ENV`, set by the same scratchpad controller
+    that sets :data:`_WORKSPACE_PATH_ENV` (pod-side config, never from the wire
+    request), so it gets the same validation: absolute, no ``..``, then
+    canonicalised and created. None — desktop, CI, older controllers — leaves
+    the derived ``<workspace>/.anton/artifacts`` default untouched.
+    """
+    raw = (os.environ.get(_ARTIFACTS_ROOT_ENV) or "").strip()
+    if not raw:
+        return None
+    if not os.path.isabs(raw):
+        raise ValueError(
+            f"trusted artifacts root must be absolute, got {raw!r} "
+            f"(set {_ARTIFACTS_ROOT_ENV} to an absolute path)"
+        )
+    if ".." in Path(raw).parts:
+        raise ValueError(f"trusted artifacts root must not contain '..': {raw!r}")
+    resolved = Path(raw).resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    if not resolved.is_dir():
+        raise ValueError(f"trusted artifacts root is not a directory: {resolved}")
+    return resolved
+
+
 #: Attachments cowork-server stages into the workspace for this conversation.
 _ATTACHMENTS_DIRNAME = "attachments"
 
@@ -557,6 +593,16 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         if llm.get("coding_model"):
             settings_kwargs["coding_model"] = llm["coding_model"]
     settings = AntonSettings(**settings_kwargs)
+    # ENG-2056: the workspace mount is per-conversation, so deriving
+    # `<workspace>/.anton/artifacts` hides sibling tasks' artifacts. When the
+    # controller mounts the PROJECT's shared artifacts dir (outside the
+    # workspace, so it can't land on sys.path) and points _ARTIFACTS_ROOT_ENV
+    # at it, use that instead. Must be set BEFORE resolve_workspace, which only
+    # derives artifacts_dir when the value is relative and leaves an absolute
+    # one alone; unset env var keeps today's derivation byte-identical.
+    artifacts_root = resolve_trusted_artifacts_root()
+    if artifacts_root is not None:
+        settings.artifacts_dir = str(artifacts_root)
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
