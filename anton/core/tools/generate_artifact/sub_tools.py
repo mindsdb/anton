@@ -19,8 +19,23 @@ from pathlib import Path
 
 # Chunk size the write discipline asks for (see prompts._WRITE_DISCIPLINE).
 # Soft: an oversized chunk that made it through IS written — the warning in the
-# result is about the next call, which may not be as lucky against the output cap.
-CHUNK_SOFT_LIMIT = 6_000
+# result is about the next call.
+#
+# The bound is DURATION, not the output-token budget, and that is the whole
+# reason it is not simply `GEN_WRITE_MAX_TOKENS` worth of text. Measured
+# 2026-08-28: a large `write_file` argument is not streamed incrementally —
+# the connection carries nothing for the entire generation and everything
+# arrives in one burst at the end (112s of silence for a 59 000-character
+# argument, reproduced identically against api.anthropic.com, so this is not
+# the gateway's doing). Whether such a call survives is a race against the
+# proxy's idle timeout: silences of 112-115s came back, 131-143s were dropped.
+#
+# So: coding model ~170 output tokens/s, ~2.59 characters per token on Cyrillic
+# prose (the token-hungriest content we generate) → ~440 chars/s → 16 000
+# characters is roughly 37s of silence, a ~3x margin against the shortest
+# observed drop. Raising this trades that margin for fewer rounds; re-measure
+# the drop threshold before doing so.
+CHUNK_SOFT_LIMIT = 16_000
 
 # Tail returned by read_file when `full` is not requested.
 READ_TAIL_CHARS = 500
@@ -35,9 +50,10 @@ WRITE_FILE_SCHEMA: dict = {
         "created automatically.\n\n"
         "`mode=\"w\"` (default) creates or overwrites the file. `mode=\"a\"` "
         "appends to it, creating it first if needed — use append to build a "
-        "large file in several small calls instead of one huge one. A single "
-        "call whose `content` is too large gets cut off by the output limit and "
-        "is rejected, so keep each call's `content` at most 6,000 characters."
+        "large file in several calls instead of one huge one. A single call "
+        "whose `content` is too large either gets cut off by the output limit "
+        "or takes long enough to lose its connection, and is lost either way, "
+        f"so keep each call's `content` at most {CHUNK_SOFT_LIMIT:,} characters."
     ),
     "input_schema": {
         "type": "object",
@@ -179,16 +195,17 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
     verb = "Appended to" if mode == "a" else "Wrote"
     message = f"{verb} {rel_written} (+{len(content)} bytes, file now {size} bytes)."
     if len(content) > CHUNK_SOFT_LIMIT:
-        # The write itself succeeded — this call fit under the output cap. The
-        # warning is about the NEXT one: a model that got away with an
-        # oversized chunk keeps growing them until one is cut off mid-argument
-        # and the whole round is wasted (measured in both attempts of the
-        # 2026-08-27 live run).
+        # The write itself succeeded — this call landed. The warning is about
+        # the NEXT one: a model that got away with an oversized chunk keeps
+        # growing them, and the failure at the top of that slope is no longer
+        # only truncation. A chunk large enough to take ~2 minutes to generate
+        # holds a silent connection for that whole time and can simply be
+        # dropped (see CHUNK_SOFT_LIMIT), which costs the round outright.
         message += (
             f" WARNING: this chunk was {len(content)} characters — over the "
             f"{CHUNK_SOFT_LIMIT:,}-character chunk limit. Keep every following "
-            "chunk under the limit or it will be cut off by the output cap "
-            "and rejected."
+            "chunk under the limit: a larger one risks being cut off by the "
+            "output cap or losing its connection before it arrives."
         )
     return {
         "ok": True,

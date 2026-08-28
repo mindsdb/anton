@@ -3,8 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
+import httpx
+import pytest
+
 from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
 from anton.core.tools.generate_artifact.engine import _run_loop
+from anton.core.tools.generate_artifact.state import GEN_WRITE_MAX_TOKENS
 
 
 def _resp(tool_calls):
@@ -392,3 +396,136 @@ async def test_read_file_full_flag_is_passed_through(tmp_path: Path, monkeypatch
     )
     assert isinstance(result, dict)
     assert seen["full"] is True
+
+
+# ── Output budget per round, and surviving a dropped stream (2026-08-28) ──────
+
+
+async def test_write_rounds_get_the_raised_budget_and_round_zero_does_not(
+    tmp_path: Path,
+):
+    """Round 0 runs on the slower planning model, so it keeps the client default.
+
+    Measured 2026-08-28: at the raised budget a planning-model write runs long
+    enough to have its connection dropped (4 failures out of 4), while the same
+    budget on the coding model delivered 50k characters in one call. The split
+    is the whole point — asserting only "a budget is passed" would not catch a
+    regression that passes it to both.
+    """
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="write_file",
+                        input={"path": "index.html", "content": "<html>"})])
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
+    )
+    await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
+    assert session._llm.plan_stream.call_args.kwargs["max_tokens"] is None
+    assert session._llm.code_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
+
+
+async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
+    tmp_path: Path,
+):
+    """A big chunk must not be mistaken for a truncated one.
+
+    The write rounds run on GEN_WRITE_MAX_TOKENS, so a reply well above the
+    client's default is normal. Judging it against the default instead would
+    reject the last tool call of every large chunk — the exact failure the
+    raised budget exists to remove.
+    """
+    session = AsyncMock()
+    session._llm.max_tokens = 8192          # client default, far below the round's
+    session._llm.plan_stream = _stream_mock(
+        # An inert round-0 call: read_file is handled entirely inside sub_tools,
+        # so the round is consumed without dragging a real handler onto the mock.
+        _resp([ToolCall(id="0", name="read_file", input={"path": "absent.html"})])
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp_capped(
+            [ToolCall(id="1", name="write_file",
+                      input={"path": "index.html", "content": "<html></html>"})],
+            output_tokens=12_000,           # > default, < GEN_WRITE_MAX_TOKENS
+        ),
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})]),
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
+    assert isinstance(result, dict)
+    assert result["files_written"] == ["index.html"]
+    assert (tmp_path / "index.html").read_text(encoding="utf-8") == "<html></html>"
+
+
+def _dropping_stream():
+    """A stream that dies mid-iteration, as a real dropped connection does."""
+
+    async def _gen(**kw):
+        if False:  # pragma: no cover - makes this an async generator
+            yield None
+        raise httpx.RemoteProtocolError("peer closed connection")
+
+    return _gen
+
+
+async def test_dropped_stream_is_retried_once_with_a_halved_budget(tmp_path: Path):
+    """A mid-stream drop must not kill the generation.
+
+    Large tool-call arguments are not streamed incrementally, so the connection
+    is silent for the whole generation and can be dropped outright. Retrying on
+    the same budget would mostly reproduce it, so the retry halves the budget:
+    a shorter call is less likely to be dropped, and if it truncates instead the
+    loop already recovers from that.
+    """
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        # An inert round-0 call: read_file is handled entirely inside sub_tools,
+        # so the round is consumed without dragging a real handler onto the mock.
+        _resp([ToolCall(id="0", name="read_file", input={"path": "absent.html"})])
+    )
+    good = _one_event_stream(
+        _resp([ToolCall(id="1", name="write_file",
+                        input={"path": "index.html", "content": "<html></html>"})])
+    )
+    finish = _one_event_stream(
+        _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
+    )
+    session._llm.code_stream = Mock(
+        side_effect=[_dropping_stream()(), good, finish]
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
+    assert isinstance(result, dict)
+    assert result["files_written"] == ["index.html"]
+    budgets = [c.kwargs["max_tokens"] for c in session._llm.code_stream.call_args_list]
+    assert budgets[0] == GEN_WRITE_MAX_TOKENS
+    assert budgets[1] == GEN_WRITE_MAX_TOKENS // 2
+
+
+async def test_a_second_drop_in_the_same_round_propagates(tmp_path: Path):
+    """One retry, not a loop: a persistently dead connection must surface.
+
+    Retrying forever would spend the whole round budget on a link that is not
+    coming back, and report the failure as something else entirely.
+    """
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        # An inert round-0 call: read_file is handled entirely inside sub_tools,
+        # so the round is consumed without dragging a real handler onto the mock.
+        _resp([ToolCall(id="0", name="read_file", input={"path": "absent.html"})])
+    )
+    session._llm.code_stream = Mock(
+        side_effect=[_dropping_stream()(), _dropping_stream()()]
+    )
+    with pytest.raises(httpx.RemoteProtocolError):
+        await _run_loop(
+            session=session, system="s", kickoff="k", artifact_path=tmp_path,
+            node_label="generate_frontend",
+        )

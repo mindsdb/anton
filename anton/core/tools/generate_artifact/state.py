@@ -48,6 +48,24 @@ JOURNAL_DETAIL_MAX: int = 300
 SPEC_MAX_TOKENS: int = 16384
 SPEC_MAX_TOKENS_RETRY: int = 20480
 
+# Output budget for the WRITE rounds of `_run_loop` (rounds > 0, coding model),
+# overriding the client default of 8192. Measured 2026-08-28 against
+# `api.mindshub.ai/v1`: 20480 is accepted on both aliases (the earlier note
+# above claiming 16384 for `haiku` was wrong — its ceiling is the same 20480),
+# and one `write_file` call at that budget delivered 50 402 characters of
+# Russian HTML in 15 754 tokens. The live artifact was 41 570 characters /
+# 16 063 tokens, i.e. the default 8192 was a quarter of what the gateway holds
+# and forced the file into ~8 chunks.
+#
+# NOT applied to round 0. That round runs on the planning model, which is
+# ~2.3x slower per token (75 vs 170 tok/s measured), and a long generation is
+# silent on the wire for its whole duration (see sub_tools.CHUNK_SOFT_LIMIT).
+# Round 0 therefore keeps the client default: at 8192 an over-long write is
+# merely truncated, which the loop recovers from, whereas at 20480 the same
+# call runs long enough to have its connection dropped — measured 4 failures
+# out of 4 at 131-143s.
+GEN_WRITE_MAX_TOKENS: int = 20480
+
 
 # ── Verdict schemas for diamond nodes (generate_object) ──────────────────────
 class DataVerdict(BaseModel):

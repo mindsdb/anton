@@ -419,7 +419,36 @@ def test_role_forbids_new_scratchpad_names():
 
 def test_write_discipline_names_a_hard_chunk_limit():
     """"Well under ~6 KB" held neither the first chunk (24 KB) nor the first
-    append (cut at the output cap) in both live-run attempts."""
+    append (cut at the output cap) in both live-run attempts.
+
+    Asserted against the constant, not a literal. The literal form was not just
+    duplication: `"6,000 characters"` is a substring of `"16,000 characters"`,
+    so when the limit was re-measured the test kept passing while checking
+    nothing.
+    """
+    from anton.core.tools.generate_artifact.sub_tools import CHUNK_SOFT_LIMIT
+
     d = prompts._WRITE_DISCIPLINE
-    assert "6,000 characters" in d
+    assert f"{CHUNK_SOFT_LIMIT:,} characters" in d
     assert "mode=\"w\"` chunk and the first" in d
+
+
+def test_chunk_limit_is_quoted_identically_everywhere_it_is_stated():
+    """One measurement, four surfaces the model reads — they must not drift.
+
+    The limit is stated in the write_file schema, in the write discipline, and
+    (halved) in both post-failure recovery messages. Each used to carry its own
+    literal.
+    """
+    from anton.core.tools.generate_artifact import engine, sub_tools
+
+    limit = f"{sub_tools.CHUNK_SOFT_LIMIT:,} characters"
+    assert limit in sub_tools.WRITE_FILE_SCHEMA["description"]
+    assert limit in prompts._WRITE_DISCIPLINE
+
+    # Recovery asks for LESS than the limit — repeating the limit that was just
+    # exceeded is no instruction at all.
+    assert engine._RECOVERY_CHUNK < sub_tools.CHUNK_SOFT_LIMIT
+    recovery = f"{engine._RECOVERY_CHUNK:,} characters"
+    assert recovery in engine._TRUNCATED_MSG
+    assert recovery in engine._NO_CONTENT_MSG

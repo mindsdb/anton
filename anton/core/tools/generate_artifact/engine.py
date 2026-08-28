@@ -18,13 +18,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import httpx
 
 from anton.core.artifacts.internal_files import PRD_FILENAME
 
 from . import sub_tools
-from .state import SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
+from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
 from .prompts import (
     build_api_spec_prompt,
     build_backend_kickoff,
@@ -38,6 +41,8 @@ from .prompts import (
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.core.llm.provider import LLMResponse
+
+logger = logging.getLogger(__name__)
 
 
 # Higher than the old 12 because the sub-generator also spends rounds on
@@ -57,19 +62,27 @@ MAX_ROUNDS = 20
 # land. Truncation is streaming — only the last block is incomplete, the rest
 # arrived in full. Without saying so, the model re-sends the chunks it already
 # wrote and mode="a" duplicates them in the file.
+#
+# The recovery size is derived from the chunk limit rather than written out:
+# the call that just failed was already too big, so naming the same limit again
+# is no instruction at all. Half the limit is the "definitely smaller than what
+# just failed" number, and it moves automatically when the limit is re-measured.
+_RECOVERY_CHUNK = sub_tools.CHUNK_SOFT_LIMIT // 2
+
 _TRUNCATED_MSG = (
     "Error: THIS tool call was cut off by the output limit and wrote nothing. "
     "The earlier tool calls in this same reply DID take effect — do NOT re-send "
     "them, or `mode=\"a\"` will duplicate their content. Continue from where the "
     "file now ends, appending with `mode=\"a\"`. Your next chunk must be at most "
-    "4,000 characters of `content`; split the remaining work into as many "
-    "chunks as it takes."
+    f"{_RECOVERY_CHUNK:,} characters of `content`; split the remaining work "
+    "into as many chunks as it takes."
 )
 
 _NO_CONTENT_MSG = (
     "Error: `content` was not delivered, so nothing was written. Re-emit this "
-    "chunk with a non-empty `content` of at most 4,000 characters, appending "
-    "with `mode=\"a\"` if the file already has earlier chunks."
+    f"chunk with a non-empty `content` of at most {_RECOVERY_CHUNK:,} "
+    "characters, appending with `mode=\"a\"` if the file already has earlier "
+    "chunks."
 )
 
 
@@ -101,9 +114,22 @@ async def _drain_stream(events) -> "LLMResponse":
     non-streaming call sends no bytes over the wire until the whole response
     is ready, and `api.mindshub.ai` sits behind Cloudflare, which kills a
     connection that has been silent for ~100s with a 524 — a real failure on
-    long spec/code generations. Streaming keeps bytes flowing continuously so
-    the proxy never observes silence, regardless of how long the full
-    generation takes.
+    long spec/code generations.
+
+    For TEXT that works: bytes flow continuously and the proxy never observes
+    silence. For a large TOOL-CALL argument it does NOT, and the original
+    version of this docstring was wrong to claim otherwise. Measured
+    2026-08-28: generating a 59 000-character `write_file` argument produced
+    its first stream event at ~2s, then nothing for 112 seconds, then every
+    remaining event in a single burst. The same profile appears when talking
+    straight to `api.anthropic.com`, so it is not the gateway's doing and
+    cannot be fixed on our side — the argument simply is not streamed
+    incrementally.
+
+    Consequence: a long tool-call generation IS a silent connection, and
+    whether it survives is a race against the proxy's idle timeout. Hence
+    `_call_with_stream_retry` below, and the duration-derived chunk limit in
+    `sub_tools.CHUNK_SOFT_LIMIT`.
     """
     from anton.core.llm.provider import StreamComplete
 
@@ -114,6 +140,67 @@ async def _drain_stream(events) -> "LLMResponse":
     if result is None:
         raise RuntimeError("LLM stream ended without a StreamComplete event")
     return result
+
+
+# Mid-stream transport failures. `httpx` is not declared by anton directly but
+# is a hard requirement of both `openai` and `anthropic`, so it is always
+# installed; it is declared in pyproject alongside this use rather than relied
+# on transitively. The measured failure is RemoteProtocolError ("peer closed
+# connection without sending complete message body"); the neighbours are the
+# same class of half-open-connection death.
+_STREAM_DROP_ERRORS: tuple[type[BaseException], ...] = (
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+)
+
+# Floor for the halved retry budget — below this a chunk is too small to make
+# progress and the round is wasted either way.
+_RETRY_BUDGET_FLOOR = 2048
+
+
+async def _call_with_stream_retry(
+    llm_call,
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict] | None,
+    max_tokens: int | None,
+    default_cap: int | None,
+) -> tuple["LLMResponse", int | None]:
+    """One LLM round, retried once if the connection dies mid-stream.
+
+    Returns the response and the budget it actually ran on — the caller needs
+    the latter to judge truncation, and the retry deliberately does not run on
+    the same budget as the first try.
+
+    Retrying with IDENTICAL parameters would mostly reproduce the failure: the
+    drop is a race between how long the generation stays silent (see
+    `_drain_stream`) and the proxy's idle timeout, and neither changes on a
+    re-run. So the retry halves the budget, which halves the silence. If the
+    shorter budget truncates instead, that is a strictly better outcome — the
+    loop already recovers from truncation by asking for a smaller chunk, while
+    a dropped connection propagates as a raw transport error and kills the
+    whole generation.
+
+    Nothing has been executed when a drop happens: tool calls run only after
+    the stream is fully drained, so a retry cannot double-apply a write.
+    """
+    budget = max_tokens
+    try:
+        return await _drain_stream(
+            llm_call(system=system, messages=messages, tools=tools, max_tokens=budget)
+        ), budget
+    except _STREAM_DROP_ERRORS:
+        effective = budget or default_cap
+        retry_budget = max(_RETRY_BUDGET_FLOOR, effective // 2) if effective else None
+        logger.warning(
+            "generate_artifact: stream dropped mid-generation; retrying once "
+            "with a halved output budget (%s -> %s)", effective, retry_budget,
+        )
+    return await _drain_stream(
+        llm_call(system=system, messages=messages, tools=tools, max_tokens=retry_budget)
+    ), retry_budget
 
 
 def _output_token_cap(session) -> int | None:
@@ -393,7 +480,7 @@ async def _run_loop(
     data-access code that ran to later FSM steps.
     """
     tools = sub_tools.tool_schemas()
-    cap = _output_token_cap(session)
+    default_cap = _output_token_cap(session)
     messages: list[dict] = [{"role": "user", "content": kickoff}]
 
     files_written: list[str] = []
@@ -404,12 +491,27 @@ async def _run_loop(
     for round_idx in range(MAX_ROUNDS):
         # First round: use the planning model for highest-quality initial generation.
         # Subsequent rounds (retries, read_file refinements) use the coding model.
-        llm_call = session._llm.plan_stream if round_idx == 0 else session._llm.code_stream
-        response = await _drain_stream(llm_call(
+        first_round = round_idx == 0
+        llm_call = session._llm.plan_stream if first_round else session._llm.code_stream
+        # Only the write rounds get the raised budget; round 0 keeps the client
+        # default because it runs on the slower planning model. See
+        # GEN_WRITE_MAX_TOKENS for the measurements behind the split.
+        budget = None if first_round else GEN_WRITE_MAX_TOKENS
+        # Truncation must be judged against the budget THIS round ran on.
+        # Against the client default instead, every reply over 8192 tokens
+        # would be called truncated and its last tool call rejected — exactly
+        # the failure the raised budget exists to remove. `used_budget` is what
+        # the call settled on, which differs from `budget` when the round was
+        # retried after a dropped stream.
+        response, used_budget = await _call_with_stream_retry(
+            llm_call,
             system=system,
             messages=messages,
             tools=tools,
-        ))
+            max_tokens=budget,
+            default_cap=default_cap,
+        )
+        cap = used_budget or default_cap
 
         if trace is not None:
             trace.llm_call(

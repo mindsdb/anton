@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# The chunk limit is quoted to the model here and enforced in `write_file`;
+# reading it from the one constant keeps the two from drifting apart.
+from .sub_tools import CHUNK_SOFT_LIMIT
+
 
 # ---------------------------------------------------------------------------
 # Canonical FSM graph — embedded in decision/generation prompts so every LLM
@@ -440,7 +444,7 @@ FRONTEND — `static/index.html`:
 # Mixed in everywhere _VISUAL_RULES is: chunked writing is needed by html-app and
 # by the fullstack frontend alike. It cannot live in _FRONTEND_RULES — that block
 # only goes to the fullstack branch.
-_WRITE_DISCIPLINE = """\
+_WRITE_DISCIPLINE = f"""\
 WRITING A LARGE FILE (mandatory — a single big call cannot succeed):
 Your reply has a hard output limit. A `write_file` call carrying a whole
 dashboard exceeds it, gets cut off mid-argument, and is REJECTED — nothing is
@@ -450,10 +454,10 @@ written and the round is wasted. Build the file in chunks instead:
 - Every next chunk: `write_file(path, content, mode="a")` — one section per call:
   the data block, then each chart's markup, then the scripts, then the closing
   tags.
-- HARD CHUNK LIMIT: at most 6,000 characters of `content` per call — the FIRST
-  `mode="w"` chunk and the first `mode="a"` chunk included; those are exactly
-  where oversized calls get cut off. A 40 KB page is 8-10 chunks. Several small
-  calls in one reply are fine and cost one round together.
+- HARD CHUNK LIMIT: at most {CHUNK_SOFT_LIMIT:,} characters of `content` per
+  call — the FIRST `mode="w"` chunk and the first `mode="a"` chunk included;
+  those are exactly where oversized calls fail. A 40 KB page is 3-4 chunks.
+  Several small calls in one reply are fine and cost one round together.
 - Do NOT re-emit the whole file to "fix" something — append the remaining part.
   To check what landed, `read_file` the path — it returns the size and the tail,
   which is all you need.
