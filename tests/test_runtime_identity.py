@@ -57,10 +57,12 @@ class TestServingModelLines:
         lines = serving_model_lines(requested="grok", served="grok-4.6")
         assert lines == ["- Serving model: grok-4.6 (as reported by the provider on its last response)."]
 
-    def test_requested_only_is_labelled_unconfirmed(self):
+    def test_requested_only_names_the_requested_model_without_promising_confirmation(self):
         (line,) = serving_model_lines(requested="qwen/qwen3.5-9b", served=None)
-        assert line.startswith("- Serving model: qwen/qwen3.5-9b")
-        assert "not yet confirmed" in line
+        assert line == "- Serving model: qwen/qwen3.5-9b (the model requested for this conversation)."
+        # "not yet confirmed" was wrong in steady state: on desktop/web the host
+        # never carries the served id into the next turn (review finding on #410).
+        assert "not yet" not in line
 
     def test_nothing_known_yields_no_lines(self):
         assert serving_model_lines(requested=None, served=None) == []
@@ -258,7 +260,7 @@ class TestSessionRuntimeIdentity:
         mock_llm.last_served_model = None
 
         prompt = await _system_prompt_after_turn(mock_llm)
-        assert "Serving model: grok (the model that was requested" in prompt
+        assert "Serving model: grok (the model requested for this conversation)" in prompt
 
     async def test_empty_context_and_unknown_client_yields_cannot_verify_no_mandate(self):
         # The web-pod shape before the fix: nothing injected. make_mock_llm's
@@ -295,8 +297,35 @@ class TestSessionRuntimeIdentity:
         session = ChatSession(ChatSessionConfig(llm_client=client))
         await session.turn("hi")
         await session.turn("which model are you?")
-        assert "Serving model: grok (the model that was requested" in seen[0]
+        assert "Serving model: grok (the model requested for this conversation)" in seen[0]
         assert "Serving model: grok-4.6 (as reported by the provider" in seen[-1]
+
+    async def test_host_that_rebuilds_the_client_each_turn_gets_the_requested_model_every_turn(self):
+        """The shipping hosts' shape (cowork-server: `_build_chat_session` per
+        turn; web pod: one process per turn). The served id never survives to
+        the next prompt, so the line must be the requested alias — stated as
+        such, not as "not yet confirmed". Pins the reach honestly (review
+        finding on #410); the served-id path above is the CLI's."""
+        seen: list[str] = []
+        history = None
+        for _ in range(3):
+            provider = _FakeProvider([_text_response("ok", model="grok-4.6")])
+            client = LLMClient(
+                planning_provider=provider, planning_model="grok",
+                coding_provider=provider, coding_model="grok",
+            )
+            real_plan = client.plan
+
+            async def spy(**kwargs):
+                seen.append(kwargs.get("system", ""))
+                return await real_plan(**kwargs)
+
+            client.plan = spy  # type: ignore[method-assign]
+            session = ChatSession(ChatSessionConfig(llm_client=client, initial_history=history))
+            await session.turn("which model are you?")
+            history = list(session.history)
+        lines = [[l for l in s.splitlines() if l.startswith("- Serving model:")][0] for s in seen]
+        assert lines == ["- Serving model: grok (the model requested for this conversation)."] * 3
 
 
 # ── every provider path surfaces `response.model` ────────────────────────────

@@ -25,8 +25,13 @@ website): the alias the user picked, never the vendor model underneath it.
   answer and reveals nothing the picker didn't.
 - Anything else → the model the provider **actually reported serving**
   (``LLMResponse.model``, echoed by MindsHub, OpenAI, Anthropic, Ollama and
-  LM Studio alike), falling back to the requested id before the first response
-  arrives — labelled as unconfirmed, so a turn-1 answer is still honest.
+  LM Studio alike) when the host keeps the ``LLMClient`` alive across turns
+  (the CLI); otherwise the requested id. **Reach today:** cowork-server builds
+  a fresh session and client every turn (``harness.py:_build_chat_session``)
+  and the web pod is one process per turn, so on both shipping hosts the line
+  is the requested alias — which is what the picker shows, so it is honest,
+  just unconfirmed. Seeding the served id across turns is the host's job
+  (ENG-2050 owns recording the served model per conversation).
 - Nothing known → the agent is told to say it cannot verify, and never to guess
   or deny. The old prompt had no such fallback; that absence is what turned a
   wrong input into a confident falsehood.
@@ -112,10 +117,10 @@ def serving_model_lines(
     if srv:
         return [f"- Serving model: {srv} (as reported by the provider on its last response)."]
     if req:
-        return [
-            f"- Serving model: {req} (the model that was requested; the provider has "
-            f"not yet confirmed it)."
-        ]
+        # Steady state on desktop and web, not a transient (see module docstring):
+        # say what is true — this is the requested model — without promising a
+        # confirmation the host never delivers.
+        return [f"- Serving model: {req} (the model requested for this conversation)."]
     return []
 
 
