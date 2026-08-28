@@ -84,16 +84,20 @@ def resolve_artifact_id(raw_id: str, inherited_id: str, created_at: str) -> str:
 
     An `id` that already parses wins outright. That makes a stale `stableId`
     written by an older build inert, instead of letting it re-stamp an identity
-    that published versions are already keyed under. Only when `id` is still the
-    short form does `stableId` decide — there it already keyed those things, and
-    keeping them bound is worth more than the folder slug's readable suffix.
+    that published versions are already keyed under. Whenever `id` does NOT
+    parse — the short legacy form, a name, or a damaged value — `stableId`
+    decides if it is present: it already keyed those published versions, auth
+    rules and comment threads, and keeping them bound is worth more than the
+    folder slug's readable suffix (and more than re-deriving a value that
+    nothing out there is keyed under).
 
-    Everything else is widened rather than rejected: hand-written and very old
-    records carry names in `id` (`"static-art"`), and refusing them would drop
-    the artifact from every listing, which reads as a deletion. The one shape
-    that does raise is a value that plausibly IS a damaged identity — hex-only
-    and wider than a legacy id — because re-minting that would silently detach
-    the artifact from its published versions, auth rules and comment threads.
+    With no `stableId` to fall back on, everything else is widened rather than
+    rejected: hand-written and very old records carry names in `id`
+    (`"static-art"`), and refusing them would drop the artifact from every
+    listing, which reads as a deletion. The one shape that does raise is a
+    value that plausibly IS a damaged identity — hex-only and wider than a
+    legacy id — because re-minting that would silently detach the artifact
+    from its published versions, auth rules and comment threads.
     """
     raw = (raw_id or "").strip()
     try:

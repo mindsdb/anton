@@ -203,8 +203,7 @@ def _zip_html(path: Path) -> bytes:
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
             parent = path.resolve().parent
             for ref in _find_referenced_files(path):
-                arc_name = str(ref.relative_to(parent))
-                _write_scrubbed(zf, ref, arc_name)
+                _write_scrubbed(zf, ref, ref.relative_to(parent).as_posix())
         else:
             # Directory — include all files except owner-side housekeeping
             # (e.g. `.published.json`, which holds the plaintext access
@@ -212,7 +211,7 @@ def _zip_html(path: Path) -> bytes:
             for f in sorted(path.rglob("*")):
                 rel = f.relative_to(path)
                 if f.is_file() and not any(part in _BUNDLE_SKIP_NAMES for part in rel.parts):
-                    _write_scrubbed(zf, f, str(f.relative_to(path)))
+                    _write_scrubbed(zf, f, rel.as_posix())
     return buf.getvalue()
 
 
@@ -457,6 +456,20 @@ def publish(
         artifact_key = artifact_key or artifact_key_for(artifact.id)
     else:
         zipped = _zip_html(file_path)
+        # A static artifact publishes its primary *file*, not its folder, so the
+        # identity sits in the metadata.json next to that file. Derive it here
+        # too: otherwise only fullstack publishes carry `artifact_key` and the
+        # upload lambda locks static artifacts to the legacy
+        # `{user_dir}/{report_id}` key, detaching them from their drafts and
+        # comment threads. cowork-server passes the key explicitly, so this only
+        # covers a direct anton publish.
+        # Only the artifact root is consulted (a file's own folder), never an
+        # ancestor: publishing one page out of an artifact would otherwise mint
+        # a second report under the same key, and the auth rule is per key.
+        if not artifact_key:
+            owner = artifact if file_path.is_dir() else _load_artifact_metadata(file_path.parent)
+            if owner is not None:
+                artifact_key = artifact_key_for(owner.id)
 
     payload_dict["file_payload"] = base64.b64encode(zipped).decode()
     if report_id:

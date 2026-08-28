@@ -18,9 +18,11 @@ logger = logging.getLogger(__name__)
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _EMAIL_SPLIT_RE = re.compile(r"[\s,;]+")
 
-# Keep in sync with anton.publisher._FULLSTACK_EXCLUDED (publisher.py:42):
-# backend.log is the running backend's runtime log — excluded from the
-# published bundle there, so it must not count as user content here either.
+# Keep in sync with anton.publisher._FULLSTACK_EXCLUDED: backend.log is the
+# running backend's runtime log — excluded from the published bundle there, so
+# it must not count as user content here either.
+# Matched against the artifact-relative path's FIRST component, so reserved
+# directories belong here too (`.revisions`, the private revision journal).
 _HOUSEKEEPING_FILES = {"metadata.json", "README.md", "backend.log", ".published.json", ".revisions"}
 
 
