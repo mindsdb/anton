@@ -13,6 +13,7 @@ given, and ChatSystemPromptBuilder.build() calls suffix.strip() unconditionally.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -69,6 +70,27 @@ async def test_no_connections_and_no_suffix_does_not_crash(workspace_path):
     prompt = await session._build_system_prompt()  # must not raise
 
     assert "Google Drive" not in prompt
+
+
+async def test_deleted_connection_env_does_not_survive_into_a_later_build(workspace_path):
+    """Regression: build_chat_session() never cleared DS_* env before
+    injecting connections, so a connection deleted between two builds in
+    the same process left its DS_* var behind for a later build to inherit."""
+    from anton.core.datasources.data_vault import LocalDataVault
+    from anton.core.runtime import build_chat_session
+
+    vault = LocalDataVault()
+    vault.save("postgres", "leftover", {"host": "leftover.example.com"})
+    try:
+        await build_chat_session(session_id="test-leak-1", workspace_path=str(workspace_path))
+        assert os.environ.get("DS_POSTGRES_LEFTOVER__HOST") == "leftover.example.com"
+
+        vault.delete("postgres", "leftover")
+
+        await build_chat_session(session_id="test-leak-2", workspace_path=str(workspace_path))
+        assert "DS_POSTGRES_LEFTOVER__HOST" not in os.environ
+    finally:
+        os.environ.pop("DS_POSTGRES_LEFTOVER__HOST", None)
 
 
 async def test_explicit_system_prompt_suffix_still_appended(workspace_path):

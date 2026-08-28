@@ -208,3 +208,33 @@ def test_base_url_env_override(monkeypatch):
     monkeypatch.setattr("anton.minds_client.minds_request", fake)
     _vault().load("google_drive", "primary")
     assert seen["url"] == "https://auth.pr-123.dev.mindshub.ai/v1/oauth/google_drive/token"
+
+
+def test_no_turn_key_diagnostic_wins_over_the_allowlist_one(monkeypatch, caplog):
+    """A turn with neither a turn key nor a matching connection should log
+    the more actionable "no turn key" message, not the allowlist refusal —
+    the turn-key check must run first."""
+    def fail(*a, **kw):
+        raise AssertionError("must not call out with no turn key")
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fail)
+    vault = TurnKeyDataVault({"turn_key": "", "connections": []})
+    with caplog.at_level("WARNING"):
+        assert vault.load("google_drive", "primary") is None
+    assert any("no turn key available" in r.message for r in caplog.records)
+    assert not any("not in this turn's connection list" in r.message for r in caplog.records)
+
+
+def test_clear_ds_env_drops_the_per_connection_cache(monkeypatch):
+    """A later fetch after clear_ds_env() must not return a cached
+    pre-clear value."""
+    responses = iter([b'{"access_token": "first"}', b'{"access_token": "second"}'])
+
+    def fake(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        return next(responses)
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake)
+    vault = _vault()
+    assert vault.load("google_drive", "primary")["access_token"] == "first"
+    vault.clear_ds_env()
+    assert vault.load("google_drive", "primary")["access_token"] == "second"
