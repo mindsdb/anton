@@ -26,7 +26,9 @@ from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
     StreamTextDelta,
+    StructuredOutputError,
     TokenLimitExceeded,
+    TransientProviderError,
     ToolCall,
     Usage,
 )
@@ -87,6 +89,13 @@ def _stub_tools(session) -> None:
 def _ended_by(send_event_mock) -> str:
     assert send_event_mock.called, "no turn_completed event emitted"
     return send_event_mock.call_args.kwargs["ended_by"]
+
+
+def _verifier_fields(send_event_mock) -> tuple[str, str]:
+    """(verifier_failure, verifier_error_type) on the last emitted event."""
+    assert send_event_mock.called, "no turn_completed event emitted"
+    k = send_event_mock.call_args.kwargs
+    return k["verifier_failure"], k["verifier_error_type"]
 
 
 async def test_task_cancel_reports_cancelled_not_error(workspace):
@@ -377,6 +386,76 @@ async def test_verifier_failure_reports_handback_verifier_failure(workspace):
         async for _ in session.turn_stream("run my script"):
             pass
     assert _ended_by(send) == "handback_verifier_failure"
+    # ENG-1858: the handback also says WHY. A bare exception is the "hard"
+    # class, and the type — never the message — names it.
+    assert _verifier_fields(send) == ("hard", "RuntimeError")
+
+
+async def _handback_with(workspace, exc) -> tuple[str, str]:
+    """Run one turn whose every verdict attempt raises `exc`; return the
+    (verifier_failure, verifier_error_type) pair the turn event carried."""
+    mock_llm = _verdict_llm("COMPLETE")
+    mock_llm.generate_object_code = AsyncMock(side_effect=exc)
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "handback_verifier_failure"
+    return _verifier_fields(send)
+
+
+async def test_truncated_verdict_reports_truncated_class(workspace):
+    # ENG-1081's shape: the model narrated past every budget in the ladder
+    # and never reached the tool call. Groupable as `truncated` — the cure is
+    # budget, not capability — and the type says it never got to the call.
+    assert await _handback_with(
+        workspace,
+        StructuredOutputError("narrated", truncated=True, output_tokens=512, max_tokens=512),
+    ) == ("truncated", "StructuredOutputError:no_call")
+
+
+async def test_no_call_verdict_reports_hard_no_call(workspace):
+    # The nemotron suspicion (ENG-1858): a model that returns prose instead of
+    # the forced call, within budget. Not truncation — a bigger budget won't
+    # help — so it is `hard`, and `:no_call` is what separates it from a
+    # schema rejection in PostHog.
+    assert await _handback_with(
+        workspace,
+        StructuredOutputError("no tool call", truncated=False, reached_tool_call=False),
+    ) == ("hard", "StructuredOutputError:no_call")
+
+
+async def test_unusable_call_verdict_reports_hard_unusable_call(workspace):
+    # ENG-1095's fable shape: the call arrived but its arguments failed the
+    # schema. Same class, opposite cure (smaller/looser schema, not a fallback
+    # for models that can't call tools) — hence the suffix.
+    assert await _handback_with(
+        workspace,
+        StructuredOutputError("bad args", truncated=False, reached_tool_call=True),
+    ) == ("hard", "StructuredOutputError:unusable_call")
+
+
+async def test_transient_verdict_reports_transient_class(workspace):
+    # A provider blip is the opposite claim from a capability failure: it
+    # hands back (ENG-1079) but must not read as "this model can't verify".
+    assert await _handback_with(
+        workspace, TransientProviderError("overloaded", provider="minds-cloud")
+    ) == ("transient", "TransientProviderError")
+
+
+async def test_verified_turn_carries_no_verifier_failure(workspace):
+    # A produced verdict leaves both fields empty — they mean "no verdict",
+    # not "verdict was COMPLETE".
+    session = ChatSession(
+        ChatSessionConfig(llm_client=_verdict_llm("COMPLETE"), workspace=workspace, session_id="conv-t")
+    )
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "completed"
+    assert _verifier_fields(send) == ("", "")
 
 
 async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
@@ -403,6 +482,9 @@ async def test_denied_verdict_reports_completed_not_verifier_failure(workspace):
     # honest-stop denominators exclude unverified turns without a
     # per-conversation Langfuse hop (ENG-1632 review).
     assert send.call_args.kwargs["verification_skipped"] == "true"
+    # ...and says WHY (ENG-1858): a denied turn is the one skipped-verifier
+    # shape that must stay separable from a hard latch in PostHog.
+    assert _verifier_fields(send) == ("denied", "TokenLimitExceeded")
 
 
 async def test_verified_turn_reports_verification_not_skipped(workspace):
@@ -572,6 +654,7 @@ async def test_latched_skip_turns_also_stamp_verification_skipped(workspace):
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     rows = []
+    why = []
     with patch("anton.analytics.send_event") as send:
         for i in range(2):
             # _verdict_llm's plan list is consumed by turn 1; re-arm per turn.
@@ -588,8 +671,13 @@ async def test_latched_skip_turns_also_stamp_verification_skipped(workspace):
                 pass
             k = send.call_args.kwargs
             rows.append((k["ended_by"], k["verification_skipped"]))
+            why.append((k["verifier_failure"], k["verifier_error_type"]))
     # Turn 1 = the denied-latch site; turn 2 = the latched-skip site.
     assert rows == [("completed", "true"), ("completed", "true")]
+    # ENG-1858: turn 1 made the call and was denied (class + type); turn 2
+    # made no call, so it carries the latch reason and no type. This is the
+    # one `latched_*` value the hard-latch test cannot reach.
+    assert why == [("denied", "TokenLimitExceeded"), ("latched_denied", "")]
 
 
 async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipped(workspace):
@@ -607,6 +695,7 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
     _stub_tools(session)
     rows = []
+    why = []
     with patch("anton.analytics.send_event") as send:
         for i in range(_VERIFIER_LATCH_REPROBE_TURNS + 2):
             plans = [
@@ -622,6 +711,7 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
                 pass
             k = send.call_args.kwargs
             rows.append((k["ended_by"], k["verification_skipped"]))
+            why.append((k["verifier_failure"], k["verifier_error_type"]))
     # Turn 1: honest diagnosis, distinguished by its own terminal.
     assert rows[0] == ("handback_verifier_failure", "false")
     # Turn 2: the second-hard-failure latch site.
@@ -629,6 +719,14 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
     # Every later turn — the latched skips AND the failed re-probe that falls
     # inside this window — books completed and must carry the flag.
     assert all(r == ("completed", "true") for r in rows[2:]), rows[2:]
+    # ENG-1858: each of those exits also says WHY. Turns 1 and 2 made the
+    # call and saw it fail (hard + the exception type); the skipped turns
+    # made no call and carry the latch reason instead; the re-probe (turn
+    # _VERIFIER_LATCH_REPROBE_TURNS + 2, index -1) made the call again.
+    assert why[0] == ("hard", "RuntimeError")
+    assert why[1] == ("hard", "RuntimeError")
+    assert all(w == ("latched_hard", "") for w in why[2:-1]), why[2:-1]
+    assert why[-1] == ("hard", "RuntimeError")
 
 
 # ─── error_type: naming the failure, not just counting it (ENG-1689) ─────────

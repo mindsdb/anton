@@ -204,6 +204,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
         session_id: str | None = None,
+        scratchpad_ds_env: dict[str, str] | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -227,6 +228,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # conversation's UUID as `session_id`). Only used to scope the namespace
         # snapshot — see `_session_snapshot_path`.
         self._session_id: str | None = session_id
+        # DS_* overlay for this pad's subprocess; None keeps legacy full-copy behaviour.
+        self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -243,6 +246,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
+
+    def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
+        self._scratchpad_ds_env = ds_env
 
     def _session_snapshot_path(self, *, create: bool = False) -> Path | None:
         """Where this pad's namespace snapshot lives, or None if it can't be written.
@@ -600,10 +606,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
+        if self._scratchpad_ds_env is not None:
+            # Never trust inherited DS_* values — strip them, then overlay
+            # exactly what this pad should see.
+            for key in [k for k in env if k.startswith("DS_")]:
+                del env[key]
+            env.update(self._scratchpad_ds_env)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
+        else:
+            env.pop("ANTON_SCRATCHPAD_MODEL", None)
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
+        else:
+            env.pop("ANTON_SCRATCHPAD_PROVIDER", None)
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -1341,6 +1357,7 @@ def local_scratchpad_runtime_factory(
     cells: list[Cell] | None,
     workspace_path: Path | None,
     session_id: str | None = None,
+    scratchpad_ds_env: dict[str, str] | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1351,4 +1368,5 @@ def local_scratchpad_runtime_factory(
         cells=cells,
         workspace_path=workspace_path,
         session_id=session_id,
+        scratchpad_ds_env=scratchpad_ds_env,
     )

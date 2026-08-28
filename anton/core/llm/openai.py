@@ -13,6 +13,7 @@ from anton.utils.datasources import scrub_credentials
 
 from .provider import safe_parse_tool_input
 from .provider import (
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMProvider,
@@ -214,6 +215,31 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         raise classify_404(
             model, message=provider_msg, code=code, status=status_str,
         ) from exc
+
+    # A permanent, content-SHAPED rejection: some block in conversation history
+    # reached the provider in a shape it doesn't parse — not a provider-
+    # availability issue, so retrying the identical request fails identically
+    # every time (ENG-1992). Two dialects recognized: OpenAI Responses' "Invalid
+    # value: 'x'. Supported values are: ..." (param names the offending content
+    # index) and Anthropic's "Input tag 'x' found using 'type' does not match
+    # any of the expected tags". cowork-server's turn-error mapping detects this
+    # type (or its scrubbed class name on the remote path) and repairs the
+    # offending content in the conversation's stored history so the next turn
+    # doesn't resend the same poison — see ContentValidationError's docstring.
+    if etype == "invalid_request_error":
+        provider_msg = str(envelope.get("message") or body.get("message") or "").lower()
+        param = str(envelope.get("param") or body.get("param") or "").lower()
+        _content_shape_error = (
+            (".content[" in param or param.endswith(".content"))
+            or "supported values are" in provider_msg
+            or "does not match any of the expected tags" in provider_msg
+        )
+        if _content_shape_error:
+            raise ContentValidationError(
+                "The model provider rejected part of this conversation's content "
+                "(an attachment or image in an unsupported format). That content "
+                "will be removed automatically so the conversation can continue."
+            ) from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
@@ -1074,6 +1100,7 @@ class OpenAIProvider(LLMProvider):
                 cache_creation_tokens=cache_creation_tokens,
             ),
             stop_reason=choice.finish_reason,
+            model=getattr(response, "model", None),
         )
 
     async def stream(
@@ -1125,6 +1152,8 @@ class OpenAIProvider(LLMProvider):
         cache_read_tokens = 0
         cache_creation_tokens = 0
         stop_reason: str | None = None
+        # What the server says it is serving; every chunk carries it (ENG-1638).
+        served_model: str | None = None
 
         # Track tool call deltas by index
         tc_state: dict[int, dict] = {}
@@ -1139,6 +1168,7 @@ class OpenAIProvider(LLMProvider):
             stream = await self._client.chat.completions.create(**kwargs)
             stream_started = True
             async for chunk in stream:
+                served_model = getattr(chunk, "model", None) or served_model
                 if chunk.usage:
                     (
                         input_tokens,
@@ -1335,6 +1365,7 @@ class OpenAIProvider(LLMProvider):
                     cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
+                model=served_model,
             )
         )
 
@@ -1454,6 +1485,7 @@ class OpenAIProvider(LLMProvider):
         cache_read_tokens = 0
         cache_creation_tokens = 0
         stop_reason: str | None = None
+        served_model: str | None = None  # from the final Response object (ENG-1638)
 
         # Map output_index → in-flight function-call state. Responses API uses
         # a per-output_index stable handle for streaming arguments.
@@ -1549,6 +1581,7 @@ class OpenAIProvider(LLMProvider):
                             ) = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
                         stop_reason = getattr(final_response, "status", None)
+                        served_model = getattr(final_response, "model", None) or served_model
         except openai.BadRequestError as exc:
             msg = str(exc).lower()
             if "context_length_exceeded" in msg or "maximum context length" in msg:
@@ -1631,6 +1664,7 @@ class OpenAIProvider(LLMProvider):
                     cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
+                model=served_model,
             )
         )
 
@@ -1693,4 +1727,5 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             cache_creation_tokens=cache_creation_tokens,
         ),
         stop_reason=status,
+        model=getattr(response, "model", None),
     )

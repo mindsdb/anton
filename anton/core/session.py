@@ -20,6 +20,7 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.endpoints import classify_endpoint
+from anton.core.llm.identity import serving_model_lines
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -558,6 +559,26 @@ def _safe_error_type(exc: BaseException) -> str:
         return "unavailable"
 
 
+def _verifier_error_type(exc: BaseException | None) -> str:
+    """`_safe_error_type` for the verdict call, with the one split it needs.
+
+    A non-truncated `StructuredOutputError` is two different failures that
+    ENG-1095 pulls apart: the model never produced the forced tool call at all
+    (`:no_call` — the shape a model without reliable tool-calling shows), or it
+    produced one the schema rejected (`:unusable_call` — fable's `{}` at 8
+    output tokens). Same class name, opposite cures, so the type alone would
+    merge them back into one PostHog row (ENG-1858). Content-free: the suffix
+    is derived from a boolean, never from the message. Cannot raise: the only
+    attribute read is a plain bool set in `StructuredOutputError.__init__`.
+    """
+    if exc is None:
+        return ""
+    name = _safe_error_type(exc)
+    if isinstance(exc, StructuredOutputError):
+        return name + (":unusable_call" if exc.reached_tool_call else ":no_call")
+    return name
+
+
 def _is_provider_auth_error(exc: BaseException) -> bool:
     """A provider-auth 401 — anton's "Invalid API key — …" copy from
     `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
@@ -967,20 +988,27 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
-    # Identifier for the host driving this session. Surfaced on telemetry /
-    # langfuse traces so the host that produced a given trace is filterable.
+    # WHICH AGENT ran this session. Surfaced on telemetry / langfuse traces, and
+    # the gateway composes the trace's display name from it as
+    # "{harness}:turn-{turn_id}".
     #
-    # The values actually in use, which are NOT what this field's name suggests:
-    #   "cli"     — anton's own interactive chat (chat_session.py, chat.py)
-    #   "anton"   — cowork-server, which passes its *agent harness* id here;
-    #               this — see `surface` below, which is how they are now told
-    #               apart (ENG-1459)
-    #   "cloud"   — the one-turn-per-pod cloud path
-    #   None      — a host that did not identify itself
+    #   "anton"   — the anton agent. Every first-party caller today: the CLI,
+    #               cowork-server (desktop and web), and the cloud pod.
+    #   "hermes"  — the hermes agent (cowork-server's other harness). Note it
+    #               emits no langfuse traces yet, so this value has no volume —
+    #               a query showing 100% anton is NOT evidence hermes is unused.
+    #   None      — a host that did not identify itself.
     #
     # None must stay reserved for that last case: until ENG-1495 the CLI left it
     # unset, so "" meant both "CLI" and "unidentified" and nothing could tell
     # them apart.
+    #
+    # WHERE it ran is `surface`, below — a separate axis. Until ENG-1694 this one
+    # field carried both, holding "cli" and "cloud" (places) alongside "anton"
+    # and "hermes" (agents), so it could answer neither question: a "cli" trace
+    # could not say which agent ran, and an "anton" trace could not say where.
+    # Keep the vocabularies apart. A value that answers "where" belongs in
+    # `surface`; if a third question ever needs answering, it gets a third field.
     harness: str | None = None
     # WHERE the user was, as opposed to which agent ran: one of
     # `anton.core.llm.tracing.VALID_SURFACES` (`desktop` / `web` / `cli`), or
@@ -1142,6 +1170,19 @@ class ChatSession:
         self._workspace = config.workspace
         self._data_vault = config.data_vault
         self._console = config.console
+        if self._console is None:
+            # connect_new_datasource's interactive mode needs a terminal to
+            # prompt in; without one, don't advertise it to the model (ENG-1849).
+            from anton.tools import (
+                CONNECT_DATASOURCE_TOOL,
+                CONNECT_DATASOURCE_TOOL_NO_CONSOLE,
+            )
+            self._extra_tools = [
+                CONNECT_DATASOURCE_TOOL_NO_CONSOLE
+                if tool is CONNECT_DATASOURCE_TOOL
+                else tool
+                for tool in self._extra_tools
+            ]
         self._history: list[dict] = (
             list(config.initial_history) if config.initial_history else []
         )
@@ -1209,6 +1250,7 @@ class ChatSession:
             cells=config.cells,
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
+            data_vault=config.data_vault,
         )
 
         self.tool_registry = ToolRegistry()
@@ -1222,6 +1264,13 @@ class ChatSession:
         # Where `create_skill_draft` stages skills the agent builds. None means
         # the host stages none, and the tool is not registered at all.
         self._skill_drafts_root = getattr(s, "skill_drafts_root", None)
+        # Slugs of artifacts this turn created or opened for editing, recorded
+        # by the artifact tool handlers as they run. A host builds the turn's
+        # artifact cards from this rather than diffing the artifacts directory:
+        # the set names what THIS turn actually touched, so a concurrent turn
+        # writing into the same (shared, project-wide) directory can never be
+        # mistaken for this turn's work. Reset at the top of every turn.
+        self._artifacts_touched: set[str] = set()
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
@@ -1317,6 +1366,15 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    @property
+    def artifacts_touched(self) -> set[str]:
+        """Slugs this turn created or opened for editing.
+
+        A copy: a host reads this after the turn to decide which artifacts to
+        surface, and must not be able to mutate the session's own record.
+        """
+        return set(self._artifacts_touched)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -1772,10 +1830,23 @@ class ChatSession:
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
 
+        # Which model is serving THIS conversation (ENG-1638): what the planning
+        # provider reported on its last response, else the id we requested,
+        # labelled unconfirmed. Read via getattr/isinstance so a host that
+        # passes a mock or an older client without these attributes gets the
+        # cannot-verify fallback rather than a Mock repr in the prompt. Lives in
+        # the cache-stable prefix on purpose: it changes at most once per
+        # session (turn 1 requested → turn 2 served) and is otherwise stable.
+        identity_lines = serving_model_lines(
+            requested=getattr(self._llm, "planning_model", None),
+            served=getattr(self._llm, "last_served_model", None),
+        )
+
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
             conversation_started=_conversation_started,
             system_prompt_context=self._system_prompt_context,
+            runtime_identity_lines=identity_lines,
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -2695,13 +2766,14 @@ class ChatSession:
         logger.info(
             "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
             "grace_granted=%s grace_tokens=%d "
-            "tokens_total=%d "
+            "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
             "by_role=%s %s",
             self._session_id, turn_index, tc.ended_by,
             str(tc.verification_skipped).lower(),
-            tc.grace_granted or "-", tc.grace_tokens, tc.total_tokens,
+            tc.grace_granted or "-", tc.grace_tokens,
+            tc.verifier_failure, tc.verifier_error_type, tc.total_tokens,
             tc.input_tokens, tc.output_tokens, tc.cache_read_tokens,
             tc.cache_creation_tokens, tc.llm_calls, tc.rounds,
             tc.continuations, tc.peak_context_tokens, tc.duration_ms,
@@ -2820,6 +2892,12 @@ class ChatSession:
                 # consistent with how other unset string properties go out.
                 grace_granted=tc.grace_granted,
                 grace_tokens=str(tc.grace_tokens),
+                # WHY the verifier produced no verdict (ENG-1858): the loop's
+                # own truncated/transient/hard/denied class plus the content-
+                # free exception type. Empty on verified turns. See
+                # `TurnCost.verifier_failure`.
+                verifier_failure=tc.verifier_failure,
+                verifier_error_type=tc.verifier_error_type,
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -2877,6 +2955,15 @@ class ChatSession:
                 # URL itself — those carry internal corporate hostnames.
                 endpoint_class=classify_endpoint(_turn_settings),
                 harness=str(self._harness or ""),
+                # WHERE the user was (desktop / web / cli), as opposed to which
+                # agent ran (`harness`). Same value the Langfuse `surface:` tag
+                # carries (ENG-1459); it was deliberately left off this event
+                # then, on the grounds that PostHog's renderer events already
+                # had it — but those ride a different distinct_id and cannot
+                # split this row, and this row is where cost and outcome live
+                # (ENG-1945). "" when the host did not say; never a guess —
+                # `_validated_surface` already rejected anything unrecognised.
+                surface=str(getattr(self, "_surface", None) or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
                 # trace headers carry, so an analytics row links back to
@@ -2911,9 +2998,10 @@ class ChatSession:
         is reported as ``"unknown"`` rather than coerced either way.
 
         Payload is deliberately name + verdict + duration + exception CLASS
-        plus the two join keys, and nothing else. Arguments, result content
-        and ``str(exc)`` routinely carry file paths, user data and
-        credentials-adjacent strings — none of them may ever appear here.
+        + surface (a closed enum, ENG-1945) plus the two join keys, and
+        nothing else. Arguments, result content and ``str(exc)`` routinely
+        carry file paths, user data and credentials-adjacent strings — none
+        of them may ever appear here.
 
         ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
         values exactly (same names, same derivation), so a tool failure spotted
@@ -2955,6 +3043,10 @@ class ChatSession:
                 ok="unknown" if ok is None else str(ok).lower(),
                 duration_ms=str(int(duration_ms)),
                 error_type=error_type,
+                # Same derivation as `turn_completed`'s `surface` (ENG-1945),
+                # so a tool row can be split by desktop / web without joining
+                # to its parent turn first.
+                surface=str(getattr(self, "_surface", None) or ""),
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
             )
@@ -3882,6 +3974,10 @@ class ChatSession:
         self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
+        # Per-turn, so a long-lived session (the CLI reuses one across turns)
+        # reports only what the CURRENT turn touched. Hosts that build a fresh
+        # session per turn get the same result either way.
+        self._artifacts_touched = set()
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -5326,6 +5422,12 @@ class ChatSession:
                     # emit (late finalizers would see a later turn's state).
                     if self._turn_cost is not None:
                         self._turn_cost.verification_skipped = True
+                        # ...and WHY it was skipped (ENG-1858): no call was
+                        # made this turn, so there is no exception type — the
+                        # latch reason is the whole story.
+                        self._turn_cost.verifier_failure = (
+                            f"latched_{self._verifier_latch_reason or 'hard'}"
+                        )
                     break
                 _verifier_log.info(
                     "completion-verifier re-probing after %d skipped verifications",
@@ -5344,6 +5446,10 @@ class ChatSession:
             # latch: a blown budget is a tail sample of one model's verbosity,
             # an identical hard error twice is a capability problem (ENG-1155).
             verdict_failure: str | None = None
+            # The last attempt's exception, kept only long enough to stamp
+            # its TYPE on the turn books below (ENG-1858). `except ... as exc`
+            # unbinds `exc` at the end of each clause, hence the copy.
+            verdict_exc: BaseException | None = None
             for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
                 try:
                     verdict = await self._llm.generate_object_code(
@@ -5362,6 +5468,7 @@ class ChatSession:
                         _VERIFIER_TOKEN_BUDGETS
                     )
                     verdict_failure = "truncated" if exc.truncated else "hard"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s retrying=%s",
@@ -5376,6 +5483,7 @@ class ChatSession:
                     # transient tuple). Retrying, diagnosing, or telling the
                     # user buys nothing: handled below by latching silently.
                     verdict_failure = "denied"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=DENIED budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -5392,6 +5500,7 @@ class ChatSession:
                     # still gets its honest diagnosis (ENG-1079); it just doesn't
                     # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=TRANSIENT budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -5403,6 +5512,7 @@ class ChatSession:
                     # the exception message, which can carry conversation
                     # content (ENG-1081).
                     verdict_failure = "hard"
+                    verdict_exc = exc
                     _verifier_log.info(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
@@ -5419,6 +5529,17 @@ class ChatSession:
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
+                # Every no-verdict exit below — denied latch, hard latch,
+                # failed re-probe, honest handback — books the SAME two
+                # facts, so stamp them once here rather than at each site
+                # (ENG-1858). Class + exception type only; the exception
+                # message can quote conversation content and never leaves
+                # the process.
+                if self._turn_cost is not None:
+                    self._turn_cost.verifier_failure = verdict_failure or "hard"
+                    self._turn_cost.verifier_error_type = _verifier_error_type(
+                        verdict_exc
+                    )
                 if verdict_failure == "denied":
                     # A denied verdict recurs every turn by construction, so
                     # don't wait for a second sample: latch NOW and end the

@@ -165,7 +165,13 @@ _pending_lock = threading.Lock()
 #                    cache_read_tokens, cache_creation_tokens, llm_calls,
 #                    rounds, continuations, peak_context_tokens, duration_ms,
 #                    {planning,coding,router}_{model,tokens,calls},
-#                    unknown_{tokens,calls}, llm_provider, harness,
+#                    unknown_{tokens,calls}, llm_provider, endpoint_class,
+#                    error_type, verifier_failure + verifier_error_type (WHY
+#                    the completion verifier produced no verdict — the loop's
+#                    truncated/transient/hard/denied class and the content-
+#                    free exception type; "" on verified turns; ENG-1858),
+#                    harness, surface (desktop / web / cli — WHERE
+#                    the user was, "" when the host did not say; ENG-1945),
 #                    anton_version, conversation_id, turn_index
 #
 #   rule_retrieval   outcome, when_rules, kept_rules, rules_chars,
@@ -180,6 +186,7 @@ _pending_lock = threading.Lock()
 #                    never the message, which carries paths and user input).
 #                    One event per executed tool call; tool arguments and
 #                    result content are deliberately absent (ENG-1486).
+#                    surface mirrors turn_completed's (ENG-1945).
 #                    conversation_id + turn_index mirror turn_completed's
 #                    values, so a tool row joins to its parent turn row and,
 #                    via Langfuse sessionId, to the gateway trace.

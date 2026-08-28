@@ -12,6 +12,7 @@ from anton.core.datasources.data_vault import (
     DataVault,
     LocalDataVault,
     _slug_env_prefix,
+    _sweep_ds_env_vars,
     is_secret_key,
 )
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
@@ -382,15 +383,45 @@ def _connection_identity(fields: dict, secure_keys: list | None = None) -> str |
     return None
 
 
+def _is_oauth_connection(vault: DataVault, engine: str, name: str) -> bool:
+    """True when this connection's own stored fields say auth_type=oauth.
+
+    An OAuth connection's engine name can collide with an unrelated registry
+    entry of the same name (gmail's registry entry is the legacy IMAP
+    connector) — its field schema never matches, so it must not be
+    classified against that registry entry. Cheap: TurnKeyDataVault caches
+    per (engine, name), so this never costs a second network fetch.
+    """
+    record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
+    fields = (record or {}).get("fields") or {}
+    return fields.get("auth_type") == "oauth"
+
+
+def clear_ds_env() -> None:
+    """Unconditionally clear every DS_* env var and reset the known/secret
+    registries — call this even on a turn with nothing to reinject (e.g. no
+    oauth block this turn), so a var from a prior call can never survive into
+    a turn that has no vault of its own to reset it. This is the version
+    callers with no vault instance in hand can use; callers that do have one
+    should call `restore_namespaced_env()` so any vault-specific override of
+    `clear_ds_env()` (e.g. cache invalidation) still runs."""
+    _reset_registered_ds_vars()
+    _sweep_ds_env_vars()
+
+
 def restore_namespaced_env(vault: DataVault) -> None:
-    """Clear all DS_* vars, then reinject every saved connection as namespaced."""
+    """Clear all DS_* vars, then reinject every saved connection as namespaced.
+
+    Clears via `vault.clear_ds_env()` rather than the module-level
+    `clear_ds_env()` so a vault implementation's own override runs.
+    """
     _reset_registered_ds_vars()
     vault.clear_ds_env()
     dreg = DatasourceRegistry()
     for conn in vault.list_connections():
         vault.inject_env(conn["engine"], conn["name"])  # flat=False by default
         edef = dreg.get(conn["engine"])
-        if edef is not None:
+        if edef is not None and not _is_oauth_connection(vault, conn["engine"], conn["name"]):
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
         else:
             _register_unregistered_connection_vars(vault, conn["engine"], conn["name"])

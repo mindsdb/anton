@@ -132,11 +132,7 @@ add more — installed packages persist across resets.
 
 {conversation_discipline}
 
-RUNTIME IDENTITY:
-{runtime_context}
-- You know what LLM provider and model you are running on. NEVER ask the user which \
-LLM or API they want — you already know. When building tools or code that needs an LLM, \
-use YOUR OWN provider and SDK (the one from the runtime info above).
+{runtime_identity_section}
 
 PROBLEM-SOLVING RESILIENCE:
 - When something fails (HTTP 403, import error, timeout, blocked request, etc.), pause \
@@ -256,7 +252,9 @@ writes across requests. Use ONLY when that state genuinely cannot live in an \
 external data source; prefer stateless when in doubt (see BACKEND & FULLSTACK \
 section) → `type="fullstack-stateful-app"`, `primary="static/index.html"`. \
 The frontend lives in a `static/` subfolder of the artifact, served by \
-`backend.py`.
+`backend.py`. Light durable state uses the platform `STATE` store (declare \
+`state_manifest.json`); heavy/relational data uses an external connected \
+database.
 
 WHEN NOT TO REGISTER:
 - Pure chat answers, tables, or markdown rendered inline in the conversation \

@@ -15,12 +15,16 @@ Provenance is server-managed (deterministic). Only `name`,
 """
 
 from anton.core.artifacts.models import (
+    ARTIFACT_ID_SLUG_PREFIX_LEN,
     ARTIFACT_TYPES,
     Artifact,
     ArtifactType,
     FileEntry,
     ProvenanceEntry,
     TurnEntry,
+    artifact_key,
+    canonical_artifact_id,
+    resolve_artifact_id,
 )
 from anton.core.artifacts.snapshot import (
     DirSnapshot,
@@ -30,6 +34,7 @@ from anton.core.artifacts.snapshot import (
 from anton.core.artifacts.store import ArtifactStore
 
 __all__ = [
+    "ARTIFACT_ID_SLUG_PREFIX_LEN",
     "ARTIFACT_TYPES",
     "Artifact",
     "ArtifactStore",
@@ -38,6 +43,9 @@ __all__ = [
     "FileEntry",
     "ProvenanceEntry",
     "TurnEntry",
+    "artifact_key",
+    "canonical_artifact_id",
     "diff_snapshots",
+    "resolve_artifact_id",
     "snapshot_dir",
 ]

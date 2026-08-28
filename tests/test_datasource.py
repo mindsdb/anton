@@ -2686,6 +2686,22 @@ class TestTemporaryFlatExecution:
         assert "DS_HOST" not in os.environ
         assert os.environ.get("DS_POSTGRES_ANALYTICS__HOST") == "analytics.example.com"
 
+    def test_restore_namespaced_env_calls_the_vaults_own_clear_ds_env(self):
+        """restore_namespaced_env must dispatch through vault.clear_ds_env()
+        (not the module-level clear_ds_env()) so a vault-specific override
+        (e.g. cache invalidation) still runs."""
+        calls = []
+
+        class FakeVault:
+            def clear_ds_env(self):
+                calls.append("cleared")
+
+            def list_connections(self):
+                return []
+
+        restore_namespaced_env(FakeVault())
+        assert calls == ["cleared"]
+
     def test_restore_namespaced_env_reinjects_all_connections(self, vault_dir):
         """_restore_namespaced_env restores ALL saved connections, not just one."""
         vault = LocalDataVault(vault_dir=vault_dir)

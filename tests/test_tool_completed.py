@@ -163,17 +163,32 @@ async def test_unmigrated_handler_verdict_is_unknown_not_a_guess(workspace):
 # ── Payload contract ─────────────────────────────────────────────────
 
 
-async def test_payload_is_exactly_the_six_keys_all_strings(workspace):
+async def test_payload_is_exactly_the_seven_keys_all_strings(workspace):
     """No arguments, no result content, no surprise keys — and str values only,
     because send_event's extras are wire parameters (tests/test_ask_user.py:496).
     """
     session = _session(workspace, [ToolOutcome(content="secret result body", ok=True)])
     events = await _tool_completed_calls(session)
     assert set(events[0]) == {"name", "ok", "duration_ms", "error_type",
-                              "conversation_id", "turn_index"}
+                              "surface", "conversation_id", "turn_index"}
     assert all(isinstance(v, str) for v in events[0].values())
     assert "secret result body" not in json.dumps(events[0])
     int(events[0]["duration_ms"])  # numeric string, parseable
+
+
+async def test_surface_rides_the_tool_row_and_is_empty_when_the_host_did_not_say(workspace):
+    """ENG-1945: `surface` on the tool row, same derivation as turn_completed.
+
+    Two assertions on purpose: the unset case must be "" (never a guess —
+    `_validated_surface` already dropped anything unrecognised), and a host
+    that declared one must see it on every tool row, not just the turn row.
+    """
+    session = _session(workspace, [ToolOutcome(content="x", ok=True)])
+    assert (await _tool_completed_calls(session))[0]["surface"] == ""
+
+    session = _session(workspace, [ToolOutcome(content="x", ok=True)])
+    session._surface = "desktop"
+    assert (await _tool_completed_calls(session))[0]["surface"] == "desktop"
 
 
 async def test_join_keys_match_the_same_turns_turn_completed_row(workspace):

@@ -267,8 +267,9 @@ class TestRuntimeContext:
         assert "claude-sonnet-4-6" in system_prompt
         assert "claude-opus-4-6" in system_prompt
 
-    async def test_system_prompt_warns_not_to_ask_about_llm(self):
-        """System prompt includes instruction to never ask which LLM to use."""
+    async def test_system_prompt_tells_agent_not_to_ask_which_llm_for_code(self):
+        """The configured block still tells the agent to use its own provider
+        for code it writes, without asking the user (ENG-1638 kept this half)."""
         mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
@@ -280,7 +281,10 @@ class TestRuntimeContext:
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
-        assert "NEVER ask the user which" in system_prompt
+        assert "Do not ask the user which LLM or API to use" in system_prompt
+        # The old mandate that produced confident wrong answers is gone.
+        assert "you already know" not in system_prompt
+        assert "NEVER ask the user which" not in system_prompt
 
     async def test_conversation_discipline_in_prompt(self):
         """System prompt includes conversation discipline rules."""
