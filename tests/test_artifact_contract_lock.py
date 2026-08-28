@@ -365,10 +365,13 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "explicit `<body>`")),
     Rule("errors", 'Missing <meta name="viewport" content="width=device-width, initial-scale=1.0">.',
          _both(_FRONT_BOTH, 'name="viewport"')),
+    # Only fetch(). `href`/`src` were dropped from the contract deliberately
+    # (I-17): the rule failed two correct artifacts in a row over a link back to
+    # a source article and its images, and the retry passed by moving the same
+    # URLs into JS strings. Do not restore it without a check that sees the
+    # rendered DOM rather than the HTML text.
     Rule("errors", "Absolute URL is not allowed in fetch(): ...",
          _both(_FRONT_BOTH, "absolute URL")),
-    Rule("errors", "Absolute URL is not allowed in resource references: ...",
-         _both(_FRONT_BOTH, "resource reference")),
     Rule("errors", "Frontend must not use the global name window.__antonCommentsLayer.",
          _both(_FRONT_BOTH, "__antonCommentsLayer")),
     Rule("errors", "Frontend contains a mangled script tag (an underscore variant like "

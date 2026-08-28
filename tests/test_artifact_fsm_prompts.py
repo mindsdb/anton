@@ -212,7 +212,6 @@ def test_visual_rules_carry_the_frontend_verifier_contract():
     for marker in (
         "explicit `<body>`",
         "absolute URL",
-        "resource reference",
         "__antonCommentsLayer",
         "!important",
         "z-index",

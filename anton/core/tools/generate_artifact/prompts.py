@@ -187,10 +187,6 @@ fails the step and costs a regeneration):
 - Emit a complete HTML document with an explicit `<body>`...`</body>`.
 - Include `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - NEVER put an absolute URL in a `fetch()` call. Use relative paths only.
-- NEVER put an absolute URL in a resource reference either — no `<link
-  href="https://...">` for fonts or CSS, no `<img src="https://...">`. The ONLY
-  allowed absolute URL in the whole document is a `<script src="https://...">`
-  CDN library tag.
 - NEVER use the global name `window.__antonCommentsLayer`; it is reserved by the
   host app.
 - Write script tags as plain `<script>` and `</script>` — never any underscore

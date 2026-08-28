@@ -43,6 +43,35 @@ def test_absolute_fetch_url_is_error():
     assert any("absolute" in e.lower() for e in r.errors)
 
 
+def test_absolute_href_and_img_src_are_not_flagged_at_all():
+    """I-17: a dashboard built from a web article links back to it and shows its images.
+
+    Neither an error nor a warning — the accepted PRD asks for exactly these,
+    and the previous rule failed two correct artifacts in a row. Verified for
+    both artifact shapes because `_VISUAL_RULES` is shared.
+    """
+    html = GOOD.replace(
+        '<div id="kpi-revenue"></div>',
+        '<a href="https://habr.com/ru/articles/1074010/">Источник</a>'
+        '<img src="https://habrastorage.org/getpro/habr/upload_files/a.png">'
+        '<link href="https://fonts.googleapis.com/css2?family=Inter" rel="stylesheet">',
+    )
+    for is_fullstack in (True, False):
+        r = verify_frontend(html, is_fullstack=is_fullstack)
+        assert r.ok, r.errors
+        assert not [w for w in r.warnings if "absolute" in w.lower() or "http" in w.lower()]
+
+
+def test_absolute_fetch_url_is_still_an_error_next_to_absolute_href():
+    """Dropping the href/src rule must not weaken the fetch() one."""
+    html = GOOD.replace(
+        "fetch(api('/api/items'))", "fetch('http://localhost:8000/api/items')"
+    ).replace('<div id="kpi-revenue"></div>', '<a href="https://example.com/src">src</a>')
+    r = verify_frontend(html, is_fullstack=True)
+    assert not r.ok
+    assert any("fetch()" in e for e in r.errors)
+
+
 def test_bare_path_backend_call_is_error_for_fullstack():
     html = GOOD.replace("fetch(api('/api/items'))", "fetch('/items')")
     r = verify_frontend(html, is_fullstack=True)

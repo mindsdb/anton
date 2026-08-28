@@ -66,21 +66,22 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
     if is_fullstack and not re.search(r"""<meta[^>]+name=['"]api-base['"]""", html, re.I):
         errors.append('Missing <meta name="api-base" content=""> (required for fullstack frontends).')
 
-    # 4. No absolute URLs in fetch() calls or non-script resource references.
-    #    Any <script src="https://..."> (a CDN library) is allowed — the task
-    #    rules permit user-requested libraries, so a foreign CDN is a warning
-    #    (below), never a hard error.
+    # 4. No absolute URLs in fetch() calls. Only fetch() — a hardcoded host in
+    #    a data call breaks the artifact the moment it is published, because the
+    #    backend it names is the local one.
+    #
+    #    Absolute URLs in `href`/`src` are NOT checked at all — not an error and
+    #    not a warning. The rule used to cover them and produced two live
+    #    failures in a row: a dashboard built from a web article legitimately
+    #    links back to its source (`<a href>`) and shows the source's images
+    #    (`<img src>`), and the accepted PRD had asked for both. Worse, the
+    #    check only ever saw HTML text, so the retry "fixed" it by moving the
+    #    same URLs into JS strings rendered through innerHTML — identical DOM,
+    #    a full regeneration burned, and the model now knows the workaround.
+    #    A check that a correct artifact fails and an incorrect one passes is
+    #    worse than no check.
     for m in re.finditer(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]?https?://""", html, re.I):
         errors.append(f"Absolute URL is not allowed in fetch(): ...{html[m.start():m.start()+60]!r}")
-        break
-    for m in re.finditer(r"""(?:href|src)\s*=\s*['"]https?://""", html, re.I):
-        tag_start = html.rfind("<", 0, m.start())
-        tag = html[tag_start:m.start()].lower()
-        if tag.startswith("<script"):
-            continue  # CDN library script — allowed
-        errors.append(
-            f"Absolute URL is not allowed in resource references: ...{html[m.start():m.start()+60]!r}"
-        )
         break
 
     # 5. All backend calls under /api/* (fullstack only).
