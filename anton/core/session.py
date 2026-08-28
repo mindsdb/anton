@@ -14,7 +14,7 @@ import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -363,6 +363,13 @@ class _VerifierVerdict(BaseModel):
             "than assuming it's almost done."
         ),
     )
+
+    @field_validator("close_to_done", mode="before")
+    @classmethod
+    def _null_falls_back_to_default(cls, v: object) -> object:
+        # An explicit `null` here otherwise fails validation for the WHOLE
+        # verdict, not just this field — fall back to the field default.
+        return False if v is None else v
 
 
 # Output budgets for the verdict call: first attempt, then the retry used when
@@ -878,14 +885,15 @@ def _role_calls(tc: TurnCost, role: str) -> str:
 
 
 def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
-    """Append `tag` ("round" or "ceiling") to `turn_cost.grace_granted`,
-    comma-joined and deduplicated."""
+    """Add `tag` ("round" or "ceiling") to `turn_cost.grace_granted`,
+    comma-joined, deduplicated, and sorted — alphabetical rather than
+    firing order, so the two-grace value is one fixed string either way."""
     if turn_cost is None:
         return
     tags = turn_cost.grace_granted.split(",") if turn_cost.grace_granted else []
     if tag not in tags:
         tags.append(tag)
-        turn_cost.grace_granted = ",".join(tags)
+        turn_cost.grace_granted = ",".join(sorted(tags))
 
 
 def _build_verify_request(
@@ -3132,9 +3140,12 @@ class ChatSession:
 
         `_spend_ceiling_grace_tokens` adds on top of that bound, not inside it:
         the reserve term above cancels out of the gate-plus-reserve landing
-        point, so a granted grace overshoots the ceiling by (approximately)
-        its own size, once per turn. See `_grant_spend_ceiling_grace` for why
-        that term is kept well under the reserve's own size.
+        point, so a granted grace overshoots the ceiling by roughly one more
+        call, once per turn. Known gap: the grace is capped at
+        `max_turn_tokens // 4`, so a single call costing more than that share
+        overshoots past this bound — see `test_total_is_bounded_by_the_ceiling`.
+        See `_grant_spend_ceiling_grace` for why the grace stays well under
+        the reserve's own size otherwise.
         """
         peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
         reserve = min(
@@ -3658,18 +3669,22 @@ class ChatSession:
         resilience_nudged: set[str] = set()
         # Mirrors turn_stream's one-time grants, the same way the round-cap
         # and spend-ceiling checks below already mirror it. This path has no
-        # continuation loop, so each grant is simply spent once for the
-        # whole call rather than once per continuation.
-        _round_cap_grace_active = False
-
+        # continuation loop — unlike `_stream_and_handle_tools`, which needs
+        # its own per-continuation flag — so `_round_cap_grace_used` alone
+        # already tracks whether THIS call earned the wider cap.
         while response.tool_calls:
             tool_round += 1
-            if tool_round > self._max_tool_rounds and not self._round_cap_grace_used:
+            # `> 0` excludes a configured 0 (or misconfigured negative) cap:
+            # that means "no tool rounds", not "one round of free grace".
+            if (
+                tool_round > self._max_tool_rounds
+                and not self._round_cap_grace_used
+                and self._max_tool_rounds > 0
+            ):
                 self._round_cap_grace_used = True
-                _round_cap_grace_active = True
                 _record_grace(self._turn_cost, "round")
             effective_round_cap = self._max_tool_rounds + (
-                _ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0
+                _ROUND_CAP_GRACE_ROUNDS if self._round_cap_grace_used else 0
             )
             if self._turn_cost is not None and tool_round <= effective_round_cap:
                 self._turn_cost.rounds += 1
@@ -4046,6 +4061,11 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        # One-time cap grace, reset once per turn_stream() call rather than in
+        # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
+        self._spend_ceiling_grace_used = False
+        self._spend_ceiling_grace_tokens = 0
+        self._round_cap_grace_used = False
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
@@ -4583,10 +4603,6 @@ class ChatSession:
         system = await self._build_system_prompt(user_message)
         self._compacted_this_turn = False
         self._compaction_failed_this_turn = False
-        # One-time cap grace (ENG-1893), reset per turn like the flags above.
-        self._spend_ceiling_grace_used = False
-        self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
 
         response: StreamComplete | None = None
 
@@ -4674,8 +4690,14 @@ class ChatSession:
                 # mid-loop spend-ceiling grace — no verdict exists yet at
                 # this point, so the grant is a single small window rather
                 # than a self-report. Decided before the accounting below so
-                # the granted round is counted like any other.
-                if tool_round > self._max_tool_rounds and not self._round_cap_grace_used:
+                # the granted round is counted like any other. `> 0` excludes
+                # a configured 0 (or negative) cap — "no tool rounds", not
+                # "one round of free grace".
+                if (
+                    tool_round > self._max_tool_rounds
+                    and not self._round_cap_grace_used
+                    and self._max_tool_rounds > 0
+                ):
                     self._round_cap_grace_used = True
                     _round_cap_grace_active = True
                     _record_grace(self._turn_cost, "round")

@@ -140,41 +140,38 @@ async def test_ceiling_stops_the_turn_and_marks_the_exit(workspace):
     assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
 
 
-@pytest.mark.parametrize("per_call", [PER_CALL, 300_000])
-async def test_total_is_bounded_by_the_ceiling(workspace, per_call):
-    """The turn's spend lands at the ceiling, give or take two output budgets
-    and one grace allotment.
+@pytest.mark.parametrize(
+    "per_call,expected_total",
+    [
+        # Pinned observed totals, not re-derived from `_grant_spend_ceiling_grace`
+        # at test time — a regression in that shared formula must move the
+        # production value AWAY from a frozen expected number, not move both
+        # in lockstep with an assertion that re-computes the same formula.
+        (PER_CALL, 1_000_000),
+        (300_000, 1_200_000),
+    ],
+)
+async def test_total_is_bounded_by_the_ceiling(workspace, per_call, expected_total):
+    """The turn's spend lands at a specific, pinned total for each fixture.
 
-    The reserve is what makes this hold at all: the hand-back diagnosis is
-    itself an LLM call, so gating AT the ceiling would overshoot by that call.
+    Deterministic scripted mock, deterministic outcome — exact equality catches
+    a regression the old `<= CEILING + slack + grace` bound could not: that
+    bound re-derived the same formula the code under test uses, so a formula
+    regression moved the bound and the production value together and the
+    assertion never noticed.
 
-    The slack is not slop — it is the exact residual of the design. The reserve
-    is derived from `peak_context_tokens` (input + cache_read + cache_creation)
-    but compared against `total_tokens`, which also counts output, so the two
-    calls that land after the last passing check contribute their output on top.
-    Asserting `<= CEILING` exactly passed only because the old fixture happened
-    to land on 1,000,000 with zero margin; it reddened as soon as `per_call`
-    moved. State the real bound instead of a knife-edge one.
-
-    The grace term is new: this run's all-tool-calls shape trips the mid-loop
-    gate, and the first trip buys one silent extension before the turn
-    actually stops. Computed from the real `_grant_spend_ceiling_grace`
-    formula, not a flat constant — a flat `_SPEND_CEILING_RESERVE` slack only
-    held at this fixture's small `per_call`; parametrised over a second,
-    bigger `per_call` so the peak-scaled branch of the formula is pinned too.
+    Known gap, not asserted here: at `per_call` large enough that one call's
+    cost exceeds the grace's own `CEILING // 4` cap (roughly >25% of the
+    ceiling), the overshoot is materially larger than this formula predicts —
+    e.g. `per_call=600_000` lands at 1,800,000, not the ~1,550,000 the old
+    bound implied. Tracked as a follow-up, not fixed here.
     """
     session = _session(workspace, responses=[_tool_call(i) for i in range(1, 40)],
                        per_call=per_call)
     with patch("anton.analytics.send_event") as send:
         await _run(session)
-    slack = 2 * (per_call // 4)  # `_usage` puts a quarter of each call in output
-    peak = per_call - (per_call // 4)  # `_usage`'s context share of one call
-    grace = min(max(_SPEND_CEILING_GRACE_FLOOR, peak), CEILING // 4)
     # Analytics properties go over the wire as strings.
-    assert (
-        int(send.call_args.kwargs["tokens_total"])
-        <= CEILING + slack + grace
-    )
+    assert int(send.call_args.kwargs["tokens_total"]) == expected_total
 
 
 async def test_trips_inside_one_tool_loop_with_no_continuation(workspace):

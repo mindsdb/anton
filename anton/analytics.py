@@ -166,10 +166,13 @@ _pending_lock = threading.Lock()
 #                    rounds, continuations, peak_context_tokens, duration_ms,
 #                    {planning,coding,router}_{model,tokens,calls},
 #                    unknown_{tokens,calls}, llm_provider, endpoint_class,
-#                    error_type, verifier_failure + verifier_error_type (WHY
-#                    the completion verifier produced no verdict — the loop's
-#                    truncated/transient/hard/denied class and the content-
-#                    free exception type; "" on verified turns; ENG-1858),
+#                    error_type, grace_granted + grace_tokens ("", "round",
+#                    "ceiling", or "ceiling,round" — the one-time round-cap /
+#                    spend-ceiling extensions granted this turn, and the
+#                    ceiling one's size), verifier_failure + verifier_error_type
+#                    (WHY the completion verifier produced no verdict — the
+#                    loop's truncated/transient/hard/denied class and the
+#                    content-free exception type; "" on verified turns; ENG-1858),
 #                    harness, surface (desktop / web / cli — WHERE
 #                    the user was, "" when the host did not say; ENG-1945),
 #                    anton_version, conversation_id, turn_index

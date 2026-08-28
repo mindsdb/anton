@@ -55,3 +55,14 @@ def test_close_to_done_defaults_false_and_is_bounded():
     assert "roughly 1-3 more tool calls" in desc
     assert "nothing blocking or uncertain" in desc
     assert "an unsure model errs toward asking the user" in desc
+
+
+def test_close_to_done_null_falls_back_to_default_not_a_validation_error():
+    # A model emitting an explicit `"close_to_done": null` alongside an
+    # otherwise-valid verdict used to fail the WHOLE verdict (non-Optional
+    # field, lax bool coercion has no null case) rather than take the
+    # field's own documented default.
+    verdict = _VerifierVerdict.model_validate(
+        {"status": "INCOMPLETE", "reason": "still working", "close_to_done": None}
+    )
+    assert verdict.close_to_done is False

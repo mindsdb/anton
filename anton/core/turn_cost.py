@@ -127,7 +127,8 @@ class TurnCost:
     # their ended_by already distinguishes them.
     verification_skipped: bool = False
     # One-time grace(s) granted this turn: "", "round", "ceiling", or
-    # "round,ceiling". Without this a turn that used a grace and finished is
+    # "ceiling,round" — alphabetical, not firing order (see `_record_grace`).
+    # Without this a turn that used a grace and finished is
     # byte-identical in `turn_completed` to one that never neared a limit —
     # `ended_by=round_cap`/`spend_ceiling` counts drop while actual spend
     # rises, unmeasurably.
