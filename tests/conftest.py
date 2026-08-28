@@ -37,6 +37,19 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 # relying on inheritance. Same call cowork-server's own conftest already makes for
 # the database: "Force isolation (assignment, not setdefault, never touch a real DB)."
 os.environ["ANTON_ANALYTICS_ENABLED"] = "false"
+#
+# Belt and braces: blank the sinks too, so the suite is fail-safe rather than
+# fail-open. The flag above is honoured by exactly one `if` in `send_event`, and
+# this whole bug exists because ENG-1288 added an emitter that reached a real
+# sink — the next one, or any refactor of that single check, reopens it, and the
+# test below would not notice because it asserts on a resolved setting rather
+# than on "no bytes left the process". Both of these are documented kill
+# switches in analytics.py: blanking `analytics_url` has always stopped every
+# event, and an empty `posthog_key` disables the direct PostHog sink. Measured
+# with the enabled-check bypassed: flag alone still emitted, flag plus these two
+# emitted nothing. Costs no coverage — the full suite passes unchanged.
+os.environ["ANTON_ANALYTICS_URL"] = ""
+os.environ["ANTON_POSTHOG_KEY"] = ""
 
 
 def make_mock_llm() -> AsyncMock:
