@@ -798,3 +798,71 @@ def test_short_lived_process_loses_its_event_without_the_flush():
         time.sleep(0.2)
 
     assert received == []
+
+
+# ── The suite's own kill switch (ENG-2055) ──────────────────────────
+#
+# `tests/conftest.py` turns analytics off for the whole suite. Nothing asserted
+# that it worked, in either direction: the same 2,709 tests passed whether the
+# switch held or was silently cancelled, which is why a developer's exported
+# `ANTON_ANALYTICS_ENABLED` shipped real events to production for four months
+# before anyone noticed.
+#
+# So this cannot be an in-process assertion. By the time any test runs, conftest
+# has already executed in an interpreter the test did not control, and asserting
+# on the result would pass for the wrong reason on a clean machine — exactly the
+# environment CI provides. The child below reproduces the *defeated* case: the
+# variable is exported before the interpreter starts, which is the only shape in
+# which the bug is visible.
+
+#: Imports the suite's conftest the way pytest does — for its module-level side
+#: effect — then reports what a freshly resolved AntonSettings believes.
+_KILL_SWITCH_CHILD = """
+import sys
+sys.path.insert(0, {tests_dir!r})
+import conftest  # noqa: F401  -- imported for its module-level kill switch
+from anton.config.settings import AntonSettings
+sys.stdout.write("enabled=%s" % AntonSettings().analytics_enabled)
+"""
+
+
+def _resolve_analytics_enabled_in_child(**env_overrides: str) -> str:
+    env = dict(os.environ)
+    # The suite may itself run under GitHub Actions. `_is_ci()` is a *separate*
+    # guard that would drop the traffic anyway, so leaving a marker set would
+    # make this pass for the wrong reason on CI and fail locally.
+    for marker in _CI_MARKERS:
+        env.pop(marker, None)
+    env.update(env_overrides)
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    result = subprocess.run(
+        [sys.executable, "-c", _KILL_SWITCH_CHILD.format(tests_dir=tests_dir)],
+        check=True, timeout=30, env=env, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def test_the_suite_kill_switch_beats_an_exported_variable():
+    """conftest must win over the developer's environment, not defer to it.
+
+    Mutation-verified: restore `os.environ.setdefault(...)` in conftest and this
+    fails with `enabled=True`, because the exported value is then already
+    present and `setdefault` declines to write.
+    """
+    assert _resolve_analytics_enabled_in_child(
+        ANTON_ANALYTICS_ENABLED="true"
+    ) == "enabled=False"
+
+
+def test_a_test_can_still_re_enable_analytics_for_itself(monkeypatch):
+    """The switch is machine-wide, not a wall.
+
+    Removing the shell-level opt-out does not remove a test's ability to
+    exercise the enabled path: `monkeypatch.setenv` runs long after conftest
+    import, and `AntonSettings` reads the environment at construction. Asserted
+    so nobody "restores" the escape hatch believing this case was lost with it.
+    """
+    monkeypatch.setenv("ANTON_ANALYTICS_ENABLED", "true")
+    from anton.config.settings import AntonSettings
+
+    assert AntonSettings().analytics_enabled is True
