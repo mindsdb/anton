@@ -47,7 +47,7 @@ async def run(state: PrdState) -> dict:
                 "status": "prd_written",
                 "prd_path": str(state.artifact_path / "prd.md"),
                 "artifact_type": state.final_artifact_type,
-                "brief_summary": state.brief_markdown,
+                "brief_summary": state.brief,
                 "qa_log": state.qa_log_markdown(),
             }
 
@@ -64,7 +64,7 @@ async def run(state: PrdState) -> dict:
                 "status": "prd_written_unconfirmed",
                 "prd_path": str(state.artifact_path / "prd.md"),
                 "artifact_type": state.final_artifact_type,
-                "brief_summary": state.brief_markdown,
+                "brief_summary": state.brief,
                 "qa_log": state.qa_log_markdown(),
             }
 
@@ -82,6 +82,6 @@ async def run(state: PrdState) -> dict:
         "status": "prd_written_unconfirmed",
         "prd_path": str(state.artifact_path / "prd.md"),
         "artifact_type": state.final_artifact_type,
-        "brief_summary": state.brief_markdown,
+        "brief_summary": state.brief,
         "qa_log": state.qa_log_markdown(),
     }

@@ -52,6 +52,8 @@ async def generate(
         slug=slug,
         artifact_path=artifact_path,
         artifact_type=artifact_type,
+        is_fullstack=artifact_type != "html-app",
+        brief="",
         user_request=user_request,
         agent_understanding=agent_understanding,
         known_data=known_data,

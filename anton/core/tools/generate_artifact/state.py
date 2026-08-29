@@ -66,6 +66,25 @@ SPEC_MAX_TOKENS_RETRY: int = 20480
 # out of 4 at 131-143s.
 GEN_WRITE_MAX_TOKENS: int = 20480
 
+# Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
+# `show_and_confirm` call plus up to two "revise brief, show again" cycles.
+# Not a separate hard cap — the shared budget itself is what eventually stops
+# the revise loop (elicit() returns "limit"); this only decides how many of
+# the turn's questions the gathering phase may spend before that.
+PHASE2_RESERVED_QUESTIONS = 3
+
+
+def gathering_question_budget(session: "ChatSession | Any") -> int:
+    """How many `ask_user` calls the gathering phase may make this time.
+
+    Recomputed on every call rather than cached on the state, because
+    `session.question_count` keeps changing as questions are asked.
+    """
+    from anton.core.interaction.elicit import MAX_QUESTIONS_PER_TURN
+
+    remaining = MAX_QUESTIONS_PER_TURN - getattr(session, "question_count", 0)
+    return max(0, remaining - PHASE2_RESERVED_QUESTIONS)
+
 
 # ── Verdict schemas for diamond nodes (generate_object) ──────────────────────
 class DataVerdict(BaseModel):
@@ -120,8 +139,15 @@ class GenState:
     artifact_type: str
     artifact_path: Path
     slug: str
-    brief: str
-    is_fullstack: bool
+    # The brief the user agreed to. Empty until phase B has drafted one —
+    # which is most of a run's life now that the pipeline starts at gathering
+    # rather than at a brief handed in by the caller.
+    brief: str = ""
+    # Derived from `artifact_type` when not given (see `__post_init__`).
+    # Callers may still pass it explicitly; leaving it out is the safer
+    # default, because a state whose type and this flag disagree would send
+    # an html-app down the fullstack branch with nothing reporting it.
+    is_fullstack: bool | None = None
     # Entry-file name from the artifact metadata. May be None — `create_artifact`
     # allows omitting it; HTML_APP_DEFAULT_PRIMARY then applies.
     primary: str | None = None
@@ -147,6 +173,66 @@ class GenState:
     # is called from synchronous FSM code that cannot await a full queue, and
     # `QueueFull` there would abort a generation over a progress line.
     progress: "asyncio.Queue[str | None] | None" = None
+
+    # ── Discovery phases (A-C) ───────────────────────────────────────────
+    # The tool's own inputs. `brief` above holds the confirmed brief markdown
+    # once phase B has run; before that it is empty.
+    user_request: str = ""
+    agent_understanding: str = ""
+    known_data: str = ""
+    user_preferences: str = ""
+    # THE shared message list for phases A-D. Dropped at the spec boundary:
+    # generation nodes build their context from the fields on this state, not
+    # from this list. One list, because phase B relies on seeing what phase
+    # A's scratchpad calls returned.
+    messages: list[dict] = field(default_factory=list)
+    qa_log: list[str] = field(default_factory=list)
+    gathering_notes: str = ""
+    # Set by `finish_gathering`. Empty means it was never called and the
+    # originally registered `artifact_type` stands.
+    final_artifact_type: str = ""
+    # Set by `finish_gathering`. False means the loop ran out of rounds
+    # instead — one of the two conditions that opens the emergency data loop.
+    gathering_complete: bool = False
+    declared_sources: list[str] = field(default_factory=list)
+    # Declared sources with nothing executed against them. Tracked explicitly
+    # rather than inferred from `data_notes` being empty: after a user
+    # correction the notes are full of the PREVIOUS gathering's cells, and an
+    # emptiness check would read that as "everything is covered".
+    unverified_sources: list[str] = field(default_factory=list)
+    # Raw material for the deterministic renderers in discovery/notes.py.
+    scratchpad_execs: list[dict] = field(default_factory=list)
+    web_calls: list[dict] = field(default_factory=list)
+    web_notes: str = ""
+    # True when a repeat call arrived with changed soft fields, i.e. the user
+    # asked for something. Set by the entry point from the stored
+    # `call_fingerprint`; decides whether the brief is redrawn or reused
+    # verbatim. An optimization, never a confirmation signal.
+    call_changed: bool = False
+    # Installed by the entry point. None on the bench harness and in unit
+    # tests that construct a state directly, so every read goes through
+    # `winding_down()`.
+    spend: "Any | None" = None
+
+    def __post_init__(self) -> None:
+        if self.is_fullstack is None:
+            self.is_fullstack = self.artifact_type != "html-app"
+
+    def record_qa(self, question: str, answer_summary: str) -> None:
+        self.qa_log.append(f"- **Q:** {question}\n  **A:** {answer_summary}")
+
+    def qa_log_markdown(self) -> str:
+        return "\n".join(self.qa_log) if self.qa_log else "(no questions were asked)"
+
+    def winding_down(self) -> bool:
+        """The one place that tolerates a missing guard.
+
+        `spend` is None for the bench harness and for tests that build a
+        state by hand, and neither should acquire budget behaviour just by
+        existing. Every phase asks through here rather than reaching into
+        `spend` directly, so that None-check lives once.
+        """
+        return self.spend is not None and self.spend.should_wind_down()
 
     def record(self, node: str, outcome: str, detail: str = "") -> None:
         self.trace.append(StepResult(node=node, outcome=outcome, detail=detail))

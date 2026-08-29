@@ -50,12 +50,12 @@ def _state(artifact_path: Path, **over) -> PrdState:
     return state
 
 
-async def test_draft_brief_sets_brief_markdown_and_appends_to_messages(tmp_path):
+async def test_draft_brief_sets_the_brief_and_appends_to_messages(tmp_path):
     state = _state(tmp_path)
     state.session._llm.plan = AsyncMock(return_value=_response("## Goal\nAn analog clock.\n"))
     await brief.draft_brief(state)
-    assert state.brief_markdown == "## Goal\nAn analog clock."
-    assert state.messages[-1]["content"] == state.brief_markdown
+    assert state.brief == "## Goal\nAn analog clock."
+    assert state.messages[-1]["content"] == state.brief
 
 
 async def test_draft_brief_restarts_the_spinner_before_the_llm_call(tmp_path):
@@ -102,10 +102,10 @@ async def test_draft_brief_raises_on_an_empty_reply(tmp_path):
 
 async def test_show_and_confirm_accept(monkeypatch):
     state = _state(Path("/tmp/x"))
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
 
     async def fake_elicit(session, request):
-        assert request.prompt == state.brief_markdown
+        assert request.prompt == state.brief
         assert {o.value for o in request.options} == {"accept", "cancel"}
         return AskAnswer(status="answered", values=("accept",))
 
@@ -120,7 +120,7 @@ async def test_show_and_confirm_cancel(monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
     state = _state(Path("/tmp/x"))
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
     outcome = await brief.show_and_confirm(state)
     assert outcome == "cancelled"
 
@@ -131,7 +131,7 @@ async def test_show_and_confirm_user_declined_to_answer(monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
     state = _state(Path("/tmp/x"))
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
     outcome = await brief.show_and_confirm(state)
     assert outcome == "cancelled"
 
@@ -142,7 +142,7 @@ async def test_show_and_confirm_free_text_is_a_revision(monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
     state = _state(Path("/tmp/x"))
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
     outcome = await brief.show_and_confirm(state)
     assert outcome == "revise"
     assert "make it dark mode" in state.messages[-1]["content"]
@@ -156,7 +156,7 @@ async def test_show_and_confirm_logs_a_node_per_outcome(monkeypatch):
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
     trace = MagicMock()
     state = _state(Path("/tmp/x"), trace_log=trace)
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
     await brief.show_and_confirm(state)
     trace.node.assert_called_once_with("show_and_confirm", "accepted", detail="user picked accept")
 
@@ -168,7 +168,7 @@ async def test_show_and_confirm_budget_or_channel_failure_is_unconfirmed_not_can
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
     state = _state(Path("/tmp/x"))
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
     outcome = await brief.show_and_confirm(state)
     assert outcome == "unconfirmed"
 
@@ -288,7 +288,7 @@ async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
     state = _state(Path("/tmp/x"))
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
     outcome = await brief.show_and_confirm(state)
     assert outcome == "accepted"
     assert seen_requests[0].default_value == "accept"
@@ -306,7 +306,7 @@ async def test_show_and_confirm_requests_compact_rendering(monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_elicit)
     state = _state(Path("/tmp/x"))
-    state.brief_markdown = "## Goal\n..."
+    state.brief = "## Goal\n..."
     await brief.show_and_confirm(state)
     assert seen_requests[0].compact is True
 

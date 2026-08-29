@@ -126,9 +126,9 @@ async def draft_brief(state: PrdState) -> None:
             "draft_brief: the model replied with no text — it may have "
             "called a tool instead of drafting the brief."
         )
-    state.brief_markdown = brief
-    state.messages.append({"role": "assistant", "content": state.brief_markdown})
-    state.trace_log.node("draft_brief", "done", detail=state.brief_markdown[:200])
+    state.brief = brief
+    state.messages.append({"role": "assistant", "content": state.brief})
+    state.trace_log.node("draft_brief", "done", detail=state.brief[:200])
 
 
 async def show_and_confirm(state: PrdState) -> str:
@@ -145,7 +145,7 @@ async def show_and_confirm(state: PrdState) -> str:
     from anton.core.interaction.elicit import AskOption, AskRequest
 
     request = AskRequest(
-        prompt=state.brief_markdown,
+        prompt=state.brief,
         kind="choice",
         options=(
             AskOption(value="accept", label="Accept"),
