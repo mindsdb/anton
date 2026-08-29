@@ -3066,6 +3066,17 @@ class ChatSession:
             # Analytics must never affect the tool call that just ran.
             pass
 
+    def spend_ceiling_reached(self) -> bool:
+        """Public read of the turn's spend ceiling, for long-running tools.
+
+        `generate_artifact` runs a whole pipeline inside a single tool-use
+        round, so the loop-level check in `_spend_ceiling_stops_the_tool_loop`
+        cannot see it overspend (I-20). It reads this instead of the private
+        method — a tool reaching into `_`-prefixed session internals is how
+        `_output_token_cap` ended up broken by a refactor (I-08).
+        """
+        return self._spend_ceiling_reached()
+
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.
 
