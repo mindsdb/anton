@@ -12,6 +12,12 @@ import re
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, TECH_SPEC_FILENAME
 
 from . import engine, prompts
+from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import them from here)
+    EXEC_CODE_MAX,
+    EXEC_NOTES_MAX,
+    EXEC_OUTPUT_MAX,
+    render_exec_notes as _render_exec_notes,
+)
 from .prompts import HTML_APP_DEFAULT_PRIMARY
 from .state import (
     DATA_LOOP_MAX,
@@ -36,48 +42,6 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     )
     state.trace_log.verdict(node=node, schema=getattr(schema, "__name__", str(schema)), value=value)
     return result
-
-
-# Caps for the exec-code record appended to data_notes: per-cell code, per-cell
-# output snippet, and the whole section. Oldest cells are dropped first — the
-# most recent ones are the ones that worked.
-EXEC_CODE_MAX = 2000
-EXEC_OUTPUT_MAX = 300
-EXEC_NOTES_MAX = 8000
-
-
-def _render_exec_notes(
-    execs: list[dict], *, header: str = "### Code executed while fetching"
-) -> str:
-    """Deterministic record of the Python the fetch step ran.
-
-    Appended to data_notes so later steps (tech spec, backend generation) see
-    the exact working data-access code instead of relying on the model's
-    `finish` summary to mention it.
-    """
-    blocks: list[str] = []
-    for e in execs:
-        code = (e.get("code") or "").strip()
-        if not code:
-            continue
-        if len(code) > EXEC_CODE_MAX:
-            code = code[:EXEC_CODE_MAX] + "\n# … truncated …"
-        out = " ".join((e.get("output") or "").split())
-        if len(out) > EXEC_OUTPUT_MAX:
-            out = out[:EXEC_OUTPUT_MAX] + " …"
-        block = f"Scratchpad `{e.get('name')}`:\n```python\n{code}\n```"
-        if out:
-            block += f"\nOutput: {out}"
-        blocks.append(block)
-    dropped = 0
-    while blocks and sum(len(b) for b in blocks) > EXEC_NOTES_MAX:
-        blocks.pop(0)
-        dropped += 1
-    if not blocks:
-        return ""
-    if dropped:
-        header += f" (first {dropped} cell(s) omitted for size)"
-    return header + "\n" + "\n\n".join(blocks)
 
 
 async def _fetch_data_sample(state: GenState) -> str:
