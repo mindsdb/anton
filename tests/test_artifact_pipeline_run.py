@@ -11,7 +11,7 @@ import pytest
 from anton.core.artifacts import ArtifactStore
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
-from anton.core.tools.generate_artifact.discovery import orchestrator
+from anton.core.tools.generate_artifact.discovery import brief, orchestrator
 from anton.core.tools.generate_artifact.discovery.state import PrdState
 
 
@@ -58,7 +58,7 @@ async def test_full_happy_path_accept_on_first_try(tmp_path, monkeypatch):
     async def fake_ask_via_elicit(session, request):
         return AskAnswer(status="answered", values=("accept",))
 
-    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
     result = await orchestrator.run(state)
     assert result["status"] == "prd_written"
@@ -78,7 +78,7 @@ async def test_cancelled_never_writes_prd(tmp_path, monkeypatch):
     async def fake_ask_via_elicit(session, request):
         return AskAnswer(status="answered", values=("cancel",))
 
-    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
     result = await orchestrator.run(state)
     assert result["status"] == "cancelled"
@@ -96,7 +96,7 @@ async def test_revise_then_accept_loops_back_through_draft_brief(tmp_path, monke
         ]
     )
     state.session._llm.generate_object = AsyncMock(
-        return_value=orchestrator.FeedbackVerdict(route="revise_brief", reasoning="just wording")
+        return_value=brief.FeedbackVerdict(route="revise_brief", reasoning="just wording")
     )
 
     answers = iter([
@@ -107,7 +107,7 @@ async def test_revise_then_accept_loops_back_through_draft_brief(tmp_path, monke
     async def fake_ask_via_elicit(session, request):
         return next(answers)
 
-    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
     result = await orchestrator.run(state)
     assert result["status"] == "prd_written"
@@ -144,7 +144,7 @@ async def test_best_effort_when_gathering_never_calls_finish_gathering(tmp_path,
     async def fake_ask_via_elicit(session, request):
         return AskAnswer(status="answered", values=("accept",))
 
-    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
     result = await orchestrator.run(state)
     assert result["status"] == "prd_written"
@@ -171,7 +171,7 @@ async def test_unconfirmed_when_budget_runs_out_at_confirm(tmp_path, monkeypatch
     async def fake_ask_via_elicit(session, request):
         return AskAnswer(status="limit")
 
-    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
     result = await orchestrator.run(state)
     assert result["status"] == "prd_written_unconfirmed"
@@ -190,7 +190,7 @@ async def test_qa_log_is_present_in_every_status(tmp_path, monkeypatch):
     async def fake_ask_via_elicit(session, request):
         return AskAnswer(status="answered", values=("cancel",))
 
-    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
     result = await orchestrator.run(state)
     assert "qa_log" in result
@@ -209,13 +209,13 @@ async def test_revise_loop_has_a_defensive_cap_and_ends_unconfirmed(tmp_path, mo
     ] + [_text_response("## Goal\n...\n")] * (orchestrator.MAX_REVISE_CYCLES + 5)
     state.session._llm.plan = AsyncMock(side_effect=responses)
     state.session._llm.generate_object = AsyncMock(
-        return_value=orchestrator.FeedbackVerdict(route="revise_brief", reasoning="wording only")
+        return_value=brief.FeedbackVerdict(route="revise_brief", reasoning="wording only")
     )
 
     async def fake_ask_via_elicit(session, request):
         return AskAnswer(status="answered", text="one more tweak")
 
-    monkeypatch.setattr(orchestrator.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
     result = await orchestrator.run(state)
     assert result["status"] == "prd_written_unconfirmed"
