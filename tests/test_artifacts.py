@@ -476,6 +476,17 @@ def test_excluded_set_covers_every_generation_input():
     assert set(GENERATION_INPUT_FILES) <= _EXCLUDED_FROM_FILES
 
 
+def test_discovery_json_is_a_generation_input_not_an_artifact_file():
+    """The discovery checkpoint sits next to dashboard.html and must never be
+    reported to the user as part of what was built."""
+    from anton.core.artifacts.internal_files import (
+        DISCOVERY_FILENAME,
+        GENERATION_INPUT_FILES,
+    )
+
+    assert DISCOVERY_FILENAME in GENERATION_INPUT_FILES
+
+
 def test_housekeeping_set_still_mirrors_cowork_server():
     """The set is documented as mirroring cowork-server's artifacts service
     (`cowork/services/artifacts.py:132`), and `publish_access` plus the publish

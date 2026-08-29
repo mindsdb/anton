@@ -22,6 +22,11 @@ from __future__ import annotations
 PRD_FILENAME = "prd.md"
 TECH_SPEC_FILENAME = "spec.md"
 API_SPEC_FILENAME = "openapi.json"
+# Machine-readable state of the discovery phases (gathering -> brief -> PRD):
+# fingerprints, pipeline stage, declared data sources, the brief, and the
+# rendered data/web notes. `prd.md` is the human-readable record of the same
+# phases; this is what the pipeline itself reads back on a cold start.
+DISCOVERY_FILENAME = "discovery.json"
 
 # Reported by `generate_artifact` as `internal_files` and excluded from an
 # artifact's `files[]`: generation inputs, not deliverables.
@@ -29,4 +34,5 @@ GENERATION_INPUT_FILES = frozenset({
     PRD_FILENAME,
     TECH_SPEC_FILENAME,
     API_SPEC_FILENAME,
+    DISCOVERY_FILENAME,
 })
