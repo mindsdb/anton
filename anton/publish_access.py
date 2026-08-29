@@ -31,6 +31,14 @@ _HOUSEKEEPING_FILES = {
     ".state_manifest.published.json",
 }
 
+# Reserved directories (`.revisions` — the private revision journal). Matching
+# here is against the path's first component, so folding these into the set
+# above would work — but that set is locked to the store's copy by
+# `test_housekeeping_set_matches_publish_access_copy`, and the store, which
+# matches whole paths, has to keep directories separate. Same split on both
+# sides keeps that lock meaningful rather than one more thing to update twice.
+_HOUSEKEEPING_DIRS = {".revisions"}
+
 
 def normalize_emails(values) -> list[str]:
     """Strip + lowercase + de-dupe, preserving first-seen order."""
@@ -202,7 +210,7 @@ def _user_files(folder: Path) -> list[Path]:
                 continue
             rel = p.relative_to(folder)
             top = rel.parts[0] if rel.parts else ""
-            if top in _HOUSEKEEPING_FILES:
+            if top in _HOUSEKEEPING_FILES or top in _HOUSEKEEPING_DIRS:
                 continue
             out.append(p)
     except OSError:

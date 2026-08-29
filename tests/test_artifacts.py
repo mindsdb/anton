@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -18,6 +19,7 @@ from anton.core.artifacts import (
     ARTIFACT_TYPES,
     Artifact,
     ArtifactStore,
+    artifact_key,
     diff_snapshots,
     snapshot_dir,
 )
@@ -54,8 +56,9 @@ def test_create_writes_metadata_and_readme(store: ArtifactStore):
         description="Compares NVDA and BTC.",
         type="html-app",
     )
-    assert artifact.slug == f"nvda-btc-dashboard-{artifact.id}"
-    assert len(artifact.id) == 8
+    assert artifact.slug == f"nvda-btc-dashboard-{artifact.id[:8]}"
+    assert len(artifact.id) == 32
+    assert UUID(artifact.id).hex == artifact.id
     folder = store.folder_for(artifact.slug)
     assert folder.is_dir()
     assert (folder / "metadata.json").is_file()
@@ -78,6 +81,106 @@ def test_create_persists_round_trip(store: ArtifactStore):
     assert on_disk["type"] == "document"
     assert on_disk["files"] == []
     assert on_disk["provenance"] == []
+    assert on_disk["id"] == artifact.id
+    assert "stableId" not in on_disk
+
+
+LEGACY_METADATA = {
+    "id": "a1b2c3d4",
+    "slug": "legacy-a1b2c3d4",
+    "createdAt": "2026-08-25T12:00:00+00:00",
+    "updatedAt": "2026-08-25T12:00:00+00:00",
+    "name": "Legacy",
+    "description": "",
+    "type": "document",
+}
+
+
+def test_legacy_metadata_widens_to_a_repeatable_full_id():
+    """anton widens in memory while cowork-server persists, so two independent
+    readers have to land on the same value without coordinating."""
+    first = Artifact.model_validate(LEGACY_METADATA)
+    second = Artifact.model_validate(LEGACY_METADATA)
+
+    assert first.id == second.id
+    assert len(first.id) == 32
+    assert UUID(first.id).hex == first.id
+
+
+def test_legacy_widening_keeps_the_slug_suffix_addressable():
+    """The old eight characters stay the id prefix, so `<name>-<id[:8]>` folders
+    keep resolving after the widening."""
+    artifact = Artifact.model_validate(LEGACY_METADATA)
+
+    assert artifact.id[:8] == "a1b2c3d4"
+    assert artifact.slug.endswith(f"-{artifact.id[:8]}")
+
+
+def test_persisted_stable_id_wins_over_rederivation():
+    """Records from the two-field era already keyed published versions and
+    comment threads by `stableId`; adopting it keeps those keys bound."""
+    minted = "11111111-2222-4333-8444-555555555555"
+    artifact = Artifact.model_validate({**LEGACY_METADATA, "stableId": minted})
+
+    assert artifact.id == UUID(minted).hex
+
+
+@pytest.mark.parametrize("damaged_id", [
+    "7db94eb8f0a54c7e9c1d2b3a4f5e6d7",   # one char short of a UUID
+    "7db94eb8f0a54c7e9c1d2b3a4f5e6d700",  # one char long
+    "7db94eb8f0a5",                       # hex, wider than a legacy id
+])
+def test_a_damaged_id_is_rejected_not_re_minted(damaged_id):
+    """Hex-only and wider than a legacy id: a truncated or padded identity.
+    Re-minting it would detach the artifact from its published versions, auth
+    rules and comment threads."""
+    with pytest.raises(Exception):
+        Artifact.model_validate({**LEGACY_METADATA, "id": damaged_id})
+
+
+@pytest.mark.parametrize("name_like_id", ["static-art", "legacy", "z" * 32])
+def test_a_name_in_the_id_field_widens_rather_than_dropping_the_artifact(name_like_id):
+    """Hand-written and very old records carry names in `id`. Refusing them
+    would drop the artifact from every listing, which reads as a deletion."""
+    artifact = Artifact.model_validate({**LEGACY_METADATA, "id": name_like_id})
+
+    assert UUID(artifact.id).hex == artifact.id
+
+
+def test_an_empty_id_is_rejected():
+    """The early return in the widening validator leaves nothing to widen from;
+    the field constraint has to catch it, or `artifact_key('')` blows up later."""
+    with pytest.raises(Exception):
+        Artifact.model_validate({**LEGACY_METADATA, "id": ""})
+
+
+def test_a_malformed_persisted_stable_id_is_rejected():
+    with pytest.raises(Exception):
+        Artifact.model_validate({**LEGACY_METADATA, "stableId": "not-a-uuid"})
+
+
+def test_an_already_widened_id_ignores_a_stale_stable_id():
+    """An older build could re-add `stableId` to a record whose `id` is already
+    the identity that published versions are keyed under. `id` has to win, or
+    that stale write would re-stamp the artifact and orphan its comments."""
+    widened = "7db94eb8f0a54c7e9c1d2b3a4f5e6d70"
+
+    artifact = Artifact.model_validate({
+        **LEGACY_METADATA,
+        "id": widened,
+        "stableId": "080ee44e-9ebd-5f7f-ab07-cccfc6b9d56e",
+    })
+
+    assert artifact.id == widened
+
+
+def test_artifact_key_is_the_canonical_dashed_form():
+    """The upload lambda normalizes what it stores in `_meta.json` the same way,
+    so the browser shell and cowork agree on one comments key."""
+    artifact = Artifact.model_validate(LEGACY_METADATA)
+
+    assert artifact_key(artifact.id) == f"artifact/{UUID(artifact.id)}"
+    assert artifact_key(artifact.id) == artifact_key(str(UUID(artifact.id)))
 
 
 # ─── Slug uniqueness ────────────────────────────────────────────────────────
@@ -98,12 +201,12 @@ def test_same_name_yields_distinct_slugs(store: ArtifactStore):
 def test_slug_lowercases_and_sanitizes(store: ArtifactStore):
     artifact = store.create(name="Hello, World!", description="x", type="document")
     # Punctuation collapses to hyphens; runs deduped; lowercased.
-    assert artifact.slug == f"hello-world-{artifact.id}"
+    assert artifact.slug == f"hello-world-{artifact.id[:8]}"
 
 
 def test_slug_falls_back_when_name_is_garbage(store: ArtifactStore):
     artifact = store.create(name="!!!", description="x", type="document")
-    assert artifact.slug == f"untitled-artifact-{artifact.id}"
+    assert artifact.slug == f"untitled-artifact-{artifact.id[:8]}"
 
 
 def test_non_latin_names_still_get_distinct_folders(store: ArtifactStore):
@@ -125,7 +228,7 @@ def test_display_name_carries_no_id(store: ArtifactStore):
     artifact = store.create(name="", description="x", type="document")
 
     assert artifact.name == "untitled-artifact"
-    assert artifact.slug == f"untitled-artifact-{artifact.id}"
+    assert artifact.slug == f"untitled-artifact-{artifact.id[:8]}"
 
 
 def test_slug_stays_within_the_length_budget(store: ArtifactStore):
@@ -134,7 +237,7 @@ def test_slug_stays_within_the_length_budget(store: ArtifactStore):
     artifact = store.create(name="x" * 200, description="x", type="document")
 
     assert len(artifact.slug) <= 64
-    assert artifact.slug.endswith(f"-{artifact.id}")
+    assert artifact.slug.endswith(f"-{artifact.id[:8]}")
 
 
 # ─── List + open ────────────────────────────────────────────────────────────
@@ -397,6 +500,21 @@ def test_housekeeping_set_matches_publish_access_copy():
     assert _HOUSEKEEPING_FILES == ACCESS_COPY
 
 
+def test_housekeeping_dirs_match_publish_access_copy():
+    """Reserved DIRECTORIES are a second set, and it drifts just as quietly.
+
+    `publish_access` matches on the path's first component, so a directory name
+    also "works" inside `_HOUSEKEEPING_FILES` there — which is how `.revisions`
+    arrived in the staging merge, breaking the lock above. The store matches
+    whole relative paths and cannot fold directories in, so both sides keep the
+    split and both sides are locked.
+    """
+    from anton.core.artifacts.store import _HOUSEKEEPING_DIRS
+    from anton.publish_access import _HOUSEKEEPING_DIRS as ACCESS_COPY
+
+    assert _HOUSEKEEPING_DIRS == ACCESS_COPY
+
+
 def test_reconcile_excludes_state_runtime_files(store: ArtifactStore):
     """A locally-run stateful backend writes its SQLite store (and WAL/SHM side
     files) into the artifact folder; publishing adds the schema snapshot. All
@@ -428,6 +546,18 @@ def test_a_nested_file_named_like_a_generation_input_is_kept(store: ArtifactStor
     (folder / "openapi.json").write_text("{}")
     opened = store.open(artifact.slug)
     assert {f.path for f in opened.files} == {"static/openapi.json"}
+
+def test_reconcile_excludes_revision_journal(store: ArtifactStore):
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    folder = store.folder_for(artifact.slug)
+    (folder / "dashboard.html").write_text("<html></html>")
+    journal = folder / ".revisions" / "entries"
+    journal.mkdir(parents=True)
+    (journal / "private-source.md").write_text("must not surface")
+
+    opened = store.open(artifact.slug)
+
+    assert {f.path for f in opened.files} == {"dashboard.html"}
 
 
 def test_reconcile_on_read_is_idempotent(store: ArtifactStore):

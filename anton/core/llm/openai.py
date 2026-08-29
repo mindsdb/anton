@@ -1159,6 +1159,7 @@ class OpenAIProvider(LLMProvider):
                 cache_creation_tokens=cache_creation_tokens,
             ),
             stop_reason=choice.finish_reason,
+            model=getattr(response, "model", None),
         )
 
     async def stream(
@@ -1215,6 +1216,8 @@ class OpenAIProvider(LLMProvider):
         cache_read_tokens = 0
         cache_creation_tokens = 0
         stop_reason: str | None = None
+        # What the server says it is serving; every chunk carries it (ENG-1638).
+        served_model: str | None = None
 
         # Track tool call deltas by index
         tc_state: dict[int, dict] = {}
@@ -1229,6 +1232,7 @@ class OpenAIProvider(LLMProvider):
             stream = await self._client.chat.completions.create(**kwargs)
             stream_started = True
             async for chunk in stream:
+                served_model = getattr(chunk, "model", None) or served_model
                 if chunk.usage:
                     (
                         input_tokens,
@@ -1430,6 +1434,7 @@ class OpenAIProvider(LLMProvider):
                     cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
+                model=served_model,
             )
         )
 
@@ -1549,6 +1554,7 @@ class OpenAIProvider(LLMProvider):
         cache_read_tokens = 0
         cache_creation_tokens = 0
         stop_reason: str | None = None
+        served_model: str | None = None  # from the final Response object (ENG-1638)
 
         # Map output_index → in-flight function-call state. Responses API uses
         # a per-output_index stable handle for streaming arguments.
@@ -1644,6 +1650,7 @@ class OpenAIProvider(LLMProvider):
                             ) = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
                         stop_reason = getattr(final_response, "status", None)
+                        served_model = getattr(final_response, "model", None) or served_model
         except openai.BadRequestError as exc:
             msg = str(exc).lower()
             if "context_length_exceeded" in msg or "maximum context length" in msg:
@@ -1726,6 +1733,7 @@ class OpenAIProvider(LLMProvider):
                     cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
+                model=served_model,
             )
         )
 
@@ -1788,4 +1796,5 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             cache_creation_tokens=cache_creation_tokens,
         ),
         stop_reason=status,
+        model=getattr(response, "model", None),
     )

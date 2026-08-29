@@ -16,6 +16,8 @@ where it can actually be broken.
 
 from __future__ import annotations
 
+import ast
+import pathlib
 import re
 from pathlib import Path
 
@@ -31,9 +33,34 @@ _WORKFLOW = _ROOT / ".github/workflows/scratchpad-dev-build.yml"
 _PRETEND = re.compile(r"SETUPTOOLS_SCM_PRETEND_VERSION=(\S+?)\s*\\?$", re.MULTILINE)
 
 
+def _strip_comments(text: str) -> str:
+    """Drop comment-only lines before matching. Load-bearing, not cosmetic.
+
+    This file has already been bitten twice by the same thing. The single-line
+    capture assertion matched ``tail -n 1`` anywhere in the ``run`` block, and
+    the comment explaining the pipeline contained that literal, so deleting the
+    pipe left the test green. The cowork-server half of ENG-1796 then repeated
+    it exactly: a comment reading ``already checks out with fetch-depth: 0``
+    satisfied the assertion guarding that setting, and both mutations passed.
+
+    Prose about a guard must never be able to stand in for the guard, so the
+    stripping happens once here rather than at each call site.
+    """
+    # Truncate each line at its first `#` rather than dropping comment-only
+    # lines. A prefix check misses the likelier disabling pattern -- keeping the
+    # guard's text as a trailing note beside a no-op, e.g.
+    # `true # test ! -e /app/.git`, which reads as intact and is not. Verified:
+    # that exact mutation passed until this truncated instead.
+    #
+    # A `#` inside a quoted string would truncate a real line early, and that is
+    # the safe direction: the assertion fails loudly rather than passing on
+    # prose. None of the lines asserted on here contain one.
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
 @pytest.fixture(scope="module")
 def dockerfile() -> str:
-    return _DOCKERFILE.read_text()
+    return _strip_comments(_DOCKERFILE.read_text())
 
 
 @pytest.fixture(scope="module")
@@ -118,7 +145,7 @@ def test_git_is_excluded_from_the_build_context() -> None:
     )
 
 
-def test_the_build_refuses_a_context_containing_git() -> None:
+def test_the_build_refuses_a_context_containing_git(dockerfile: str) -> None:
     """Belt for the above: catches .git arriving by any route, not just this file.
 
     A negation pattern, a different context, or a build that bypasses
@@ -126,13 +153,10 @@ def test_the_build_refuses_a_context_containing_git() -> None:
     behind cowork-server's 0.0.0 guard -- the check belongs where the mistake
     happens, not only where one spelling of it is written down.
     """
-    assert "test ! -e /app/.git" in _DOCKERFILE_TEXT(), (
+    assert "test ! -e /app/.git" in dockerfile, (
         "the build no longer refuses a context containing .git"
     )
 
-
-def _DOCKERFILE_TEXT() -> str:
-    return _DOCKERFILE.read_text()
 
 
 def _resolve_step(workflow: dict) -> dict:
@@ -142,15 +166,20 @@ def _resolve_step(workflow: dict) -> dict:
     raise AssertionError("no `resolve` step in the version job")
 
 
+def _resolve_run(workflow: dict) -> str:
+    """The resolve step's script, comments removed — see :func:`_strip_comments`."""
+    return _strip_comments(_resolve_step(workflow).get("run", ""))
+
+
 def test_the_resolved_version_is_validated_whole_line(workflow: dict) -> None:
-    """A prefix match is not enough, because the value reaches a shell unquoted.
+    r"""A prefix match is not enough, because the value reaches a shell unquoted.
 
     The shared action expands ``extra-build-args`` unquoted into ``docker buildx
     build``, so ``2.26.8 --build-arg EVIL=1`` passes a ``^[0-9]+\.[0-9]`` prefix
     check and becomes extra arguments to that command. ``grep -Eqx`` anchors
     both ends, which is what actually closes it.
     """
-    run = _resolve_step(workflow).get("run", "")
+    run = _resolve_run(workflow)
     assert "grep -Eqx" in run, (
         "the version is no longer whole-line validated; a prefix match lets "
         "whitespace through into an unquoted shell expansion"
@@ -165,9 +194,58 @@ def test_only_one_line_is_captured(workflow: dict) -> None:
     it in the same ``run`` block names ``tail -n 1`` too, so a substring check
     stayed green when the pipe was deleted -- caught by mutation, not by review.
     """
-    run = _resolve_step(workflow).get("run", "")
+    run = _resolve_run(workflow)
     assert "uvx hatch version | tail -n 1" in run, (
         "a multi-line capture would corrupt $GITHUB_OUTPUT rather than fail"
+    )
+
+
+def test_every_dockerfile_read_in_this_file_is_comment_stripped() -> None:
+    """Closes the vector rather than the instance, on the fourth attempt.
+
+    A helper named ``_DOCKERFILE_TEXT()`` survived the previous round: dead
+    code returning raw text, sitting directly under the assertion it used to
+    serve. Nothing was broken by it -- but rerouting one assertion through it
+    and neutering the guard with a trailing comment gave ``11 passed``, so it
+    was a loaded vector with an inviting name, which is how this class recurred
+    twice already.
+
+    Deleting it is not enough on its own: the next person adding a Dockerfile
+    assertion would reach for the raw read directly and land in the same place.
+    So there is now one stripped accessor -- the ``dockerfile`` fixture -- and
+    this asserts nothing bypasses it.
+
+    Walked as an AST rather than scanned line by line, and that was not a
+    stylistic choice. The line-scanning version's first act was to flag this
+    docstring, because the prose here names the very expression it looks for --
+    prose mistaken for code, which is precisely the defect this whole file has
+    been chasing. An AST cannot see a docstring's contents, so the tool now
+    matches the problem.
+    """
+    tree = ast.parse(pathlib.Path(__file__).read_text())
+
+    stripped_args = {
+        id(arg)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_strip_comments"
+        for arg in node.args
+    }
+    bare = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "read_text"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_DOCKERFILE"
+        and id(node) not in stripped_args
+    ]
+    assert not bare, (
+        "the Dockerfile is read without stripping comments at line(s) "
+        f"{bare}; a comment there could satisfy the assertion made on it. "
+        "Use the `dockerfile` fixture."
     )
 
 

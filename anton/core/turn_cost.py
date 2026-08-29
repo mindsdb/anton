@@ -64,9 +64,11 @@ class RoleCost:
     event can carry this as flat properties instead of a nested blob.
 
     ``model`` is the alias anton REQUESTED. The gateway may resolve or fail
-    over to a different model server-side and does not report that back on the
-    response (``LLMResponse`` carries no model field), so this is the client's
-    intent, not proof of what served the call — Langfuse holds the latter.
+    over to a different model server-side; it does echo the resolved id on the
+    response (``LLMResponse.model``, ENG-1638 — verified live: ``mindshub_air``
+    comes back as ``gpt-5.6-luna``), but this field deliberately keeps the
+    requested alias so the per-model dollar math stays keyed on what the user
+    picked and can be joined to the catalog. Langfuse holds the served id.
     Normally one model per role per turn; if a role somehow sees more, they are
     joined with ``|`` so the ambiguity is visible rather than silently dropping
     one (a joined value means per-model dollar math for that role is unsafe).
@@ -124,6 +126,35 @@ class TurnCost:
     # note below on stamped-at-open fields). Handback terminals don't need it:
     # their ended_by already distinguishes them.
     verification_skipped: bool = False
+    # One-time grace(s) granted this turn: "", "round", "ceiling", or
+    # "ceiling,round" — alphabetical, not firing order (see `_record_grace`).
+    # Without this a turn that used a grace and finished is
+    # byte-identical in `turn_completed` to one that never neared a limit —
+    # `ended_by=round_cap`/`spend_ceiling` counts drop while actual spend
+    # rises, unmeasurably.
+    grace_granted: str = ""
+    # Size of the spend-ceiling grace actually granted, 0 if none. Queryable
+    # alongside `grace_granted` so the size of the concession is visible.
+    grace_tokens: int = 0
+    # WHY the completion verifier produced no verdict this turn (ENG-1858).
+    # `ended_by="handback_verifier_failure"` and `verification_skipped=True`
+    # both say only THAT it failed; 343 such turns / 14 days (5.3% of real
+    # turns, 3x the tokens of a completed one) had no groupable cause. Values
+    # are the classification the verdict loop already draws for the latch —
+    # `truncated` / `transient` / `hard` / `denied` — plus `latched_hard` /
+    # `latched_denied` for turns that never made the call because an earlier
+    # one latched. Empty when a verdict was produced or the verifier was
+    # not applicable. Stamped at the loop's exits, never read from latch
+    # state at emit (late finalizers would see a later turn's latch).
+    verifier_failure: str = ""
+    # Exception TYPE of the last verdict attempt — `_safe_error_type`, i.e.
+    # the class name only, never the message (which can quote model output
+    # derived from the user's conversation). `StructuredOutputError` carries
+    # a `:no_call` / `:unusable_call` suffix: the model never produced the
+    # forced call vs produced one the schema rejected — the split ENG-1095
+    # needs. Empty when no exception ended the verdict (verdict produced, or
+    # latched skip with no call made).
+    verifier_error_type: str = ""
     started_monotonic: float = field(default_factory=time.monotonic)
     # Set when these books have been reported. Replaces "the shared slot is
     # None" as the double-emit guard, because a late finalizer now emits the

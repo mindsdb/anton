@@ -1,9 +1,11 @@
 name: Scratchpad image - Dev build on PR
 
 # Builds and pushes the minds-anton-scratchpad image (the sandbox pod image) to ECR as
-# development-<sha> when a PR carries a deploy label. The scratchpad-controller references
-# the resulting tag via SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE; there is no Helm chart for
-# this image, so this workflow only builds and scans (no deploy job).
+# development-<sha>, on every pull request whose branch lives in this repository. No label
+# is required and none is checked: `labeled` sits in the trigger list so that adding one
+# rebuilds. The scratchpad-controller references the resulting tag via
+# SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE; there is no Helm chart for this image, so this
+# workflow only builds and scans (no deploy job).
 
 on:
   pull_request:
@@ -21,6 +23,69 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
+  # One gate answering "may this pull request reach the cluster-side build".
+  #
+  # This repo is PUBLIC and `mdb-dev` is a pod inside the newdev cluster with IRSA
+  # into the build/ECR account, so without a guard a pull request from any GitHub
+  # account executes its own code there. Fork PRs get no secrets and a read-only
+  # token, but the runner itself is the prize: cloud credentials, a network
+  # position inside the cluster, and a tool cache later internal jobs reuse.
+  # GitHub's first-time-contributor approval does not cover anyone with a merged
+  # PR, and the approval a maintainer clicks is a courtesy extended before anyone
+  # has read the Dockerfile.
+  #
+  # Three answers, not two. `HEAD_REPO` is read from the pull request payload, so
+  # on any other event it is the empty string and compares unequal, which would
+  # skip the build and tell the run page that a fork was responsible. The same
+  # trap is written up on the `Decide whether live mode is required` step in
+  # verifier-eval.yml, which met it from the other direction. So the event is
+  # checked first and gets its own message: adding a trigger to this workflow
+  # stops the build until somebody says how the gate should read it.
+  #
+  # The `version` job below stays ungated on purpose. It runs on a GitHub-hosted
+  # runner holding no credentials, and a hosted runner executing a fork's code is
+  # what every fork pull request in the world already does.
+  #
+  # Unlike the same gate in cowork and cowork-server, this one does NOT skip a
+  # `staging` -> `main` promotion PR. There those rebuild an image the release
+  # pipeline already produced; here this workflow is the only thing that builds
+  # minds-anton-scratchpad at all, so skipping a promotion would leave that commit
+  # with no image.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - name: Decide whether this pull request may reach the runner
+        id: decide
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_PR" != "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Build skipped: this run is not a pull request"
+              echo
+              echo "The gate decides from the pull request payload, and this event carries"
+              echo "none, so it cannot tell whose branch it is about to build."
+              echo "Whoever added this trigger needs to say how the gate should read it."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Build skipped: fork pull request"
+              echo
+              echo "The scratchpad image build runs on a self-hosted runner inside our"
+              echo "cluster, so it does not execute code from a fork. Nothing is wrong"
+              echo "with this pull request."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
 
   # The version the image will report, resolved from tags (ENG-1796).
   #
@@ -88,7 +153,8 @@ jobs:
           echo "anton version: $version"
 
   build:
-    needs: version
+    needs: [version, gate]
+    if: needs.gate.outputs.run == 'true'
     runs-on: mdb-dev
     outputs:
       image: ${{ steps.build.outputs.image }}

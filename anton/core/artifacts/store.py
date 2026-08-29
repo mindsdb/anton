@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from anton.core.artifacts.models import (
+    ARTIFACT_ID_SLUG_PREFIX_LEN,
     ARTIFACT_TYPES,
     METADATA_SCHEMA_VERSION,
     Artifact,
@@ -69,6 +70,13 @@ _HOUSEKEEPING_FILES = {
 # false. Both are excluded from `files[]`; only the reason differs.
 _EXCLUDED_FROM_FILES = _HOUSEKEEPING_FILES | set(GENERATION_INPUT_FILES)
 
+# Reserved DIRECTORIES, matched on the artifact-relative path's first component
+# rather than by exact name (`.revisions` is the private revision journal).
+# Separate from the sets above because those are matched whole-path: a
+# directory name folded in there would only ever match a file literally called
+# `.revisions`.
+_HOUSEKEEPING_DIRS = {".revisions"}
+
 # Same character whitelist projects_store uses — keeps slug shapes
 # consistent across antontron's project names AND artifact slugs.
 _NAME_DISALLOWED = re.compile(r"[^A-Za-z0-9._-]+")
@@ -87,13 +95,14 @@ def _utc_now() -> str:
 
 
 def _new_id() -> str:
-    return uuid.uuid4().hex[:8]
+    return uuid.uuid4().hex
 
 
-#: Width of `_new_id()`, plus the hyphen joining it to the name. Every slug ends
-#: in `-<id>` (see `create`), and the name is trimmed by this much so the whole
-#: slug still respects `_NAME_MAX_LEN`.
-_ID_SUFFIX_LEN = 8 + 1
+#: Width of the slug's id suffix, plus the hyphen joining it to the name. Every
+#: slug ends in `-<id[:8]>` (see `create`) — the full id is too long to read in
+#: a folder name — and the name is trimmed by this much so the whole slug still
+#: respects `_NAME_MAX_LEN`.
+_ID_SUFFIX_LEN = ARTIFACT_ID_SLUG_PREFIX_LEN + 1
 
 
 _UNSET = object()
@@ -199,13 +208,13 @@ class ArtifactStore:
     ) -> Artifact:
         """Create a fresh artifact folder + metadata.json + README.
 
-        Slug is `<sanitised name>-<id>`, e.g. `sales-report-a1b2c3d4`.
+        Slug is `<sanitised name>-<id[:8]>`, e.g. `sales-report-a1b2c3d4`.
         Returns the populated `Artifact`. The folder is empty other
         than the two metadata files — the agent writes its own
         files into it.
 
-        The id is IN the folder name, not just in metadata.json, because
-        the name alone does not identify an artifact:
+        The id prefix is IN the folder name, not just in metadata.json,
+        because the name alone does not identify an artifact:
 
         * `_sanitize_slug`'s whitelist is ASCII, so every artifact named
           in a non-Latin script collapses to the same `untitled-artifact`
@@ -231,10 +240,10 @@ class ArtifactStore:
         the file in the next scratchpad cell.
         """
         self.ensure_root()
-        # The id is part of the slug, so it has to exist before it.
+        # The id prefix is part of the slug, so the id has to exist before it.
         artifact_id = _new_id()
         slug_base = _sanitize_slug(name, max_len=_NAME_MAX_LEN - _ID_SUFFIX_LEN)
-        slug = self._unique_slug(f"{slug_base}-{artifact_id}")
+        slug = self._unique_slug(f"{slug_base}-{artifact_id[:ARTIFACT_ID_SLUG_PREFIX_LEN]}")
         now = _utc_now()
         artifact = Artifact(
             schemaVersion=METADATA_SCHEMA_VERSION,
@@ -434,7 +443,7 @@ class ArtifactStore:
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
             rel = p.relative_to(folder).as_posix()
-            if rel in _EXCLUDED_FROM_FILES:
+            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
                 continue
             try:
                 stat = p.stat()

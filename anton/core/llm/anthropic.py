@@ -303,6 +303,7 @@ class AnthropicProvider(LLMProvider):
                 cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
             ),
             stop_reason=response.stop_reason,
+            model=getattr(response, "model", None),
         )
 
     async def stream(
@@ -338,6 +339,7 @@ class AnthropicProvider(LLMProvider):
         cache_read_tokens = 0
         cache_creation_tokens = 0
         stop_reason: str | None = None
+        served_model: str | None = None  # from message_start (ENG-1638)
 
         # Track content blocks by index for tool correlation
         blocks: dict[int, dict] = {}
@@ -353,6 +355,7 @@ class AnthropicProvider(LLMProvider):
                 stream_started = True
                 async for event in stream:
                     if event.type == "message_start":
+                        served_model = getattr(event.message, "model", None) or served_model
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
                         output_tokens = getattr(usage, "output_tokens", 0)
@@ -473,5 +476,6 @@ class AnthropicProvider(LLMProvider):
                     cache_creation_tokens=cache_creation_tokens,
                 ),
                 stop_reason=stop_reason,
+                model=served_model,
             )
         )

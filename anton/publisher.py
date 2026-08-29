@@ -13,7 +13,7 @@ import secrets
 import zipfile
 from pathlib import Path
 
-from anton.core.artifacts.models import Artifact
+from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
@@ -50,6 +50,7 @@ _FULLSTACK_EXCLUDED = {
     "README.md",
     "backend.log",
     ".published.json",
+    ".revisions",
     ".anton_state.db",
     ".anton_state.db-wal",
     ".anton_state.db-shm",
@@ -68,7 +69,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # Owner-side housekeeping files that must never enter the published
 # bundle. `.published.json` in particular holds the artifact's plaintext
 # access password (for the in-app eye-reveal) and must stay local.
-_BUNDLE_SKIP_NAMES = {".published.json"}
+_BUNDLE_SKIP_NAMES = {".published.json", ".revisions"}
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without
@@ -202,15 +203,15 @@ def _zip_html(path: Path) -> bytes:
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
             parent = path.resolve().parent
             for ref in _find_referenced_files(path):
-                arc_name = str(ref.relative_to(parent))
-                _write_scrubbed(zf, ref, arc_name)
+                _write_scrubbed(zf, ref, ref.relative_to(parent).as_posix())
         else:
             # Directory — include all files except owner-side housekeeping
             # (e.g. `.published.json`, which holds the plaintext access
             # password and must never be published).
             for f in sorted(path.rglob("*")):
-                if f.is_file() and f.name not in _BUNDLE_SKIP_NAMES:
-                    _write_scrubbed(zf, f, str(f.relative_to(path)))
+                rel = f.relative_to(path)
+                if f.is_file() and not any(part in _BUNDLE_SKIP_NAMES for part in rel.parts):
+                    _write_scrubbed(zf, f, rel.as_posix())
     return buf.getvalue()
 
 
@@ -388,6 +389,7 @@ def publish(
     pwd_version: int = 1,
     access: dict | None = None,
     access_version: int = 1,
+    artifact_key: str | None = None,
     vault: DataVault | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
@@ -414,6 +416,8 @@ def publish(
                   See `build_access_payload` for the outbound shape.
         access_version: Monotonic version bumped whenever the restricted list/
                   org flag changes, invalidating previously issued grants.
+        artifact_key: Stable ``artifact/<uuid>`` identity shared by the draft,
+                  every published version, and its comment threads.
         vault: Credential store to resolve datasource secrets from. Defaults
                   to anton's local vault (`~/.anton/data_vault`); cowork-server
                   passes its own vault so published secrets match where the
@@ -449,12 +453,29 @@ def publish(
             payload_dict["state_manifest"] = state_manifest
         if missing:
             payload_dict["missing_datasources"] = missing
+        artifact_key = artifact_key or artifact_key_for(artifact.id)
     else:
         zipped = _zip_html(file_path)
+        # A static artifact publishes its primary *file*, not its folder, so the
+        # identity sits in the metadata.json next to that file. Derive it here
+        # too: otherwise only fullstack publishes carry `artifact_key` and the
+        # upload lambda locks static artifacts to the legacy
+        # `{user_dir}/{report_id}` key, detaching them from their drafts and
+        # comment threads. cowork-server passes the key explicitly, so this only
+        # covers a direct anton publish.
+        # Only the artifact root is consulted (a file's own folder), never an
+        # ancestor: publishing one page out of an artifact would otherwise mint
+        # a second report under the same key, and the auth rule is per key.
+        if not artifact_key:
+            owner = artifact if file_path.is_dir() else _load_artifact_metadata(file_path.parent)
+            if owner is not None:
+                artifact_key = artifact_key_for(owner.id)
 
     payload_dict["file_payload"] = base64.b64encode(zipped).decode()
     if report_id:
         payload_dict["report_id"] = report_id
+    if artifact_key:
+        payload_dict["artifact_key"] = artifact_key
     # Access control: send the hash (never the plaintext) and, for restricted
     # mode, the normalized email list + org flag (auth is the source of truth;
     # neither the list nor the password plaintext enters the zip bundle). A
