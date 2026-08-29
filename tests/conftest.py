@@ -72,8 +72,24 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 # The MagicMock one is safe BY ACCIDENT — not by either guard in this file — and
 # an earlier revision generalised that into "it never leaked". It does leak, from
 # the middle caller, which needs no more realistic settings object because it
-# already builds a real one. Measured three times at 260/five; a run reporting
-# 259/four is missing that caller, which its own ordering can hide.
+# already builds a real one.
+#
+# That middle caller fires only on a COLD workspace, and this is the thing to
+# know before re-measuring. The event is gated on
+# `install_call_installed_something(result)` (tool_handlers.py:719), and the
+# `workspace` fixture is a PERSISTENT directory in the repo —
+# `<repo>/.pytest-workspace` (test_chat_scratchpad.py:20), not tmp_path. So the
+# first run on a machine really pip-installs cowsay and emits the event; every
+# run after that gets "already satisfied", emits nothing, and reports 259/four
+# forever. Both counts are correct, for different machine states:
+#
+#   cold (.pytest-workspace absent)    260 requests, 5 families
+#   warm (cowsay already in the venv)  259 requests, 4 families
+#
+# To reproduce the 260: `rm -rf .pytest-workspace` first, or you will measure
+# 259 and conclude this comment is wrong. It is not ordering — ordering within a
+# run cannot change it, because the gate is the state of a directory that
+# outlives the run.
 #
 # Both points stand and neither subsumes the other: a name-grep cannot find the
 # third caller, and reaching send_event does not mean sending. The accidental
