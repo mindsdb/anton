@@ -21,12 +21,13 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 # Measured 2026-08-28 with the variable exported, counted at two different
 # points, because they do not agree and the difference is the interesting part:
 #
-#   on the wire (local capture server)   259 requests, 12 event names, 4 families
+#   on the wire (local capture server)   260 requests, 13 event names, 5 families
 #                                        tool_completed 149, ds_connect_* 89,
-#                                        ask_user_* 16, turn_completed 5
+#                                        ask_user_* 16, turn_completed 5,
+#                                        scratchpad_package_installed 1
 #   at the emitter (send_event calls)    277 invocations, 16 event names
 #
-# Quote the wire number: 259 is what reached production. Do NOT subtract the two
+# Quote the wire number: 260 is what reached production. Do NOT subtract the two
 # — they count different populations, in both directions. Some send_event calls
 # never send (they die inside its own try/except), and some wire requests have no
 # send_event call in this process at all: test_cloud_turn_process.py does
@@ -50,19 +51,37 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 # monkeypatch, or the event name. It is structurally invisible to that method.
 # Instrument the emitter instead.
 #
-# Second, reaching send_event is NOT sending. That fifth caller passes a
-# MagicMock session, so send_event sails past both guards below (every MagicMock
-# attribute is truthy) and then dies in _posthog_body with "Object of type
-# MagicMock is not JSON serializable", swallowed by send_event's own
-# `except Exception: pass`. Verified three ways: the event is absent from two
-# full-suite wire captures, the test alone emits zero, and instrumenting
-# _posthog_body shows the TypeError. So it never leaked — but note WHY it is
-# safe. It is safe by accident, not by either guard in this file, and a caller
-# that passed a more realistic settings object would send for real. That hole is
-# worth its own ticket; do not read it as covered.
+# Second, reaching send_event is NOT sending, and the same event demonstrates
+# both halves. Instrumenting send_event itself (not send_package_install_event —
+# that is what made an earlier revision name the wrong culprit) shows THREE
+# callers reaching it with scratchpad_package_installed, with three outcomes:
+#
+#   test_analytics.py::test_scratchpad_package_installed_goes_to_posthog_...
+#       _PosthogSettings, host ph.example.test — body builds, goes nowhere real
+#   test_chat_scratchpad.py::TestScratchpadInstallViaChat::
+#       test_install_action_dispatch
+#       real AntonSettings — reads the environment and SENDS. This is the 1
+#       scratchpad_package_installed on the wire above
+#   test_scratchpad_observer_dispatch.py::TestHandleScratchpadObserverIntegration::
+#       test_non_exec_actions_do_not_fire_observers
+#       MagicMock session, so send_event sails past both guards below (every
+#       MagicMock attribute is truthy) and dies in _posthog_body with "Object of
+#       type MagicMock is not JSON serializable", swallowed by send_event's own
+#       `except Exception: pass`
+#
+# The MagicMock one is safe BY ACCIDENT — not by either guard in this file — and
+# an earlier revision generalised that into "it never leaked". It does leak, from
+# the middle caller, which needs no more realistic settings object because it
+# already builds a real one. Measured three times at 260/five; a run reporting
+# 259/four is missing that caller, which its own ordering can hide.
+#
+# Both points stand and neither subsumes the other: a name-grep cannot find the
+# third caller, and reaching send_event does not mean sending. The accidental
+# safety of the third is still worth its own ticket — a caller that stopped
+# passing a MagicMock would start sending, with nothing in this file catching it.
 #
 # ENG-1692's script-traffic guard does not cover this. It lives inside
-# _emit_turn_cost alone, so three of those four families have no guard at all, and
+# _emit_turn_cost alone, so four of those five families have no guard at all, and
 # it only takes effect once a developer updates their installed build. This line
 # is read from the checkout, so it takes effect on the next test run after a pull
 # or rebase — cheaper than a reinstall, but a long-lived branch cut before this
