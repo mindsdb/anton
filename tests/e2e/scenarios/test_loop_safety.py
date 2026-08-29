@@ -5,15 +5,22 @@ from __future__ import annotations
 import json
 import pytest
 
+from anton.core.session import _ROUND_CAP_GRACE_ROUNDS
 from tests.e2e.harness import (
     assert_exit_ok, assert_not_output, assert_output, base_env, run_anton,
 )
 
 
+_MAX_TOOL_ROUNDS = 25
+_EFFECTIVE_CAP = _MAX_TOOL_ROUNDS + _ROUND_CAP_GRACE_ROUNDS  # ENG-1893 grace
+
+
 @pytest.mark.stub_only
 def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
-    # _MAX_TOOL_ROUNDS = 25; backstop fires at round 26 (> 25) — need 26 queued tool calls.
-    for i in range(26):
+    # Backstop fires at effective_cap + 1 — the one-time grace extension
+    # (ENG-1893) runs first, so it takes effective_cap + 1 queued tool calls
+    # to actually reach the ask.
+    for i in range(_EFFECTIVE_CAP + 1):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"loop_{i}", "code": f"print({i})"})
     stub.queue_text("Summarising. CIRCUIT_FIRED")
     result = run_anton(["--folder", str(tmp_path)], ["run forever", "exit"],
@@ -23,7 +30,7 @@ def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
     assert_not_output(result, "Traceback (most recent call last)")
     assert_output(result, "CIRCUIT_FIRED")
     assert any(
-        "You have used 25 tool-call rounds" in json.dumps(r.get("messages", []))
+        f"You have used {_EFFECTIVE_CAP} tool-call rounds" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), f"Max-rounds message not found. Request count: {stub.request_count}"
 

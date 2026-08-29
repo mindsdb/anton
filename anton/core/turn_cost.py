@@ -126,6 +126,16 @@ class TurnCost:
     # note below on stamped-at-open fields). Handback terminals don't need it:
     # their ended_by already distinguishes them.
     verification_skipped: bool = False
+    # One-time grace(s) granted this turn: "", "round", "ceiling", or
+    # "ceiling,round" — alphabetical, not firing order (see `_record_grace`).
+    # Without this a turn that used a grace and finished is
+    # byte-identical in `turn_completed` to one that never neared a limit —
+    # `ended_by=round_cap`/`spend_ceiling` counts drop while actual spend
+    # rises, unmeasurably.
+    grace_granted: str = ""
+    # Size of the spend-ceiling grace actually granted, 0 if none. Queryable
+    # alongside `grace_granted` so the size of the concession is visible.
+    grace_tokens: int = 0
     # WHY the completion verifier produced no verdict this turn (ENG-1858).
     # `ended_by="handback_verifier_failure"` and `verification_skipped=True`
     # both say only THAT it failed; 343 such turns / 14 days (5.3% of real
