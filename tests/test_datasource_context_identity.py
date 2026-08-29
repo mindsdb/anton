@@ -167,10 +167,11 @@ class TestParsePickedFiles:
 
 
 class TestGoogleDrivePickerContext:
-    """ENG-687: google_drive's drive.file OAuth scope only covers files the
-    app created itself, plus files explicitly granted via the Google
-    Picker — the agent needs those named by id or a plain files.list()/
-    files.search() call won't surface them at all."""
+    """ENG-687 gave google_drive's Picker-granted files their own prompt block
+    here. ENG-2071 removed the *listing* again: it had no project to scope by,
+    so it named files the user granted in other projects, re-opening the leak
+    ConnectionsService.picked_files_by_project() closes on the cowork-server
+    side. What stays here is the availability paragraph — no file ids."""
 
     def test_oauth_connection_without_picked_files_shows_availability_only(self, tmp_path):
         v = LocalDataVault(tmp_path)
@@ -179,26 +180,46 @@ class TestGoogleDrivePickerContext:
         assert "Connected Google Drive accounts are available" in ctx
         assert "IMPORTANT" not in ctx
 
-    def test_picked_files_surfaced_with_id_and_connection(self, tmp_path):
+    def test_picked_files_are_never_named_here(self, tmp_path):
+        """ENG-2071: the availability paragraph still fires, but no file
+        identity reaches the prompt from this function."""
         v = LocalDataVault(tmp_path)
         v.save("google_drive", "work", {
             "auth_type": "oauth",
             "_picked_files": json.dumps([{"id": "f1", "name": "Roadmap.gdoc"}]),
         })
         ctx = build_datasource_context(v)
-        assert "IMPORTANT — additional Drive files" in ctx
-        assert "Roadmap.gdoc" in ctx
-        assert "id: f1" in ctx
-        assert "connection: work" in ctx
+        assert "Connected Google Drive accounts are available" in ctx
+        assert "Roadmap.gdoc" not in ctx
+        assert "f1" not in ctx
+        assert "IMPORTANT — additional Drive files" not in ctx
 
-    def test_resource_key_not_required_but_included_when_present(self, tmp_path):
+    def test_file_granted_in_another_project_is_not_named(self, tmp_path):
+        """The leak itself. A file tagged to Project A must not surface at all
+        from here — this function cannot tell which project is active, which is
+        exactly why it no longer lists any of them."""
         v = LocalDataVault(tmp_path)
         v.save("google_drive", "work", {
-            "_picked_files": json.dumps([{"id": "f1", "name": "Shared.gdoc", "resourceKey": "rk123"}]),
+            "auth_type": "oauth",
+            "_picked_files": json.dumps([
+                {"id": "secret-a", "name": "ProjectA-Salaries.gsheet", "projects": ["Project A"]},
+            ]),
         })
         ctx = build_datasource_context(v)
-        assert "Roadmap.gdoc" not in ctx  # sanity: not leaking the other test's fixture
-        assert "Shared.gdoc" in ctx
+        assert "ProjectA-Salaries.gsheet" not in ctx
+        assert "secret-a" not in ctx
+
+    def test_picker_only_connection_still_shows_availability(self, tmp_path):
+        """A Picker-granted connection with no `auth_type` still triggers the
+        paragraph — unchanged from before ENG-2071, which is why presence is
+        still tracked even though the list is gone."""
+        v = LocalDataVault(tmp_path)
+        v.save("google_drive", "work", {
+            "_picked_files": json.dumps([{"id": "f1", "name": "Roadmap.gdoc"}]),
+        })
+        ctx = build_datasource_context(v)
+        assert "Connected Google Drive accounts are available" in ctx
+        assert "Roadmap.gdoc" not in ctx
 
     def test_malformed_picked_file_entries_are_dropped_not_crashed(self, tmp_path):
         v = LocalDataVault(tmp_path)
@@ -206,7 +227,9 @@ class TestGoogleDrivePickerContext:
             "_picked_files": json.dumps(["not-a-dict", {"name": "missing-id"}]),
         })
         ctx = build_datasource_context(v)  # must not raise
-        assert "IMPORTANT" not in ctx  # nothing well-formed survived, so no block at all
+        # Nothing well-formed survived and there is no oauth marker, so the
+        # connection reads as "no Picker grant" and no paragraph appears.
+        assert "Connected Google Drive accounts are available" not in ctx
 
     def test_no_google_drive_connection_no_guidance(self, tmp_path):
         v = LocalDataVault(tmp_path)
@@ -215,13 +238,14 @@ class TestGoogleDrivePickerContext:
         assert "Google Drive" not in ctx
         assert "IMPORTANT" not in ctx
 
-    def test_multiple_google_drive_connections_each_listed_separately(self, tmp_path):
+    def test_multiple_google_drive_connections_name_no_files(self, tmp_path):
         v = LocalDataVault(tmp_path)
         v.save("google_drive", "work", {"_picked_files": json.dumps([{"id": "1", "name": "Work.gdoc"}])})
         v.save("google_drive", "personal", {"_picked_files": json.dumps([{"id": "2", "name": "Personal.gdoc"}])})
         ctx = build_datasource_context(v)
-        assert "Work.gdoc" in ctx and "connection: work" in ctx
-        assert "Personal.gdoc" in ctx and "connection: personal" in ctx
+        assert "Connected Google Drive accounts are available" in ctx
+        assert "Work.gdoc" not in ctx
+        assert "Personal.gdoc" not in ctx
 
     def test_active_only_suppresses_other_connections_guidance(self, tmp_path):
         v = LocalDataVault(tmp_path)
@@ -235,10 +259,11 @@ class TestGoogleDrivePickerContext:
         assert "Google Drive" not in ctx
         assert "Roadmap.gdoc" not in ctx
 
-    def test_active_only_on_google_drive_still_shows_its_guidance(self, tmp_path):
+    def test_active_only_on_google_drive_still_shows_availability(self, tmp_path):
         v = LocalDataVault(tmp_path)
         v.save("google_drive", "work", {
             "_picked_files": json.dumps([{"id": "1", "name": "Roadmap.gdoc"}]),
         })
         ctx = build_datasource_context(v, active_only="google_drive-work")
-        assert "Roadmap.gdoc" in ctx
+        assert "Connected Google Drive accounts are available" in ctx
+        assert "Roadmap.gdoc" not in ctx
