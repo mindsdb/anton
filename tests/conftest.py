@@ -18,12 +18,27 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 # absent, so a developer with ANTON_ANALYTICS_ENABLED exported — which is exactly
 # what someone working on an analytics ticket sets — cancelled this line without
 # any warning, and the suite shipped real events to production for four months.
-# Measured 2026-08-28 against a local capture server: one run with the variable
-# exported emitted 254 events — tool_completed 147, ds_connect_* 89, ask_user_* 16,
-# turn_completed 2.
+# Measured 2026-08-28 against a local capture server, reproduced twice on a clean
+# checkout: one run with the variable exported emitted 260 events across FIVE
+# families — tool_completed 149, ds_connect_* 89, ask_user_* 16, turn_completed 5,
+# scratchpad_package_installed 1.
+#
+# The fifth family is the one worth knowing about, because it is invisible to the
+# obvious way of finding it. Enumerating leakers by grepping the event name finds
+# only test_tool_outcome_tracking.py's TestPackageInstallTelemetry, and those four
+# tests monkeypatch send_event, so they reach the emitter and fire nothing. The
+# event that actually leaks comes from
+# test_scratchpad_observer_dispatch.py::TestHandleScratchpadObserverIntegration::
+# test_non_exec_actions_do_not_fire_observers, which contains no occurrence of
+# send_event, patch(, monkeypatch, or the event name — it reaches
+# send_package_install_event incidentally through the dispatch path, unpatched.
+# Identified by instrumenting the emitter with PYTEST_CURRENT_TEST, not by
+# reading. An earlier revision of this comment said 254 events across four
+# families; that figure came from a pre-branch build and a name-based enumeration
+# that could not see this caller.
 #
 # ENG-1692's script-traffic guard does not cover this. It lives inside
-# _emit_turn_cost alone, so three of those four families have no guard at all, and
+# _emit_turn_cost alone, so four of those five families have no guard at all, and
 # it only takes effect once a developer updates their installed build. This line
 # is read from the checkout, so it takes effect on the next test run after a pull
 # or rebase — cheaper than a reinstall, but a long-lived branch cut before this
