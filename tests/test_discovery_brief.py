@@ -12,8 +12,8 @@ import pytest
 from anton.core.artifacts import ArtifactStore
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, Usage
-from anton.core.tools.generate_prd import orchestrator
-from anton.core.tools.generate_prd.state import PrdState
+from anton.core.tools.generate_artifact.discovery import orchestrator
+from anton.core.tools.generate_artifact.discovery.state import PrdState
 
 
 def _response(content: str) -> LLMResponse:

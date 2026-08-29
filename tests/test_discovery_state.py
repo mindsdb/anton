@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from anton.core.interaction.elicit import MAX_QUESTIONS_PER_TURN
-from anton.core.tools.generate_prd.state import (
+from anton.core.tools.generate_artifact.discovery.state import (
     PHASE2_RESERVED_QUESTIONS,
     PrdState,
     gathering_question_budget,

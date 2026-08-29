@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from anton.core.tools import generate_prd
+from anton.core.tools.generate_artifact import discovery as generate_prd
 
 
 def _kwargs(**over) -> dict:
@@ -31,7 +31,7 @@ def _kwargs(**over) -> dict:
 
 async def test_generate_passes_the_trace_log_into_prd_state(monkeypatch):
     trace = MagicMock()
-    monkeypatch.setattr("anton.core.tools.generate_prd.debug_trace.make_trace", lambda: trace)
+    monkeypatch.setattr("anton.core.tools.generate_artifact.debug_trace.make_trace", lambda: trace)
 
     seen_state = {}
 
@@ -46,7 +46,7 @@ async def test_generate_passes_the_trace_log_into_prd_state(monkeypatch):
 
 async def test_generate_logs_run_start_before_run_and_run_result_after(monkeypatch):
     trace = MagicMock()
-    monkeypatch.setattr("anton.core.tools.generate_prd.debug_trace.make_trace", lambda: trace)
+    monkeypatch.setattr("anton.core.tools.generate_artifact.debug_trace.make_trace", lambda: trace)
 
     calls = []
 
@@ -68,7 +68,7 @@ async def test_generate_logs_run_start_before_run_and_run_result_after(monkeypat
 
 async def test_generate_logs_a_failed_run_result_and_still_raises(monkeypatch):
     trace = MagicMock()
-    monkeypatch.setattr("anton.core.tools.generate_prd.debug_trace.make_trace", lambda: trace)
+    monkeypatch.setattr("anton.core.tools.generate_artifact.debug_trace.make_trace", lambda: trace)
 
     async def fake_run(state):
         raise RuntimeError("draft_brief: the model replied with no text")

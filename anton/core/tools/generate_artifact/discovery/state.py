@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .debug_trace import NullTrace, PrdTrace  # noqa: F401  (PrdTrace re-exported for typing)
+from ..debug_trace import NullTrace, GenTrace as PrdTrace  # noqa: F401  (PrdTrace re-exported for typing)
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession

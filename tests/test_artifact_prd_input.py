@@ -245,8 +245,8 @@ async def test_what_generate_prd_writes_is_what_generate_artifact_reads(tmp_path
     from types import SimpleNamespace
 
     from anton.core.llm.provider import LLMResponse, Usage
-    from anton.core.tools.generate_prd import orchestrator as prd_orchestrator
-    from anton.core.tools.generate_prd.state import PrdState
+    from anton.core.tools.generate_artifact.discovery import orchestrator as prd_orchestrator
+    from anton.core.tools.generate_artifact.discovery.state import PrdState
 
     artifact_dir = tmp_path / "artifacts" / "s"
     artifact_dir.mkdir(parents=True)

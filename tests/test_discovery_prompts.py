@@ -4,13 +4,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from anton.core.tools.generate_prd.prompts import (
+from anton.core.tools.generate_artifact.discovery.prompts import (
     build_gathering_continue_message,
     build_gathering_kickoff,
     build_gathering_system_prompt,
     build_phase2_system_prompt,
 )
-from anton.core.tools.generate_prd.state import PrdState
+from anton.core.tools.generate_artifact.discovery.state import PrdState
 
 
 def _state(**over) -> PrdState:

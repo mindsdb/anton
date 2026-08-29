@@ -53,13 +53,18 @@ class GenTrace:
             # Best-effort: never let the logger break generation.
             pass
 
-    def run_start(self, *, slug, artifact_type, artifact_path, brief, is_fullstack) -> None:
+    def run_start(self, **payload: Any) -> None:
+        """One event for the whole pipeline.
+
+        Accepts both shapes of caller: the generation FSM passes
+        `artifact_path` and `is_fullstack`, the discovery phases pass
+        `user_request` and `agent_understanding`. Open-ended on purpose — a
+        merged tool with two historical entry points would otherwise need two
+        near-identical events, and the viewer keys off `event`, not the field
+        set.
+        """
         self._emit("run_start", {
-            "slug": slug,
-            "artifact_type": artifact_type,
-            "artifact_path": str(artifact_path),
-            "brief": brief,
-            "is_fullstack": is_fullstack,
+            k: str(v) if isinstance(v, Path) else v for k, v in payload.items()
         })
 
     def node(self, node, outcome, detail="") -> None:

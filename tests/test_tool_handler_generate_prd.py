@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import json
 
-import anton.core.tools.generate_prd as gen_pkg
+import anton.core.tools.generate_artifact.discovery as gen_pkg
 from anton.core.artifacts import ArtifactStore
 from anton.core.tools.tool_handlers import handle_generate_prd
 

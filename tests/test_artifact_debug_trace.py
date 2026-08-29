@@ -1,15 +1,15 @@
-"""debug_trace.py: PrdTrace/NullTrace — the generate_prd step log.
+"""debug_trace.py: GenTrace/NullTrace — the merged pipeline's step log.
 
-Deliberately mirrors generate_artifact's GenTrace/NullTrace record shape and
-reads the SAME `ANTON_DEBUG_ARTIFACT_GENERATE_TOOL` env var, so a run that
-calls both tools back to back appends into one combined, viewer-compatible
-log instead of two separate files."""
+One trace for the whole pipeline, reading the single
+`ANTON_DEBUG_ARTIFACT_GENERATE_TOOL` env var: the discovery phases and the
+generation FSM append to the same viewer-compatible file, which is what makes
+a run readable end to end instead of as two disjoint logs."""
 from __future__ import annotations
 
 import json
 
 from anton.core.llm.provider import LLMResponse, Usage
-from anton.core.tools.generate_prd import debug_trace
+from anton.core.tools.generate_artifact import debug_trace
 
 
 def _lines(path):
@@ -26,7 +26,7 @@ def test_make_trace_returns_null_trace_when_env_var_unset(monkeypatch):
 
 def test_make_trace_returns_prd_trace_when_env_var_set(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTON_DEBUG_ARTIFACT_GENERATE_TOOL", str(tmp_path / "trace.jsonl"))
-    assert isinstance(debug_trace.make_trace(), debug_trace.PrdTrace)
+    assert isinstance(debug_trace.make_trace(), debug_trace.GenTrace)
 
 
 def test_null_trace_methods_are_all_no_ops():
@@ -39,8 +39,16 @@ def test_null_trace_methods_are_all_no_ops():
     trace.run_result(ok=True)
 
 
-def test_run_start_writes_slug_type_and_combined_brief(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+def test_run_start_records_the_call_fields_verbatim(tmp_path):
+    """One run_start for the whole pipeline, fields passed through as given.
+
+    The two tools used to fold their inputs into a single `brief` string so
+    that both emitted the same record shape for the shared viewer. There is
+    one tool now and one run_start, so the folding has nothing left to
+    reconcile — and a debug log that reshapes its input is a debug log you
+    cannot compare against the call that produced it.
+    """
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     trace.run_start(
         slug="clock", artifact_type="html-app",
         user_request="build a clock", agent_understanding="an analog clock",
@@ -50,25 +58,38 @@ def test_run_start_writes_slug_type_and_combined_brief(tmp_path):
     assert rec["event"] == "run_start"
     assert rec["slug"] == "clock"
     assert rec["artifact_type"] == "html-app"
-    assert "build a clock" in rec["brief"]
-    assert "an analog clock" in rec["brief"]
-    assert "none" in rec["brief"]
-    assert "dark mode" in rec["brief"]
+    assert rec["user_request"] == "build a clock"
+    assert rec["agent_understanding"] == "an analog clock"
+    assert rec["known_data"] == "none"
+    assert rec["user_preferences"] == "dark mode"
 
 
-def test_run_start_omits_empty_optional_fields_from_brief(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+def test_run_start_records_only_the_fields_it_was_given(tmp_path):
+    """Open-ended by design: the generation FSM passes `artifact_path` and
+    `is_fullstack`, the discovery phases pass the call fields, and neither
+    has to carry the other's keys."""
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     trace.run_start(
         slug="clock", artifact_type="html-app",
         user_request="build a clock", agent_understanding="an analog clock",
     )
     rec = _lines(tmp_path / "trace.jsonl")[0]
-    assert "Known data" not in rec["brief"]
-    assert "User preferences" not in rec["brief"]
+    assert "known_data" not in rec
+    assert "user_preferences" not in rec
+
+
+def test_run_start_stringifies_a_path(tmp_path):
+    """`artifact_path` arrives as a Path and json.dumps cannot serialise one
+    directly; the `default=str` fallback would hide the conversion, so it is
+    explicit."""
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
+    trace.run_start(slug="clock", artifact_path=tmp_path, is_fullstack=False)
+    rec = _lines(tmp_path / "trace.jsonl")[0]
+    assert rec["artifact_path"] == str(tmp_path)
 
 
 def test_node_writes_node_outcome_and_detail(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     trace.node("gathering", "done", detail="finish_gathering: type=html-app")
     rec = _lines(tmp_path / "trace.jsonl")[0]
     assert rec == {
@@ -80,7 +101,7 @@ def test_node_writes_node_outcome_and_detail(tmp_path):
 
 
 def test_llm_call_with_response_uses_serialize_response(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     response = LLMResponse(content="hello", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=2))
     trace.llm_call(
         node="draft_brief", method="plan", system="sys",
@@ -96,7 +117,7 @@ def test_llm_call_with_response_uses_serialize_response(tmp_path):
 
 
 def test_llm_call_with_structured_value_omits_response_shape(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     trace.llm_call(
         node="classify_feedback", method="generate_object", system="sys",
         messages=[], value={"route": "revise_brief"},
@@ -106,7 +127,7 @@ def test_llm_call_with_structured_value_omits_response_shape(tmp_path):
 
 
 def test_verdict_writes_schema_and_value(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     trace.verdict(node="classify_feedback", schema="FeedbackVerdict", value={"route": "revise_brief"})
     rec = _lines(tmp_path / "trace.jsonl")[0]
     assert rec["schema"] == "FeedbackVerdict"
@@ -114,7 +135,7 @@ def test_verdict_writes_schema_and_value(tmp_path):
 
 
 def test_scratchpad_writes_input_and_output(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     trace.scratchpad(node="web_search", input={"query": "btc price"}, output="found 3 results")
     rec = _lines(tmp_path / "trace.jsonl")[0]
     assert rec["node"] == "web_search"
@@ -123,7 +144,7 @@ def test_scratchpad_writes_input_and_output(tmp_path):
 
 
 def test_run_result_writes_ok_result_or_error(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path / "trace.jsonl"))
+    trace = debug_trace.GenTrace(str(tmp_path / "trace.jsonl"))
     trace.run_result(ok=True, result={"status": "prd_written"})
     trace.run_result(ok=False, error="boom")
     recs = _lines(tmp_path / "trace.jsonl")
@@ -134,7 +155,7 @@ def test_run_result_writes_ok_result_or_error(tmp_path):
 
 
 def test_emit_never_raises_when_the_path_is_unwritable(tmp_path):
-    trace = debug_trace.PrdTrace(str(tmp_path))  # a directory, not a file
+    trace = debug_trace.GenTrace(str(tmp_path))  # a directory, not a file
     trace.node("gathering", "done")  # must not raise
 
 
@@ -143,8 +164,8 @@ def test_writes_append_rather_than_truncate(tmp_path):
     trace instance opened later in the same run must add to the file, not
     wipe out what the first one already wrote."""
     path = tmp_path / "trace.jsonl"
-    debug_trace.PrdTrace(str(path)).node("gathering", "done")
-    debug_trace.PrdTrace(str(path)).node("draft_brief", "done")  # a second instance, same path
+    debug_trace.GenTrace(str(path)).node("gathering", "done")
+    debug_trace.GenTrace(str(path)).node("draft_brief", "done")  # a second instance, same path
     assert [r["node"] for r in _lines(path)] == ["gathering", "draft_brief"]
 
 

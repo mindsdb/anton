@@ -117,7 +117,7 @@ _PRD_UNCONFIRMED_INSTRUCTION = (
 async def handle_generate_prd(session: "ChatSession", tc_input: dict) -> str:
     """Draft and confirm a PRD for an already-registered web artifact.
 
-    Validates input, then hands off to `anton.core.tools.generate_prd.generate`,
+    Validates input, then hands off to `anton.core.tools.generate_artifact.discovery.generate`,
     which runs the two-phase FSM (gather → draft/confirm/write) and writes
     `prd.md` into the artifact folder. Never raises — pipeline failures come
     back wrapped by `_prd_generation_failed`; a `cancelled` or
@@ -145,7 +145,7 @@ async def handle_generate_prd(session: "ChatSession", tc_input: dict) -> str:
         return "Error: `agent_understanding` is required."
 
     folder = store.folder_for(slug)
-    from anton.core.tools.generate_prd import generate
+    from anton.core.tools.generate_artifact.discovery import generate
 
     try:
         result = await generate(

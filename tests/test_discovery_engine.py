@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
-from anton.core.tools.generate_prd import engine
-from anton.core.tools.generate_prd.state import PrdState
+from anton.core.tools.generate_artifact.discovery import engine
+from anton.core.tools.generate_artifact.discovery.state import PrdState
 
 
 def _response(content="", tool_calls=None) -> LLMResponse:

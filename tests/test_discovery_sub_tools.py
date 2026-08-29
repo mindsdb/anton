@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from anton.core.interaction.elicit import AskAnswer, AskOption, AskRequest
-from anton.core.tools.generate_prd import sub_tools
+from anton.core.tools.generate_artifact.discovery import sub_tools
 
 
 def test_tool_schemas_always_include_the_core_four():

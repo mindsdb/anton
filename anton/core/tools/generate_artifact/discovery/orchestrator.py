@@ -143,7 +143,7 @@ async def draft_brief(state: PrdState) -> None:
         # instruction not to. Raising here — rather than silently
         # continuing with an empty brief — means `orchestrator.run`'s
         # caller chain surfaces it as a normal generator crash: it
-        # propagates up through `generate_prd.generate()` into
+        # propagates up through `discovery.generate()` into
         # `handle_generate_prd`'s `except Exception`, which already wraps
         # it with `_prd_generation_failed` (see Task 7). No new
         # error-reporting path needed.
