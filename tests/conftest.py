@@ -18,27 +18,42 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 # absent, so a developer with ANTON_ANALYTICS_ENABLED exported — which is exactly
 # what someone working on an analytics ticket sets — cancelled this line without
 # any warning, and the suite shipped real events to production for four months.
-# Measured 2026-08-28 against a local capture server, reproduced twice on a clean
-# checkout: one run with the variable exported emitted 260 events across FIVE
-# families — tool_completed 149, ds_connect_* 89, ask_user_* 16, turn_completed 5,
-# scratchpad_package_installed 1.
+# Measured 2026-08-28 with the variable exported, counted at two different
+# points, because they do not agree and the difference is the interesting part:
 #
-# The fifth family is the one worth knowing about, because it is invisible to the
-# obvious way of finding it. Enumerating leakers by grepping the event name finds
-# only test_tool_outcome_tracking.py's TestPackageInstallTelemetry, and those four
-# tests monkeypatch send_event, so they reach the emitter and fire nothing. The
-# event that actually leaks comes from
+#   on the wire (local capture server)   259 requests, 12 event names, 4 families
+#                                        tool_completed 149, ds_connect_* 89,
+#                                        ask_user_* 16, turn_completed 5
+#   at the emitter (send_event calls)    277 invocations, 16 event names
+#
+# 259 is the leak. The other 18 reach send_event and die inside its own
+# try/except before anything is sent. Quote the wire number: it is what reached
+# production.
+#
+# Two traps live in that gap, and both cost a review round here.
+#
+# First, enumerating leakers by GREPPING THE EVENT NAME is unsound. For
+# scratchpad_package_installed the grep finds only TestPackageInstallTelemetry,
+# whose four tests monkeypatch send_event and fire nothing — but a fifth caller,
 # test_scratchpad_observer_dispatch.py::TestHandleScratchpadObserverIntegration::
-# test_non_exec_actions_do_not_fire_observers, which contains no occurrence of
-# send_event, patch(, monkeypatch, or the event name — it reaches
-# send_package_install_event incidentally through the dispatch path, unpatched.
-# Identified by instrumenting the emitter with PYTEST_CURRENT_TEST, not by
-# reading. An earlier revision of this comment said 254 events across four
-# families; that figure came from a pre-branch build and a name-based enumeration
-# that could not see this caller.
+# test_non_exec_actions_do_not_fire_observers, reaches send_package_install_event
+# through the dispatch path while containing no occurrence of send_event, patch(,
+# monkeypatch, or the event name. It is structurally invisible to that method.
+# Instrument the emitter instead.
+#
+# Second, reaching send_event is NOT sending. That fifth caller passes a
+# MagicMock session, so send_event sails past both guards below (every MagicMock
+# attribute is truthy) and then dies in _posthog_body with "Object of type
+# MagicMock is not JSON serializable", swallowed by send_event's own
+# `except Exception: pass`. Verified three ways: the event is absent from two
+# full-suite wire captures, the test alone emits zero, and instrumenting
+# _posthog_body shows the TypeError. So it never leaked — but note WHY it is
+# safe. It is safe by accident, not by either guard in this file, and a caller
+# that passed a more realistic settings object would send for real. That hole is
+# worth its own ticket; do not read it as covered.
 #
 # ENG-1692's script-traffic guard does not cover this. It lives inside
-# _emit_turn_cost alone, so four of those five families have no guard at all, and
+# _emit_turn_cost alone, so three of those four families have no guard at all, and
 # it only takes effect once a developer updates their installed build. This line
 # is read from the checkout, so it takes effect on the next test run after a pull
 # or rebase — cheaper than a reinstall, but a long-lived branch cut before this
