@@ -26,9 +26,18 @@ from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCal
 #                                        ask_user_* 16, turn_completed 5
 #   at the emitter (send_event calls)    277 invocations, 16 event names
 #
-# 259 is the leak. The other 18 reach send_event and die inside its own
-# try/except before anything is sent. Quote the wire number: it is what reached
-# production.
+# Quote the wire number: 259 is what reached production. Do NOT subtract the two
+# — they count different populations, in both directions. Some send_event calls
+# never send (they die inside its own try/except), and some wire requests have no
+# send_event call in this process at all: test_cloud_turn_process.py does
+# `env = os.environ.copy()` and runs the real entrypoint as a child, which
+# produced 5 wire events against 0 in-process calls when measured alone. The tell
+# is that the wire shows MORE tool_completed than the emitter does (149 vs 148),
+# which no amount of swallowed exceptions can explain.
+#
+# That child is also why this line must be an assignment rather than setdefault
+# for a second reason: children inherit os.environ, so the write reaches them.
+# Same file, measured before and after this fix: 5 events -> 0.
 #
 # Two traps live in that gap, and both cost a review round here.
 #

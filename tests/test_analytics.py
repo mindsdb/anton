@@ -858,14 +858,36 @@ def test_the_suite_kill_switch_beats_an_exported_variable():
 
 
 def test_a_test_can_still_re_enable_analytics_for_itself(monkeypatch):
-    """The switch is machine-wide, not a wall.
+    """The switch is machine-wide, not a wall — but the flag is only half of it.
 
-    Removing the shell-level opt-out does not remove a test's ability to
-    exercise the enabled path: `monkeypatch.setenv` runs long after conftest
-    import, and `AntonSettings` reads the environment at construction. Asserted
-    so nobody "restores" the escape hatch believing this case was lost with it.
+    `monkeypatch.setenv` runs long after conftest import and `AntonSettings`
+    reads the environment at construction, so a test can still flip the flag for
+    itself. Asserted so nobody "restores" the shell-level escape hatch believing
+    that case was lost with it.
+
+    The other half is asserted because conftest blanks the sinks too: flipping
+    the flag re-enables the *setting*, not sending. `send_event` returns at
+    `if not settings.analytics_url` before either sink is reached, so a test that
+    needs to exercise the send path must set ANTON_ANALYTICS_URL — and
+    ANTON_POSTHOG_KEY for the direct sink — as well. Left unsaid, the next
+    developer flips the flag, sees nothing sent, and concludes the guard broke.
+
+    The second half is checked at the sender rather than at the resolved
+    setting, which also makes this the only test that fails if the sink blanking
+    is removed from conftest.
     """
     monkeypatch.setenv("ANTON_ANALYTICS_ENABLED", "true")
     from anton.config.settings import AntonSettings
 
-    assert AntonSettings().analytics_enabled is True
+    settings = AntonSettings()
+    assert settings.analytics_enabled is True
+
+    # The flag alone does not restore sending. Asserted on "nothing was handed
+    # to a sender thread", not on the settings values, so it stays true however
+    # the guards inside send_event are later rearranged.
+    spawned: list = []
+    monkeypatch.setattr(analytics, "_spawn", lambda fn, *a: spawned.append(fn))
+    monkeypatch.setattr(analytics, "_is_ci", lambda: False)
+    analytics.send_event(settings, "turn_completed", tokens_total="1")  # direct sink
+    analytics.send_event(settings, "ds_connect_attempt")  # collector sink
+    assert spawned == []
