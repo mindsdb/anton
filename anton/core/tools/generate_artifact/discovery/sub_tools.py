@@ -132,25 +132,6 @@ def _web_fetch_schema() -> dict:
     }
 
 
-def tool_schemas(*, include_ask_user: bool) -> list[dict]:
-    """The tool schemas offered to phase 1's gathering loop this round.
-
-    `include_ask_user` is computed once per `run_gathering_loop` call from
-    the remaining question budget (see state.gathering_question_budget) —
-    when it is False, the model is not even shown the tool, so it spends no
-    rounds asking questions guaranteed to come back `limit`/`unavailable`.
-    """
-    schemas = [
-        _scratchpad_schema(),
-        _web_search_schema(),
-        _web_fetch_schema(),
-        FINISH_GATHERING_SCHEMA,
-    ]
-    if include_ask_user:
-        schemas.append(ASK_USER_SCHEMA)
-    return schemas
-
-
 async def signal_thinking(session: "ChatSession") -> None:
     """Restart the host's spinner before a direct LLM call.
 
@@ -272,3 +253,84 @@ async def dispatch_ask_user(session: "ChatSession", tc_input: dict) -> dict:
         "question": request.prompt,
         "answer_summary": summary,
     }
+
+
+# ── Steps of the shared-prefix region (phases A-D) ──────────────────────────
+STEP_GATHERING = "gathering"
+STEP_DRAFT_BRIEF = "draft_brief"
+STEP_REDRAW_BRIEF = "redraw_brief"
+STEP_WRITE_PRD = "write_prd"
+STEP_TECH_SPEC = "make_tech_spec"
+STEP_API_SPEC = "make_api_spec"
+
+_DATA_TOOLS = frozenset({"scratchpad", "web_search", "web_fetch"})
+
+# Which tools may actually RUN on each step. The schema array itself never
+# changes (see `pipeline_tool_schemas`), because system prompt + tools +
+# messages form the cached prefix and editing any of them at a phase switch
+# costs a full cache miss on the largest context in the pipeline.
+#
+# `redraw_brief` is a separate row from `draft_brief` for one reason:
+# `finish_gathering`. On the hot path it is denied, because a model reaches
+# for it whenever a prompt says "you have finished gathering" — that is why
+# the old code removed it from the array outright. On the redraw step it is
+# required: it is how the artifact type and the declared data sources get
+# re-stated after a user correction.
+ALLOWED_TOOLS_BY_STEP: dict[str, frozenset[str]] = {
+    STEP_GATHERING: _DATA_TOOLS | {"ask_user", "finish_gathering"},
+    STEP_DRAFT_BRIEF: _DATA_TOOLS,
+    STEP_REDRAW_BRIEF: _DATA_TOOLS | {"finish_gathering"},
+    STEP_WRITE_PRD: _DATA_TOOLS,
+    STEP_TECH_SPEC: frozenset(),
+    STEP_API_SPEC: frozenset(),
+}
+
+_STEP_TASK = {
+    STEP_GATHERING: "gathering data and settling the artifact type",
+    STEP_DRAFT_BRIEF: "drafting the brief — reply with text, no tool calls",
+    STEP_REDRAW_BRIEF: "redrawing the brief after the user's correction",
+    STEP_WRITE_PRD: "writing the full PRD — reply with markdown, no tool calls",
+    STEP_TECH_SPEC: "writing the technical specification — reply with markdown, no tool calls",
+    STEP_API_SPEC: "writing the API specification — reply with JSON, no tool calls",
+}
+
+
+def pipeline_tool_schemas() -> list[dict]:
+    """The ONE tool array used by every call in phases A-D.
+
+    Fixed contents, fixed order, built the same way every time: it is part of
+    the cached prefix, and a reordered array is a changed prefix. Availability
+    per step is decided by `rejection_for`, never by dropping entries here.
+    """
+    return [
+        _scratchpad_schema(),
+        _web_search_schema(),
+        _web_fetch_schema(),
+        ASK_USER_SCHEMA,
+        FINISH_GATHERING_SCHEMA,
+    ]
+
+
+def rejection_for(step: str, name: str, *, questions_left: int) -> str | None:
+    """The refusal text for a disallowed call, or None when it may run.
+
+    The refusal names the current step and the action expected instead: a
+    bare "not available" leaves the model to guess, and a guessing model
+    spends another round — which on a spec step costs a full re-send of the
+    shared history, the most expensive round in the pipeline.
+    """
+    allowed = ALLOWED_TOOLS_BY_STEP.get(step)
+    if allowed is None:
+        return (
+            f"`{name}` is not available: step `{step}` is unknown to this "
+            "pipeline. Reply with text and no tool calls."
+        )
+    task = _STEP_TASK.get(step, step)
+    if name not in allowed:
+        return f"`{name}` is not available at this step. You are {task}."
+    if name == "ask_user" and questions_left <= 0:
+        return (
+            "`ask_user` is unavailable: the question budget for this turn is "
+            "exhausted. Proceed on a stated assumption instead of asking again."
+        )
+    return None

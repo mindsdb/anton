@@ -13,12 +13,7 @@ from typing import TYPE_CHECKING
 
 from anton.core.artifacts.models import ARTIFACT_TYPES
 
-from . import sub_tools
-from .prompts import (
-    build_gathering_continue_message,
-    build_gathering_kickoff,
-    build_gathering_system_prompt,
-)
+from . import prompts, sub_tools
 from .state import PrdState, gathering_question_budget
 
 if TYPE_CHECKING:
@@ -61,13 +56,26 @@ async def run_gathering_loop(state: "PrdState") -> None:
         (orchestrator.run) falls back on.
     """
     budget = gathering_question_budget(state.session)
-    tools = sub_tools.tool_schemas(include_ask_user=budget > 0)
+    # One array for the whole shared-prefix region; availability per step is
+    # decided in code by `sub_tools.rejection_for`, not by dropping entries.
+    tools = state.pipeline_tools
+    system = state.pipeline_system
+    step = sub_tools.STEP_GATHERING
 
     if not state.messages:
-        state.messages.append({"role": "user", "content": build_gathering_kickoff(state)})
+        state.messages.append({
+            "role": "user",
+            "content": prompts.build_call_kickoff(state)
+            + "\n\n"
+            + prompts.step_message(step, state),
+        })
     else:
-        state.messages.append({"role": "user", "content": build_gathering_continue_message()})
-    system = build_gathering_system_prompt(state)
+        state.messages.append({
+            "role": "user",
+            "content": prompts.step_message(
+                step, state, extra=prompts.GATHERING_CONTINUE
+            ),
+        })
 
     questions_asked = 0
 
@@ -121,6 +129,19 @@ async def run_gathering_loop(state: "PrdState") -> None:
             name = tc.name
             inp = tc.input or {}
 
+            # Availability is enforced here, not by editing the tool array:
+            # the array is part of the cached prefix and has to stay
+            # byte-identical across every call in phases A-D.
+            reason = sub_tools.rejection_for(
+                step, name, questions_left=budget - questions_asked
+            )
+            if reason is not None:
+                state.trace_log.tool_rejected(node=step, tool=name, reason=reason)
+                result_blocks.append(
+                    {"type": "tool_result", "tool_use_id": tc.id, "content": reason}
+                )
+                continue
+
             if name == "finish_gathering":
                 claimed_type = str(inp.get("artifact_type") or "")
                 # The schema's `enum` (see sub_tools.FINISH_GATHERING_SCHEMA)
@@ -137,19 +158,8 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": "ok"})
                 finished = True
             elif name == "ask_user":
-                if questions_asked >= budget:
-                    result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": (
-                                "Question limit reached for this turn; "
-                                "proceed on a stated assumption instead of "
-                                "asking again."
-                            ),
-                        }
-                    )
-                    continue
+                # The exhausted-budget case is handled by the gate above, so
+                # reaching here means there is a question left to spend.
                 outcome = await sub_tools.dispatch_ask_user(state.session, inp)
                 questions_asked += 1
                 state.record_qa(outcome["question"], outcome["answer_summary"])

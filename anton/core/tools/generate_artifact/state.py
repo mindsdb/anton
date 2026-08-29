@@ -213,6 +213,27 @@ class GenState:
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.
     spend: "Any | None" = None
+    # Built on first read and never rebuilt. Together with `messages` they
+    # are the cached prefix of every phase A-D call, so anything that would
+    # change them mid-run has to live in a step message instead.
+    _pipeline_system: str = ""
+    _pipeline_tools: "list[dict] | None" = None
+
+    @property
+    def pipeline_system(self) -> str:
+        if not self._pipeline_system:
+            from .discovery.prompts import build_pipeline_system_prompt
+
+            self._pipeline_system = build_pipeline_system_prompt(self)
+        return self._pipeline_system
+
+    @property
+    def pipeline_tools(self) -> list[dict]:
+        if self._pipeline_tools is None:
+            from .discovery.sub_tools import pipeline_tool_schemas
+
+            self._pipeline_tools = pipeline_tool_schemas()
+        return self._pipeline_tools
 
     def __post_init__(self) -> None:
         if self.is_fullstack is None:

@@ -11,8 +11,7 @@ from __future__ import annotations
 from anton.core.artifacts.internal_files import PRD_FILENAME
 
 from . import sub_tools
-from .brief import _phase2_tools
-from .prompts import build_phase2_system_prompt
+from . import prompts
 from .state import PrdState
 
 
@@ -45,13 +44,16 @@ async def write_prd(state: PrdState) -> str:
     """Phase 2 step 5 (or the best-effort path from an unconfirmed budget):
     expand the brief into the full PRD, save it, and update the artifact's
     `type` in metadata.json if it changed. Returns the full PRD markdown."""
-    state.messages.append({"role": "user", "content": _WRITE_PRD_INSTRUCTION})
+    state.messages.append({
+        "role": "user",
+        "content": prompts.step_message(sub_tools.STEP_WRITE_PRD, state),
+    })
     await sub_tools.signal_thinking(state.session)
-    system = build_phase2_system_prompt(state)
+    system = state.pipeline_system
     response = await state.session._llm.plan(
         system=system,
         messages=state.messages,
-        tools=_phase2_tools(),
+        tools=state.pipeline_tools,
     )
     state.trace_log.llm_call(
         node="write_prd", method="plan", system=system,

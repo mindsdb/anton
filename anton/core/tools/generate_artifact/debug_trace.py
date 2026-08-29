@@ -28,6 +28,7 @@ class NullTrace:
     def node(self, *_: Any, **__: Any) -> None: ...
     def llm_call(self, **_: Any) -> None: ...
     def verdict(self, **_: Any) -> None: ...
+    def tool_rejected(self, **_: Any) -> None: ...
     def scratchpad(self, **_: Any) -> None: ...
     def file_written(self, **_: Any) -> None: ...
     def verifier(self, **_: Any) -> None: ...
@@ -69,6 +70,17 @@ class GenTrace:
 
     def node(self, node, outcome, detail="") -> None:
         self._emit("node", {"node": node, "outcome": outcome, "detail": detail})
+
+    def tool_rejected(self, *, node: str, tool: str, reason: str) -> None:
+        """A tool call the step's gate refused to run.
+
+        Recorded because the whole trade — a stable prefix in exchange for
+        misses costing a round instead of being impossible — is only
+        defensible if the misses are countable. Labelled by node: a miss
+        while gathering is cheap, a miss in a spec node re-sends the entire
+        shared history.
+        """
+        self._emit("tool_rejected", {"node": node, "tool": tool, "reason": reason})
 
     def llm_call(self, *, node, method, system, messages,
                  response=None, value=None, attempt=None, round=None) -> None:

@@ -12,7 +12,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from . import sub_tools
-from .prompts import build_phase2_system_prompt
+from . import prompts
 from .state import PrdState
 
 
@@ -70,40 +70,20 @@ _DRAFT_BRIEF_INSTRUCTION = (
     "the brief, and the closing line — no other text."
 )
 
-def _phase2_tools() -> list[dict]:
-    """A non-empty tool list, WITHOUT `ask_user` or `finish_gathering` —
-    passed to phase 2's `plan()` calls purely so the Anthropic API accepts a
-    `messages` list that still contains phase 1's `tool_use`/`tool_result`
-    blocks (the API rejects any request with those blocks present unless
-    `tools` is also non-empty — see `anthropic.py`'s
-    `if merged_tools: kwargs["tools"] = ...`). `finish_gathering` is
-    deliberately excluded even though `sub_tools.tool_schemas` would
-    normally include it: of the four schemas, it is the one whose semantics
-    ("gathering is done, call this") superficially fit phase 2's "you have
-    finished gathering information" framing, making it the tool a model is
-    likeliest to reach for despite the system prompt's instruction not to.
-    `scratchpad`/`web_search`/`web_fetch` stay — they are hard to imagine
-    calling as a reply to "reply with plain text only".
-
-    This is defense in depth, not the actual guard against an empty reply:
-    if the model calls a tool anyway (any of the three still offered, or
-    something else entirely), `response.content` comes back empty and
-    `draft_brief`/`write_prd` raise on it — see the guard in both.
-    """
-    return [t for t in sub_tools.tool_schemas(include_ask_user=False) if t["name"] != "finish_gathering"]
-
-
 async def draft_brief(state: PrdState) -> None:
     """Phase 2 step 1: draft the short brief. Continues `state.messages` —
     this is NOT a fresh conversation, so the model sees everything phase 1
     found."""
-    state.messages.append({"role": "user", "content": _DRAFT_BRIEF_INSTRUCTION})
+    state.messages.append({
+        "role": "user",
+        "content": prompts.step_message(sub_tools.STEP_DRAFT_BRIEF, state),
+    })
     await sub_tools.signal_thinking(state.session)
-    system = build_phase2_system_prompt(state)
+    system = state.pipeline_system
     response = await state.session._llm.plan(
         system=system,
         messages=state.messages,
-        tools=_phase2_tools(),
+        tools=state.pipeline_tools,
     )
     state.trace_log.llm_call(
         node="draft_brief", method="plan", system=system,
@@ -195,7 +175,7 @@ async def classify_feedback(state: PrdState) -> str:
     whether the user's comment needs more data/questions
     (`back_to_gathering`) or the brief can just be reworded with what we
     already know (`revise_brief`)."""
-    system = build_phase2_system_prompt(state)
+    system = state.pipeline_system
     instruction = (
         "The user just commented on the PRD brief instead of accepting "
         "it (see the last user message). Decide: does addressing it need "

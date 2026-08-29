@@ -11,20 +11,19 @@ from anton.core.interaction.elicit import AskAnswer, AskOption, AskRequest
 from anton.core.tools.generate_artifact.discovery import sub_tools
 
 
-def test_tool_schemas_always_include_the_core_four():
-    names = {t["name"] for t in sub_tools.tool_schemas(include_ask_user=False)}
-    assert names == {"scratchpad", "web_search", "web_fetch", "finish_gathering"}
-
-
-def test_tool_schemas_add_ask_user_when_requested():
-    names = {t["name"] for t in sub_tools.tool_schemas(include_ask_user=True)}
-    assert "ask_user" in names
-    assert names == {"scratchpad", "web_search", "web_fetch", "finish_gathering", "ask_user"}
+def test_the_pipeline_array_always_carries_all_five_tools():
+    """There is no conditional array any more. Availability per step is
+    decided by `rejection_for`, because the array is the cached prefix for
+    every call in phases A-D and cannot be edited mid-run."""
+    names = {t["name"] for t in sub_tools.pipeline_tool_schemas()}
+    assert names == {
+        "scratchpad", "web_search", "web_fetch", "finish_gathering", "ask_user",
+    }
 
 
 def test_finish_gathering_schema_requires_summary_and_artifact_type():
     schema = next(
-        t for t in sub_tools.tool_schemas(include_ask_user=False)
+        t for t in sub_tools.pipeline_tool_schemas()
         if t["name"] == "finish_gathering"
     )
     assert set(schema["input_schema"]["required"]) == {"summary", "artifact_type"}
@@ -37,7 +36,7 @@ def test_finish_gathering_schema_constrains_artifact_type_to_the_closed_enum():
     from anton.core.artifacts.models import ARTIFACT_TYPES
 
     schema = next(
-        t for t in sub_tools.tool_schemas(include_ask_user=False)
+        t for t in sub_tools.pipeline_tool_schemas()
         if t["name"] == "finish_gathering"
     )
     assert schema["input_schema"]["properties"]["artifact_type"]["enum"] == list(ARTIFACT_TYPES)

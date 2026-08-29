@@ -141,20 +141,36 @@ async def test_ask_user_is_dispatched_via_elicit_not_handle_ask_user(monkeypatch
     assert "dark" in state.qa_log_markdown()
 
 
-async def test_ask_user_omitted_from_tools_when_budget_is_zero():
-    """When gathering_question_budget is 0, the ask_user schema must not be
-    offered at all — offering a tool guaranteed to answer `limit` just burns
-    a round telling the model that (see prd-design.md, review iteration 3)."""
+async def test_ask_user_stays_in_the_array_and_is_refused_by_the_gate():
+    """It used to be dropped from the schema list when the budget hit zero.
+
+    That is no longer available: the array is the cached prefix for every
+    call in phases A-D, and editing it mid-run costs a full cache miss on the
+    largest context in the pipeline. The guarantee moves into the gate — the
+    tool is offered but the call is refused without reaching `elicit`, and
+    the refusal says why.
+    """
     from anton.core.interaction.elicit import MAX_QUESTIONS_PER_TURN
 
     session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("ask_user", {"question": "which theme?", "options": []})]),
         _response(tool_calls=[_tc("finish_gathering", {"summary": "ok", "artifact_type": "html-app"})]),
     )
-    session.question_count = MAX_QUESTIONS_PER_TURN  # budget exhausted before phase 1 even starts
+    session.question_count = MAX_QUESTIONS_PER_TURN  # budget exhausted before gathering starts
     state = _state(session)
     await engine.run_gathering_loop(state)
+
     tools_seen = session._llm.plan.call_args.kwargs["tools"]
-    assert "ask_user" not in {t["name"] for t in tools_seen}
+    assert "ask_user" in {t["name"] for t in tools_seen}
+
+    refusals = [
+        block["content"]
+        for message in state.messages
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if block.get("type") == "tool_result"
+    ]
+    assert any("budget" in r.lower() for r in refusals)
 
 
 async def test_round_budget_exhausted_without_finish_gathering(monkeypatch):
