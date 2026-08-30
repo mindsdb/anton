@@ -34,9 +34,9 @@ __all__ = [
 # which layer is interrupting them. Every question kind draws on this same
 # budget — a `select_path` picker spends it too — so "8 questions per turn"
 # is not "8 `ask_user` calls per turn". Raised from 3 to 8 alongside
-# generate_prd (ENG-969): its phase 2 (show the brief, then up to two
-# revise cycles) reserves 3 of these for itself so the confirm step is not
-# a one-shot — see generate_prd/state.py's PHASE2_RESERVED_QUESTIONS.
+# the artifact pipeline (ENG-969): its brief phase (show the brief, then up
+# to two revise cycles) reserves 3 of these for itself so the confirm step is
+# not a one-shot — see generate_artifact/state.py's PHASE2_RESERVED_QUESTIONS.
 MAX_QUESTIONS_PER_TURN = 8
 
 # One option is nothing to choose; thirty buttons is a UI failure and the

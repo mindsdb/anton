@@ -1,4 +1,4 @@
-"""Sub-tools exposed to generate_prd's phase 1 gathering loop.
+"""Sub-tools exposed to the pipeline's shared-prefix region (phases A-D).
 
 Four tools are always offered: `scratchpad`, `web_search`, `web_fetch` (thin
 schema copies of the existing top-level tools — dispatch reuses their real
@@ -87,9 +87,20 @@ FINISH_GATHERING_SCHEMA: dict = {
             "notes": {
                 "type": "string",
                 "description": (
-                    "Everything the PRD-drafting step needs: goal, data "
-                    "sources found, sample rows, open assumptions, UI/UX "
-                    "hints — this is the only context phase 2 starts from."
+                    "Everything the brief needs: goal, data sources found, "
+                    "sample rows, open assumptions, UI/UX hints."
+                ),
+            },
+            "data_sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Short names of the data sources this artifact reads "
+                    '(e.g. "orders table", "the article at <url>"). Empty '
+                    "when the artifact needs no external data. A source "
+                    "named here that has had no code run against it is "
+                    "fetched before generation starts, so naming one you "
+                    "have not touched is how you ask for it."
                 ),
             },
         },
@@ -101,7 +112,7 @@ FINISH_GATHERING_SCHEMA: dict = {
 def _scratchpad_schema() -> dict:
     # Reuse the exact schema the main agent sees, so the gathering loop
     # drives scratchpads with the same contract. Imported lazily to avoid a
-    # tool_defs <-> generate_prd import cycle (mirrors generate_artifact's
+    # tool_defs <-> discovery import cycle (mirrors generate_artifact's
     # own sub_tools.py).
     from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
 
@@ -155,7 +166,7 @@ async def ask_via_elicit(session: "ChatSession", request: "AskRequest") -> "AskA
 
     `elicit()` re-raises whatever `elicitor.ask()` raises instead of
     returning an `"error"` status (there is no such status — see
-    `AskAnswer.status`'s docstring). Both generate_prd call sites — this
+    `AskAnswer.status`'s docstring). Both discovery call sites — this
     one (via `dispatch_ask_user`, phase 1's `ask_user` sub-tool) and
     `orchestrator.show_and_confirm` (phase 2) — bypass `handle_ask_user`
     entirely to keep the raw status, which also means neither gets its

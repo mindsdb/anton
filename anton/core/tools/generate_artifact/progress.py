@@ -2,7 +2,7 @@
 
 `GenState.step_started` turns an FSM node name into one of these lines and
 pushes it onto the progress channel; `handle_generate_artifact` forwards them
-as `ToolProgress` markers. The node names themselves (`is_data_enough`,
+as `ToolProgress` markers. The node names themselves (`make_api_spec`,
 `make_api_spec`) are graph vocabulary and must never reach a user, so the
 mapping is explicit rather than derived from the identifier.
 
@@ -17,8 +17,10 @@ from __future__ import annotations
 # Keyed by the node label the orchestrator already uses for `state.record` and
 # the debug trace, so one node has one name across all three channels.
 STEP_LABELS: dict[str, str] = {
-    "inspect_scratchpads": "Looking at the data already gathered in this session",
-    "is_data_enough": "Working out whether that data is enough",
+    "gathering": "Gathering what the artifact needs",
+    "draft_brief": "Preparing a short brief for you",
+    "redraw_brief": "Updating the brief with your changes",
+    "write_prd": "Writing down the agreed requirements",
     "define_required_data": "Working out what data is still missing",
     "is_possible_to_fetch": "Checking whether the missing data can be obtained",
     "fetch_data_sample": "Fetching a data sample",
@@ -55,3 +57,12 @@ def label_for(node: str, *, is_fullstack: bool = False, attempt: int = 0) -> str
     if text is None:
         return None
     return f"{text} (retry)" if attempt > 0 else text
+
+
+# Channel-control markers, not user-facing text. They travel on the same
+# queue as the progress lines because ordering with respect to those lines is
+# the entire point: the pipeline raises its question from inside the task the
+# handler is draining, so a marker emitted between OPEN and CLOSED would be
+# printed on top of a live prompt.
+QUESTION_OPEN = "\x00question-open"
+QUESTION_CLOSED = "\x00question-closed"

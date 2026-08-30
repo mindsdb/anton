@@ -99,9 +99,9 @@ async def draft_brief(state: PrdState) -> None:
         # continuing with an empty brief — means `orchestrator.run`'s
         # caller chain surfaces it as a normal generator crash: it
         # propagates up through `discovery.generate()` into
-        # `handle_generate_prd`'s `except Exception`, which already wraps
-        # it with `_prd_generation_failed` (see Task 7). No new
-        # error-reporting path needed.
+        # `handle_generate_artifact`'s `except Exception`, which already
+        # wraps it with `_generation_failed`. No new error-reporting path
+        # needed.
         raise RuntimeError(
             "draft_brief: the model replied with no text — it may have "
             "called a tool instead of drafting the brief."
@@ -197,3 +197,74 @@ async def classify_feedback(state: PrdState) -> str:
     state.trace_log.verdict(node="classify_feedback", schema="FeedbackVerdict", value=result.model_dump())
     return result.route if result.route in ("revise_brief", "back_to_gathering") else "revise_brief"
 
+
+
+async def redraw_brief(state: PrdState) -> None:
+    """Redraw the brief after a user correction, and re-declare the sources.
+
+    Separate from `draft_brief` for one reason: `finish_gathering` is allowed
+    here. On the hot path it is denied on the brief step, because a model
+    reaches for it whenever a prompt mentions having finished gathering. Here
+    it is the point — a correction that introduces a data source nobody has
+    fetched is only discoverable if the model re-states the source list.
+
+    Not calling it is tolerated rather than fatal. A hard failure would turn
+    every correction into a possible lost run, while the cost of the miss is
+    bounded: the artifact is rebuilt from the sources already known, which is
+    the same result the correction would have had without the new source.
+    """
+    from anton.core.artifacts.models import ARTIFACT_TYPES
+
+    state.messages.append({
+        "role": "user",
+        "content": prompts.step_message(sub_tools.STEP_REDRAW_BRIEF, state),
+    })
+    await sub_tools.signal_thinking(state.session)
+    system = state.pipeline_system
+    response = await state.session._llm.plan(
+        system=system,
+        messages=state.messages,
+        tools=state.pipeline_tools,
+    )
+    state.trace_log.llm_call(
+        node="redraw_brief", method="plan", system=system,
+        messages=state.messages, response=response,
+    )
+
+    declared = None
+    new_type = ""
+    for tc in getattr(response, "tool_calls", None) or []:
+        if tc.name != "finish_gathering":
+            continue
+        inp = tc.input or {}
+        new_type = str(inp.get("artifact_type") or "")
+        raw = inp.get("data_sources")
+        declared = [str(s) for s in raw] if isinstance(raw, list) else []
+
+    if declared is not None:
+        previous = set(state.declared_sources)
+        if new_type in ARTIFACT_TYPES:
+            state.final_artifact_type = new_type
+        state.declared_sources = declared
+        # Anything the correction introduced has nothing executed against it.
+        # This — not "data_notes is empty" — is what opens the emergency data
+        # loop: after a correction the notes are full of the PREVIOUS
+        # gathering's cells, and an emptiness check would read that as
+        # "everything is covered".
+        state.unverified_sources = [s for s in declared if s not in previous]
+    else:
+        state.trace_log.node(
+            "redraw_brief", "no_finish_gathering",
+            detail="artifact type and declared sources kept from the previous call",
+        )
+
+    brief = (response.content or "").strip()
+    if not brief:
+        state.trace_log.node("redraw_brief", "fail", detail="model replied with no text")
+        raise RuntimeError(
+            "redraw_brief: the model replied with no text — it may have "
+            "called a tool instead of redrawing the brief."
+        )
+    state.brief = brief
+    state.messages.append({"role": "assistant", "content": state.brief})
+    state.trace_log.node("redraw_brief", "done", detail=state.brief[:200])

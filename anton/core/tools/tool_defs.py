@@ -3,7 +3,6 @@ from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
     handle_generate_artifact,
-    handle_generate_prd,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -414,41 +413,47 @@ LAUNCH_BACKEND_TOOL = ToolDef(
 )
 
 
-GENERATE_PRD_TOOL = ToolDef(
-    name="generate_prd",
+GENERATE_ARTIFACT_TOOL = ToolDef(
+    name="generate_artifact",
     description=(
-        "Draft and get user confirmation on a PRD (Product Requirements "
-        "Document) for an already-registered web artifact (html-app, "
-        "fullstack-stateless-app, fullstack-stateful-app), BEFORE any code "
-        "is written. Runs a bounded internal process: determines the "
-        "artifact type, gathers/verifies any data needed (may call "
-        "scratchpad, web_search, web_fetch, and ask the user clarifying "
-        "questions internally), drafts a short brief, and shows it to the "
-        "user for accept/cancel/revise. On acceptance, writes the full "
-        "`prd.md` into the artifact folder.\n\n"
+        "Build an already-registered web artifact end to end. Use INSTEAD OF "
+        "writing files yourself in the scratchpad. Reads `type` from the "
+        "artifact's metadata (must be `html-app`, `fullstack-stateless-app`, "
+        "or `fullstack-stateful-app`).\n\n"
+        "It runs the whole thing itself: gathers the data it needs (it can "
+        "use the scratchpad, web search and web fetch), asks the user "
+        "whatever is still unclear, agrees a short brief with them, writes "
+        "the requirements down as `prd.md`, then a technical spec, then the "
+        "code — with static verification, and for fullstack apps a launch "
+        "and a health check on `/api/health`. There is no separate PRD step "
+        "to call first, and you do NOT call `launch_backend` afterwards.\n\n"
         "Inputs:\n"
         "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
         "- `user_request`: the user's request, as close to their original "
         "wording as possible.\n"
-        "- `agent_understanding`: how you understand the task, based on "
-        "the whole conversation so far.\n"
+        "- `agent_understanding`: how you understand the task, based on the "
+        "whole conversation so far.\n"
         "- `known_data` (optional): anything already known about the data "
         "needed — descriptions, or scratchpad references (pad name, cell) "
         "if you already fetched something.\n"
-        "- `user_preferences` (optional): relevant known preferences "
-        "(style, preferred APIs, etc.).\n\n"
-        "Returns one of three shapes:\n"
-        '- `{"status": "prd_written", "prd_path", "artifact_type", '
-        '"brief_summary", "qa_log"}` — the user confirmed; proceed to '
-        "build the artifact using `prd_path` as the requirements source.\n"
-        '- `{"status": "prd_written_unconfirmed", ...}` — a draft was '
-        "written but NOT confirmed (the per-turn question budget ran "
-        "out); do NOT proceed to building the artifact, show "
-        "`brief_summary` and get explicit confirmation first.\n"
-        '- `{"status": "cancelled", "reason", "qa_log"}` — the user '
-        "declined; do NOT write a PRD yourself and do NOT proceed.\n\n"
-        "On a technical failure, do NOT build the PRD or the artifact "
-        "yourself — report the failure to the user."
+        "- `user_preferences` (optional): relevant known preferences (style, "
+        "preferred APIs, etc.).\n\n"
+        "Returns a `status`:\n"
+        '- `generated` — done. `files_written` are the artifact\'s own files '
+        "(report those), `internal_files` are generation inputs like "
+        "`spec.md` (do NOT present them as deliverables), `trace` lists the "
+        "steps and their outcomes.\n"
+        "- `needs_confirmation` — a brief was drafted but the user could not "
+        "be asked. Show `brief_summary`; if they agree, call again with the "
+        "SAME `user_request`.\n"
+        "- `cancelled` — the user declined. Do not build the artifact by "
+        "hand.\n"
+        "- `stopped_over_budget` — the turn ran out of tokens and the "
+        "pipeline stopped cleanly; what it finished is on disk.\n\n"
+        "Every status but `generated` carries an `instruction` saying what to "
+        "do next — follow it. On a technical failure, report it to the user "
+        "and ask how to proceed; NEVER fall back to building the artifact "
+        "yourself."
     ),
     input_schema={
         "type": "object",
@@ -459,153 +464,61 @@ GENERATE_PRD_TOOL = ToolDef(
             },
             "user_request": {
                 "type": "string",
-                "description": "The user's request, as close to their original wording as possible.",
+                "description": (
+                    "The user's request, as close to their original wording "
+                    "as possible. This identifies the work: a repeat call "
+                    "carrying the same request continues where the previous "
+                    "one stopped, a different one starts over."
+                ),
             },
             "agent_understanding": {
                 "type": "string",
-                "description": "How you understand the task, based on the whole conversation.",
+                "description": (
+                    "How you understand the task, from the whole "
+                    "conversation. If the user asked for a change after "
+                    "seeing the brief, put the change here and keep "
+                    "`user_request` unchanged."
+                ),
             },
             "known_data": {
                 "type": "string",
                 "description": (
-                    "What's already known about needed data — descriptions "
-                    "or scratchpad references (pad name, cell)."
+                    "What is already known about the data needed — "
+                    "descriptions, or scratchpad references (pad name, cell) "
+                    "if you already fetched something."
                 ),
             },
             "user_preferences": {
                 "type": "string",
-                "description": "Relevant known user preferences (style, preferred APIs, etc.).",
+                "description": (
+                    "Relevant known user preferences (style, preferred APIs, "
+                    "etc.)."
+                ),
             },
         },
         "required": ["slug", "user_request", "agent_understanding"],
     },
-    handler=handle_generate_prd,
-)
-
-
-
-GENERATE_ARTIFACT_TOOL = ToolDef(
-    name="generate_artifact",
-    description=(
-        "Populate an already-registered artifact's folder via a dedicated "
-        "sub-generator. Use INSTEAD OF writing files yourself in the "
-        "scratchpad. Reads `type` from the artifact's metadata (must be "
-        "`html-app`, `fullstack-stateless-app`, or `fullstack-stateful-app`).\n\n"
-        "REQUIREMENTS COME FROM THE PRD: if `generate_prd` has written "
-        "`prd.md` into the artifact folder, this tool reads it itself and "
-        "builds from it — that document, which the user reviewed and "
-        "accepted, outranks anything in `context`. Run `generate_prd` first; "
-        "do not pass, quote or paraphrase the PRD. Without a `prd.md` the tool "
-        "still runs, but then `context` is all it has to work from.\n\n"
-        "Inputs:\n"
-        "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
-        "- `context`: a markdown brief carrying what the PRD does not — with "
-        "these three sections:\n"
-        "  ## User request — the user's literal ask\n"
-        "  ## Conversation context — relevant decisions/history from this chat\n"
-        "  ## Data — what data ALREADY EXISTS in scratchpad cells: name the "
-        "scratchpad(s), the specific cells, and what exactly was done in them "
-        "— which query/extraction ran, which variables were produced, and what "
-        "the result showed — because the generator opens those scratchpads and "
-        "pulls or rebuilds the data from them. A `### Sample` subsection of "
-        "2–5 rows is allowed ONLY for rows actually observed in one of those "
-        "cells; never fabricate one. If you have not touched the data sources "
-        "yet, say so in one line or omit the section: the generator fetches "
-        "what is missing itself, guided by the PRD. Do NOT list sources, "
-        "schemas or row counts you merely expect to exist — describing the "
-        "data the artifact needs is the PRD's job. DO NOT include env var "
-        "names, connection strings, credentials, API endpoint paths the "
-        "generator must implement, backend file layout, or any other "
-        "implementation detail — those belong in the generator's own planning "
-        "step, not in this brief.\n"
-        "  Do NOT restate the requirements in `context`; they are in the PRD.\n\n"
-        "For fullstack apps the tool launches the backend itself (health-checked "
-        "on `/api/health`) and records the port in metadata; you do NOT call "
-        "`launch_backend` yourself. On success it returns "
-        "`{slug, path, files_written, internal_files, summary, trace}` — "
-        "`files_written` are the artifact's own files (report those to the "
-        "user), `internal_files` are generation inputs like `spec.md` and "
-        "`openapi.json` (do NOT present them as deliverables), and `trace` "
-        "lists the generation steps and their outcomes; on failure a single error string "
-        "naming the node that stopped the run. If generation fails, report the "
-        "failure to the user and ask how to proceed — NEVER fall back to "
-        "building the artifact yourself via scratchpad or any other means."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "slug": {
-                "type": "string",
-                "description": "Slug of an already-registered artifact.",
-            },
-            "context": {
-                "type": "string",
-                "description": (
-                    "Markdown brief with sections `## User request`, "
-                    "`## Conversation context`, `## Data`. It supplements the "
-                    "PRD, which the tool reads from the artifact folder "
-                    "itself — do NOT restate the requirements here. "
-                    "The `## Data` section describes ONLY data that already "
-                    "exists in scratchpad cells: name the scratchpad(s), the "
-                    "cells, and what was done in them (the generator opens "
-                    "those scratchpads to pull/rebuild the data). Omit it (or "
-                    "say so in one line) when you have not touched the "
-                    "sources yet — the generator fetches what is missing "
-                    "itself. Do NOT list sources, schemas or row counts you "
-                    "merely expect to exist. NO env var names, connection "
-                    "details, API endpoint paths, or backend layout. Add a "
-                    "`### Sample` of 2–5 rows only for rows actually observed "
-                    "in one of those cells (never fabricate). "
-                    "Passed verbatim to the sub-generator."
-                ),
-            },
-        },
-        "required": ["slug", "context"],
-    },
     handler=handle_generate_artifact,
     prompt=(
         "ARTIFACT GENERATION:\n"
-        "`generate_artifact` produces every file for an already-registered "
-        "artifact by running a strict internal generation state machine "
-        "(data-sufficiency check → technical spec → REST API spec → backend & "
-        "frontend generation with verification → launch & health check). Use it "
-        "INSTEAD of writing artifact files yourself in the scratchpad.\n"
+        "`generate_artifact` builds an already-registered artifact end to "
+        "end — gathering data, agreeing a brief with the user, writing the "
+        "requirements, the technical spec and the code, with verification "
+        "and (for fullstack) a launch and health check. Use it INSTEAD of "
+        "writing artifact files yourself in the scratchpad.\n"
         "  1. Call `create_artifact` to register the slug and pick the type "
         "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
-        "  2. Call `generate_prd(slug=<slug>, ...)` and let it agree the "
-        "requirements with the user. It writes `prd.md` into the artifact "
-        "folder, and `generate_artifact` reads that file itself — you do NOT "
-        "pass it, quote it, or summarise it.\n"
-        "  3. Call `generate_artifact(slug=<slug>, context=<markdown brief>)`.\n"
-        "     - `context` MUST be a markdown document with these three "
-        "sections:\n"
-        "         ## User request\n"
-        "         ## Conversation context\n"
-        "         ## Data\n"
-        "       WHAT `context` IS FOR: the requirements live in `prd.md`. "
-        "`context` adds only what the PRD does not carry — the user's literal "
-        "wording, relevant chat history, and what data is ALREADY in hand. Do "
-        "NOT restate the requirements here.\n"
-        "       For `## Data`: describe ONLY data that already exists in "
-        "scratchpad cells — name the scratchpad(s), the specific cells, and "
-        "what was done in them (which query/extraction ran, which variables "
-        "were produced, what the result showed), because the generator opens "
-        "those scratchpads and pulls or rebuilds the data from them. Add a "
-        "`### Sample` of 2–5 rows ONLY if those rows were actually observed in "
-        "one of those cells; never fabricate one, and never sample data you "
-        "have not fetched. If you have not touched the sources yet, say so in "
-        "one line or omit the section — the generator fetches what is missing "
-        "itself, guided by the PRD. Do NOT list sources, schemas or row counts "
-        "you merely expect to exist; that is what the PRD describes. DO NOT "
-        "mention in this section:\n"
-        "         • env var names (DS_POSTGRES_*, API_KEY, etc.) or any "
-        "credentials/connection strings,\n"
-        "         • API endpoint paths the generator must implement "
-        "(`GET /api/...`),\n"
-        "         • backend file layout, modules, or implementation details.\n"
-        "       Those are the generator's job to design — not yours to dictate.\n"
-        "For fullstack apps the tool launches the backend itself and records the "
-        "port — you do NOT need to call `launch_backend` afterwards."
+        "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
+        "agent_understanding=..., known_data?, user_preferences?)`. It asks "
+        "the user anything it still needs, so do not pre-interview them for "
+        "it.\n"
+        "  3. Follow the `instruction` in the result. `needs_confirmation` "
+        "means show `brief_summary` and, if the user agrees, call again with "
+        "the SAME `user_request` — that repeat call IS the confirmation. A "
+        "correction goes in `agent_understanding`, with `user_request` left "
+        "as it was.\n"
+        "Do NOT call `launch_backend` for a fullstack artifact built this "
+        "way — the tool launches and health-checks it itself."
     ),
 )
 

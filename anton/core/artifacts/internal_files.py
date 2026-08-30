@@ -1,7 +1,7 @@
 """Names of the files the generation pipeline leaves in an artifact folder
 that are inputs to generation rather than artifact content.
 
-`generate_prd` writes `prd.md`; `generate_artifact` writes `spec.md` and
+`generate_artifact` writes `prd.md`, `discovery.json`, `spec.md` and
 `openapi.json`, and reads the PRD back from the same folder (ENG-969 → ENG-968
 handoff). Every one of them physically sits next to `dashboard.html` or
 `backend.py`, and every one of them would otherwise be reported to the user as

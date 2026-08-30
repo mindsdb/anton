@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, Mock
 
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import orchestrator
+from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
-    DataVerdict, FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
+    FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
 )
 
 
@@ -32,21 +33,26 @@ def _state(tmp_path, **kw):
 
 # ── Task 7: data phase ───────────────────────────────────────────────────────
 
-async def test_data_phase_short_circuits_when_enough(tmp_path: Path):
+async def test_data_phase_costs_nothing_on_the_normal_path(tmp_path: Path):
+    """No LLM call at all. `is_data_enough` used to sit here asking a second
+    model to re-derive the verdict the gathering phase already gave by
+    calling `finish_gathering`."""
     st = _state(tmp_path)
+    st.gathering_complete = True
     st.session._llm.generate_object = AsyncMock(
-        return_value=DataVerdict(enough=True, reasoning="no data needed")
+        side_effect=AssertionError("the data phase must not call the model here")
     )
     err = await orchestrator._data_phase(st)
     assert err is None
     assert st.data_iterations == 0
-    assert any(s.node == "is_data_enough" and s.outcome == "yes" for s in st.trace)
 
 
 async def test_data_phase_terminates_when_impossible(tmp_path: Path):
     st = _state(tmp_path)
+    st.gathering_complete = True
+    st.declared_sources = ["orders"]
+    st.unverified_sources = ["orders"]
     seq = [
-        DataVerdict(enough=False, reasoning="need orders"),
         RequiredData(items=[RequiredDataItem(name="orders", where="nowhere", why="chart")], reasoning="r"),
         FetchVerdict(possible=False, reasoning="no orders source connected"),
     ]
@@ -59,11 +65,10 @@ async def test_data_phase_terminates_when_impossible(tmp_path: Path):
 
 async def test_data_phase_budget_exhausted(tmp_path: Path, monkeypatch):
     st = _state(tmp_path)
+    st.gathering_complete = False  # never finished: the loop has to run
 
-    # Always: not enough → required → possible → fetch (writes notes) → repeat.
+    # Always: required → possible → fetch (writes notes) → repeat.
     def gen_obj(schema_class, **kw):
-        if schema_class is DataVerdict:
-            return DataVerdict(enough=False, reasoning="still missing")
         if schema_class is RequiredData:
             return RequiredData(items=[RequiredDataItem(name="x", where="db", why="y")], reasoning="r")
         return FetchVerdict(possible=True, reasoning="yes")
@@ -249,10 +254,11 @@ async def test_write_tech_spec_writes_spec_md(tmp_path: Path):
 # ── Task 9: run_app, verify_fullstack, run() ─────────────────────────────────
 
 async def test_run_html_app_happy_path(tmp_path: Path, monkeypatch):
+    # ENTRY_SPEC is the resume-from-PRD path: discovery is restored from disk
+    # and the run starts at the spec node — which is exactly what `run(state)`
+    # did before the merge, so these FSM tests keep their shape.
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
-    st.session._llm.generate_object = AsyncMock(
-        return_value=DataVerdict(enough=True, reasoning="no data needed")
-    )
+    st.gathering_complete = True
     st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
     async def fake_front(state):
@@ -262,8 +268,9 @@ async def test_run_html_app_happy_path(tmp_path: Path, monkeypatch):
         return None
     monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_front)
 
-    out = await orchestrator.run(st)
+    out = await orchestrator.run(st, entry=cp.ENTRY_SPEC)
     assert isinstance(out, dict)
+    assert out["status"] == "generated"
     assert "dashboard.html" in out["files_written"]
     # html-app must NOT run backend / run_app.
     assert not any(s["node"] == "run_app" for s in out["trace"])
@@ -271,21 +278,24 @@ async def test_run_html_app_happy_path(tmp_path: Path, monkeypatch):
 
 async def test_run_data_terminal_returns_error(tmp_path: Path):
     st = _state(tmp_path)
+    st.gathering_complete = True
+    st.declared_sources = ["x"]
+    st.unverified_sources = ["x"]
     st.session._llm.generate_object = AsyncMock(side_effect=[
-        DataVerdict(enough=False, reasoning="need x"),
         RequiredData(items=[], reasoning="need x from nowhere"),
         FetchVerdict(possible=False, reasoning="no source"),
     ])
-    out = await orchestrator.run(st)
+    out = await orchestrator.run(st, entry=cp.ENTRY_SPEC)
     assert isinstance(out, str)
     assert "not enough data" in out.lower()
 
 
 async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
     st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.gathering_complete = True
     st.session._workspace = None  # _artifact_store returns None → port update skipped
     st.session._llm.generate_object = AsyncMock(
-        return_value=DataVerdict(enough=True, reasoning="have data")
+        side_effect=AssertionError("the data phase must not call the model here")
     )
     st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
@@ -307,7 +317,7 @@ async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(orchestrator, "_launch_backend", fake_launch)
     monkeypatch.setattr(orchestrator, "_probe_app", fake_probe)
 
-    out = await orchestrator.run(st)
+    out = await orchestrator.run(st, entry=cp.ENTRY_SPEC)
     assert isinstance(out, dict)
     assert launched["health_path"] == "/api/health"
     assert any(s["node"] == "verify_fullstack" and s["outcome"] == "ok" for s in out["trace"])
@@ -320,21 +330,28 @@ async def test_public_generate_delegates_to_run(tmp_path: Path, monkeypatch):
 
     session = AsyncMock()
     captured = {}
-    async def fake_run(state):
+    async def fake_run(state, *, entry):
         captured["type"] = state.artifact_type
         captured["slug"] = state.slug
         captured["is_fullstack"] = state.is_fullstack
+        captured["entry"] = entry
+        captured["user_request"] = state.user_request
         return {"files_written": [], "summary": "ok", "trace": []}
     monkeypatch.setattr("anton.core.tools.generate_artifact.orchestrator.run", fake_run)
 
     out = await public_generate(
         session=session, artifact_type="fullstack-stateless-app",
-        artifact_path=tmp_path, context="brief", slug="a",
+        artifact_path=tmp_path, slug="a",
+        user_request="build an orders app",
+        agent_understanding="a small orders dashboard",
     )
     assert out["summary"] == "ok"
     assert captured["type"] == "fullstack-stateless-app"
     assert captured["slug"] == "a"
     assert captured["is_fullstack"] is True
+    assert captured["user_request"] == "build an orders app"
+    # Nothing on disk for this request, so the run starts at the beginning.
+    assert captured["entry"] == cp.ENTRY_FULL
 
 
 async def test_gen_verify_frontend_reports_missing_html_file(tmp_path: Path, monkeypatch):
@@ -556,8 +573,9 @@ async def test_frontend_first_attempt_does_not_delete_anything(tmp_path: Path, m
 async def test_spec_files_are_reported_separately(tmp_path: Path, monkeypatch):
     """spec.md and openapi.json are generation inputs; the agent must not call them artifacts."""
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    st.gathering_complete = True
     st.session._llm.generate_object = AsyncMock(
-        return_value=DataVerdict(enough=True, reasoning="no data needed")
+        side_effect=AssertionError("the data phase must not call the model here")
     )
     st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
@@ -569,7 +587,7 @@ async def test_spec_files_are_reported_separately(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_front)
 
-    out = await orchestrator.run(st)
+    out = await orchestrator.run(st, entry=cp.ENTRY_SPEC)
 
     assert isinstance(out, dict)
     assert out["files_written"] == ["dashboard.html"]
@@ -579,168 +597,25 @@ async def test_spec_files_are_reported_separately(tmp_path: Path, monkeypatch):
     assert (tmp_path / "spec.md").is_file()
 
 
-# ── Scratchpad inspection ────────────────────────────────────────────────────
+# ── The emergency data loop ─────────────────────────────────────────────────
 
-class _FakeCell:
-    def __init__(self, code, stdout="", error=None):
-        self.code = code
-        self.stdout = stdout
-        self.stderr = ""
-        self.error = error
-        self.description = ""
-        self.logs = ""
+async def test_data_phase_still_fetches_when_a_source_is_unverified(
+    tmp_path: Path, monkeypatch
+):
+    """The loop is emergency-only now, but it is not gone.
 
-
-class _FakePad:
-    def __init__(self, cells):
-        self.cells = cells
-
-
-def _session_with_pads(pads: dict):
-    session = AsyncMock()
-    session._scratchpads.pads = pads
-    return session
-
-
-def test_pads_named_in_brief_matches_on_word_boundary():
-    """A pad named `dash` must not match the word "dashboard"."""
-    session = _session_with_pads({"dash": _FakePad([]), "orders": _FakePad([])})
-    brief = "Build a dashboard from the `orders` pad."
-    assert orchestrator._pads_named_in_brief(session, brief) == ["orders"]
-
-
-def test_pads_named_in_brief_is_defensive_against_mock_session():
-    """session is an AsyncMock: pads is a mock, not a dict.
-
-    We also assert the absence of a RuntimeWarning: rejecting the mock by calling
-    `.keys()` inside try/except instead of by type would return an abandoned
-    coroutine, which surfaces at GC time in the output of EVERY test with a mock
-    session. Elsewhere such a coroutine has to be closed by hand — here it must
-    never appear.
+    `is_data_enough` was removed because the gathering phase already answered
+    that question by calling `finish_gathering`. What survives is the fetch
+    path, entered when a declared source has nothing executed against it.
     """
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        assert orchestrator._pads_named_in_brief(AsyncMock(), "any brief") == []
-        assert orchestrator._live_pad_names(AsyncMock()) == []
-        assert orchestrator._pads_dict(AsyncMock()) == {}
-
-
-def test_inspect_puts_cells_into_data_notes(tmp_path: Path):
-    session = _session_with_pads(
-        {"orders": _FakePad([
-            _FakeCell("df = q('select * from orders')", stdout="1000 rows"),
-            _FakeCell("   ", stdout="ignored"),  # empty code is skipped
-        ])}
-    )
-    st = _state(tmp_path, session=session, brief="Use the `orders` scratchpad.")
-
-    orchestrator._inspect_named_scratchpads(st)
-
-    assert "select * from orders" in st.data_notes
-    assert "1000 rows" in st.data_notes
-    assert "orders" in st.data_notes
-    assert any(s.node == "inspect_scratchpads" and s.outcome == "done" for s in st.trace)
-
-
-def test_inspect_reports_cell_errors_not_just_stdout(tmp_path: Path):
-    """Without this a failed cell lands in the notes as code with no result —
-    indistinguishable from a successful one that printed nothing."""
-    session = _session_with_pads(
-        {"orders": _FakePad([
-            _FakeCell("import nope", stdout="", error="ModuleNotFoundError: nope")
-        ])}
-    )
-    st = _state(tmp_path, session=session, brief="See the `orders` pad.")
-
-    orchestrator._inspect_named_scratchpads(st)
-
-    assert "ModuleNotFoundError" in st.data_notes
-
-
-def test_inspect_records_skip_when_nothing_matched(tmp_path: Path):
-    """A silent no-op here has already hidden a wrong premise twice."""
-    session = _session_with_pads({"unrelated": _FakePad([_FakeCell("x = 1")])})
-    st = _state(tmp_path, session=session, brief="No pad is named here.")
-
-    orchestrator._inspect_named_scratchpads(st)
-
-    assert st.data_notes == ""
-    step = next(s for s in st.trace if s.node == "inspect_scratchpads")
-    assert step.outcome == "skipped"
-    assert "unrelated" in step.detail  # the live pads are listed so the skip is visible
-
-
-def test_inspect_records_skip_when_no_live_pads(tmp_path: Path):
-    session = _session_with_pads({})
-    st = _state(tmp_path, session=session, brief="Use the `orders` pad.")
-
-    orchestrator._inspect_named_scratchpads(st)
-
-    step = next(s for s in st.trace if s.node == "inspect_scratchpads")
-    assert step.outcome == "skipped"
-    assert "no live scratchpads" in step.detail
-
-
-def test_inspect_records_empty_when_pad_has_no_cells(tmp_path: Path):
-    session = _session_with_pads({"orders": _FakePad([])})
-    st = _state(tmp_path, session=session, brief="Use the `orders` pad.")
-
-    orchestrator._inspect_named_scratchpads(st)
-
-    assert st.data_notes == ""
-    step = next(s for s in st.trace if s.node == "inspect_scratchpads")
-    assert step.outcome == "empty"
-
-
-def test_inspect_applies_the_existing_cap(tmp_path: Path):
-    """The cap already lives in _render_exec_notes — reuse it, do not write a second one."""
-    session = _session_with_pads(
-        {"big": _FakePad([_FakeCell("x" * 3000, stdout="y" * 1000) for _ in range(10)])}
-    )
-    st = _state(tmp_path, session=session, brief="Use the `big` pad.")
-
-    orchestrator._inspect_named_scratchpads(st)
-
-    assert len(st.data_notes) < orchestrator.EXEC_NOTES_MAX + 1000
-    assert "omitted for size" in st.data_notes
-
-
-async def test_data_phase_sees_inspected_cells(tmp_path: Path):
-    """The inspection runs BEFORE is_data_enough, or it is pointless."""
-    session = _session_with_pads(
-        {"orders": _FakePad([_FakeCell("df = q('select 1')", stdout="1 row")])}
-    )
-    st = _state(tmp_path, session=session, brief="Chart the `orders` pad.")
-    seen = {}
-
-    async def fake_generate_object(schema, *, system, messages):
-        seen["user"] = messages[0]["content"]
-        return DataVerdict(enough=True, reasoning="already have it")
-
-    st.session._llm.generate_object = fake_generate_object
-
-    err = await orchestrator._data_phase(st)
-
-    assert err is None
-    assert "select 1" in seen["user"], "is_data_enough did not see the inspected cells"
-
-
-async def test_data_phase_still_fetches_when_not_enough(tmp_path: Path, monkeypatch):
-    """Regression guard: the inspection does NOT replace the data phase.
-
-    Design decision 3: the define_required_data -> is_possible_to_fetch ->
-    fetch_data_sample loop stays in full.
-    """
-    session = _session_with_pads({"orders": _FakePad([_FakeCell("x = 1", stdout="ok")])})
-    st = _state(tmp_path, session=session, brief="Chart the `orders` pad.")
+    st = _state(tmp_path)
+    st.gathering_complete = True
+    st.declared_sources = ["orders table"]
+    st.unverified_sources = ["orders table"]
 
     seq = [
-        DataVerdict(enough=False, reasoning="need more"),
         RequiredData(items=[RequiredDataItem(name="totals", where="db", why="chart")], reasoning="r"),
         FetchVerdict(possible=True, reasoning="yes"),
-        DataVerdict(enough=True, reasoning="now fine"),
     ]
     st.session._llm.generate_object = AsyncMock(side_effect=seq)
     fetched = {"n": 0}
@@ -755,6 +630,44 @@ async def test_data_phase_still_fetches_when_not_enough(tmp_path: Path, monkeypa
 
     assert err is None
     assert fetched["n"] == 1, "the fetch loop did not run"
+    assert st.unverified_sources == [], "the fetch did not clear the backlog"
+
+
+async def test_a_correction_that_names_a_new_source_opens_the_loop(tmp_path: Path):
+    """The case the whole `unverified_sources` list exists for.
+
+    After a correction the notes are full — they hold the PREVIOUS
+    gathering's cells — so an "are the notes empty" check would read that as
+    "everything is covered" and the new source would never be fetched.
+    """
+    st = _state(tmp_path)
+    st.gathering_complete = True
+    st.data_notes = "Scratchpad `old`:\n```python\nrows = q()\n```"
+    st.declared_sources = ["orders table", "returns table"]
+    st.unverified_sources = ["returns table"]
+
+    assert orchestrator._needs_data_loop(st) is True
+
+
+async def test_the_loop_is_skipped_when_gathering_covered_the_data(tmp_path: Path):
+    st = _state(tmp_path)
+    st.gathering_complete = True
+    st.declared_sources = ["orders table"]
+    st.unverified_sources = []
+
+    assert orchestrator._needs_data_loop(st) is False
+    assert await orchestrator._data_phase(st) is None
+    assert any(s.node == "data_check" for s in st.trace)
+
+
+async def test_an_unfinished_gathering_phase_opens_the_loop(tmp_path: Path):
+    """Condition 1: the round budget ran out without `finish_gathering`, so
+    nothing vouches for the data. Computable on a cold start too — the flag
+    comes back from `discovery.json`."""
+    st = _state(tmp_path)
+    st.gathering_complete = False
+
+    assert orchestrator._needs_data_loop(st) is True
 
 
 def test_public_data_sources_skill_is_loaded_from_the_store():

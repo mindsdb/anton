@@ -1,4 +1,4 @@
-"""Prompt builders for generate_prd's two phases.
+"""Prompt builders for the discovery phases.
 
 Both phases share the same preamble (the input the tool was called with) so
 neither has to re-derive it — only the task-specific instructions differ.

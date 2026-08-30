@@ -9,9 +9,15 @@ from __future__ import annotations
 import inspect
 import re
 
-from anton.core.artifacts.internal_files import API_SPEC_FILENAME, TECH_SPEC_FILENAME
+from anton.core.artifacts.internal_files import (
+    API_SPEC_FILENAME,
+    PRD_FILENAME,
+    TECH_SPEC_FILENAME,
+)
 
 from . import engine, prompts
+from .discovery import checkpoint as cp
+from .discovery.orchestrator import CANCELLED, run_discovery
 from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import them from here)
     EXEC_CODE_MAX,
     EXEC_NOTES_MAX,
@@ -21,7 +27,6 @@ from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import 
 from .prompts import HTML_APP_DEFAULT_PRIMARY
 from .state import (
     DATA_LOOP_MAX,
-    DataVerdict,
     FetchVerdict,
     GenState,
     RequiredData,
@@ -69,152 +74,53 @@ async def _fetch_data_sample(state: GenState) -> str:
     return summary
 
 
-def _pads_dict(session) -> dict:
-    """Live scratchpad runtimes, or {} when this is not a real manager.
+def _needs_data_loop(state: GenState) -> bool:
+    """Whether the emergency data loop has to run at all.
 
-    The `isinstance(..., dict)` check does double duty. The real
-    `ScratchpadManager.pads` is a genuine dict (`backends/manager.py:33` returns
-    `self._pads`), while in tests the session is an `AsyncMock` whose `pads` is a
-    mock. Rejecting it by type means we never call `.keys()` on it, so we never
-    create an un-awaited coroutine — one would surface as a RuntimeWarning at GC
-    time and pollute the output of every test using a mock session. See
-    `_list_connections`, where such a coroutine has to be closed by hand; here it
-    simply never comes into existence.
+    Decided from STATE, never from what happened during this call: on a cold
+    start the gathering phase ran in a different process, so any condition
+    phrased as "phase A did X" is simply not computable. Both inputs are
+    restored from `discovery.json`.
+
+    Two ways in:
+      1. gathering never finished — the loop ran out of rounds without
+         calling `finish_gathering`, so nothing vouches for the data;
+      2. a declared source has nothing executed against it.
+
+    Condition 2 is tracked as an explicit list rather than inferred from
+    whether `data_notes` is empty, and that distinction carries the whole
+    correction path: a user asking for a chart over a NEW source arrives with
+    notes that are far from empty — they hold the previous gathering's cells.
+    Matching source names against exec text would be guesswork, so the list
+    is maintained where the facts are known.
+
+    On the normal path the list is empty by construction and the loop costs
+    nothing.
     """
-    try:
-        pads = session._scratchpads.pads
-    except Exception:  # noqa: BLE001
-        return {}
-    return pads if isinstance(pads, dict) else {}
-
-
-def _pads_named_in_brief(session, brief: str) -> list[str]:
-    """Names of live scratchpads mentioned in `brief` — the caller passes the
-    brief and the PRD joined, since either may be where a pad is named.
-
-    Matching runs from the live pads to the brief text, not the other way round.
-    Persistent pads cannot be enumerated (`Cell` does not store its pad name,
-    `base.py:15-26`), and on this branch `get_or_create` does NOT materialise a
-    pad from replayed cells: `ChatSessionConfig.cells` is declared as `None`
-    (`session.py:261`) and no production caller sets it. So we work only with
-    what is already live in the process — and a false match costs a few tokens in
-    the notes rather than a venv provisioning.
-
-    Word boundaries are mandatory: a pad named `dash` would otherwise match the
-    word "dashboard", which a dashboard brief is guaranteed to contain.
-    """
-    matched = [
-        name
-        for name in _pads_dict(session)
-        if isinstance(name, str)
-        and name.strip()
-        and re.search(rf"\b{re.escape(name)}\b", brief)
-    ]
-    return sorted(matched)
-
-
-def _live_pad_names(session) -> list[str]:
-    """Live pad names — used only for the skip record. Never raises."""
-    return sorted(str(k) for k in _pads_dict(session))
-
-
-def _inspect_named_scratchpads(state: GenState) -> None:
-    """Read the cells of pads named in the brief or the PRD into `data_notes`.
-
-    Reads `pad.cells` directly (`base.py:52`) rather than going through `dump`:
-    that returns a ready-made markdown string from `render_notebook()`, which
-    `_render_exec_notes` cannot consume, and it carries every cell's full code
-    with no truncation. `pad.cells` maps into the required shape as-is, so the
-    existing caps come for free.
-
-    The step is synchronous and side-effect free: no `await`, no `get_or_create`.
-    """
-    state.step_started("inspect_scratchpads")
-    # The PRD is searched alongside the brief: `generate_prd` is required to
-    # cite the scratchpad and cell behind every data source it describes, so
-    # on the normal path the PRD is where a pad name actually appears — the
-    # brief may never mention one. Matching only the brief would re-fetch data
-    # the PRD already points at.
-    matched = _pads_named_in_brief(
-        state.session, "\n\n".join(p for p in (state.brief, state.prd) if p)
-    )
-    if not matched:
-        live = _live_pad_names(state.session)
-        detail = (
-            "no scratchpad named in the brief matched the live ones: "
-            + ", ".join(live)
-            if live
-            else "no live scratchpads in this session"
-        )
-        state.record("inspect_scratchpads", "skipped", detail)
-        return
-
-    pads = _pads_dict(state.session)
-    execs: list[dict] = []
-    for name in matched:
-        for cell in getattr(pads[name], "cells", None) or []:
-            code = getattr(cell, "code", "") or ""
-            if not code.strip():
-                continue
-            execs.append(
-                {
-                    "name": name,
-                    "code": code,
-                    # stdout or the error text: a failed cell would otherwise
-                    # land in the notes as code with no result — indistinguishable
-                    # from a successful one that printed nothing. "What was tried
-                    # and what did not work" is exactly what the inspection needs.
-                    "output": getattr(cell, "stdout", "") or getattr(cell, "error", "") or "",
-                }
-            )
-
-    # Own header: the default "### Code executed while fetching" would be a lie
-    # here — nothing was fetched, these are the main agent's cells. It would also
-    # contradict the `is_data_enough` instruction, which teaches the node to count
-    # this data as available "regardless of who obtained it".
-    notes = _render_exec_notes(
-        execs,
-        header="### Cells the main agent already ran in: " + ", ".join(matched),
-    )
-    if not notes:
-        state.record(
-            "inspect_scratchpads", "empty",
-            "pads named in the brief have no cells: " + ", ".join(matched),
-        )
-        return
-
-    state.data_notes = (state.data_notes + "\n\n" + notes).strip()
-    state.record(
-        "inspect_scratchpads", "done",
-        f"{len(execs)} cell(s) from {', '.join(matched)}",
-    )
+    if not state.gathering_complete:
+        return True
+    return bool(state.unverified_sources)
 
 
 async def _data_phase(state: GenState) -> str | None:
-    """is_data_enough ↔ define_required_data → is_possible_to_fetch → fetch.
+    """The emergency data loop: define -> can-fetch -> fetch, bounded.
 
-    Before the first `is_data_enough`, inspect the pads named in the brief: what
-    the outer agent already gathered does not need gathering again. The phase
-    itself is not trimmed — only its input changes.
+    `is_data_enough` used to stand in front of this as an LLM call. It is
+    gone: the gathering phase already answered that question by calling
+    `finish_gathering`, and asking a second model to re-derive the same
+    verdict from a summary of the first one's work cost a call per run and
+    added nothing.
     """
-    _inspect_named_scratchpads(state)
-    last_reasoning = ""
-    for _ in range(DATA_LOOP_MAX + 1):
-        state.step_started("is_data_enough")
-        verdict: DataVerdict = await _decide(
-            state, DataVerdict, prompts.build_data_enough_prompt(state), "is_data_enough"
-        )
-        if verdict.enough:
-            state.record("is_data_enough", "yes", verdict.reasoning)
-            return None
-        state.record("is_data_enough", "no", verdict.reasoning)
+    if not _needs_data_loop(state):
+        state.record("data_check", "skipped", "gathering already covered the data")
+        return None
 
-        if state.data_iterations >= DATA_LOOP_MAX:
-            break
-
+    last_reasoning = "the gathering phase did not verify the data it declared"
+    while state.data_iterations < DATA_LOOP_MAX:
         state.step_started("define_required_data")
         required: RequiredData = await _decide(
-            state, RequiredData, prompts.build_required_data_prompt(state), "define_required_data"
+            state, RequiredData, prompts.build_required_data_prompt(state),
+            "define_required_data",
         )
         required_text = "\n".join(
             f"- {it.name} — from {it.where} ({it.why})" for it in required.items
@@ -224,20 +130,28 @@ async def _data_phase(state: GenState) -> str | None:
 
         state.step_started("is_possible_to_fetch")
         can: FetchVerdict = await _decide(
-            state, FetchVerdict, prompts.build_can_fetch_prompt(state, required_text), "is_possible_to_fetch"
+            state, FetchVerdict,
+            prompts.build_can_fetch_prompt(state, required_text),
+            "is_possible_to_fetch",
         )
         if not can.possible:
             state.record("is_possible_to_fetch", "no", can.reasoning)
             state.error = f"not enough data: {can.reasoning}"
             return state.error
         state.record("is_possible_to_fetch", "yes", can.reasoning)
-        last_reasoning = can.reasoning
 
         state.step_started("fetch_data_sample")
         notes = await _fetch_data_sample(state)
         state.data_iterations += 1
         state.data_notes = (state.data_notes + "\n\n" + notes).strip()
+        # The loop fetched exactly what was declared unverified, so the list
+        # clears. Not narrowed item by item: the fetch step works from
+        # `define_required_data`'s consolidated list, not per source.
+        state.unverified_sources = []
         state.record("fetch_data_sample", "done", notes[:200])
+
+        if not _needs_data_loop(state):
+            return None
 
     state.error = (
         f"not enough data: the data loop did not converge within {DATA_LOOP_MAX} "
@@ -245,10 +159,6 @@ async def _data_phase(state: GenState) -> str | None:
     )
     return state.error
 
-
-# ---------------------------------------------------------------------------
-# Spec + generation nodes
-# ---------------------------------------------------------------------------
 
 from . import verifiers
 from .state import GEN_LOOP_MAX_RETRIES, GEN_VERIFY_MAX_RETRIES
@@ -302,6 +212,8 @@ def _spec_context(state: GenState) -> str:
         parts.append(prd)
     if state.data_notes.strip():
         parts.append("## Data\n" + state.data_notes.strip())
+    if state.web_notes.strip():
+        parts.append(state.web_notes.strip())
     spec_path = state.artifact_path / TECH_SPEC_FILENAME
     if spec_path.is_file():
         parts.append("## Technical specification\n" + spec_path.read_text(encoding="utf-8"))
@@ -850,7 +762,7 @@ async def _run_and_verify_app(state: GenState) -> str | None:
     return state.error
 
 
-def _success(state: GenState) -> dict:
+def _result_shell(state: GenState) -> dict:
     return {
         "files_written": state.files_written,
         # Generation input, not output: it physically sits in the artifact folder
@@ -861,25 +773,151 @@ def _success(state: GenState) -> dict:
     }
 
 
-async def run(state: GenState) -> dict | str:
-    # is_data_enough loop
-    err = await _data_phase(state)
-    if err is not None:
-        return err
-    # make_tech_spec
-    err = await _write_tech_spec(state)
-    if err is not None:
-        return err
-    # is_fullstack (deterministic)
+def _save_checkpoint(state: GenState, stage: str) -> None:
+    """Write `discovery.json` at a stage transition.
+
+    Every field phase E reads goes in, because the boundary has to survive
+    the process: `data_notes` and `web_notes` live only in memory otherwise,
+    and the pad-inspection step that used to rebuild them on a cold start is
+    gone.
+    """
+    cp.save(
+        state.artifact_path,
+        cp.DiscoveryCheckpoint(
+            request_fingerprint=cp.request_fingerprint(state.user_request),
+            call_fingerprint=cp.call_fingerprint(
+                state.agent_understanding, state.known_data, state.user_preferences
+            ),
+            pipeline_stage=stage,
+            artifact_type=state.final_artifact_type or state.artifact_type,
+            gathering_complete=state.gathering_complete,
+            declared_sources=list(state.declared_sources),
+            unverified_sources=list(state.unverified_sources),
+            brief_markdown=state.brief,
+            data_notes=state.data_notes,
+            web_notes=state.web_notes,
+        ),
+    )
+
+
+def _invalidate_specs(state: GenState) -> None:
+    """Drop specs written for a previous PRD.
+
+    Runs after phase C succeeds, on EVERY new `prd.md` — not only when the
+    request changed. The most common correction keeps the same request and
+    only fixes the brief, and a spec built from the un-corrected requirements
+    is exactly what a later cold start would pick up.
+
+    Deliberately not run before phase A: a cancelled or early-failing run
+    must not destroy the previous, working state (same principle as
+    invariant 9 for the entry file).
+    """
+    for name in (TECH_SPEC_FILENAME, API_SPEC_FILENAME):
+        path = state.artifact_path / name
+        if path.is_file():
+            path.unlink()
+        if name in state.internal_files:
+            state.internal_files.remove(name)
+    state.api_spec = None
+
+
+def _finish(state: GenState) -> dict:
+    _save_checkpoint(state, cp.STAGE_GENERATED)
+    return {"status": "generated", **_result_shell(state)}
+
+
+def _cancelled(state: GenState) -> dict:
+    """Nothing written, nothing deleted.
+
+    The folder may already hold a previous run's work; cancelling means "do
+    not rebuild", not "erase what is there".
+    """
+    return {
+        "status": "cancelled",
+        "reason": "user declined the brief",
+        "qa_log": state.qa_log_markdown(),
+    }
+
+
+def _needs_confirmation(state: GenState) -> dict:
+    return {
+        "status": "needs_confirmation",
+        "brief_summary": state.brief,
+        "prd_path": str(state.artifact_path / PRD_FILENAME),
+        "artifact_type": state.final_artifact_type or state.artifact_type,
+        "qa_log": state.qa_log_markdown(),
+    }
+
+
+def _stopped_over_budget(state: GenState, detail: str) -> dict:
+    # `brief_summary` travels with every budget stop: the run can end before
+    # the user has seen a brief at all, and then this is the only way to show
+    # them one.
+    return {
+        "status": "stopped_over_budget",
+        "detail": detail,
+        "brief_summary": state.brief,
+        **_result_shell(state),
+    }
+
+
+async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
+    """Walk the whole pipeline from wherever this call is entitled to start."""
+    if entry in (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION):
+        stage = await run_discovery(state, entry=entry)
+        if stage == CANCELLED:
+            return _cancelled(state)
+        if stage == cp.STAGE_AWAITING_CONFIRMATION:
+            _save_checkpoint(state, cp.STAGE_AWAITING_CONFIRMATION)
+            # Same stage on disk, two different things to tell the user.
+            # "Show the brief and get agreement" and "we stopped because this
+            # got expensive — continue?" are not the same question, and the
+            # second has to mention the budget or the user never learns why
+            # the work stopped short.
+            if state.winding_down():
+                return _stopped_over_budget(
+                    state, "budget reached while agreeing the brief"
+                )
+            return _needs_confirmation(state)
+        _invalidate_specs(state)
+        _save_checkpoint(state, cp.STAGE_PRD_WRITTEN)
+
+    if entry != cp.ENTRY_GENERATE:
+        # Before the spec phase, not only before generation: `make_tech_spec`
+        # is the single most expensive call in the pipeline (it carries the
+        # whole shared history), and by here `prd.md` plus a `PRD_WRITTEN`
+        # checkpoint are already on disk, so stopping is cheap to resume.
+        if state.winding_down():
+            return _stopped_over_budget(
+                state, "budget reached before the specification"
+            )
+        err = await _data_phase(state)
+        if err is not None:
+            return err
+        err = await _write_tech_spec(state)
+        if err is not None:
+            return err
+        if state.is_fullstack:
+            err = await _make_api_spec(state)
+            if err is not None:
+                return err
+        _save_checkpoint(state, cp.STAGE_SPEC_WRITTEN)
+        # The shared history has done its job: `spec.md` is the recoding
+        # point now. Dropping it here, in one place, is what keeps the
+        # generation rounds as small as they are today.
+        state.messages = []
+
+    if state.winding_down():
+        return _stopped_over_budget(
+            state, "budget reached before file generation started"
+        )
+
     if not state.is_fullstack:
         err = await _gen_verify_frontend(state)
         if err is not None:
             return err
-        return _success(state)
-    # fullstack: make_api_spec → parallel backend/frontend gen+verify
-    err = await _make_api_spec(state)
-    if err is not None:
-        return err
+        return _finish(state)
+
     back_err, front_err = await asyncio.gather(
         _gen_verify_backend(state), _gen_verify_frontend(state)
     )
@@ -887,8 +925,15 @@ async def run(state: GenState) -> dict | str:
         return back_err
     if front_err is not None:
         return front_err
-    # run_app → verify_fullstack (with one backend-loop retry)
+    # Over the ceiling the backend is not launched at all — no process
+    # started, no port written into metadata. Both loops closed, so the files
+    # are there; what is missing is only the launch, and that is what the
+    # continuation does.
+    if state.winding_down():
+        return _stopped_over_budget(
+            state, "budget reached before launching the backend"
+        )
     err = await _run_and_verify_app(state)
     if err is not None:
         return err
-    return _success(state)
+    return _finish(state)

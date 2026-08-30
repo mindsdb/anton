@@ -738,6 +738,8 @@ def _brief_and_notes(state) -> str:
         parts.append(f"## Data gathered so far\n{state.data_notes.strip()}")
     else:
         parts.append("## Data gathered so far\n(nothing gathered yet)")
+    if getattr(state, "web_notes", "").strip():
+        parts.append(state.web_notes.strip())
     journal = state.journal()
     if journal:
         parts.append(f"## Progress journal (steps completed so far)\n{journal}")

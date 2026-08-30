@@ -1,5 +1,5 @@
-"""Phase 1 of generate_prd: a bounded ReAct loop that determines the
-artifact type, gathers/verifies data, and asks clarifying questions.
+"""Phase A of the artifact pipeline: a bounded ReAct loop that determines
+the artifact type, gathers/verifies data, and asks clarifying questions.
 
 Shape mirrors generate_artifact/engine.py's `_run_loop` — same tool-call
 protocol (Anthropic-style tool_use / tool_result blocks), same round budget
@@ -149,12 +149,24 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # emit a type outside ARTIFACT_TYPES. Left unchecked, that
                 # string reaches `write_prd`'s `ArtifactStore.update(type=...)`
                 # unvalidated until much later, where it raises ValueError
-                # and crashes the whole generate_prd call instead of just
+                # and crashes the whole run instead of just
                 # falling back to the type that was already known-good.
                 state.final_artifact_type = (
                     claimed_type if claimed_type in ARTIFACT_TYPES else state.artifact_type
                 )
                 state.gathering_notes = str(inp.get("notes") or inp.get("summary") or "")
+                raw_sources = inp.get("data_sources")
+                state.declared_sources = (
+                    [str(s) for s in raw_sources] if isinstance(raw_sources, list) else []
+                )
+                # On the hot path the gathering loop had the scratchpad and
+                # used it, so a source it declares is one it worked with. The
+                # unverified list is what the emergency data loop reads, and
+                # it is filled by `redraw_brief` after a correction, not here.
+                state.unverified_sources = (
+                    [] if state.scratchpad_execs else list(state.declared_sources)
+                )
+                state.gathering_complete = True
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": "ok"})
                 finished = True
             elif name == "ask_user":
@@ -175,18 +187,41 @@ async def run_gathering_loop(state: "PrdState") -> None:
 
                 content = _unwrap_outcome(await handle_scratchpad(state.session, inp))
                 state.trace_log.scratchpad(node="scratchpad", input=inp, output=content)
+                # Raw material for `notes.render_exec_notes`: the working
+                # data-access code is what phase E needs, and it must not
+                # depend on the model mentioning it in a summary.
+                if inp.get("action") == "exec" and inp.get("code"):
+                    state.scratchpad_execs.append({
+                        "name": inp.get("name"),
+                        "code": inp.get("code"),
+                        "output": content if isinstance(content, str) else str(content),
+                    })
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
             elif name == "web_search":
                 from anton.core.tools.web_tools import handle_web_search_fallback
 
                 content = await handle_web_search_fallback(state.session, inp)
                 state.trace_log.scratchpad(node="web_search", input=inp, output=content)
+                state.web_calls.append({
+                    "kind": "web_search",
+                    "query": str(inp.get("query") or ""),
+                    "url": "",
+                    "title": "",
+                    "excerpt": content if isinstance(content, str) else str(content),
+                })
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
             elif name == "web_fetch":
                 from anton.core.tools.web_tools import handle_web_fetch_fallback
 
                 content = await handle_web_fetch_fallback(state.session, inp)
                 state.trace_log.scratchpad(node="web_fetch", input=inp, output=content)
+                state.web_calls.append({
+                    "kind": "web_fetch",
+                    "query": "",
+                    "url": str(inp.get("url") or ""),
+                    "title": "",
+                    "excerpt": content if isinstance(content, str) else str(content),
+                })
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
             else:
                 result_blocks.append(

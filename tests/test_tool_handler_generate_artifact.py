@@ -17,8 +17,13 @@ from anton.core.tools.progress import ToolProgress
 from anton.core.tools.tool_handlers import handle_generate_artifact
 
 
-async def _collect(session, tc_input, handler=handle_generate_artifact):
-    """Drain the streaming handler into (progress lines, final result)."""
+async def _collect_raw(session, tc_input, handler=handle_generate_artifact):
+    """Drain the streaming handler into (progress lines, final item).
+
+    The final item is whatever the handler yielded — a `ToolOutcome` on every
+    path that reached the pipeline, a bare string for input validation, which
+    the dispatcher still accepts.
+    """
     progress: list[str] = []
     result = None
     async for item in handler(session, tc_input):
@@ -27,6 +32,12 @@ async def _collect(session, tc_input, handler=handle_generate_artifact):
         else:
             result = item
     return progress, result
+
+
+async def _collect(session, tc_input, handler=handle_generate_artifact):
+    """Same, with the result flattened to its text for content assertions."""
+    progress, result = await _collect_raw(session, tc_input, handler)
+    return progress, getattr(result, "content", result)
 
 
 def _session(tmp_path: Path):
@@ -49,7 +60,7 @@ async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, mo
         return "Backend verification failed after retry: boom"
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    _, out = await _collect(_session(tmp_path), {"slug": slug, "context": "brief"})
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
     assert "artifact generation failed" in out
     assert "Backend verification failed after retry: boom" in out
     assert "do NOT build or repair the artifact yourself" in out
@@ -63,13 +74,13 @@ async def test_generator_crash_is_wrapped(tmp_path: Path, monkeypatch):
         raise RuntimeError("kaput")
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    _, out = await _collect(_session(tmp_path), {"slug": slug, "context": "brief"})
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
     assert "artifact generation failed" in out
     assert "kaput" in out
 
 
 async def test_input_validation_errors_are_not_wrapped(tmp_path: Path):
-    _, out = await _collect(_session(tmp_path), {"slug": "nope", "context": "b"})
+    _, out = await _collect(_session(tmp_path), {"slug": "nope", "user_request": "build it", "agent_understanding": "an app"})
     assert out.startswith("Error: no artifact found")
     assert "generation failed" not in out
 
@@ -81,7 +92,7 @@ async def test_success_returns_json_unchanged(tmp_path: Path, monkeypatch):
         return {"files_written": ["backend.py"], "summary": "ok", "trace": []}
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    _, out = await _collect(_session(tmp_path), {"slug": slug, "context": "brief"})
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
     assert '"files_written"' in out
     assert "generation failed" not in out
 
@@ -115,7 +126,7 @@ async def test_handler_forwards_primary_to_generate(monkeypatch, tmp_path):
     monkeypatch.setattr(th, "_artifact_store", lambda session: _Store())
 
     _, out = await _collect(
-        object(), {"slug": "a", "context": "## User request\nx"},
+        object(), {"slug": "a", "user_request": "build it", "agent_understanding": "an app"},
         handler=th.handle_generate_artifact,
     )
     assert "report.html" in out
@@ -140,7 +151,7 @@ async def test_step_lines_are_yielded_as_progress_before_the_result(
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     progress, out = await _collect(
-        _session(tmp_path), {"slug": slug, "context": "brief"}
+        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"}
     )
     assert progress == ["Writing the backend", "Verifying the backend"]
     assert '"files_written"' in out
@@ -161,13 +172,13 @@ async def test_progress_lines_are_relayed_while_generation_is_still_running(
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     agen = handle_generate_artifact(
-        _session(tmp_path), {"slug": slug, "context": "brief"}
+        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"}
     )
     first = await agen.__anext__()
     assert first == ToolProgress("Writing the technical specification")
     released.set()
     rest = [item async for item in agen]
-    assert len(rest) == 1 and '"files_written"' in rest[0]
+    assert len(rest) == 1 and '"files_written"' in rest[0].content
 
 
 async def test_progress_lines_stop_at_a_crash_and_the_failure_still_arrives(
@@ -184,7 +195,7 @@ async def test_progress_lines_stop_at_a_crash_and_the_failure_still_arrives(
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     progress, out = await _collect(
-        _session(tmp_path), {"slug": slug, "context": "brief"}
+        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"}
     )
     assert progress == ["Writing the backend"]
     assert "kaput" in out
@@ -209,7 +220,7 @@ async def test_abandoning_the_generator_cancels_generation(tmp_path: Path, monke
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
     agen = handle_generate_artifact(
-        _session(tmp_path), {"slug": slug, "context": "brief"}
+        _session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"}
     )
     assert await agen.__anext__() == ToolProgress("Writing the backend")
     await started.wait()
@@ -221,7 +232,7 @@ async def test_abandoning_the_generator_cancels_generation(tmp_path: Path, monke
 async def test_validation_errors_yield_no_progress(tmp_path: Path):
     """A rejected call never reaches the FSM, so it must not open a step in
     the host's UI."""
-    progress, out = await _collect(_session(tmp_path), {"context": "b"})
+    progress, out = await _collect(_session(tmp_path), {"user_request": "build it", "agent_understanding": "an app"})
     assert progress == []
     assert out == "Error: `slug` is required."
 
@@ -236,6 +247,75 @@ async def test_success_tells_the_agent_not_to_reverify(tmp_path: Path, monkeypat
         return {"files_written": ["backend.py"], "summary": "ok", "trace": []}
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    _, out = await _collect(_session(tmp_path), {"slug": slug, "context": "brief"})
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
     assert '"instruction"' in out
     assert "Do NOT re-read" in out
+
+
+# ── I-03: the handler states its own verdict ────────────────────────────────
+
+
+def test_the_tool_schema_has_no_context_parameter():
+    """`context` carried a three-section markdown contract duplicated across
+    three ToolDef surfaces. Typed fields need no such contract."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    props = GENERATE_ARTIFACT_TOOL.input_schema["properties"]
+    assert "context" not in props
+    assert set(GENERATE_ARTIFACT_TOOL.input_schema["required"]) == {
+        "slug", "user_request", "agent_understanding",
+    }
+    assert set(props) == {
+        "slug", "user_request", "agent_understanding",
+        "known_data", "user_preferences",
+    }
+
+
+def test_generate_prd_is_no_longer_a_tool():
+    import anton.core.tools.tool_defs as td
+
+    assert not hasattr(td, "GENERATE_PRD_TOOL")
+
+
+async def test_a_successful_run_reports_ok_even_though_its_trace_says_failed(tmp_path, monkeypatch):
+    """I-03. The legacy classifier substring-matched the result text, and a
+    successful trace legitimately contains the word: "backend.py failed to
+    import in venv" is what a SUCCESSFUL retry looks like. That counted as an
+    error and fed the per-tool error streak."""
+    from anton.core.tools.registry import ToolOutcome
+
+    async def fake_generate(**kw):
+        return {
+            "status": "generated",
+            "files_written": ["dashboard.html"],
+            "internal_files": [],
+            "summary": "verify_backend:fail; generate_backend:done",
+            "trace": [{"node": "verify_backend", "outcome": "fail",
+                       "detail": "backend.py failed to import in venv"}],
+        }
+
+    slug = _make_artifact(tmp_path)
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, outcome = await _collect_raw(
+        _session(tmp_path),
+        {"slug": slug, "user_request": "build it", "agent_understanding": "an app"},
+    )
+    assert isinstance(outcome, ToolOutcome)
+    assert outcome.ok is True
+    assert "failed" in outcome.content  # the very substring that used to lie
+
+
+async def test_a_pipeline_failure_reports_not_ok(tmp_path, monkeypatch):
+    from anton.core.tools.registry import ToolOutcome
+
+    async def fake_generate(**kw):
+        return "make_tech_spec: the specification hit the output limit"
+
+    slug = _make_artifact(tmp_path)
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, outcome = await _collect_raw(
+        _session(tmp_path),
+        {"slug": slug, "user_request": "build it", "agent_understanding": "an app"},
+    )
+    assert isinstance(outcome, ToolOutcome)
+    assert outcome.ok is False

@@ -87,13 +87,6 @@ def gathering_question_budget(session: "ChatSession | Any") -> int:
 
 
 # ── Verdict schemas for diamond nodes (generate_object) ──────────────────────
-class DataVerdict(BaseModel):
-    """`is_data_enough`: is there enough data to solve the task?"""
-
-    enough: bool
-    reasoning: str
-
-
 class RequiredDataItem(BaseModel):
     name: str  # what the datum is, e.g. "list of orders"
     where: str  # where it conceptually lives, e.g. "postgres `orders` table"
@@ -151,7 +144,7 @@ class GenState:
     # Entry-file name from the artifact metadata. May be None — `create_artifact`
     # allows omitting it; HTML_APP_DEFAULT_PRIMARY then applies.
     primary: str | None = None
-    # Body of `prd.md` when `generate_prd` left one in the artifact folder
+    # Body of `prd.md` when a previous run left one in the artifact folder
     # (ENG-969 → ENG-968). This — not `brief` — is the requirements source on
     # the normal path: it is the document the user actually reviewed and
     # accepted, while `brief` is assembled by the calling agent. Empty when

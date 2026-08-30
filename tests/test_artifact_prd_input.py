@@ -1,9 +1,11 @@
-"""I-01: `generate_artifact` takes its requirements from the `prd.md` that
-`generate_prd` left in the artifact folder.
+"""`prd.md` and `discovery.json`: the record and the resume point.
 
-Before this, the file was only ever written — nothing read it, so the artifact
-was built from whatever the calling agent chose to put in `context`, not from
-the document the user actually accepted.
+The PRD stays the human-readable statement of what the user agreed to, and
+is still what the generation nodes are told to treat as authoritative. What
+changed with the merge is that it is no longer the CHANNEL: the pipeline
+hands its own state forward in memory on the hot path, and reads
+`discovery.json` back on a cold start. The `context` parameter — and the
+three-surface markdown contract it needed — is gone with it.
 """
 from __future__ import annotations
 
@@ -12,7 +14,8 @@ from unittest.mock import AsyncMock
 
 from anton.core.artifacts.internal_files import PRD_FILENAME
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
-from anton.core.tools.generate_artifact.state import DataVerdict, GenState
+from anton.core.tools.generate_artifact.discovery import checkpoint as cp
+from anton.core.tools.generate_artifact.state import GenState
 
 
 def _state(tmp_path, **kw):
@@ -89,15 +92,23 @@ async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, mon
     _write_prd(tmp_path, "## Goal\nShow the orders table.")
     seen = {}
 
-    async def fake_run(state):
+    async def fake_run(state, *, entry):
         seen["prd"] = state.prd
+        seen["entry"] = entry
         return {"files_written": [], "internal_files": [], "summary": "", "trace": []}
 
+    # A checkpoint has to exist for this to be a resume — without one the run
+    # starts at gathering and writes its own PRD rather than reading this one.
+    cp.save(tmp_path, cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("show orders"),
+        pipeline_stage=cp.STAGE_PRD_WRITTEN,
+    ))
     monkeypatch.setattr(orchestrator, "run", fake_run)
     await engine.generate(
         session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
-        context="## User request\nx", slug="a",
+        slug="a", user_request="show orders", agent_understanding="orders table",
     )
+    assert seen["entry"] == cp.ENTRY_SPEC
     assert "Show the orders table." in seen["prd"]
 
 
@@ -139,101 +150,70 @@ def test_generation_nodes_see_the_prd(tmp_path: Path):
     assert "dark background" in orchestrator._spec_context(st)
 
 
-# ── scratchpad reuse ────────────────────────────────────────────────────────
+# ── the resume point ────────────────────────────────────────────────────────
 
-class _FakeCell:
-    def __init__(self, code, stdout=""):
-        self.code = code
-        self.stdout = stdout
-        self.error = ""
+def test_a_cold_start_restores_the_notes_the_hot_path_had(tmp_path: Path):
+    """`data_notes` and `web_notes` live only in memory during a run, and the
+    pad-inspection step that used to rebuild them is gone. If they did not
+    survive in `discovery.json`, a resumed run would build from a PRD that no
+    longer restates the data-access code either."""
+    from anton.core.tools.generate_artifact.engine import _restore
 
-
-class _FakePad:
-    def __init__(self, cells):
-        self.cells = cells
-
-
-def _session_with_pads(pads: dict):
-    session = AsyncMock()
-    session._scratchpads.pads = pads
-    return session
-
-
-def test_a_pad_named_only_in_the_prd_is_still_inspected(tmp_path: Path):
-    """`generate_prd` must cite the scratchpad and cell behind every data
-    source it describes, so on the normal path the PRD — not the brief — is
-    where a pad name appears. Matching the brief alone would re-fetch data the
-    PRD already points at."""
-    session = _session_with_pads(
-        {"orders": _FakePad([_FakeCell("df = read_orders()", "1000 rows")])}
+    stored = cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("show orders"),
+        call_fingerprint=cp.call_fingerprint("an orders dashboard", "", ""),
+        pipeline_stage=cp.STAGE_PRD_WRITTEN,
+        artifact_type="html-app",
+        gathering_complete=True,
+        declared_sources=["orders table"],
+        unverified_sources=[],
+        brief_markdown="## Goal\nAn orders dashboard.",
+        data_notes="Scratchpad `o`:\n```python\nrows = q()\n```",
+        web_notes="### Sources read from the web\n- web_fetch: https://x/y",
     )
-    st = _state(
-        tmp_path, session=session,
-        brief="## User request\nShow me a dashboard",
-        prd="## Data model\nOrders come from the `orders` scratchpad, cell 1.",
+    st = _state(tmp_path, user_request="show orders",
+                agent_understanding="an orders dashboard")
+    _restore(st, stored)
+
+    context = orchestrator._spec_context(st)
+    assert "rows = q()" in context
+    assert "https://x/y" in context
+    assert st.declared_sources == ["orders table"]
+    assert st.gathering_complete is True
+    assert st.call_changed is False
+
+
+def test_a_changed_understanding_marks_the_call_as_a_correction(tmp_path: Path):
+    """`call_changed` decides whether the brief is redrawn. It is an
+    optimization, never a confirmation signal — being wrong costs one cheap
+    call in either direction."""
+    from anton.core.tools.generate_artifact.engine import _restore
+
+    stored = cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("show orders"),
+        call_fingerprint=cp.call_fingerprint("an orders dashboard", "", ""),
+        pipeline_stage=cp.STAGE_AWAITING_CONFIRMATION,
     )
-    orchestrator._inspect_named_scratchpads(st)
-    assert "read_orders()" in st.data_notes
-    assert st.trace[0].outcome == "done"
+    st = _state(tmp_path, user_request="show orders",
+                agent_understanding="an orders dashboard, weekly not daily")
+    _restore(st, stored)
+    assert st.call_changed is True
 
 
-def test_pads_are_still_matched_from_the_brief_alone(tmp_path: Path):
-    """The pre-PRD path keeps working — a brief that names a pad with no PRD
-    present must still be inspected."""
-    session = _session_with_pads({"orders": _FakePad([_FakeCell("q = 1", "ok")])})
-    st = _state(tmp_path, session=session, brief="data is in the orders scratchpad")
-    orchestrator._inspect_named_scratchpads(st)
-    assert "q = 1" in st.data_notes
+def test_whitespace_noise_in_the_request_is_not_a_different_request(tmp_path: Path):
+    """The outer model re-types these fields every call. A stray newline must
+    not cost a full re-gather, questions to the user included."""
+    stored = cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("show   orders"),
+        pipeline_stage=cp.STAGE_PRD_WRITTEN,
+    )
+    entry = cp.decide_entry(
+        stored, request_fp=cp.request_fingerprint("  show orders  ")
+    )
+    assert entry == cp.ENTRY_SPEC
 
 
 # ── the tool's own contract ─────────────────────────────────────────────────
-
-def _contract_surfaces() -> dict[str, str]:
-    """The three places the `context` contract is stated for the model. All
-    three are read by the LLM — the description and the schema as part of the
-    tools array, `prompt` as a block spliced into the system prompt by
-    `prompt_builder._build_tool_prompts_section` — so a change applied to one
-    and forgotten in another is a contradiction shipped to production."""
-    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL as tool
-
-    return {
-        "description": tool.description,
-        "prompt": tool.prompt or "",
-        "schema": tool.input_schema["properties"]["context"]["description"],
-    }
-
-
-def test_no_surface_still_asks_for_a_requirements_section():
-    """The FRS section is gone from `context`: requirements now live in the
-    PRD, and asking for both invites two sources of truth that disagree."""
-    for name, text in _contract_surfaces().items():
-        assert "Functional Requirements Specification" not in text, name
-
-
-def test_every_surface_points_at_the_prd():
-    for name, text in _contract_surfaces().items():
-        assert "PRD" in text or "prd.md" in text, name
-
-
-def test_the_workflow_names_generate_prd_before_generate_artifact():
-    """Without this the model has no way to know a PRD is supposed to exist —
-    the file would simply never be there and every run would take the
-    context-only fallback."""
-    prompt = _contract_surfaces()["prompt"]
-    assert "generate_prd" in prompt
-    assert prompt.index("generate_prd") < prompt.index("generate_artifact(slug=")
-
-
-def test_the_data_section_is_limited_to_what_already_exists():
-    """`## Data` must describe fetched cells, not expected sources: anything
-    the agent merely expects is a guess competing with the PRD, and a sample
-    it has not observed is fabricated data."""
-    for name, text in _contract_surfaces().items():
-        if "## Data" not in text:
-            continue
-        assert "already" in text, name
-        assert "scratchpad" in text, name
-
 
 # ── the two tools agree on the file ─────────────────────────────────────────
 
@@ -271,21 +251,24 @@ async def test_what_generate_prd_writes_is_what_generate_artifact_reads(tmp_path
     assert gen_state.prd == body.strip()
 
 
-async def test_prd_data_reference_lets_the_data_phase_short_circuit(tmp_path: Path):
-    """The point of the two changes together: cells the PRD points at land in
-    `data_notes`, so `is_data_enough` can answer from what is already there
-    instead of starting its own fetch loop."""
-    session = _session_with_pads(
-        {"orders": _FakePad([_FakeCell("print(df.head())", "id,total\n1,99")])}
+async def test_a_restored_run_does_not_re_enter_the_data_loop(tmp_path: Path):
+    """What the pad-inspection step used to buy, now bought by the
+    checkpoint: a resumed run whose sources were verified last time does not
+    pay for the data loop again."""
+    from anton.core.tools.generate_artifact.engine import _restore
+
+    stored = cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("show orders"),
+        pipeline_stage=cp.STAGE_PRD_WRITTEN,
+        gathering_complete=True,
+        declared_sources=["orders table"],
+        unverified_sources=[],
+        data_notes="Scratchpad `o`:\n```python\nprint(df.head())\n```",
     )
-    st = _state(
-        tmp_path, session=session,
-        brief="## User request\nShow a dashboard",
-        prd="## Data model\nthe `orders` scratchpad, cell 1",
-    )
-    st.session._llm.generate_object = AsyncMock(
-        return_value=DataVerdict(enough=True, reasoning="cells already show the data")
-    )
+    st = _state(tmp_path, user_request="show orders", agent_understanding="x")
+    _restore(st, stored)
+
+    assert orchestrator._needs_data_loop(st) is False
     assert await orchestrator._data_phase(st) is None
     assert st.data_iterations == 0
     assert "print(df.head())" in st.data_notes

@@ -1,5 +1,10 @@
-"""orchestrator.run: the full two-phase sequence, exercised end to end with
-every LLM/elicit call mocked (unit-level, no real model)."""
+"""run_discovery: phases A-C end to end, every LLM/elicit call mocked.
+
+It returns a pipeline STAGE, not a result dict. The stage is what lands in
+`discovery.json` and it is the single fact a later call reads to decide where
+to resume — so these tests assert stages, and the statuses the outer tool
+reports are asserted where they are produced, in the FSM orchestrator.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,7 +16,7 @@ import pytest
 from anton.core.artifacts import ArtifactStore
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
-from anton.core.tools.generate_artifact.discovery import brief, orchestrator
+from anton.core.tools.generate_artifact.discovery import brief, checkpoint as cp, orchestrator
 from anton.core.tools.generate_artifact.discovery.state import PrdState
 
 
@@ -60,9 +65,9 @@ async def test_full_happy_path_accept_on_first_try(tmp_path, monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
-    result = await orchestrator.run(state)
-    assert result["status"] == "prd_written"
-    assert result["artifact_type"] == "html-app"
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert state.final_artifact_type == "html-app"
     assert (state.artifact_path / "prd.md").exists()
 
 
@@ -80,8 +85,8 @@ async def test_cancelled_never_writes_prd(tmp_path, monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
-    result = await orchestrator.run(state)
-    assert result["status"] == "cancelled"
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+    assert result == orchestrator.CANCELLED
     assert not (state.artifact_path / "prd.md").exists()
 
 
@@ -109,8 +114,8 @@ async def test_revise_then_accept_loops_back_through_draft_brief(tmp_path, monke
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
-    result = await orchestrator.run(state)
-    assert result["status"] == "prd_written"
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+    assert result == cp.STAGE_PRD_WRITTEN
     assert (state.artifact_path / "prd.md").read_text() == "full revised PRD" or "full revised PRD" in (state.artifact_path / "prd.md").read_text()
 
 
@@ -146,9 +151,9 @@ async def test_best_effort_when_gathering_never_calls_finish_gathering(tmp_path,
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
-    result = await orchestrator.run(state)
-    assert result["status"] == "prd_written"
-    assert result["artifact_type"] == "html-app"  # fell back to the registered type
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert state.final_artifact_type == "html-app"  # fell back to the registered type
     # The gathering pass's best-effort summary must have reached draft_brief
     # via `state.messages` — not been silently dropped along with the empty
     # `final_artifact_type`.
@@ -173,12 +178,15 @@ async def test_unconfirmed_when_budget_runs_out_at_confirm(tmp_path, monkeypatch
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
-    result = await orchestrator.run(state)
-    assert result["status"] == "prd_written_unconfirmed"
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+    assert result == cp.STAGE_AWAITING_CONFIRMATION
     assert (state.artifact_path / "prd.md").exists()
 
 
-async def test_qa_log_is_present_in_every_status(tmp_path, monkeypatch):
+async def test_the_qa_log_survives_a_cancelled_run(tmp_path, monkeypatch):
+    """It used to ride out on the result dict. The sequencer returns a stage
+    now, so the log lives on the state — which is also where the FSM
+    orchestrator reads it when building `cancelled` / `needs_confirmation`."""
     state = _make_state(tmp_path)
     state.session._llm.plan = AsyncMock(
         side_effect=[
@@ -192,8 +200,9 @@ async def test_qa_log_is_present_in_every_status(tmp_path, monkeypatch):
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
-    result = await orchestrator.run(state)
-    assert "qa_log" in result
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+    assert result == orchestrator.CANCELLED
+    assert "Show PRD brief for confirmation" in state.qa_log_markdown()
 
 
 async def test_revise_loop_has_a_defensive_cap_and_ends_unconfirmed(tmp_path, monkeypatch):
@@ -217,6 +226,6 @@ async def test_revise_loop_has_a_defensive_cap_and_ends_unconfirmed(tmp_path, mo
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fake_ask_via_elicit)
 
-    result = await orchestrator.run(state)
-    assert result["status"] == "prd_written_unconfirmed"
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+    assert result == cp.STAGE_AWAITING_CONFIRMATION
     assert (state.artifact_path / "prd.md").exists()

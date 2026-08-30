@@ -394,23 +394,34 @@ def _load_prd(state) -> None:
 async def generate(
     *,
     session: "ChatSession",
-    artifact_type: str,
-    artifact_path: Path,
-    context: str,
     slug: str,
+    artifact_path: Path,
+    artifact_type: str,
+    user_request: str,
+    agent_understanding: str,
+    known_data: str = "",
+    user_preferences: str = "",
     primary: str | None = None,
     progress: "asyncio.Queue[str | None] | None" = None,
 ) -> dict | str:
-    """Drive the artifact-generation FSM to populate ``artifact_path``.
+    """Run the whole artifact pipeline: gather, agree, specify, build.
 
-    Returns a result dict (with a step ``trace``) on success, or a single
-    error string naming the node where the machine stopped.
+    Returns a result dict carrying a ``status``, or a single error string
+    naming the node where the machine stopped.
+
+    Where the run STARTS is decided here, from what the artifact folder
+    already holds. Two independent checks, neither of which guesses intent
+    from free text: `user_request` says whether this is the same work, and
+    the recorded stage says how far the previous call got. See
+    `discovery/checkpoint.py`.
 
     ``progress``, when given, receives one user-facing line per step start
     (see ``GenState.step_started``). Optional so the non-streaming callers —
     ``bench_generate.py``, tests — need no channel to drain.
     """
+    from .discovery import checkpoint as cp
     from .orchestrator import run
+    from .spend import SpendGuard
     from .state import GenState
     from .debug_trace import make_trace
 
@@ -424,7 +435,8 @@ async def generate(
         slug=slug,
         artifact_type=artifact_type,
         artifact_path=artifact_path,
-        brief=context,
+        user_request=user_request,
+        agent_understanding=agent_understanding,
         is_fullstack=artifact_type != "html-app",
     )
 
@@ -433,19 +445,63 @@ async def generate(
         artifact_type=artifact_type,
         artifact_path=artifact_path,
         slug=slug,
-        brief=context,
-        is_fullstack=artifact_type != "html-app",
         primary=primary,
+        user_request=user_request,
+        agent_understanding=agent_understanding,
+        known_data=known_data,
+        user_preferences=user_preferences,
         trace_log=trace,
         progress=progress,
+        spend=SpendGuard(session=session),
     )
-    _load_prd(state)
-    result = await run(state)
+
+    stored = cp.load(artifact_path)
+    entry = cp.decide_entry(
+        stored, request_fp=cp.request_fingerprint(user_request)
+    )
+    state.record("entry", entry, "" if stored is None else stored.pipeline_stage)
+    if entry != cp.ENTRY_FULL and stored is not None:
+        _restore(state, stored)
+        _load_prd(state)
+
+    # `elicit()` is called from inside the FSM task while the tool handler is
+    # draining the progress queue, so the two have to be told about each
+    # other; the channel is the only thing they share.
+    session._artifact_progress = progress
+    try:
+        result = await run(state, entry=entry)
+    finally:
+        session._artifact_progress = None
     if isinstance(result, str):
         trace.run_result(ok=False, error=result)
     else:
         trace.run_result(ok=True, result=result)
     return result
+
+
+def _restore(state, stored) -> None:
+    """Rebuild in memory what the discovery phases produced last time.
+
+    Everything phase E reads has to come back, not just the PRD: the
+    pad-inspection step that used to reconstruct `data_notes` on a cold start
+    is gone, and the PRD no longer restates the data-access code.
+
+    `call_changed` is the only derived value — it says whether this call
+    brought a correction, and it decides whether the brief is redrawn or
+    reused verbatim. An optimization, never a confirmation signal.
+    """
+    from .discovery import checkpoint as cp
+
+    state.brief = stored.brief_markdown
+    state.data_notes = stored.data_notes
+    state.web_notes = stored.web_notes
+    state.declared_sources = list(stored.declared_sources)
+    state.unverified_sources = list(stored.unverified_sources)
+    state.gathering_complete = stored.gathering_complete
+    state.final_artifact_type = stored.artifact_type
+    state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
+        state.agent_understanding, state.known_data, state.user_preferences
+    )
 
 
 # ---------------------------------------------------------------------------

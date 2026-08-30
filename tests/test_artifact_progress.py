@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, Mock
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import orchestrator
 from anton.core.tools.generate_artifact.progress import STEP_LABELS, label_for
-from anton.core.tools.generate_artifact.state import DataVerdict, GenState, VerifyResult
+from anton.core.tools.generate_artifact.state import GenState, VerifyResult
 
 
 async def _one_event_stream(response):
@@ -49,8 +49,8 @@ def _drain(state) -> list[str]:
 def test_label_is_plain_language_not_the_node_name():
     """Node names are graph vocabulary — `is_data_enough` must never be what
     a user reads."""
-    assert label_for("is_data_enough", is_fullstack=True) == (
-        "Working out whether that data is enough"
+    assert label_for("make_tech_spec", is_fullstack=True) == (
+        "Writing the technical specification"
     )
 
 
@@ -129,20 +129,20 @@ def test_step_started_does_not_touch_the_journal(tmp_path: Path):
 
 # ── orchestrator call sites ─────────────────────────────────────────────────
 
-async def test_data_phase_and_tech_spec_report_before_they_run(tmp_path: Path):
-    """Order matters: each line must arrive before its step's work, which is
-    what `record` (fired on completion) cannot do."""
+async def test_the_tech_spec_reports_before_it_runs(tmp_path: Path):
+    """Order matters: the line must arrive before the step's work, which is
+    what `record` (fired on completion) cannot do.
+
+    The data phase no longer reports anything on the normal path — it does
+    not run there. `inspect_scratchpads` and `is_data_enough` were the two
+    steps that always announced themselves, and both are gone.
+    """
     st = _state(tmp_path)
-    st.session._llm.generate_object = AsyncMock(
-        return_value=DataVerdict(enough=True, reasoning="no data needed")
-    )
+    st.gathering_complete = True
     st.session._llm.plan_stream = _stream_mock(type("R", (), {"content": "# Spec"})())
 
     assert await orchestrator._data_phase(st) is None
-    assert _drain(st) == [
-        "Looking at the data already gathered in this session",
-        "Working out whether that data is enough",
-    ]
+    assert _drain(st) == []
     assert await orchestrator._write_tech_spec(st) is None
     assert _drain(st) == ["Writing the technical specification"]
 

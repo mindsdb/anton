@@ -8,7 +8,6 @@ from anton.core.tools.generate_artifact.state import (
     GEN_VERIFY_MAX_RETRIES,
     JOURNAL_DETAIL_MAX,
     RUNAPP_MAX_RETRIES,
-    DataVerdict,
     FetchVerdict,
     GenState,
     RequiredData,
@@ -24,8 +23,6 @@ def test_budgets_match_spec():
 
 
 def test_verdict_models_validate():
-    dv = DataVerdict(enough=True, reasoning="no data needed")
-    assert dv.enough is True
     rd = RequiredData(items=[{"name": "orders", "where": "postgres", "why": "chart"}], reasoning="r")
     assert rd.items[0].name == "orders"
     fv = FetchVerdict(possible=False, reasoning="no source")

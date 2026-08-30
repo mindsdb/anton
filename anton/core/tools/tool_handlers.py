@@ -83,96 +83,6 @@ def _artifact_store(session: "ChatSession"):
     return ArtifactStore(workspace.artifacts_dir)
 
 
-def _prd_generation_failed(reason: str) -> str:
-    """Wrap a generate_prd failure so the outer agent reports it instead of
-    building the PRD (or the artifact) by hand. Mirrors
-    generate_artifact's `_generation_failed` wrapper — same rationale:
-    without this instruction the agent treats a pipeline failure as a cue
-    to DIY the next step, silently bypassing the confirmation flow."""
-    return (
-        "Error: PRD generation failed.\n\n"
-        f"{reason}\n\n"
-        "IMPORTANT: do NOT write prd.md yourself and do NOT proceed to "
-        "building the artifact. Report this failure to the user: state in "
-        "plain language that PRD generation failed, quote the reason "
-        "above, and ask how they want to proceed."
-    )
-
-
-_PRD_CANCELLED_INSTRUCTION = (
-    "PRD generation was cancelled by the user — do NOT write prd.md "
-    "yourself, do NOT proceed to building the artifact, report back to "
-    "the user."
-)
-
-_PRD_UNCONFIRMED_INSTRUCTION = (
-    "The PRD was drafted best-effort but the user has NOT confirmed it "
-    "(question budget for this turn is exhausted) — do NOT proceed to "
-    "building the artifact yet; show `brief_summary` to the user and get "
-    "their explicit confirmation before continuing, in this turn if the "
-    "budget allows or in a follow-up turn otherwise."
-)
-
-
-async def handle_generate_prd(session: "ChatSession", tc_input: dict) -> str:
-    """Draft and confirm a PRD for an already-registered web artifact.
-
-    Validates input, then hands off to `anton.core.tools.generate_artifact.discovery.generate`,
-    which runs the two-phase FSM (gather → draft/confirm/write) and writes
-    `prd.md` into the artifact folder. Never raises — pipeline failures come
-    back wrapped by `_prd_generation_failed`; a `cancelled` or
-    `prd_written_unconfirmed` result carries its own do-NOT-proceed
-    instruction instead.
-    """
-    import json
-
-    store = _artifact_store(session)
-    if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
-
-    slug = (tc_input.get("slug") or "").strip()
-    if not slug:
-        return "Error: `slug` is required."
-    artifact = store.open(slug)
-    if artifact is None:
-        return f"Error: no artifact found for slug `{slug}`."
-
-    user_request = (tc_input.get("user_request") or "").strip()
-    if not user_request:
-        return "Error: `user_request` is required."
-    agent_understanding = (tc_input.get("agent_understanding") or "").strip()
-    if not agent_understanding:
-        return "Error: `agent_understanding` is required."
-
-    folder = store.folder_for(slug)
-    from anton.core.tools.generate_artifact.discovery import generate
-
-    try:
-        result = await generate(
-            session=session,
-            slug=slug,
-            artifact_path=folder,
-            artifact_type=artifact.type,
-            user_request=user_request,
-            agent_understanding=agent_understanding,
-            known_data=(tc_input.get("known_data") or "").strip(),
-            user_preferences=(tc_input.get("user_preferences") or "").strip(),
-        )
-    except Exception as exc:  # last-resort: never escalate to the dispatcher
-        return _prd_generation_failed(f"generator crashed: {exc}")
-
-    status = result.get("status")
-    if status == "cancelled":
-        return json.dumps({**result, "instruction": _PRD_CANCELLED_INSTRUCTION}, indent=2)
-    # Both remaining statuses wrote prd.md into the artifact folder, so this
-    # turn touched the artifact (see _track_artifact) — `create_artifact` may
-    # have happened in an earlier turn.
-    _track_artifact(session, store, slug, summary="Drafted PRD")
-    if status == "prd_written_unconfirmed":
-        return json.dumps({**result, "instruction": _PRD_UNCONFIRMED_INSTRUCTION}, indent=2)
-    return json.dumps(result, indent=2)
-
-
 def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = "") -> None:
     """Record that THIS turn created or opened `slug`.
 
@@ -540,6 +450,49 @@ def _generation_failed(reason: str) -> str:
     )
 
 
+async def _drain_progress(queue):
+    """Yield ToolProgress markers, staying silent while a question is open.
+
+    The pipeline asks the user from inside the task this handler is draining,
+    so a marker emitted mid-question lands on top of a live prompt — and the
+    CLI's Live context does not survive that.
+
+    Lines produced during that window are not dropped silently: the last one
+    is emitted once the answer arrives, so the user still learns where the
+    pipeline got to. They are not replayed in full, because by then they
+    describe steps that already finished.
+    """
+    from anton.core.tools.generate_artifact.progress import (
+        QUESTION_CLOSED,
+        QUESTION_OPEN,
+    )
+    from anton.core.tools.progress import ToolProgress
+
+    depth = 0
+    pending: str | None = None
+    while True:
+        line = await queue.get()
+        if line is None:
+            return
+        if line == QUESTION_OPEN:
+            # A counter, not a flag: `show_and_confirm` wraps a call that
+            # wraps itself, so the sentinels arrive nested. A flag would let
+            # the inner CLOSED unmute the channel while the outer question is
+            # still on screen — exactly the bug this prevents.
+            depth += 1
+            continue
+        if line == QUESTION_CLOSED:
+            depth = max(0, depth - 1)
+            if depth == 0 and pending is not None:
+                yield ToolProgress(pending)
+                pending = None
+            continue
+        if depth:
+            pending = line
+            continue
+        yield ToolProgress(line)
+
+
 async def _generate_with_progress_close(coro, queue) -> "dict | str":
     """Await `coro`, then close the progress channel exactly once.
 
@@ -554,31 +507,59 @@ async def _generate_with_progress_close(coro, queue) -> "dict | str":
         queue.put_nowait(None)
 
 
+_STATUS_INSTRUCTIONS = {
+    "generated": (
+        "Every file listed was statically verified by the generation "
+        "pipeline. Do NOT re-read, re-parse or re-verify them, and do not "
+        "open them looking for problems — report the result to the user and "
+        "act only on problems the user actually reports."
+    ),
+    "cancelled": (
+        "The user declined the brief. Do NOT write prd.md yourself and do "
+        "NOT build the artifact by hand — report back to the user."
+    ),
+    "needs_confirmation": (
+        "A brief was drafted but the user could not be asked to confirm it. "
+        "Show `brief_summary` to the user. If they agree, call this tool "
+        "again with the SAME `user_request` — the repeat call is the "
+        "confirmation and the pipeline continues from where it stopped. If "
+        "they ask for a change, call again with the same `user_request` and "
+        "the change in `agent_understanding`. If they decline, do not call "
+        "again."
+    ),
+    "stopped_over_budget": (
+        "This turn reached its token budget and the pipeline stopped "
+        "cleanly; what it had finished is on disk. Tell the user how far it "
+        "got and ask whether to continue. If they agree, call this tool "
+        "again with the SAME `user_request` — it resumes rather than "
+        "restarting."
+    ),
+}
+
+
 async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
-    """Generate every file for an already-registered artifact via the FSM.
+    """Build an already-registered artifact end to end.
 
-    The handler loads artifact metadata to read its `type` (rejects types
-    outside {html-app, fullstack-stateless-app, fullstack-stateful-app}),
-    validates input shape (context required), and hands off to
-    `anton.core.tools.generate_artifact.generate`, which runs the deterministic
-    generation state machine and writes files into the artifact folder.
-    Pipeline failures come back wrapped by `_generation_failed` so the agent
-    surfaces them to the user instead of hand-building the artifact.
+    The handler validates input and reads the artifact's `type` (rejecting
+    types outside {html-app, fullstack-stateless-app, fullstack-stateful-app}),
+    then hands off to `generate_artifact.generate`, which runs all five
+    phases — gather, brief, PRD, spec, code — and writes into the artifact
+    folder. Pipeline failures come back wrapped by `_generation_failed` so
+    the agent surfaces them instead of hand-building the artifact.
 
-    An async generator rather than a plain coroutine (ENG-970): a fullstack
-    run takes minutes, and a tool that emits nothing for minutes reads as a
-    hang. Every FSM step's start arrives on an `asyncio.Queue` and is yielded
-    as a `ToolProgress` marker; `ToolRegistry.dispatch_tool_stream` forwards
-    those and takes the LAST non-marker item as the tool result, so every
-    return path below yields exactly one — string or JSON, unchanged from
-    when this was a coroutine. The queue exists because the FSM cannot yield
-    from here: progress originates several frames down, including inside the
-    `asyncio.gather` that runs backend and frontend generation at once.
+    An async generator rather than a plain coroutine (ENG-970): a full run
+    takes minutes, and a tool that emits nothing for minutes reads as a hang.
+    Step starts arrive on an `asyncio.Queue` and are yielded as `ToolProgress`
+    markers; `ToolRegistry.dispatch_tool_stream` forwards those and takes the
+    LAST non-marker item as the tool result. The queue exists because the FSM
+    cannot yield from here: progress originates several frames down,
+    including inside the `asyncio.gather` that runs backend and frontend
+    generation at once.
     """
     import asyncio
     import json
 
-    from anton.core.tools.progress import ToolProgress
+    from anton.core.tools.registry import ToolOutcome
 
     store = _artifact_store(session)
     if store is None:
@@ -603,9 +584,13 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         )
         return
 
-    context = tc_input.get("context")
-    if not isinstance(context, str) or not context.strip():
-        yield "Error: `context` is required (markdown brief)."
+    user_request = (tc_input.get("user_request") or "").strip()
+    if not user_request:
+        yield "Error: `user_request` is required."
+        return
+    agent_understanding = (tc_input.get("agent_understanding") or "").strip()
+    if not agent_understanding:
+        yield "Error: `agent_understanding` is required."
         return
 
     folder = store.folder_for(slug)
@@ -616,10 +601,13 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         _generate_with_progress_close(
             generate(
                 session=session,
-                artifact_type=artifact.type,
-                artifact_path=folder,
-                context=context,
                 slug=slug,
+                artifact_path=folder,
+                artifact_type=artifact.type,
+                user_request=user_request,
+                agent_understanding=agent_understanding,
+                known_data=(tc_input.get("known_data") or "").strip(),
+                user_preferences=(tc_input.get("user_preferences") or "").strip(),
                 primary=artifact.primary,
                 progress=queue,
             ),
@@ -627,14 +615,15 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         )
     )
     try:
-        while True:
-            line = await queue.get()
-            if line is None:  # generation finished, one way or another
-                break
-            yield ToolProgress(line)
+        async for marker in _drain_progress(queue):
+            yield marker
         result = await task
     except Exception as exc:  # last-resort: never escalate to the dispatcher
-        yield _generation_failed(f"generator crashed: {exc}")
+        yield ToolOutcome(
+            content=_generation_failed(f"generator crashed: {exc}"),
+            ok=False,
+            reason=type(exc).__name__,
+        )
         return
     finally:
         # A no-op once the task is done. Reached with the task still running
@@ -643,33 +632,35 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         # writing files into the artifact folder with nobody left to report to.
         task.cancel()
 
-    # Success or FSM failure alike, the generation wrote into the artifact
-    # folder (at minimum spec.md), so this turn touched the artifact — and
-    # `create_artifact` may have happened in an earlier turn, leaving this
-    # one otherwise unattributed. Only the crash path above skips tracking.
+    # Success or failure alike, the run wrote into the artifact folder (at
+    # minimum prd.md), so this turn touched the artifact — and
+    # `create_artifact` may have happened in an earlier turn, leaving this one
+    # otherwise unattributed. Only the crash path above skips tracking.
     _track_artifact(session, store, slug, summary="Generated artifact files")
 
     if isinstance(result, str):
-        yield _generation_failed(result)
+        yield ToolOutcome(content=_generation_failed(result), ok=False, reason="pipeline")
         return
 
-    # The instruction exists because the calling agent otherwise re-verifies
-    # the pipeline's work by hand: a measured 2026-08-27 run spent 11
-    # planning-model calls (and most of its token bill) re-reading and
-    # re-parsing an artifact the generator had already verified.
-    yield json.dumps(
-        {
-            "slug": slug,
-            "path": str(folder),
-            **result,
-            "instruction": (
-                "Every file listed was statically verified by the generation "
-                "pipeline. Do NOT re-read, re-parse or re-verify them, and do "
-                "not open them looking for problems — report the result to "
-                "the user and act only on problems the user actually reports."
-            ),
-        },
-        indent=2,
+    status = result.get("status", "generated")
+    # I-03: an explicit verdict rather than the dispatcher substring-matching
+    # the text. A successful run's `trace` legitimately contains the word
+    # "failed" (e.g. "backend.py failed to import in venv" after a successful
+    # retry), which the legacy classifier counted as an error and fed into the
+    # per-tool error streak.
+    yield ToolOutcome(
+        content=json.dumps(
+            {
+                "slug": slug,
+                "path": str(folder),
+                **result,
+                "instruction": _STATUS_INSTRUCTIONS.get(
+                    status, _STATUS_INSTRUCTIONS["generated"]
+                ),
+            },
+            indent=2,
+        ),
+        ok=True,
     )
 
 
