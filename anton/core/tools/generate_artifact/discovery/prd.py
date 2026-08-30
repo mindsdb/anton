@@ -21,23 +21,24 @@ _WRITE_PRD_INSTRUCTION = (
     "this generation tool, the PRD workflow, prior attempts, or that this "
     "is a redo/regeneration of something.\n\n"
     "Goal, Artifact type (with justification for the choice), "
-    "Data model (sources, schema/fields, sample rows, PLUS connection code "
-    "examples for anything fetched via scratchpad or web_fetch — cite the "
-    "scratchpad name and cell; for a fullstack-stateful-app additionally "
-    "list the app-owned durable state: each kind of stored item as a named "
-    "collection with its fields and what identifies one item — these are "
-    "app-owned, so they have no scratchpad citation and no connection "
-    "code), Functional requirements (omit for static artifacts), UI/UX "
-    "requirements (layout, components, style, and any known user "
-    "preferences).\n\n"
-    "Do NOT copy long-form source content (article text, document bodies, "
-    "fetched pages) into the PRD when it already lives in a scratchpad cell: "
-    "the generator reads those cells directly. Describe the STRUCTURE and "
-    "cite the scratchpad and cell instead — e.g. for a presentation, a slide "
-    "outline with one line per slide, not the slide texts. Short samples "
-    "(a few rows, a title list) are fine.\n\n"
+    "Data model (the sources, their fields, and a few sample rows; for a "
+    "fullstack-stateful-app additionally list the app-owned durable state: "
+    "each kind of stored item as a named collection with its fields and what "
+    "identifies one item), Functional requirements (omit for static "
+    "artifacts), UI/UX requirements (layout, components, style, and any "
+    "known user preferences).\n\n"
+    "This document records WHAT THE USER AGREED TO. It is not the only thing "
+    "the build step reads: the working data-access code and the source "
+    "material reach it through their own channels. So do not restate "
+    "connection code, environment variable names, or long-form source "
+    "content (article text, document bodies, fetched pages) here — describe "
+    "the requirements, and keep the document short enough that a person will "
+    "actually read it. Describe STRUCTURE where the content is long: for a "
+    "presentation, a slide outline with one line per slide, not the slide "
+    "texts. Short samples (a few rows, a title list) are fine.\n\n"
     "Reply with the PRD document only, as markdown, no other text."
 )
+
 
 
 async def write_prd(state: PrdState) -> str:
@@ -74,8 +75,15 @@ async def write_prd(state: PrdState) -> str:
         )
     state.messages.append({"role": "assistant", "content": full_prd})
 
-    # Same constant `generate_artifact` reads back — see anton/core/artifacts/internal_files.py.
+    # Same constant the cold-start path reads back — see
+    # anton/core/artifacts/internal_files.py.
     (state.artifact_path / PRD_FILENAME).write_text(full_prd, encoding="utf-8")
+    # `prd_section` renders `state.prd`, and it is declared to the spec and
+    # generation nodes as the authoritative requirements source. Leaving it
+    # holding the version read at entry means a PRD rewritten during THIS
+    # call — which is what every user correction produces — never reaches
+    # them, and the correction is lost inside one run.
+    state.prd = full_prd
 
     final_type = state.final_artifact_type or state.artifact_type
     if final_type != state.artifact_type:

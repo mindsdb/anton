@@ -148,10 +148,52 @@ def test_write_prd_instruction_also_forbids_process_meta_commentary():
 
 
 def test_write_prd_instruction_forbids_copying_long_form_source_content():
-    """The 2026-08-27 live run retold one article three times (pad → prd.md →
-    spec.md → index.html). The PRD must reference the scratchpad cell and give
-    the structure, not the content."""
+    """The 2026-08-27 live run retold one article three times (pad -> prd.md
+    -> spec.md -> index.html). The PRD gives the structure, not the content.
+
+    The citation half of the old rule is gone with the merge: the generator
+    no longer finds the source by following a pointer in the PRD, because the
+    spec node carries what it needs forward and `data_notes` holds the code
+    that fetched it.
+    """
     text = prd._WRITE_PRD_INSTRUCTION
-    assert "Do NOT copy long-form source content" in text
-    assert "cite the scratchpad and cell" in text
+    assert "long-form source content" in text
     assert "slide outline" in text
+
+
+def test_the_prd_no_longer_demands_connection_code():
+    """I-25: the PRD weighed 18-21KB because it was the only channel to the
+    generator. It is not any more — `data_notes` carries the working code and
+    `spec.md` carries the source material — so its mandate shrinks to the
+    requirements the user agreed to.
+
+    Asserts the removal of the exact REQUIREMENT, not the absence of a word.
+    The new text legitimately says "do not restate connection code", so a
+    substring check for "connection code" would be red on the very paragraph
+    that implements this change — and the natural way to make it green would
+    be deleting that paragraph. Same trap as `"6,000 characters"` being a
+    substring of `"16,000 characters"`.
+    """
+    from anton.core.tools.generate_artifact.discovery.prd import _WRITE_PRD_INSTRUCTION
+
+    # The old demand, verbatim from the pre-merge instruction.
+    assert "PLUS connection code examples" not in _WRITE_PRD_INSTRUCTION
+    assert "cite the scratchpad name and cell" not in _WRITE_PRD_INSTRUCTION
+    # The new framing: this document records the agreement, it is not the
+    # only thing downstream reads.
+    assert "not the only thing the build step reads" in _WRITE_PRD_INSTRUCTION
+
+
+async def test_write_prd_updates_the_state_not_only_the_file(tmp_path):
+    """`prd_section` renders `state.prd` and declares it authoritative. A PRD
+    rewritten during this call — which is what every user correction produces
+    — has to reach the spec node, or the correction is lost inside one run."""
+    artifact_dir = tmp_path / "artifacts" / "s"
+    artifact_dir.mkdir(parents=True)
+    state = _state(artifact_dir, prd="# Stale PRD from the previous call")
+    state.session._llm.plan = AsyncMock(
+        return_value=_response("## Goal\nWeekly, not daily.\n")
+    )
+    await prd.write_prd(state)
+    assert state.prd != "# Stale PRD from the previous call"
+    assert state.prd == (artifact_dir / "prd.md").read_text(encoding="utf-8")
