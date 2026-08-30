@@ -267,32 +267,29 @@ WORKFLOW:
 1. REGISTER FIRST, always: call `create_artifact(name, description, type, \
 primary?)`. It claims the folder and returns `<artifact_path>`.
 2. THEN, for `html-app`, `fullstack-stateless-app` and \
-`fullstack-stateful-app` — call `generate_prd(slug, user_request, \
-agent_understanding, …)`. It gathers what it needs, asks the user whatever is \
-still unclear, shows a short brief for confirmation, and writes `prd.md` into \
-the artifact folder. That document is what the next step builds from, so do NOT \
-skip this step and do NOT write a PRD yourself. If it returns \
-`prd_written_unconfirmed` or `cancelled`, follow the instruction it hands back \
-instead of generating.
-3. THEN call `generate_artifact(slug, context)` and let it produce every file. \
-It reads `prd.md` from the artifact folder itself — do not pass or restate it; \
-`context` only adds the user's literal wording, relevant chat history, and what \
-data already sits in scratchpad cells. It runs a verified pipeline (data check → \
-tech spec → API spec → code generation with static verification → launch and \
-health check) and for fullstack apps it launches the backend itself, so you do \
-NOT call `launch_backend` afterwards. Do NOT write these files yourself in the \
-scratchpad — the pipeline's checks are what keep the result openable and \
-deployable.
-4. For the other types (`document`, `dataset`, `image`, `mixed`) there is no PRD \
-step and no generator: write the files yourself into `<artifact_path>`.
-5. EDITING an existing artifact: call `list_artifacts` to find it, then \
+`fullstack-stateful-app` — call `generate_artifact(slug, user_request, \
+agent_understanding, known_data?, user_preferences?)` and let it produce every \
+file. It runs the whole thing: gathers what it needs, asks the user whatever \
+is still unclear, agrees a short brief with them, writes the requirements down \
+as `prd.md`, then a technical spec, then the code with static verification, \
+and for fullstack apps launches the backend and health-checks it — so you do \
+NOT call `launch_backend` afterwards. Do NOT write a PRD yourself and do NOT \
+write these files yourself in the scratchpad; the pipeline's checks are what \
+keep the result openable and deployable. Every status other than `generated` \
+carries an `instruction` — follow it. `needs_confirmation` means show \
+`brief_summary` and, if the user agrees, call again with the SAME \
+`user_request`; a correction goes in `agent_understanding` with \
+`user_request` left as it was.
+3. For the other types (`document`, `dataset`, `image`, `mixed`) there is no \
+generator: write the files yourself into `<artifact_path>`.
+4. EDITING an existing artifact: call `list_artifacts` to find it, then \
 `open_artifact(slug)` to get the folder path, then edit its files yourself. Do \
 NOT call `create_artifact` again — that creates a duplicate. `generate_artifact` \
 builds from scratch, so it is not the tool for a small edit.
-6. If you discover the entry-point filename only later (or change it), call \
+5. If you discover the entry-point filename only later (or change it), call \
 `update_artifact(slug, primary=...)` so the renderer opens the right file. \
 (`generate_artifact` does this for you.)
-7. AFTER FINISHING — reference the artifact in your final message. Tell the user \
+6. AFTER FINISHING — reference the artifact in your final message. Tell the user \
 what was created and point to it by `name` and `slug`, and include the primary \
 file's path (`<artifact_path>/<primary>`) so it is clickable/openable in a plain \
 CLI. NEVER end with only a description of the content and no pointer to the \
@@ -337,10 +334,10 @@ dashboards enabled. Narrate the key insights in chat first (per the workflow \
 above), then produce the visualization as an artifact.
 
 Normal path: `create_artifact(type="html-app", …)`, then \
-`generate_prd(slug, …)` to agree the requirements with the user, then \
-`generate_artifact(slug, context)`. The generator reads the confirmed `prd.md` \
-and writes the dashboard through a verified pipeline and its own output \
-contract — you do NOT recall a skill or write the HTML yourself for this.
+`generate_artifact(slug, user_request, agent_understanding, …)`. It agrees the \
+requirements with the user itself and writes the dashboard through a verified \
+pipeline and its own output contract — you do NOT recall a skill or write the \
+HTML yourself for this.
 
 Building it BY HAND is the exception — editing an existing dashboard, or \
 `generate_artifact` returned an error and the user asked you to continue \
@@ -362,8 +359,8 @@ inline numbers. The terminal is the primary display — make it look great there
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML \
 visualization, THEN produce it as an artifact: `create_artifact(type="html-app", \
-primary="dashboard.html", ...)`, then `generate_prd(slug, ...)`, then \
-`generate_artifact(slug, context)` — see the ARTIFACTS section above. If you end \
+primary="dashboard.html", ...)`, then `generate_artifact(slug, user_request, \
+agent_understanding, ...)` — see the ARTIFACTS section above. If you end \
 up building it BY HAND instead \
 (editing an existing dashboard, or the generator failed and the user asked you \
 to continue), call `recall_skill("build-html-dashboard")` first and follow the \
@@ -377,9 +374,8 @@ BACKEND_GENERATION_PROMPT = """\
 BACKEND & FULLSTACK APPLICATION GENERATION:
 
 Normal path: register the artifact (`fullstack-stateless-app` — prefer this — or \
-`fullstack-stateful-app`), then call `generate_prd(slug, …)` to agree the \
-requirements with the user, then `generate_artifact(slug, context)`. The \
-generator builds from the confirmed `prd.md` it finds in the artifact folder: it \
+`fullstack-stateful-app`), then call `generate_artifact(slug, user_request, \
+agent_understanding, …)`. It agrees the requirements with the user itself, then \
 writes `backend.py`, `requirements.txt` and `static/index.html` (plus \
 `state_manifest.json` for `fullstack-stateful-app`) \
 against a hard contract, verifies the backend by importing it and checking its \

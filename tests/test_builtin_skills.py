@@ -265,17 +265,15 @@ class TestArtifactWorkflowPointsAtTheTool:
         assert "BEFORE" in ARTIFACTS_PROMPT
 
 
-class TestEveryPathNamesThePrdStep:
-    """`generate_prd` must appear, ahead of `generate_artifact`, in every
-    always-on block that describes building a web artifact.
+class TestNoPathStillNamesASeparatePrdStep:
+    """The two-step pipeline is gone, and so is the lock that guarded its
+    order (invariant 13).
 
-    The generator takes its requirements from the `prd.md` that `generate_prd`
-    leaves in the artifact folder. A block that sends the agent straight from
-    `create_artifact` to `generate_artifact` therefore does not merely omit a
-    step — it produces a run with no PRD at all, which silently falls back to
-    building from `context`. `generate_prd` also has no `ToolDef.prompt` of its
-    own, so these blocks and its tool description are the only places the model
-    can learn the step exists.
+    `generate_prd` was a separate tool with no `ToolDef.prompt` of its own, so
+    these always-on blocks were the only place the model could learn the step
+    existed — which is why an ordering lock was worth having. There is one
+    tool now and it agrees the requirements itself, so a block still naming a
+    PRD step would be sending the agent to call something that does not exist.
     """
 
     def _blocks(self) -> dict[str, str]:
@@ -293,17 +291,21 @@ class TestEveryPathNamesThePrdStep:
             "viz_markdown": VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
         }
 
-    def test_prd_step_is_named_before_the_generator(self):
+    def test_no_block_sends_the_agent_to_a_tool_that_does_not_exist(self):
         for name, text in self._blocks().items():
-            assert "generate_prd" in text, name
-            assert text.index("generate_prd") < text.index("generate_artifact"), name
+            assert "generate_prd" not in text, name
 
-    def test_the_generator_is_not_told_to_be_handed_the_prd(self):
-        """It reads the file itself; an agent that quotes or paraphrases the PRD
-        into `context` reintroduces the copy that could disagree with it."""
+    def test_every_block_still_names_the_generator(self):
+        for name, text in self._blocks().items():
+            assert "generate_artifact" in text, name
+
+    def test_the_artifacts_block_says_the_tool_agrees_the_requirements_itself(self):
+        """The agent must not pre-interview the user for something the tool
+        will ask about anyway, nor write a PRD by hand."""
         from anton.core.llm.prompts import ARTIFACTS_PROMPT
 
-        assert "reads `prd.md`" in ARTIFACTS_PROMPT
+        assert "agrees a short brief" in ARTIFACTS_PROMPT
+        assert "Do NOT write a PRD yourself" in ARTIFACTS_PROMPT
 
 
 class TestRecallIsConditionalNow:
