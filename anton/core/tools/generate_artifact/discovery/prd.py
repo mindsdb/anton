@@ -44,6 +44,7 @@ async def write_prd(state: PrdState) -> str:
     """Phase 2 step 5 (or the best-effort path from an unconfirmed budget):
     expand the brief into the full PRD, save it, and update the artifact's
     `type` in metadata.json if it changed. Returns the full PRD markdown."""
+    state.step_started(sub_tools.STEP_WRITE_PRD)
     state.messages.append({
         "role": "user",
         "content": prompts.step_message(sub_tools.STEP_WRITE_PRD, state),

@@ -77,20 +77,65 @@ def test_html_app_says_page_not_frontend():
 
 
 def test_every_step_started_call_site_has_a_label():
-    """The orchestrator and the label table must not drift: a node added to
-    the FSM with a `step_started` call but no entry here would silently
-    produce no progress line at all."""
-    src = Path(orchestrator.__file__).read_text(encoding="utf-8")
+    """The pipeline and the label table must not drift: a step added with a
+    `step_started` call but no entry here would silently produce no progress
+    line at all.
+
+    Walks the discovery phases as well as the FSM. They report too now, and a
+    walk that stopped at the orchestrator would leave the newer half of the
+    pipeline unchecked — which is exactly where new steps are being added.
+    """
+    from anton.core.tools.generate_artifact.discovery import (
+        brief as discovery_brief,
+        engine as discovery_engine,
+        orchestrator as discovery_orchestrator,
+        prd as discovery_prd,
+    )
+
+    modules = [
+        orchestrator,
+        discovery_engine,
+        discovery_brief,
+        discovery_prd,
+        discovery_orchestrator,
+    ]
+    src = "\n".join(
+        Path(m.__file__).read_text(encoding="utf-8") for m in modules
+    )
+    from anton.core.tools.generate_artifact.discovery import sub_tools
+
+    def _node_name(arg):
+        """The step name a `step_started` argument denotes, or None.
+
+        Resolves `sub_tools.STEP_*` as well as bare strings: the discovery
+        phases pass the constants, and a walk that only understood literals
+        would wave them through unchecked — which is precisely the drift this
+        test exists to catch.
+        """
+        if isinstance(arg, ast.Constant):
+            return arg.value
+        if isinstance(arg, ast.Attribute) and arg.attr.startswith("STEP_"):
+            return getattr(sub_tools, arg.attr, None)
+        return None
+
     called: set[str] = set()
+    unresolved: list[str] = []
     for node in ast.walk(ast.parse(src)):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "step_started"
             and node.args
-            and isinstance(node.args[0], ast.Constant)
         ):
-            called.add(node.args[0].value)
+            name = _node_name(node.args[0])
+            if name is None:
+                unresolved.append(ast.dump(node.args[0]))
+            else:
+                called.add(name)
+    assert not unresolved, (
+        "step_started called with something this walk cannot resolve, so its "
+        f"label goes unchecked: {unresolved}"
+    )
     assert called, "no step_started call sites found — did the FSM stop reporting?"
     assert called <= set(STEP_LABELS), (
         f"nodes with no label: {sorted(called - set(STEP_LABELS))}"

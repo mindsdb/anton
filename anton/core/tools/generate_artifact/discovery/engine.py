@@ -77,6 +77,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
             ),
         })
 
+    state.step_started(sub_tools.STEP_GATHERING)
     questions_asked = 0
 
     for round_idx in range(MAX_ROUNDS):

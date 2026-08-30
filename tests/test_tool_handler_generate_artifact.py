@@ -319,3 +319,112 @@ async def test_a_pipeline_failure_reports_not_ok(tmp_path, monkeypatch):
     )
     assert isinstance(outcome, ToolOutcome)
     assert outcome.ok is False
+
+
+# ── The question and the progress stream do not overlap ─────────────────────
+
+
+async def test_progress_is_silent_while_a_question_is_open():
+    """The pipeline asks the user from inside the task this handler drains.
+    A marker printed over a live prompt corrupts it, and the CLI's Live
+    context does not survive that."""
+    import asyncio
+
+    from anton.core.tools.generate_artifact.progress import (
+        QUESTION_CLOSED,
+        QUESTION_OPEN,
+    )
+    from anton.core.tools.tool_handlers import _drain_progress
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for item in (
+        "Gathering what the artifact needs",
+        QUESTION_OPEN,
+        "Writing down the agreed requirements",   # produced while the prompt was up
+        "Designing the API",                      # ditto
+        QUESTION_CLOSED,
+        "Writing the page",
+        None,
+    ):
+        queue.put_nowait(item)
+
+    lines = [m.text async for m in _drain_progress(queue)]
+    assert lines[0] == "Gathering what the artifact needs"
+    # Everything produced while the question was open collapses into at most
+    # one line, emitted only after the answer — and never a raw sentinel.
+    assert QUESTION_OPEN not in lines and QUESTION_CLOSED not in lines
+    assert lines[-1] == "Writing the page"
+    assert "Writing down the agreed requirements" not in lines
+
+
+async def test_nested_question_sentinels_do_not_unmute_early():
+    """`show_and_confirm` wraps a call that wraps itself, so the sentinels
+    arrive nested. A boolean flag would unmute on the inner CLOSED, while the
+    brief is still on screen."""
+    import asyncio
+
+    from anton.core.tools.generate_artifact.progress import (
+        QUESTION_CLOSED,
+        QUESTION_OPEN,
+    )
+    from anton.core.tools.tool_handlers import _drain_progress
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for item in (
+        QUESTION_OPEN, QUESTION_OPEN,
+        "Writing down the agreed requirements",   # deep inside the question
+        QUESTION_CLOSED,
+        "Designing the API",                      # still inside the outer one
+        QUESTION_CLOSED,
+        None,
+    ):
+        queue.put_nowait(item)
+
+    lines = [m.text async for m in _drain_progress(queue)]
+    assert lines == ["Designing the API"]
+
+
+async def test_the_brief_confirmation_mutes_progress(tmp_path):
+    """The longest question of the run goes through `show_and_confirm`, which
+    reaches `elicit` on its own path. Wrapping only the `ask_user` sub-tool
+    would leave exactly this one unprotected."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from anton.core.interaction.elicit import AskAnswer
+    from anton.core.tools.generate_artifact.discovery import brief
+    from anton.core.tools.generate_artifact.progress import (
+        QUESTION_CLOSED,
+        QUESTION_OPEN,
+    )
+    from anton.core.tools.generate_artifact.state import GenState
+
+    queue: asyncio.Queue = asyncio.Queue()
+    seen_when_asked: list[str] = []
+
+    async def fake_ask(session, request):
+        while not queue.empty():
+            seen_when_asked.append(queue.get_nowait())
+        return AskAnswer(status="answered", values=("accept",))
+
+    session = SimpleNamespace(
+        _llm=SimpleNamespace(), question_count=0, elicitor=None,
+        emit=AsyncMock(), _artifact_progress=queue,
+    )
+    state = GenState(
+        session=session, artifact_type="html-app", artifact_path=tmp_path,
+        slug="s", brief="## Goal\nA clock.",
+    )
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(brief.sub_tools, "ask_via_elicit", fake_ask):
+        outcome = await brief.show_and_confirm(state)
+
+    assert outcome == "accepted"
+    assert QUESTION_OPEN in seen_when_asked, "the channel was not muted before asking"
+    remaining = []
+    while not queue.empty():
+        remaining.append(queue.get_nowait())
+    assert QUESTION_CLOSED in remaining, "the channel was never unmuted"

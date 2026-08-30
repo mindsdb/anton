@@ -18,6 +18,7 @@ orchestrator to tell "the user declined" apart from "we ran out of budget".
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from anton.core.artifacts.models import ARTIFACT_TYPES
@@ -160,6 +161,33 @@ async def signal_thinking(session: "ChatSession") -> None:
     await session.emit(StreamTaskProgress(phase="reasoning_start", message="Thinking..."))
 
 
+@asynccontextmanager
+async def progress_muted(session: "ChatSession"):
+    """Silence the progress channel while a question is on screen.
+
+    The pipeline asks from inside the task the tool handler is draining, so a
+    marker emitted mid-question lands on top of a live prompt — and the CLI's
+    Live context does not survive that (see the spinner fixes this branch
+    already needed).
+
+    A context manager rather than two bare `put_nowait` calls because there
+    are two independent call sites — this module's `ask_via_elicit` and the
+    brief's own confirmation step — and the closing sentinel must survive an
+    exception in either. They nest, which is why the drain counts depth
+    instead of holding a flag.
+    """
+    from ..progress import QUESTION_CLOSED, QUESTION_OPEN
+
+    channel = getattr(session, "_artifact_progress", None)
+    if channel is not None:
+        channel.put_nowait(QUESTION_OPEN)
+    try:
+        yield
+    finally:
+        if channel is not None:
+            channel.put_nowait(QUESTION_CLOSED)
+
+
 async def ask_via_elicit(session: "ChatSession", request: "AskRequest") -> "AskAnswer":
     """Call `elicit()` directly, never raising, with the same telemetry
     `handle_ask_user` fires around its own call.
@@ -182,7 +210,8 @@ async def ask_via_elicit(session: "ChatSession", request: "AskRequest") -> "AskA
     _send_ask_user_event(session, "ask_user_asked", props)
     question_id = f"ask:{uuid.uuid4().hex}"
     try:
-        answer = await elicit(session, question_id, request)
+        async with progress_muted(session):
+            answer = await elicit(session, question_id, request)
     except Exception:
         _send_ask_user_event(session, "ask_user_error", props)
         return AskAnswer(status="error")

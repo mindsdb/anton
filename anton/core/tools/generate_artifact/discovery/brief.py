@@ -74,6 +74,7 @@ async def draft_brief(state: PrdState) -> None:
     """Phase 2 step 1: draft the short brief. Continues `state.messages` —
     this is NOT a fresh conversation, so the model sees everything phase 1
     found."""
+    state.step_started(sub_tools.STEP_DRAFT_BRIEF)
     state.messages.append({
         "role": "user",
         "content": prompts.step_message(sub_tools.STEP_DRAFT_BRIEF, state),
@@ -142,7 +143,11 @@ async def show_and_confirm(state: PrdState) -> str:
         # caption, would just repeat what the sentence already said.
         compact=True,
     )
-    answer = await sub_tools.ask_via_elicit(state.session, request)
+    # Wrapped here too, not only inside `ask_via_elicit`: this is the longest
+    # question of the run and the one that always happens. The sentinels nest
+    # — the drain counts depth for exactly this reason.
+    async with sub_tools.progress_muted(state.session):
+        answer = await sub_tools.ask_via_elicit(state.session, request)
 
     if answer.status in ("unavailable", "limit", "error"):
         state.trace_log.node("show_and_confirm", "unconfirmed", detail=f"answer status: {answer.status}")
@@ -215,6 +220,7 @@ async def redraw_brief(state: PrdState) -> None:
     """
     from anton.core.artifacts.models import ARTIFACT_TYPES
 
+    state.step_started(sub_tools.STEP_REDRAW_BRIEF)
     state.messages.append({
         "role": "user",
         "content": prompts.step_message(sub_tools.STEP_REDRAW_BRIEF, state),
