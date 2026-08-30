@@ -67,6 +67,15 @@ async def _confirm_loop(state: PrdState) -> str:
     Returns `STAGE_PRD_WRITTEN`, `STAGE_AWAITING_CONFIRMATION` or `CANCELLED`.
     """
     for _ in range(MAX_REVISE_CYCLES):
+        if state.winding_down():
+            # Convert what the turn already spent into disk state and hand
+            # back. The brief is deliberately NOT shown: "confirm this" and
+            # "we stopped because this got expensive, continue?" are the same
+            # question, and the outer agent — which has the conversation — is
+            # the one that should ask it.
+            state.record("brief", "stopped_over_budget", "revise loop stopped")
+            await write_prd(state)
+            return cp.STAGE_AWAITING_CONFIRMATION
         outcome = await show_and_confirm(state)
 
         if outcome == "accepted":
@@ -123,6 +132,10 @@ async def run_discovery(state: PrdState, *, entry: str) -> str:
         await draft_brief(state)
         return await _confirm_loop(state)
 
+    if entry == cp.ENTRY_NEW_ITERATION:
+        await draft_brief(state)
+        return await _confirm_loop(state)
+
     if entry == cp.ENTRY_CONFIRM:
         if state.call_changed:
             await redraw_brief(state)
@@ -130,10 +143,6 @@ async def run_discovery(state: PrdState, *, entry: str) -> str:
                 return await _confirm_loop(state)
         await write_prd(state)
         return cp.STAGE_PRD_WRITTEN
-
-    if entry == cp.ENTRY_NEW_ITERATION:
-        await draft_brief(state)
-        return await _confirm_loop(state)
 
     raise ValueError(
         f"run_discovery called with an entry it does not own: {entry!r}"

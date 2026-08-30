@@ -27,6 +27,7 @@ import httpx
 from anton.core.artifacts.internal_files import PRD_FILENAME
 
 from . import sub_tools
+from .spend import WIND_DOWN_ROUNDS
 from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
 from .prompts import (
     build_api_spec_prompt,
@@ -233,6 +234,12 @@ def _response_is_truncated(response, cap: int | None) -> bool:
     used = getattr(getattr(response, "usage", None), "output_tokens", None)
     return isinstance(used, int) and used >= cap
 
+
+_WIND_DOWN_MSG = (
+    "This turn is out of budget. Close the file you are writing NOW: emit the "
+    "final `write_file` chunk if one is needed, then call `finish`. Do not "
+    "start anything new and do not verify what you wrote."
+)
 
 _SPEC_NO_TOOLS_NUDGE = (
     "\n\nDo NOT call any tool on this step. The tools stay declared for the "
@@ -585,6 +592,7 @@ async def _run_loop(
     trace=None,
     step_injections: list[tuple[str, str]] | None = None,
     require_files: bool = True,
+    spend=None,
 ) -> dict | str:
     """Run one bounded sub-agent tool-call loop.
 
@@ -598,6 +606,13 @@ async def _run_loop(
     ``scratchpad_execs`` records every scratchpad ``exec`` the loop made —
     ``{name, code, output}`` per call — so callers can hand the exact
     data-access code that ran to later FSM steps.
+
+    ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
+    is reached the loop tells the model to close its file and stop, and gives
+    it `WIND_DOWN_ROUNDS` to do so. That counter is LOCAL: the fullstack path
+    runs two of these loops at once over one guard, and a shared budget would
+    leave each with about one round — not enough to both emit a final chunk
+    and call `finish`.
     """
     tools = sub_tools.tool_schemas()
     default_cap = _output_token_cap(session)
@@ -607,8 +622,24 @@ async def _run_loop(
     scratchpad_execs: list[dict] = []
     finished_summary: str | None = None
     injected: set[str] = set()
+    closing_rounds_left = WIND_DOWN_ROUNDS
+    wind_down_announced = False
 
     for round_idx in range(MAX_ROUNDS):
+        if spend is not None and spend.should_wind_down():
+            if closing_rounds_left <= 0:
+                return {
+                    "files_written": files_written,
+                    "rounds_used": round_idx,
+                    "summary": finished_summary or "",
+                    "scratchpad_execs": scratchpad_execs,
+                    "finished": False,
+                    "over_budget": True,
+                }
+            closing_rounds_left -= 1
+            if not wind_down_announced:
+                messages.append({"role": "user", "content": _WIND_DOWN_MSG})
+                wind_down_announced = True
         # First round: use the planning model for highest-quality initial generation.
         # Subsequent rounds (retries, read_file refinements) use the coding model.
         first_round = round_idx == 0

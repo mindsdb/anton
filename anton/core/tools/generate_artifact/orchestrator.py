@@ -34,6 +34,13 @@ from .state import (
 )
 
 
+# Sentinel returned by a generation node that stopped because the turn ran
+# out of budget. Distinguished from an error string on purpose: the cause is
+# the forbidden retry, not unusable code, and the instruction the outer agent
+# gets differs — "continue when you are ready" rather than "this failed".
+OVER_BUDGET = "__over_budget__"
+
+
 async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     system, user = prompt_pair
     result = await state.session._llm.generate_object(
@@ -428,8 +435,12 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
             session=state.session, system=system, kickoff=kickoff,
             artifact_path=state.artifact_path,
             node_label="generate_backend", attempt=attempt, trace=state.trace_log,
-            step_injections=injections,
+            step_injections=injections, spend=state.spend,
         )
+        if isinstance(result, dict) and result.get("over_budget"):
+            state.record("generate_backend", "stopped_over_budget",
+                         "the write loop did not close in its wind-down rounds")
+            return OVER_BUDGET
         if isinstance(result, str):
             state.record("generate_backend", "error", result)
             last_loop_error = result
@@ -557,7 +568,12 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             session=state.session, system=system, kickoff=kickoff,
             artifact_path=state.artifact_path,
             node_label="generate_frontend", attempt=attempt, trace=state.trace_log,
+            spend=state.spend,
         )
+        if isinstance(result, dict) and result.get("over_budget"):
+            state.record("generate_frontend", "stopped_over_budget",
+                         "the write loop did not close in its wind-down rounds")
+            return OVER_BUDGET
         if isinstance(result, str):
             state.record("generate_frontend", "error", result)
             last_loop_error = result
@@ -914,6 +930,8 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
 
     if not state.is_fullstack:
         err = await _gen_verify_frontend(state)
+        if err is OVER_BUDGET:
+            return _stopped_over_budget(state, "the page could not be closed in time")
         if err is not None:
             return err
         return _finish(state)
@@ -921,6 +939,12 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     back_err, front_err = await asyncio.gather(
         _gen_verify_backend(state), _gen_verify_frontend(state)
     )
+    # `gather` waits for both: cancelling the second mid-call would leave a
+    # half-written file, which is strictly worse than one extra round.
+    if OVER_BUDGET in (back_err, front_err):
+        return _stopped_over_budget(
+            state, "a write loop could not be closed in time"
+        )
     if back_err is not None:
         return back_err
     if front_err is not None:

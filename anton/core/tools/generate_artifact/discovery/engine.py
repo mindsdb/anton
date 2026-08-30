@@ -81,6 +81,14 @@ async def run_gathering_loop(state: "PrdState") -> None:
     questions_asked = 0
 
     for round_idx in range(MAX_ROUNDS):
+        if state.winding_down():
+            # Stop collecting and let the caller write down what we have.
+            # `gathering_complete` stays False, which is also condition 1 of
+            # the emergency data loop — so a continuation automatically
+            # re-checks the data this run never finished vouching for.
+            state.record("gathering", "stopped_over_budget", f"after round {round_idx}")
+            state.gathering_complete = False
+            return
         method = "plan" if round_idx == 0 else "code"
         llm_call = state.session._llm.plan if round_idx == 0 else state.session._llm.code
         await sub_tools.signal_thinking(state.session)
