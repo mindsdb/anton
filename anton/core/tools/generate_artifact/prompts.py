@@ -901,6 +901,26 @@ def build_tech_spec_prompt(state) -> tuple[str, str]:
     )
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"
-        "Write the technical specification now."
+        + build_tech_spec_instruction(state)
     )
     return system, user
+
+
+TECH_SPEC_CARRY_FORWARD = (
+    "This is the LAST step that can see the material gathered earlier in "
+    "this conversation. The code-writing steps that follow start from this "
+    "specification and a short set of notes — nothing else from above "
+    "reaches them. Carry forward everything they will need verbatim: exact "
+    "figures, quotes to display, image URLs, the source link. Do not "
+    "paraphrase what must be reproduced exactly."
+)
+
+
+def build_tech_spec_instruction(state) -> str:
+    """The task half of the tech-spec ask, without restating the context.
+
+    On the hot path the context is already in the shared history, so only
+    this travels; `build_tech_spec_prompt` prepends the assembled context for
+    the cold-start path, where there is no history to have seen it.
+    """
+    return "Write the technical specification now.\n\n" + TECH_SPEC_CARRY_FORWARD

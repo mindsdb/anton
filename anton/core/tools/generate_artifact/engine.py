@@ -234,6 +234,12 @@ def _response_is_truncated(response, cap: int | None) -> bool:
     return isinstance(used, int) and used >= cap
 
 
+_SPEC_NO_TOOLS_NUDGE = (
+    "\n\nDo NOT call any tool on this step. The tools stay declared for the "
+    "conversation as a whole; here the only valid reply is the document "
+    "itself as text."
+)
+
 _SPEC_COMPACT_NUDGE = (
     "\n\nIMPORTANT: your previous answer was cut off by the output limit "
     "before it reached the end, so it was discarded. Write the whole "
@@ -251,10 +257,32 @@ async def _plan_whole_document(
     node_label: str,
     trace=None,
     on_retry=None,
+    messages: list[dict] | None = None,
+    tools: list[dict] | None = None,
 ) -> tuple[str, str | None]:
     """One planning call for a whole specification, retried once with more room.
 
     Returns ``(body, error)``; exactly one of the two is set.
+
+    ``messages``, when given, is the shared history of phases A-D and this
+    call APPENDS its instruction to it rather than starting a conversation:
+    the spec nodes are the last ones that see the source material, and what
+    they carry forward is all the generation nodes will get. ``tools`` must
+    then be non-empty — the history contains tool_use/tool_result blocks and
+    the API rejects a request carrying those with no tools declared.
+
+    Without ``messages`` the call keeps its original one-message shape, which
+    is the cold-start path: the context was rebuilt from disk and there is no
+    history to continue.
+
+    A tool call is refused once and then fails the node. Availability is
+    enforced in code now (the array is fixed for the whole shared-prefix
+    region), so a spec node can be handed a call it must not run; letting it
+    argue costs a full re-send of the shared history per round, the most
+    expensive round in the pipeline. The refusal deliberately does NOT consume
+    a rung of the budget ladder — that ladder exists for cut answers, and
+    spending it here would leave a genuinely truncated spec with no room left
+    to retry.
 
     A spec is produced by a single call, so — unlike the file-writing loop —
     there is no chunk boundary to append at and a cut answer cannot be
@@ -275,23 +303,48 @@ async def _plan_whole_document(
     """
     from anton.core.llm.structured import looks_truncated
 
+    budgets = (SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)
     response = None
     extra = ""
-    for attempt, budget in enumerate((SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)):
+    attempt = 0
+    refused_once = False
+    while attempt < len(budgets):
+        budget = budgets[attempt]
         if attempt > 0 and on_retry is not None:
             on_retry()
-        messages = [{"role": "user", "content": user + extra}]
+        instruction = {"role": "user", "content": user + extra}
+        call_messages = (
+            [*messages, instruction] if messages is not None else [instruction]
+        )
         response = await _drain_stream(session._llm.plan_stream(
-            system=system, messages=messages, max_tokens=budget,
+            system=system, messages=call_messages, max_tokens=budget, tools=tools,
         ))
         if trace is not None:
             trace.llm_call(
                 node=node_label, method="plan", system=system,
-                messages=messages, response=response, attempt=attempt,
+                messages=call_messages, response=response, attempt=attempt,
             )
+
+        if getattr(response, "tool_calls", None):
+            if trace is not None:
+                for tc in response.tool_calls:
+                    trace.tool_rejected(
+                        node=node_label, tool=getattr(tc, "name", "?"),
+                        reason="tool calls are not available on a specification step",
+                    )
+            if refused_once:
+                return "", (
+                    f"{node_label}: the model kept calling tools instead of "
+                    "writing the document."
+                )
+            refused_once = True
+            extra = _SPEC_NO_TOOLS_NUDGE
+            continue  # same rung: a refusal is not a truncation
+
         if not looks_truncated(response, budget):
             return (response.content or "").strip(), None
         extra = _SPEC_COMPACT_NUDGE
+        attempt += 1
 
     used = getattr(getattr(response, "usage", None), "output_tokens", None)
     return "", (
@@ -408,17 +461,28 @@ async def _generate_api_spec(
     trace=None,
     node_label: str = "make_api_spec",
     on_retry=None,
+    messages: list[dict] | None = None,
+    tools: list[dict] | None = None,
+    system_override: str | None = None,
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
 
     The model is asked for an OpenAPI document as JSON. We validate the
     response by parsing it with ``json.loads``; if parsing succeeds the spec
     is considered valid and the (normalized) JSON string is returned.
+
+    ``messages`` and ``system_override`` are the hot path: the node continues
+    the shared history under the region's single system prompt, rather than
+    opening a fresh conversation with a restated context. They travel
+    together — a history sent under a different system prompt would discard
+    the prefix cache the shared region exists to keep.
     """
     system, user = build_api_spec_prompt(context, stateless=stateless)
+    if system_override is not None:
+        system = system_override
     body, error = await _plan_whole_document(
         session, system=system, user=user, node_label=node_label, trace=trace,
-        on_retry=on_retry,
+        on_retry=on_retry, messages=messages, tools=tools,
     )
     if error is not None:
         # Already worded in terms of the output limit. Without this branch the

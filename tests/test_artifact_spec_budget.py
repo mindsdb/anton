@@ -192,3 +192,172 @@ async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):
     assert await orchestrator._write_tech_spec(st) is None
     assert (tmp_path / "spec.md").read_text(encoding="utf-8") == "# Spec\nbody"
     assert st.internal_files == ["spec.md"]
+
+
+# ── The shared history reaches the spec nodes (design 2.1) ──────────────────
+
+
+async def test_spec_call_continues_the_shared_history_when_given_one():
+    """Phase D is the last node that sees the source material, so it runs on
+    the shared message list rather than a fresh one-message conversation."""
+    seen: dict = {}
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        seen["messages"] = messages
+        seen["tools"] = tools
+        return _one_event_stream(_response("# Spec", output_tokens=10))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    history = [
+        {"role": "user", "content": "kickoff"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "1", "name": "scratchpad", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "1", "content": "ok"},
+        ]},
+    ]
+    body, err = await engine._plan_whole_document(
+        session, system="sys", user="write the spec", node_label="make_tech_spec",
+        messages=history,
+        tools=[{"name": "scratchpad", "description": "d", "input_schema": {}}],
+    )
+    assert err is None
+    assert body == "# Spec"
+    # The instruction is appended to the history, not sent on its own.
+    assert len(seen["messages"]) == len(history) + 1
+    assert seen["messages"][0] == history[0]
+    assert seen["messages"][-1]["content"] == "write the spec"
+    # A non-empty tools array is mandatory whenever the history carries
+    # tool_use/tool_result blocks — the API rejects the request otherwise.
+    assert seen["tools"]
+
+
+async def test_spec_call_without_history_still_sends_one_user_message():
+    """The cold-start path builds its context from disk, not from a history."""
+    seen: dict = {}
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        seen["messages"] = messages
+        return _one_event_stream(_response("# Spec", output_tokens=10))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    body, err = await engine._plan_whole_document(
+        session, system="sys", user="write the spec", node_label="make_tech_spec",
+    )
+    assert err is None
+    assert seen["messages"] == [{"role": "user", "content": "write the spec"}]
+
+
+async def test_a_tool_call_on_a_spec_step_is_refused_once_then_fails_the_node():
+    """The array is fixed for the whole region, so a spec node can be handed a
+    call it must not run. One refusal, then the node fails: each further round
+    re-sends the entire shared history, the most expensive round there is."""
+    calls: list[dict] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        calls.append(messages[-1]["content"])
+        return _one_event_stream(SimpleNamespace(
+            content="",
+            tool_calls=[SimpleNamespace(id="1", name="scratchpad", input={})],
+            stop_reason="tool_calls",
+            usage=SimpleNamespace(output_tokens=10),
+        ))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    body, err = await engine._plan_whole_document(
+        session, system="sys", user="write the spec", node_label="make_tech_spec",
+    )
+    assert body == ""
+    assert err is not None and "tools" in err
+    assert len(calls) == 2  # the original ask, then one nudged retry
+    assert "Do NOT call any tool" in calls[1]
+
+
+async def test_a_refused_tool_call_does_not_consume_the_truncation_retry():
+    """The budget ladder exists for cut answers. A tool-call refusal that ate
+    a rung would leave a genuinely truncated spec with no room to retry."""
+    budgets: list[int] = []
+
+    responses = [
+        SimpleNamespace(
+            content="",
+            tool_calls=[SimpleNamespace(id="1", name="scratchpad", input={})],
+            stop_reason="tool_calls",
+            usage=SimpleNamespace(output_tokens=10),
+        ),
+        _response("x" * 100, output_tokens=SPEC_MAX_TOKENS, stop_reason="length"),
+        _response("# Spec", output_tokens=10),
+    ]
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        budgets.append(max_tokens)
+        return _one_event_stream(responses[len(budgets) - 1])
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    body, err = await engine._plan_whole_document(
+        session, system="sys", user="write the spec", node_label="make_tech_spec",
+    )
+    assert err is None
+    assert body == "# Spec"
+    assert budgets == [SPEC_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY]
+
+
+async def test_the_spec_node_falls_back_to_the_assembled_context_without_history(tmp_path, monkeypatch):
+    """Cold start: `messages` is empty, so the node must send the brief and
+    the notes explicitly — not a lone instruction into the void."""
+    seen: dict = {}
+
+    async def _fake(session, *, system, user, node_label, trace=None,
+                    on_retry=None, messages=None, tools=None):
+        seen["messages"] = messages
+        seen["user"] = user
+        seen["system"] = system
+        return "# Spec", None
+
+    monkeypatch.setattr(engine, "_plan_whole_document", _fake)
+    state = _state(tmp_path, brief="## Goal\nA dashboard.")
+    state.data_notes = "rows = q()"
+    await orchestrator._write_tech_spec(state)
+
+    assert seen["messages"] is None
+    assert "A dashboard." in seen["user"]
+    assert "rows = q()" in seen["user"]
+
+
+async def test_the_spec_node_continues_the_history_when_there_is_one(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    async def _fake(session, *, system, user, node_label, trace=None,
+                    on_retry=None, messages=None, tools=None):
+        seen["messages"] = messages
+        seen["user"] = user
+        seen["system"] = system
+        seen["tools"] = tools
+        return "# Spec", None
+
+    monkeypatch.setattr(engine, "_plan_whole_document", _fake)
+    state = _state(tmp_path, brief="## Goal\nA dashboard.")
+    state.messages = [{"role": "user", "content": "kickoff"}]
+    await orchestrator._write_tech_spec(state)
+
+    assert seen["messages"] is state.messages
+    assert seen["system"] == state.pipeline_system
+    assert seen["tools"] == state.pipeline_tools
+    # No restating of a context the conversation already holds.
+    assert "A dashboard." not in seen["user"]
+
+
+def test_the_tech_spec_ask_demands_the_source_material_be_carried_forward():
+    """After this node the shared history is dropped, so anything the
+    generators need verbatim — figures, quotes, image URLs, the source link —
+    has to be in `spec.md` or it is gone."""
+    from anton.core.tools.generate_artifact.prompts import (
+        TECH_SPEC_CARRY_FORWARD,
+        build_tech_spec_instruction,
+    )
+
+    instruction = build_tech_spec_instruction(SimpleNamespace())
+    assert TECH_SPEC_CARRY_FORWARD in instruction
+    assert "LAST step" in TECH_SPEC_CARRY_FORWARD
+    assert "verbatim" in TECH_SPEC_CARRY_FORWARD

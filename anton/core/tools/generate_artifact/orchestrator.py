@@ -256,9 +256,23 @@ from .state import GEN_LOOP_MAX_RETRIES, GEN_VERIFY_MAX_RETRIES
 
 async def _write_tech_spec(state: GenState) -> str | None:
     state.step_started("make_tech_spec")
-    system, user = prompts.build_tech_spec_prompt(state)
+    if state.messages:
+        # Hot path: this node is the last one that sees the gathering
+        # conversation, so it continues it rather than being handed a summary.
+        system = state.pipeline_system
+        user = prompts.build_tech_spec_instruction(state)
+        messages = state.messages
+        tools = state.pipeline_tools
+    else:
+        # Cold start: there is no conversation. The node gets what the
+        # pre-merge generator got — brief, PRD, notes, journal — assembled
+        # from whatever `discovery.json` restored.
+        system, user = prompts.build_tech_spec_prompt(state)
+        messages = None
+        tools = None
     body, trunc_err = await engine._plan_whole_document(
         state.session, system=system, user=user, node_label="make_tech_spec",
+        messages=messages, tools=tools,
         trace=state.trace_log,
         on_retry=lambda: state.step_started("make_tech_spec", attempt=1),
     )
@@ -300,9 +314,14 @@ def _spec_context(state: GenState) -> str:
 async def _make_api_spec(state: GenState) -> str | None:
     state.step_started("make_api_spec")
     stateless = state.artifact_type == "fullstack-stateless-app"
+    # Same split as `_write_tech_spec`: continue the shared history when there
+    # is one, fall back to the assembled context on a cold start.
     spec_or_err = await engine._generate_api_spec(
         state.session, _spec_context(state), stateless=stateless,
         trace=state.trace_log, node_label="make_api_spec",
+        messages=state.messages or None,
+        tools=state.pipeline_tools if state.messages else None,
+        system_override=state.pipeline_system if state.messages else None,
         on_retry=lambda: state.step_started("make_api_spec", attempt=1),
     )
     if spec_or_err.startswith("Error:"):
