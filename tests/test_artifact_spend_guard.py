@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from anton.core.tools.generate_artifact.spend import WIND_DOWN_ROUNDS, SpendGuard
 
@@ -273,3 +274,158 @@ async def test_each_parallel_loop_gets_its_own_closing_rounds(tmp_path):
     await asyncio.gather(_loop("backend"), _loop("frontend"))
     assert rounds["backend"] == WIND_DOWN_ROUNDS
     assert rounds["frontend"] == WIND_DOWN_ROUNDS
+
+
+# ── The data phase ──────────────────────────────────────────────────────────
+
+async def test_the_data_loop_runs_under_the_guard(tmp_path):
+    """`_fetch_data_sample` is a full write loop — up to MAX_ROUNDS, up to
+    DATA_LOOP_MAX times. Without the guard it is the one place in the
+    pipeline where the ceiling can be crossed and nothing notices."""
+    from anton.core.tools.generate_artifact import engine, orchestrator
+
+    session = _CeilingSession(trips_after=99)
+    state = _pipeline_state(tmp_path, session)
+    seen = {}
+
+    async def _fake_loop(**kw):
+        seen.update(kw)
+        return {"files_written": [], "rounds_used": 1, "summary": "s", "scratchpad_execs": []}
+
+    orig, engine._run_loop = engine._run_loop, _fake_loop
+    try:
+        await orchestrator._fetch_data_sample(state)
+    finally:
+        engine._run_loop = orig
+
+    assert seen["spend"] is state.spend
+
+
+async def test_a_data_fetch_that_runs_out_of_budget_is_not_reported_as_data(tmp_path):
+    """An over-budget loop returns a result dict with no summary. Folding it
+    into `data_notes` as a fetch that happened would tell every later node
+    the data is covered when nothing was pulled."""
+    from anton.core.tools.generate_artifact import engine, orchestrator
+
+    session = _CeilingSession(trips_after=0)
+    state = _pipeline_state(tmp_path, session)
+
+    async def _fake_loop(**kw):
+        return {
+            "files_written": [], "rounds_used": 0, "summary": "",
+            "scratchpad_execs": [], "finished": False, "over_budget": True,
+        }
+
+    orig, engine._run_loop = engine._run_loop, _fake_loop
+    try:
+        note = await orchestrator._fetch_data_sample(state)
+    finally:
+        engine._run_loop = orig
+
+    assert "budget" in note
+    assert "no summary" not in note
+
+
+async def test_the_data_loop_stops_at_the_ceiling_without_calling_the_model(tmp_path):
+    from anton.core.tools.generate_artifact import orchestrator
+
+    session = _CeilingSession(trips_after=0)
+    state = _pipeline_state(tmp_path, session)
+    state.gathering_complete = False  # condition 1: the loop is needed
+    session._llm.generate_object = AsyncMock(
+        side_effect=AssertionError("the data phase must not spend past the ceiling")
+    )
+
+    err = await orchestrator._data_phase(state)
+
+    assert err is None
+    assert state.data_iterations == 0
+    assert any(s.outcome == "stopped_over_budget" for s in state.trace)
+
+
+async def test_crossing_the_ceiling_inside_the_data_phase_stops_the_spec(tmp_path):
+    """The check before the data phase is not enough: that phase can cross
+    the ceiling by itself, and `make_tech_spec` is the most expensive call in
+    the pipeline."""
+    from anton.core.artifacts.internal_files import TECH_SPEC_FILENAME
+    from anton.core.tools.generate_artifact import orchestrator
+    from anton.core.tools.generate_artifact.discovery import checkpoint as cp
+
+    session = _CeilingSession(trips_after=1)
+    state = _pipeline_state(tmp_path, session)
+
+    async def _data_phase(st):
+        session.calls = 1  # the phase spent the budget
+        return None
+
+    orig, orchestrator._data_phase = orchestrator._data_phase, _data_phase
+    try:
+        result = await orchestrator.run(state, entry=cp.ENTRY_SPEC)
+    finally:
+        orchestrator._data_phase = orig
+
+    assert result["status"] == "stopped_over_budget"
+    assert not (tmp_path / TECH_SPEC_FILENAME).exists()
+
+
+# ── The backend-relaunch retry ──────────────────────────────────────────────
+
+async def test_a_budget_stop_during_the_relaunch_retry_is_not_an_error(tmp_path):
+    """`_gen_verify_backend` returns the OVER_BUDGET sentinel, not a message.
+    Treated as an error string it reaches the user as
+    "generation failed: __over_budget__" AND forbids the repeat call — the
+    exact opposite of what a budget stop is for."""
+    from anton.core.tools.generate_artifact import orchestrator
+
+    session = _CeilingSession(trips_after=99)
+    state = _pipeline_state(tmp_path, session, is_fullstack=True)
+    state.session._scratchpads = None
+
+    async def _launch(**kw):
+        return "install failed"
+
+    async def _regen(st, **kw):
+        return orchestrator.OVER_BUDGET
+
+    saved = (orchestrator._launch_backend, orchestrator._gen_verify_backend)
+    orchestrator._launch_backend, orchestrator._gen_verify_backend = _launch, _regen
+    try:
+        err = await orchestrator._run_and_verify_app(state)
+    finally:
+        orchestrator._launch_backend, orchestrator._gen_verify_backend = saved
+
+    assert err is orchestrator.OVER_BUDGET
+    assert state.error != orchestrator.OVER_BUDGET
+
+
+async def test_run_reports_a_relaunch_budget_stop_as_a_budget_stop(tmp_path):
+    from anton.core.tools.generate_artifact import orchestrator
+    from anton.core.tools.generate_artifact.discovery import checkpoint as cp
+
+    session = _CeilingSession(trips_after=99)
+    state = _pipeline_state(tmp_path, session, is_fullstack=True)
+
+    async def _ok(st, **kw):
+        return None
+
+    async def _over(st):
+        return orchestrator.OVER_BUDGET
+
+    saved = (
+        orchestrator._gen_verify_backend,
+        orchestrator._gen_verify_frontend,
+        orchestrator._run_and_verify_app,
+    )
+    orchestrator._gen_verify_backend = _ok
+    orchestrator._gen_verify_frontend = _ok
+    orchestrator._run_and_verify_app = _over
+    try:
+        result = await orchestrator.run(state, entry=cp.ENTRY_GENERATE)
+    finally:
+        (
+            orchestrator._gen_verify_backend,
+            orchestrator._gen_verify_frontend,
+            orchestrator._run_and_verify_app,
+        ) = saved
+
+    assert result["status"] == "stopped_over_budget"

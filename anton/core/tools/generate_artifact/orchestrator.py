@@ -23,6 +23,7 @@ from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import 
     EXEC_NOTES_MAX,
     EXEC_OUTPUT_MAX,
     render_exec_notes as _render_exec_notes,
+    render_web_notes as _render_web_notes,
 )
 from .prompts import HTML_APP_DEFAULT_PRIMARY
 from .state import (
@@ -70,15 +71,44 @@ async def _fetch_data_sample(state: GenState) -> str:
         require_files=False,
         node_label="fetch_data_sample",
         trace=state.trace_log,
+        spend=state.spend,
     )
     if isinstance(result, str):
         # Loop failed — surface as a note so the next is_data_enough sees it.
         return f"(data fetch step reported: {result})"
+    if result.get("over_budget"):
+        # The guard is sticky, so the caller's next `winding_down()` check is
+        # what stops the pipeline. Said plainly rather than folded into a
+        # summary, which would read as a fetch that completed.
+        return "(data fetch stopped: the turn's budget ran out mid-fetch)"
     summary = result.get("summary") or "(fetch produced no summary)"
     exec_notes = _render_exec_notes(result.get("scratchpad_execs") or [])
     if exec_notes:
         summary += "\n\n" + exec_notes
     return summary
+
+
+def _absorb_discovery_notes(state: GenState) -> None:
+    """Render what phase A actually ran into the two channels phase E reads.
+
+    Phase E and every cold start build their context from `data_notes` and
+    `web_notes` — never from the shared message list, which is dropped at the
+    spec boundary. Rendering here, from the recorded calls rather than from
+    whatever the model chose to summarise, is the whole point of I-06: the
+    working data-access code and the source URLs survive that boundary
+    because code put them there, not because a model remembered to.
+
+    Additive, and run exactly once per call. `scratchpad_execs` and
+    `web_calls` hold only what THIS call gathered, while the notes may
+    already carry an earlier call's, restored from `discovery.json` — so
+    re-rendering from scratch would silently drop the restored half.
+    """
+    exec_notes = _render_exec_notes(state.scratchpad_execs)
+    if exec_notes:
+        state.data_notes = (state.data_notes + "\n\n" + exec_notes).strip()
+    web_notes = _render_web_notes(state.web_calls)
+    if web_notes:
+        state.web_notes = (state.web_notes + "\n\n" + web_notes).strip()
 
 
 def _needs_data_loop(state: GenState) -> bool:
@@ -124,6 +154,17 @@ async def _data_phase(state: GenState) -> str | None:
 
     last_reasoning = "the gathering phase did not verify the data it declared"
     while state.data_iterations < DATA_LOOP_MAX:
+        if state.winding_down():
+            # Not an error: whatever was fetched stays in `data_notes` and
+            # `run()` stops the pipeline immediately after this phase. The
+            # check belongs inside the loop because the phase can cross the
+            # ceiling on its own — DATA_LOOP_MAX fetch loops plus two
+            # `generate_object` calls per iteration.
+            state.record(
+                "data_check", "stopped_over_budget",
+                f"after {state.data_iterations} iteration(s)",
+            )
+            return None
         state.step_started("define_required_data")
         required: RequiredData = await _decide(
             state, RequiredData, prompts.build_required_data_prompt(state),
@@ -767,6 +808,12 @@ async def _run_and_verify_app(state: GenState) -> str | None:
                 f"## backend.log tail\n{tail}"
             ),
         )
+        if regen_err is OVER_BUDGET:
+            # Propagated as the sentinel, never as an error string: assigning
+            # it to `state.error` would surface "__over_budget__" to the user
+            # as a failed generation AND forbid the repeat call, when the
+            # files are on disk and a continuation is exactly what is wanted.
+            return OVER_BUDGET
         if regen_err is not None:
             state.error = regen_err
             return regen_err
@@ -883,6 +930,10 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
         stage = await run_discovery(state, entry=entry)
         if stage == CANCELLED:
             return _cancelled(state)
+        # Before either checkpoint save below: the notes ARE part of the
+        # boundary being persisted, and a run that stops for confirmation has
+        # already paid for the gathering they record.
+        _absorb_discovery_notes(state)
         if stage == cp.STAGE_AWAITING_CONFIRMATION:
             _save_checkpoint(state, cp.STAGE_AWAITING_CONFIRMATION)
             # Same stage on disk, two different things to tell the user.
@@ -910,6 +961,13 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
         err = await _data_phase(state)
         if err is not None:
             return err
+        # Re-checked AFTER the data phase, not only before it: that phase is
+        # itself unbounded enough to cross the ceiling, and the node right
+        # below is the most expensive call in the pipeline.
+        if state.winding_down():
+            return _stopped_over_budget(
+                state, "budget reached while gathering the missing data"
+            )
         err = await _write_tech_spec(state)
         if err is not None:
             return err
@@ -958,6 +1016,8 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
             state, "budget reached before launching the backend"
         )
     err = await _run_and_verify_app(state)
+    if err is OVER_BUDGET:
+        return _stopped_over_budget(state, "the backend could not be rebuilt in time")
     if err is not None:
         return err
     return _finish(state)

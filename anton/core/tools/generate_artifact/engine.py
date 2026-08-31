@@ -477,6 +477,13 @@ async def generate(
     session._artifact_progress = progress
     try:
         result = await run(state, entry=entry)
+    except BaseException as exc:
+        # A crash is a run outcome too. Without this the trace file simply
+        # stops mid-run with no terminal record, and nothing reading it can
+        # tell a crash apart from a session that was killed — which is the
+        # one distinction you need when a run ends unexpectedly.
+        trace.run_result(ok=False, error=f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         session._artifact_progress = None
     if isinstance(result, str):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
@@ -428,3 +429,122 @@ async def test_the_brief_confirmation_mutes_progress(tmp_path):
     while not queue.empty():
         remaining.append(queue.get_nowait())
     assert QUESTION_CLOSED in remaining, "the channel was never unmuted"
+
+
+# ── Status instructions: what the outer agent is told to do next ─────────────
+#
+# Re-homed from the deleted test_tool_handler_generate_prd.py. These strings
+# are the whole interface between a non-terminal pipeline outcome and the
+# agent holding the conversation: get them wrong and the agent either writes
+# prd.md by hand or loops calling the tool forever. Asserted through the
+# handler rather than against the dict, because the bug worth catching is a
+# status the handler never routes.
+
+
+async def _status_result(tmp_path: Path, monkeypatch, payload: dict):
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        return payload
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(
+        _session(tmp_path),
+        {"slug": slug, "user_request": "build it", "agent_understanding": "an app"},
+    )
+    return out
+
+
+async def test_cancelled_forbids_doing_it_by_hand(tmp_path: Path, monkeypatch):
+    out = await _status_result(
+        tmp_path, monkeypatch, {"status": "cancelled", "reason": "user declined the brief"}
+    )
+    assert "declined" in out
+    assert "do NOT build the artifact by hand" in out
+    assert "generation failed" not in out
+
+
+async def test_needs_confirmation_tells_the_agent_the_repeat_call_confirms(
+    tmp_path: Path, monkeypatch
+):
+    """The convergence rule. Without "the repeat call is the confirmation"
+    the agent has no way to ever get past this status."""
+    out = await _status_result(
+        tmp_path, monkeypatch,
+        {"status": "needs_confirmation", "brief_summary": "## Goal\nA clock."},
+    )
+    assert "brief_summary" in out
+    assert "the repeat call is the confirmation" in out
+    assert "SAME `user_request`" in out
+
+
+async def test_a_budget_stop_asks_the_user_rather_than_reporting_failure(
+    tmp_path: Path, monkeypatch
+):
+    out = await _status_result(
+        tmp_path, monkeypatch, {"status": "stopped_over_budget", "reason": "ceiling"}
+    )
+    assert "budget" in out
+    assert "resumes rather than restarting" in out
+    assert "generation failed" not in out
+
+
+async def test_an_unknown_status_falls_back_to_the_generated_instruction(
+    tmp_path: Path, monkeypatch
+):
+    """A status added to the pipeline but not to the table must not drop the
+    instruction field altogether — the agent would be left with raw JSON."""
+    out = await _status_result(tmp_path, monkeypatch, {"status": "brand_new", "files_written": []})
+    assert "instruction" in out
+    assert "report the result to the user" in out
+
+
+async def test_a_cancelled_run_is_not_tracked_as_generated_files(
+    tmp_path: Path, monkeypatch
+):
+    """Cancelling writes nothing, so the turn has no artifact work to
+    attribute. Every other outcome does."""
+    import anton.core.tools.tool_handlers as th
+
+    tracked: list[str] = []
+    monkeypatch.setattr(
+        th, "_track_artifact",
+        lambda session, store, slug, summary="": tracked.append(summary),
+    )
+
+    await _status_result(tmp_path, monkeypatch, {"status": "cancelled", "reason": "declined"})
+    assert tracked == []
+
+    await _status_result(tmp_path, monkeypatch, {"status": "generated", "files_written": ["a.html"]})
+    assert tracked == ["Generated artifact files"]
+
+
+# ── Required fields ─────────────────────────────────────────────────────────
+
+async def test_a_missing_user_request_is_rejected_without_starting_the_pipeline(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(
+        gen_pkg, "generate",
+        AsyncMock(side_effect=AssertionError("the pipeline must not start")),
+    )
+    slug = _make_artifact(tmp_path)
+    _, out = await _collect(
+        _session(tmp_path), {"slug": slug, "agent_understanding": "an app"}
+    )
+    assert out.startswith("Error:")
+    assert "user_request" in out
+    assert "generation failed" not in out
+
+
+async def test_a_missing_agent_understanding_is_rejected(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        gen_pkg, "generate",
+        AsyncMock(side_effect=AssertionError("the pipeline must not start")),
+    )
+    slug = _make_artifact(tmp_path)
+    _, out = await _collect(
+        _session(tmp_path), {"slug": slug, "user_request": "build it"}
+    )
+    assert out.startswith("Error:")
+    assert "agent_understanding" in out

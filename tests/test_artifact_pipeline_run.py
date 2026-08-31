@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.core.artifacts import ArtifactStore
+from anton.core.artifacts.internal_files import PRD_FILENAME
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief, checkpoint as cp, orchestrator
@@ -116,7 +117,10 @@ async def test_revise_then_accept_loops_back_through_draft_brief(tmp_path, monke
 
     result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
     assert result == cp.STAGE_PRD_WRITTEN
-    assert (state.artifact_path / "prd.md").read_text() == "full revised PRD" or "full revised PRD" in (state.artifact_path / "prd.md").read_text()
+    # The correction has to reach disk: `write_prd` runs again after a
+    # revise cycle, and reusing the PRD drafted before the correction is
+    # exactly how a user's change gets lost inside one run.
+    assert "full revised PRD" in (state.artifact_path / PRD_FILENAME).read_text()
 
 
 async def test_best_effort_when_gathering_never_calls_finish_gathering(tmp_path, monkeypatch):

@@ -632,17 +632,23 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         # writing files into the artifact folder with nobody left to report to.
         task.cancel()
 
-    # Success or failure alike, the run wrote into the artifact folder (at
-    # minimum prd.md), so this turn touched the artifact — and
-    # `create_artifact` may have happened in an earlier turn, leaving this one
-    # otherwise unattributed. Only the crash path above skips tracking.
-    _track_artifact(session, store, slug, summary="Generated artifact files")
-
     if isinstance(result, str):
+        # A failed run still worked inside the artifact folder on its way to
+        # failing, so the turn touched the artifact.
+        _track_artifact(session, store, slug, summary="Generated artifact files")
         yield ToolOutcome(content=_generation_failed(result), ok=False, reason="pipeline")
         return
 
     status = result.get("status", "generated")
+    # `cancelled` is the one outcome that wrote nothing at all: the user
+    # declined the brief before phase C, so there is no prd.md and no
+    # generated file to attribute, and claiming otherwise would put "Generated
+    # artifact files" on a turn that generated none. Every other outcome —
+    # including a budget stop, which leaves a PRD and a checkpoint behind —
+    # did write, and `create_artifact` may have happened in an earlier turn,
+    # leaving this one otherwise unattributed.
+    if status != "cancelled":
+        _track_artifact(session, store, slug, summary="Generated artifact files")
     # I-03: an explicit verdict rather than the dispatcher substring-matching
     # the text. A successful run's `trace` legitimately contains the word
     # "failed" (e.g. "backend.py failed to import in venv" after a successful

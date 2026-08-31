@@ -67,7 +67,7 @@ async def write_prd(state: PrdState) -> str:
         # Same failure shape as draft_brief's guard, and the same reason:
         # writing an empty prd.md and reporting `prd_written` would be a
         # silent lie about what happened. Raising here surfaces it as a
-        # generator crash, wrapped by `_prd_generation_failed` — never an
+        # generator crash, wrapped by `_generation_failed` — never an
         # empty file on disk with a success status.
         raise RuntimeError(
             "write_prd: the model replied with no text — it may have "
@@ -99,6 +99,6 @@ async def write_prd(state: PrdState) -> str:
         if store is not None:
             store.update(state.slug, type=final_type)
 
-    state.trace_log.node("write_prd", "done", detail=str(state.artifact_path / "prd.md"))
+    state.trace_log.node("write_prd", "done", detail=str(state.artifact_path / PRD_FILENAME))
     return full_prd
 

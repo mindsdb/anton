@@ -300,3 +300,51 @@ async def test_a_tool_call_with_a_parse_error_is_asked_to_retry_not_dispatched()
     assert state.final_artifact_type == "html-app"  # recovered on the retry
     first_result_blocks = state.messages[2]["content"]
     assert "malformed tool input" in first_result_blocks[0]["content"]
+
+
+# ── Which declared sources count as verified ────────────────────────────────
+
+async def test_a_fetched_web_page_verifies_the_source_it_came_from(monkeypatch):
+    """A source that IS a web page is verified by having been fetched.
+
+    Requiring a scratchpad cell instead sends every web-sourced request —
+    "turn this article into a dashboard" being the common one — through the
+    emergency data loop on every single run, to re-download a page the
+    gathering phase already read.
+    """
+    import anton.core.tools.web_tools as web_tools
+
+    monkeypatch.setattr(
+        web_tools, "handle_web_fetch_fallback", AsyncMock(return_value="page body")
+    )
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("web_fetch", {"url": "https://example.com/a"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "artifact_type": "html-app",
+            "notes": "read it",
+            "data_sources": ["the article"],
+        })]),
+    )
+    state = _state(session)
+
+    await engine.run_gathering_loop(state)
+
+    assert state.declared_sources == ["the article"]
+    assert state.unverified_sources == []
+
+
+async def test_a_source_nothing_was_run_against_stays_unverified():
+    """The condition the emergency data loop exists for: the model declared
+    a source it never touched."""
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {
+            "artifact_type": "html-app",
+            "notes": "assumed",
+            "data_sources": ["orders table"],
+        })]),
+    )
+    state = _state(session)
+
+    await engine.run_gathering_loop(state)
+
+    assert state.unverified_sources == ["orders table"]

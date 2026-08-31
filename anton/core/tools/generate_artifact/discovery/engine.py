@@ -168,12 +168,19 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 state.declared_sources = (
                     [str(s) for s in raw_sources] if isinstance(raw_sources, list) else []
                 )
-                # On the hot path the gathering loop had the scratchpad and
-                # used it, so a source it declares is one it worked with. The
-                # unverified list is what the emergency data loop reads, and
-                # it is filled by `redraw_brief` after a correction, not here.
+                # On the hot path the gathering loop had the data tools and
+                # used them, so a source it declares is one it worked with.
+                # `web_calls` counts as much as `scratchpad_execs`: a source
+                # that IS a web page is verified by having been fetched, and
+                # demanding a scratchpad cell for it would send every
+                # web-sourced request through the emergency data loop to
+                # re-download an article that was already read. The unverified
+                # list is what that loop reads, and after a correction it is
+                # filled by `redraw_brief`, not here.
                 state.unverified_sources = (
-                    [] if state.scratchpad_execs else list(state.declared_sources)
+                    []
+                    if (state.scratchpad_execs or state.web_calls)
+                    else list(state.declared_sources)
                 )
                 state.gathering_complete = True
                 result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": "ok"})
