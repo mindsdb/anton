@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .identity import build_runtime_identity_section
 from .prompts import (
     ARTIFACTS_PROMPT,
     BASE_VISUALIZATIONS_PROMPT,
@@ -25,7 +26,10 @@ class SystemPromptContext:
 
     Three levels with increasing importance (later = stronger influence):
       1. ``prefix``  — prepended before the base prompt
-      2. ``runtime_context`` — interpolated into the RUNTIME IDENTITY section
+      2. ``runtime_context`` — the CONFIGURED LLM block of the RUNTIME IDENTITY
+         section (provider + model ids for code the agent writes). The
+         *serving* model is not part of this context: the session derives it
+         per turn from what the provider reported (ENG-1638).
       3. ``suffix``  — appended after all other sections
     """
 
@@ -138,6 +142,7 @@ class ChatSystemPromptBuilder:
         datasource_context: str = "",
         skill_store: "SkillStore | None" = None,
         workspace_context: str = "",
+        runtime_identity_lines: list[str] | None = None,
     ) -> str:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
@@ -155,8 +160,16 @@ class ChatSystemPromptBuilder:
             else CONVERSATION_DISCIPLINE_ASK_FIRST
         )
 
+        # ENG-1638: two questions, two sub-blocks. `runtime_identity_lines` say
+        # what is serving THIS conversation (from the provider's response, or the
+        # cannot-verify fallback); `runtime_context` says what code the agent
+        # writes should call (configuration). Never one block for both.
+        runtime_identity_section = build_runtime_identity_section(
+            identity_lines=list(runtime_identity_lines or []),
+            configured_block=system_prompt_context.runtime_context,
+        )
         prompt += CHAT_SYSTEM_PROMPT.format(
-            runtime_context=system_prompt_context.runtime_context,
+            runtime_identity_section=runtime_identity_section,
             artifacts_section=ARTIFACTS_PROMPT,
             visualizations_section=visualizations_section,
             conversation_discipline=conversation_discipline,

@@ -10,6 +10,8 @@ Two layers:
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import anton.core.llm.client as llm_client_mod
@@ -67,7 +69,13 @@ def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypa
     _, cfg = _build(tmp_path, monkeypatch)
     assert cfg.runtime_factory is local_scratchpad_runtime_factory
     assert cfg.workspace is not None
-    assert cfg.harness == "cloud"
+    # ENG-1694: `harness` names WHICH AGENT, and this pod image is "anton +
+    # boot" — so the agent here IS anton. It said "cloud" until then, which
+    # described the execution and left "anton or hermes?" unanswerable. Where
+    # it ran is `surface`, sent by cowork (see the surface tests below); unset
+    # here because this fixture builds a request with no trace block.
+    assert cfg.harness == "anton"
+    assert cfg.surface is None
     assert cfg.session_id == "conv_1"
 
 
@@ -775,3 +783,96 @@ def test_a_trace_block_without_a_surface_leaves_it_unset(tmp_path, monkeypatch):
     # resolve). That must not become a junk value.
     _, cfg = _build(tmp_path, monkeypatch, trace={"install_channel": "hosted"})
     assert cfg.surface is None
+
+
+# ── turn-key OAuth data vault ────────────────────────────────────────────────
+# Turn-Key Token Handoff: a cloud turn with connectors gets a live
+# TurnKeyDataVault instead of None, and DS_* env is (re)populated for it the
+# same way desktop's harness.py does for LocalDataVault.
+
+def test_no_oauth_block_leaves_data_vault_none(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.data_vault is None
+
+
+def test_no_oauth_block_still_clears_a_leftover_ds_env_var(tmp_path, monkeypatch):
+    """A DS_* var left over from a prior call (e.g. if a process were ever
+    reused across turns) must never survive into a turn that has no oauth
+    block of its own to reset it via restore_namespaced_env()."""
+    monkeypatch.setenv("DS_LEFTOVER_FROM_PRIOR_TURN", "should-be-cleared")
+    _build(tmp_path, monkeypatch)
+    assert "DS_LEFTOVER_FROM_PRIOR_TURN" not in os.environ
+
+
+def test_oauth_block_produces_a_turn_key_data_vault(tmp_path, monkeypatch):
+    from anton.core.datasources.data_vault import TurnKeyDataVault
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "google_drive", "name": "primary"}]}
+    _, cfg = _build(tmp_path, monkeypatch, oauth=oauth)
+    assert isinstance(cfg.data_vault, TurnKeyDataVault)
+    assert cfg.data_vault.list_connections() == [
+        {"engine": "google_drive", "name": "primary", "created_at": ""}
+    ]
+
+
+def test_oauth_block_populates_ds_env_from_the_turn_key_endpoint(tmp_path, monkeypatch):
+    import anton.core.datasources.data_vault as data_vault_mod
+
+    calls: list[str] = []
+
+    def fake_minds_request(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        calls.append(url)
+        assert api_key == "tk_abc"
+        assert method == "POST"
+        return b'{"access_token": "live-token", "account_email": "a@b.com", "token_type": "Bearer", "scope": "drive.file", "expires_at": "2026-08-26T00:00:00Z"}'
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+    monkeypatch.delenv("DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN", raising=False)
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "google_drive", "name": "primary"}]}
+    _build(tmp_path, monkeypatch, oauth=oauth)
+
+    assert os.environ["DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN"] == "live-token"
+    assert os.environ["DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL"] == "a@b.com"
+    # One fetch to build the env, and restore_namespaced_env's secret-var
+    # registration reuses the same cached result rather than fetching again.
+    assert calls == [f"{data_vault_mod._DEFAULT_AUTH_BASE_URL}/v1/oauth/google_drive/token"]
+
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__TOKEN_TYPE", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__SCOPE", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__EXPIRES_AT", None)
+    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__AUTH_TYPE", None)
+
+
+def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
+    import urllib.error
+
+    def fake_minds_request(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "gmail", "name": "primary"}]}
+    _, cfg = _build(tmp_path, monkeypatch, oauth=oauth)
+
+    assert cfg.data_vault.load("gmail", "primary") is None
+    assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ
+
+
+# ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────
+
+def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, monkeypatch):
+    """Before the fix the pod passed no system_prompt_context, so RUNTIME
+    IDENTITY rendered empty under a "you already know" mandate and a Grok
+    session denied being Grok. The pod now injects the same configured block
+    desktop does; the serving-model line is derived by the session."""
+    _, cfg = _build(
+        tmp_path, monkeypatch, model="grok",
+        llm={"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"},
+    )
+    ctx = cfg.system_prompt_context.runtime_context
+    assert "Planning model: grok" in ctx
+    assert "Provider: openai-compatible" in ctx  # minds-cloud → openai-compatible derivation
+    assert str(tmp_path) not in ctx  # the workspace path never rides along (security note)

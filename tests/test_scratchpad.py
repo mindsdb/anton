@@ -35,6 +35,20 @@ def make_manager(**kwargs) -> ScratchpadManager:
     return ScratchpadManager(**{**_MANAGER_DEFAULTS, **kwargs})
 
 
+class _FakeVault:
+    """Duck-typed DataVault stand-in — ScratchpadManager only calls
+    list_connections() and env_for()."""
+
+    def __init__(self, connections: dict[tuple[str, str], dict[str, str] | None]) -> None:
+        self._connections = connections
+
+    def list_connections(self) -> list[dict[str, str]]:
+        return [{"engine": e, "name": n} for e, n in self._connections]
+
+    def env_for(self, engine: str, name: str, *, flat: bool = False) -> dict[str, str] | None:
+        return self._connections[(engine, name)]
+
+
 class TestScratchpadBasicExecution:
     async def test_basic_execution(self):
         """print(42) should return '42' in stdout."""
@@ -320,6 +334,100 @@ class TestScratchpadManager:
             await mgr.close_all()
         assert pad._proc is None, "close_all() must not restart the worker process"
 
+    async def test_get_or_create_derives_ds_env_from_vault(self):
+        """A new pad gets exactly this vault's current DS_* values."""
+        vault = _FakeVault({
+            ("postgres", "prod"): {"DS_POSTGRES_PROD__HOST": "db.example.com"},
+            ("slack", "main"): {"DS_SLACK_MAIN__BOT_TOKEN": "xoxb-123"},
+        })
+        mgr = make_manager(data_vault=vault)
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._scratchpad_ds_env == {
+                "DS_POSTGRES_PROD__HOST": "db.example.com",
+                "DS_SLACK_MAIN__BOT_TOKEN": "xoxb-123",
+            }
+        finally:
+            await mgr.close_all()
+
+    async def test_get_or_create_skips_connection_whose_env_for_fails(self):
+        """A connection whose env_for() returns None contributes nothing,
+        not a crash."""
+        vault = _FakeVault({
+            ("postgres", "gone"): None,
+            ("postgres", "prod"): {"DS_POSTGRES_PROD__HOST": "db.example.com"},
+        })
+        mgr = make_manager(data_vault=vault)
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._scratchpad_ds_env == {"DS_POSTGRES_PROD__HOST": "db.example.com"}
+        finally:
+            await mgr.close_all()
+
+    async def test_get_or_create_without_vault_passes_none(self):
+        """No data_vault (default) -> scratchpad_ds_env stays None, so
+        LocalScratchpadRuntime keeps its legacy full-copy behaviour."""
+        mgr = make_manager()  # no data_vault
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._scratchpad_ds_env is None
+        finally:
+            await mgr.close_all()
+
+    async def test_get_or_create_applies_ds_env_override_to_new_pad(self):
+        """ds_env_override on a freshly created pad takes effect after reset()."""
+        mgr = make_manager()  # no data_vault
+        try:
+            pad = await mgr.get_or_create(
+                "test", ds_env_override={"DS_HOST": "override.example.com"}
+            )
+            await pad.reset()
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_HOST', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "override.example.com"
+        finally:
+            await mgr.close_all()
+
+    async def test_get_or_create_applies_ds_env_override_to_cached_pad(self):
+        """ds_env_override on an ALREADY-cached pad also takes effect after
+        reset() — this is the exact shape the connection-test flow needs:
+        get_or_create the shared test pad, then override, then reset."""
+        mgr = make_manager()
+        try:
+            pad = await mgr.get_or_create("test")
+            await pad.reset()
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_HOST', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+
+            pad2 = await mgr.get_or_create(
+                "test", ds_env_override={"DS_HOST": "override.example.com"}
+            )
+            assert pad2 is pad
+            await pad2.reset()
+            cell2 = await pad2.execute(
+                "import os; print(os.environ.get('DS_HOST', 'NOT_FOUND'))"
+            )
+            assert cell2.stdout.strip() == "override.example.com"
+        finally:
+            await mgr.close_all()
+
+    async def test_get_or_create_does_not_recompute_for_cached_pad(self):
+        """A second get_or_create() for an existing pad name does not
+        re-derive scratchpad_ds_env — the pad keeps what it started with."""
+        vault = _FakeVault({("postgres", "prod"): {"DS_POSTGRES_PROD__HOST": "db.example.com"}})
+        mgr = make_manager(data_vault=vault)
+        try:
+            pad = await mgr.get_or_create("alpha")
+            vault._connections[("postgres", "prod")] = {"DS_POSTGRES_PROD__HOST": "changed.example.com"}
+            pad2 = await mgr.get_or_create("alpha")
+            assert pad2 is pad
+            assert pad2._scratchpad_ds_env == {"DS_POSTGRES_PROD__HOST": "db.example.com"}
+        finally:
+            await mgr.close_all()
+
 
 class TestScratchpadRenderNotebook:
     async def test_render_notebook_basic(self):
@@ -599,6 +707,101 @@ class TestScratchpadEnvironment:
                 "import os; print(os.environ.get('ANTHROPIC_API_KEY', 'MISSING'))"
             )
             assert cell.stdout.strip() == "sk-ant-test-123"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_ds_env_none_preserves_inherited_ds_vars(self, monkeypatch):
+        """scratchpad_ds_env=None (default) keeps today's behaviour: inherited
+        DS_* vars pass through untouched."""
+        monkeypatch.setenv("DS_POSTGRES_PROD__PASSWORD", "inherited-secret")
+        pad = make_scratchpad(name="ds-env-none")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "inherited-secret"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_ds_env_empty_strips_all_inherited_ds_vars(self, monkeypatch):
+        """An explicit empty dict (empty vault / all connections disabled)
+        strips every inherited DS_* var — none are added back."""
+        monkeypatch.setenv("DS_POSTGRES_PROD__PASSWORD", "should-not-leak")
+        pad = make_scratchpad(name="ds-env-empty", scratchpad_ds_env={})
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_ds_env_only_exposes_explicit_keys(self, monkeypatch):
+        """Only the DS_* pairs in scratchpad_ds_env are visible — a DS_* var
+        inherited for a different connection is stripped even though a
+        DIFFERENT DS_* var was explicitly allowed, and an inherited value for
+        the SAME key is overridden, not merged."""
+        monkeypatch.setenv("DS_SLACK_MAIN__BOT_TOKEN", "wrong-conversation-token")
+        monkeypatch.setenv("DS_POSTGRES_PROD__PASSWORD", "stale-inherited-value")
+        pad = make_scratchpad(
+            name="ds-env-scoped",
+            scratchpad_ds_env={"DS_POSTGRES_PROD__PASSWORD": "right-conversation-secret"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os\n"
+                "print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))\n"
+                "print(os.environ.get('DS_SLACK_MAIN__BOT_TOKEN', 'NOT_FOUND'))"
+            )
+            lines = cell.stdout.strip().splitlines()
+            assert lines[0] == "right-conversation-secret"
+            assert lines[1] == "NOT_FOUND"
+        finally:
+            await pad.close()
+
+    async def test_set_scratchpad_ds_env_overrides_before_reset(self):
+        """set_scratchpad_ds_env() takes effect on the NEXT start()/reset(),
+        not retroactively on an already-running process."""
+        pad = make_scratchpad(name="override-test")
+        await pad.start()
+        try:
+            pad.set_scratchpad_ds_env({"DS_TEST__KEY": "new-value"})
+            await pad.reset()
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_TEST__KEY', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "new-value"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_model_not_leaked_when_unconfigured(self, monkeypatch):
+        """An inherited ANTON_SCRATCHPAD_MODEL must not reach a pad that has
+        no coding model configured."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_MODEL", "inherited-model")
+        pad = make_scratchpad(name="ds-env-no-model")  # coding_model="" by default
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('ANTON_SCRATCHPAD_MODEL', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
+    async def test_scratchpad_provider_not_leaked_when_unconfigured(self, monkeypatch):
+        """An inherited ANTON_SCRATCHPAD_PROVIDER must not reach a pad that
+        has no coding provider configured."""
+        monkeypatch.setenv("ANTON_SCRATCHPAD_PROVIDER", "inherited-provider")
+        pad = make_scratchpad(name="ds-env-no-provider", coding_provider="")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('ANTON_SCRATCHPAD_PROVIDER', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
         finally:
             await pad.close()
 

@@ -37,27 +37,42 @@ def test_both_session_builders_use_the_shared_tool_list():
 def test_both_session_builders_identify_the_host_as_cli():
     """Same drift class as the tool list above, one field over.
 
-    `ChatSessionConfig.harness` reserves `None` for "a host that did not
-    identify itself". The CLI leaving it unset is what made `""` mean both
-    "this is the CLI" and "nobody said", so the two could never be told apart —
-    and that value reaches PostHog and Langfuse tags, not just a log line.
+    ENG-1495's property, unchanged: a host that does not identify itself is
+    indistinguishable from the CLI, because `None` is reserved for exactly that
+    case. The CLI leaving it unset is what made `""` mean both "this is the CLI"
+    and "nobody said", and that value reaches PostHog and Langfuse tags, not
+    just a log line.
+
+    **ENG-1694 moved which field carries it.** `harness` now names the AGENT
+    (`anton` / `hermes`) and `surface` names the HOST (`cli` / `desktop` /
+    `web`) — one field could not answer both, which is why a `cli` trace could
+    not say whether anton or hermes ran. So the CLI identifies itself via
+    `surface=SURFACE_CLI` now, and additionally reports `harness=HARNESS_ANTON`
+    because the CLI does run the anton agent. Both must be present: dropping
+    the surface reintroduces exactly the ENG-1495 ambiguity, and dropping the
+    harness makes the agent unknowable.
 
     Source inspection rather than a behavioural test, for the same reason the
     test above gives: exercising `rebuild_session` means standing up an
     LLMClient, a Cortex and a knowledge refresh. The property being guarded is
-    structural — both builders must pass the argument — so asserting on the
+    structural — both builders must pass the arguments — so asserting on the
     call site is the honest check rather than a weaker substitute.
 
-    Verified to be needed: deleting `harness="cli"` from both files leaves the
-    entire suite green.
+    Verified to be needed: deleting either kwarg from both files leaves the
+    rest of the suite green.
     """
     fresh = (_ANTON_DIR / "chat.py").read_text()
     rebuild = (_ANTON_DIR / "chat_session.py").read_text()
-    assert 'harness="cli"' in fresh, (
-        "fresh session builder (chat.py) must identify the host, or telemetry "
-        "and Langfuse tags cannot tell the CLI from an unidentified host"
-    )
-    assert 'harness="cli"' in rebuild, (
-        "rebuild_session (chat_session.py) must identify the host — a resumed "
-        "session that drops it reintroduces the ambiguity mid-session"
-    )
+    for name, src in (("chat.py", fresh), ("chat_session.py", rebuild)):
+        assert "surface=SURFACE_CLI" in src, (
+            f"{name} must identify the host, or telemetry and Langfuse tags "
+            "cannot tell the CLI from an unidentified host (ENG-1495)"
+        )
+        assert "harness=HARNESS_ANTON" in src, (
+            f"{name} must name the agent it runs, or a CLI trace cannot say "
+            "whether anton or hermes produced it (ENG-1694)"
+        )
+        assert 'harness="cli"' not in src, (
+            f"{name} still names a PLACE as its harness — that is the "
+            "two-vocabularies bug ENG-1694 removed"
+        )
