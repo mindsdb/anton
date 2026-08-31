@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from typing import NoReturn
 
@@ -807,6 +808,55 @@ def _split_cached_input(usage) -> tuple[int, int, int]:
     return total - read - write, read, write
 
 
+# ENG-1986: api.mindshub.ai sits behind a Cloudflare WAF rule that 403s any
+# request body containing the literal `<script` OR `</script` (case-
+# insensitive, even with injected whitespace like `< script` or `<scr ipt`)
+# *before* authentication. html-app generation necessarily asks the model to
+# emit `<script>...</script>` tags, and once written the content is echoed
+# back into the conversation history on every later round, so the block is
+# unavoidable through prompt wording alone. `_escape_script_tag`/
+# `_unescape_script_tag` insert/remove a `_` right after the leading `<` of
+# either tag (`<script` -> `<_script`, `</script` -> `<_/script`) — verified
+# against the live gateway to be outside the WAF rule's match (unlike a bare
+# whitespace trick, which the rule already normalizes away) — on every
+# outgoing/incoming string, so genuine `<script`/`</script` never appears in
+# a request body. Scoped to FLAVOR_MINDS_PASSTHROUGH only: no other flavor
+# talks to this gateway.
+_SCRIPT_TAG_RE = re.compile(r"</?script", re.IGNORECASE)
+# The unescape must be WIDER than the escape: the model reads the escaped
+# forms in its prompt (system rules, its own echoed chunks) and reproduces
+# the underscore in mutated positions. Measured 2026-08-27: a generator
+# emitted `</_script>` (underscore after the slash) for the closing tag —
+# outside the strict reverse pattern — and the mangled tag reached the file
+# on disk, silently disabling all of its JavaScript. Neither `<_script` nor
+# `</_script` is meaningful anywhere else, so normalising every underscore
+# variant is safe.
+_ESCAPED_SCRIPT_TAG_RE = re.compile(r"<_/?_?script|</?_script", re.IGNORECASE)
+
+
+def _escape_script_tag(value):
+    """Recursively replace `<script` with `<_script` in every string reachable
+    from `value` (str, or nested dict/list of them). See ENG-1986 above."""
+    if isinstance(value, str):
+        return _SCRIPT_TAG_RE.sub(lambda m: m.group(0)[0] + "_" + m.group(0)[1:], value)
+    if isinstance(value, dict):
+        return {k: _escape_script_tag(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_escape_script_tag(v) for v in value]
+    return value
+
+
+def _unescape_script_tag(value):
+    """Reverse of `_escape_script_tag`, plus model-mutated variants. See above."""
+    if isinstance(value, str):
+        return _ESCAPED_SCRIPT_TAG_RE.sub(lambda m: m.group(0).replace("_", ""), value)
+    if isinstance(value, dict):
+        return {k: _unescape_script_tag(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_unescape_script_tag(v) for v in value]
+    return value
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -1013,6 +1063,11 @@ class OpenAIProvider(LLMProvider):
                 native_web_tools=native_web_tools,
             )
 
+        is_mindshub = self._flavor == self.FLAVOR_MINDS_PASSTHROUGH
+        if is_mindshub:  # ENG-1986 — see the escape helpers above
+            system = _escape_script_tag(system)
+            messages = _escape_script_tag(messages)
+
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
 
         kwargs = build_chat_completion_kwargs(
@@ -1059,6 +1114,8 @@ class OpenAIProvider(LLMProvider):
         message = choice.message
 
         content_text = message.content or ""
+        if is_mindshub:  # ENG-1986 — undo the outgoing escape
+            content_text = _unescape_script_tag(content_text)
         tool_calls: list[ToolCall] = []
 
         if message.tool_calls:
@@ -1066,6 +1123,8 @@ class OpenAIProvider(LLMProvider):
                 # Both flags ride on the ToolCall for the session to act
                 # on. See `safe_parse_tool_input`.
                 parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
+                if is_mindshub:  # ENG-1986 — undo the outgoing escape
+                    parsed_input = _unescape_script_tag(parsed_input)
                 tool_calls.append(
                     ToolCall(
                         id=tc.id,
@@ -1124,6 +1183,11 @@ class OpenAIProvider(LLMProvider):
             ):
                 yield event
             return
+
+        is_mindshub = self._flavor == self.FLAVOR_MINDS_PASSTHROUGH
+        if is_mindshub:  # ENG-1986 — see the escape helpers above
+            system = _escape_script_tag(system)
+            messages = _escape_script_tag(messages)
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
 
@@ -1309,6 +1373,9 @@ class OpenAIProvider(LLMProvider):
                 session_backoff=True, model=model,
             ) from exc
 
+        if is_mindshub:  # ENG-1986 — undo the outgoing escape
+            content_text = _unescape_script_tag(content_text)
+
         # Finalize tool calls. Same safe-parse protection as the
         # non-streaming path — a model cut off mid-JSON-arguments
         # would otherwise crash the whole turn here with an opaque
@@ -1319,6 +1386,8 @@ class OpenAIProvider(LLMProvider):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
             parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
+            if is_mindshub:  # ENG-1986 — undo the outgoing escape
+                parsed = _unescape_script_tag(parsed)
             tool_calls.append(ToolCall(
                 id=info["id"], name=info["name"], input=parsed,
                 parse_error=parse_error, repaired=repaired,

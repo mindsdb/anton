@@ -431,6 +431,245 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     ).to_outcome()
 
 
+def _generation_failed(reason: str) -> str:
+    """Wrap an FSM failure so the outer agent reports it instead of DIY-ing.
+
+    Without this instruction the agent treats a pipeline failure as a cue to
+    build the artifact by hand (write_file/scratchpad fallback), silently
+    bypassing the whole verified pipeline. Input-validation errors are NOT
+    wrapped — those the agent should fix by correcting its call.
+    """
+    return (
+        "Error: artifact generation failed.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build or repair the artifact yourself — no "
+        "write_file / scratchpad fallback — and do not re-call "
+        "generate_artifact with the same input. Report this failure to the "
+        "user: state in plain language that artifact generation failed, quote "
+        "the reason above, and ask how they want to proceed."
+    )
+
+
+async def _drain_progress(queue):
+    """Yield ToolProgress markers, staying silent while a question is open.
+
+    The pipeline asks the user from inside the task this handler is draining,
+    so a marker emitted mid-question lands on top of a live prompt — and the
+    CLI's Live context does not survive that.
+
+    Lines produced during that window are not dropped silently: the last one
+    is emitted once the answer arrives, so the user still learns where the
+    pipeline got to. They are not replayed in full, because by then they
+    describe steps that already finished.
+    """
+    from anton.core.tools.generate_artifact.progress import (
+        QUESTION_CLOSED,
+        QUESTION_OPEN,
+    )
+    from anton.core.tools.progress import ToolProgress
+
+    depth = 0
+    pending: str | None = None
+    while True:
+        line = await queue.get()
+        if line is None:
+            return
+        if line == QUESTION_OPEN:
+            # A counter, not a flag: `show_and_confirm` wraps a call that
+            # wraps itself, so the sentinels arrive nested. A flag would let
+            # the inner CLOSED unmute the channel while the outer question is
+            # still on screen — exactly the bug this prevents.
+            depth += 1
+            continue
+        if line == QUESTION_CLOSED:
+            depth = max(0, depth - 1)
+            if depth == 0 and pending is not None:
+                yield ToolProgress(pending)
+                pending = None
+            continue
+        if depth:
+            pending = line
+            continue
+        yield ToolProgress(line)
+
+
+async def _generate_with_progress_close(coro, queue) -> "dict | str":
+    """Await `coro`, then close the progress channel exactly once.
+
+    The sentinel goes in a `finally` so the handler's drain loop terminates
+    on a crash or a cancellation too — otherwise it would sit awaiting a
+    queue nobody will ever write to again, turning any generator exception
+    into a hung turn instead of a reported failure.
+    """
+    try:
+        return await coro
+    finally:
+        queue.put_nowait(None)
+
+
+_STATUS_INSTRUCTIONS = {
+    "generated": (
+        "Every file listed was statically verified by the generation "
+        "pipeline. Do NOT re-read, re-parse or re-verify them, and do not "
+        "open them looking for problems — report the result to the user and "
+        "act only on problems the user actually reports."
+    ),
+    "cancelled": (
+        "The user declined the brief. Do NOT write prd.md yourself and do "
+        "NOT build the artifact by hand — report back to the user."
+    ),
+    "needs_confirmation": (
+        "A brief was drafted but the user could not be asked to confirm it. "
+        "Show `brief_summary` to the user. If they agree, call this tool "
+        "again with the SAME `user_request` — the repeat call is the "
+        "confirmation and the pipeline continues from where it stopped. If "
+        "they ask for a change, call again with the same `user_request` and "
+        "the change in `agent_understanding`. If they decline, do not call "
+        "again."
+    ),
+    "stopped_over_budget": (
+        "This turn reached its token budget and the pipeline stopped "
+        "cleanly; what it had finished is on disk. Tell the user how far it "
+        "got and ask whether to continue. If they agree, call this tool "
+        "again with the SAME `user_request` — it resumes rather than "
+        "restarting."
+    ),
+}
+
+
+async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
+    """Build an already-registered artifact end to end.
+
+    The handler validates input and reads the artifact's `type` (rejecting
+    types outside {html-app, fullstack-stateless-app, fullstack-stateful-app}),
+    then hands off to `generate_artifact.generate`, which runs all five
+    phases — gather, brief, PRD, spec, code — and writes into the artifact
+    folder. Pipeline failures come back wrapped by `_generation_failed` so
+    the agent surfaces them instead of hand-building the artifact.
+
+    An async generator rather than a plain coroutine (ENG-970): a full run
+    takes minutes, and a tool that emits nothing for minutes reads as a hang.
+    Step starts arrive on an `asyncio.Queue` and are yielded as `ToolProgress`
+    markers; `ToolRegistry.dispatch_tool_stream` forwards those and takes the
+    LAST non-marker item as the tool result. The queue exists because the FSM
+    cannot yield from here: progress originates several frames down,
+    including inside the `asyncio.gather` that runs backend and frontend
+    generation at once.
+    """
+    import asyncio
+    import json
+
+    from anton.core.tools.registry import ToolOutcome
+
+    store = _artifact_store(session)
+    if store is None:
+        yield "Artifact store unavailable (no workspace bound to this session)."
+        return
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        yield "Error: `slug` is required."
+        return
+    artifact = store.open(slug)
+    if artifact is None:
+        yield f"Error: no artifact found for slug `{slug}`."
+        return
+
+    supported = {"html-app", "fullstack-stateless-app", "fullstack-stateful-app"}
+    if artifact.type not in supported:
+        yield (
+            "Error: generate_artifact only supports html-app / "
+            "fullstack-stateless-app / fullstack-stateful-app. "
+            f"Got: {artifact.type}."
+        )
+        return
+
+    user_request = (tc_input.get("user_request") or "").strip()
+    if not user_request:
+        yield "Error: `user_request` is required."
+        return
+    agent_understanding = (tc_input.get("agent_understanding") or "").strip()
+    if not agent_understanding:
+        yield "Error: `agent_understanding` is required."
+        return
+
+    folder = store.folder_for(slug)
+    from anton.core.tools.generate_artifact import generate
+
+    queue: "asyncio.Queue[str | None]" = asyncio.Queue()
+    task = asyncio.create_task(
+        _generate_with_progress_close(
+            generate(
+                session=session,
+                slug=slug,
+                artifact_path=folder,
+                artifact_type=artifact.type,
+                user_request=user_request,
+                agent_understanding=agent_understanding,
+                known_data=(tc_input.get("known_data") or "").strip(),
+                user_preferences=(tc_input.get("user_preferences") or "").strip(),
+                primary=artifact.primary,
+                progress=queue,
+            ),
+            queue,
+        )
+    )
+    try:
+        async for marker in _drain_progress(queue):
+            yield marker
+        result = await task
+    except Exception as exc:  # last-resort: never escalate to the dispatcher
+        yield ToolOutcome(
+            content=_generation_failed(f"generator crashed: {exc}"),
+            ok=False,
+            reason=type(exc).__name__,
+        )
+        return
+    finally:
+        # A no-op once the task is done. Reached with the task still running
+        # when the consumer abandons this generator mid-yield (turn cancelled
+        # → `aclose()` → GeneratorExit): without it, generation would carry on
+        # writing files into the artifact folder with nobody left to report to.
+        task.cancel()
+
+    if isinstance(result, str):
+        # A failed run still worked inside the artifact folder on its way to
+        # failing, so the turn touched the artifact.
+        _track_artifact(session, store, slug, summary="Generated artifact files")
+        yield ToolOutcome(content=_generation_failed(result), ok=False, reason="pipeline")
+        return
+
+    status = result.get("status", "generated")
+    # `cancelled` is the one outcome that wrote nothing at all: the user
+    # declined the brief before phase C, so there is no prd.md and no
+    # generated file to attribute, and claiming otherwise would put "Generated
+    # artifact files" on a turn that generated none. Every other outcome —
+    # including a budget stop, which leaves a PRD and a checkpoint behind —
+    # did write, and `create_artifact` may have happened in an earlier turn,
+    # leaving this one otherwise unattributed.
+    if status != "cancelled":
+        _track_artifact(session, store, slug, summary="Generated artifact files")
+    # I-03: an explicit verdict rather than the dispatcher substring-matching
+    # the text. A successful run's `trace` legitimately contains the word
+    # "failed" (e.g. "backend.py failed to import in venv" after a successful
+    # retry), which the legacy classifier counted as an error and fed into the
+    # per-tool error streak.
+    yield ToolOutcome(
+        content=json.dumps(
+            {
+                "slug": slug,
+                "path": str(folder),
+                **result,
+                "instruction": _STATUS_INSTRUCTIONS.get(
+                    status, _STATUS_INSTRUCTIONS["generated"]
+                ),
+            },
+            indent=2,
+        ),
+        ok=True,
+    )
+
+
 async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
     """List every artifact in the workspace, newest first.
 

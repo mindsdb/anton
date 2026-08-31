@@ -78,6 +78,7 @@ from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
+    GENERATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -2111,6 +2112,7 @@ class ChatSession:
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -3061,6 +3063,17 @@ class ChatSession:
         except Exception:
             # Analytics must never affect the tool call that just ran.
             pass
+
+    def spend_ceiling_reached(self) -> bool:
+        """Public read of the turn's spend ceiling, for long-running tools.
+
+        `generate_artifact` runs a whole pipeline inside a single tool-use
+        round, so the loop-level check in `_spend_ceiling_stops_the_tool_loop`
+        cannot see it overspend (I-20). It reads this instead of the private
+        method — a tool reaching into `_`-prefixed session internals is how
+        `_output_token_cap` ended up broken by a refactor (I-08).
+        """
+        return self._spend_ceiling_reached()
 
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.

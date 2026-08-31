@@ -2,6 +2,7 @@ from anton.core.tools.progress import ToolProgress
 from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
+    handle_generate_artifact,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -178,12 +179,20 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "files — the tool returns the absolute folder path you should write "
         "into. Each artifact gets its own subfolder under `<workspace>/artifacts/`, "
         "with a `metadata.json` + `README.md` written automatically.\n\n"
-        "SKILL PREREQUISITE: `html-app` and the two fullstack types have "
-        "detailed output contracts stored as skills. If you haven't already "
-        "done so this conversation, call `recall_skill(\"build-html-dashboard\")` "
-        "before an html-app, and `recall_skill(\"build-fullstack-backend\")` "
-        "before a fullstack app — BEFORE writing any files. When unsure, "
-        "recall; skipping breaks rendering/launch.\n\n"
+        "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
+        "or fullstack-stateful-app): call `generate_artifact(slug, "
+        "user_request, agent_understanding, ...)` and let it do the rest — it "
+        "agrees the requirements with the user, writes every file, and "
+        "verifies its own output. That is the normal path. For `document`, "
+        "`dataset`, `image` and `mixed` there is no generator: write the "
+        "files yourself into the returned path.\n\n"
+        "If you do end up building one of the three generator-backed types BY "
+        "HAND (editing an existing artifact, or `generate_artifact` failed and "
+        "the user asked you to continue), the output contract lives in a skill: "
+        "call `recall_skill(\"build-html-dashboard\")` for an html-app or "
+        "`recall_skill(\"build-fullstack-backend\")` for a fullstack app before "
+        "writing anything. Hand-written code that skips it breaks "
+        "rendering/launch.\n\n"
         "Pick `type` from the closed enum:\n"
         "- html-app: a single self-contained HTML page (charts, dashboards, demos)\n"
         "- document: a doc, report, or markdown file the user reads\n"
@@ -192,10 +201,16 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "- mixed: multi-modal output that doesn't fit the above\n"
         "- fullstack-stateless-app: fullstack web app (backend + frontend) that keeps "
         "no local state between requests; all persistence goes to external data sources. "
-        "DEFAULT for fullstack apps\n"
-        "- fullstack-stateful-app: fullstack web app (backend + frontend) that keeps "
-        "local state between requests (e.g. an on-disk SQLite DB). Use ONLY when that "
-        "state truly cannot live in an external data source; prefer stateless when in doubt\n\n"
+        "Reading from or writing to an external database (Postgres, MySQL, etc.) is "
+        "stateless — the external DB is a data source, not local state. PREFER this type: "
+        "use it for anything that just queries/serves external data.\n"
+        "- fullstack-stateful-app: fullstack web app (backend + frontend) that owns "
+        "durable state of its own, persisted through the platform STATE store (a "
+        "document/key-value store declared via state_manifest.json; works both locally "
+        "and deployed). Choose this ONLY for LIGHT app-owned state — counters, settings, "
+        "sessions, user-created documents keyed by id. Heavy or relational data (joins, "
+        "transactions, analytics) belongs in an external database, which usually means "
+        "fullstack-stateless-app; when in doubt, prefer stateless.\n\n"
         "Pass `primary` (optional) when you already know the entry-point "
         "filename you'll write — e.g. `\"dashboard.html\"` for an html-app, "
         "`\"static/index.html\"` for a fullstack app, `\"report.pdf\"` for a "
@@ -343,11 +358,12 @@ LAUNCH_BACKEND_TOOL = ToolDef(
         "records the port in the artifact's `metadata.json`, and returns a "
         "structured result carrying the backend's `url` (as `external_url`), "
         "plus `pid`/`port`/log path in the message.\n\n"
+        "You normally do NOT call this: `generate_artifact` launches the backend "
+        "itself and records the port. Use this tool for a hand-built backend, or "
+        "to restart one after editing its code.\n\n"
         "The backend MUST follow the contract in the `build-fullstack-backend` "
-        "skill (template, `--port`, `/api/*` prefix, SECRETS). If you haven't "
-        "recalled it this conversation, call "
-        "`recall_skill(\"build-fullstack-backend\")` before writing or fixing "
-        "backend code.\n\n"
+        "skill (template, `--port`, `/api/*` prefix, SECRETS) — a hand-written "
+        "backend that skips it will not start.\n\n"
         "The spawned process inherits Anton's environment, including the "
         "`DS_<ENGINE>_<NAME>__<FIELD>` variables of connected data sources.\n\n"
         "Runs in a scratchpad named exactly `<slug>` (created on first call). "
@@ -394,6 +410,117 @@ LAUNCH_BACKEND_TOOL = ToolDef(
     },
     handler=handle_launch_backend,
 )
+
+
+GENERATE_ARTIFACT_TOOL = ToolDef(
+    name="generate_artifact",
+    description=(
+        "Build an already-registered web artifact end to end. Use INSTEAD OF "
+        "writing files yourself in the scratchpad. Reads `type` from the "
+        "artifact's metadata (must be `html-app`, `fullstack-stateless-app`, "
+        "or `fullstack-stateful-app`).\n\n"
+        "It runs the whole thing itself: gathers the data it needs (it can "
+        "use the scratchpad, web search and web fetch), asks the user "
+        "whatever is still unclear, agrees a short brief with them, writes "
+        "the requirements down as `prd.md`, then a technical spec, then the "
+        "code — with static verification, and for fullstack apps a launch "
+        "and a health check on `/api/health`. There is no separate PRD step "
+        "to call first, and you do NOT call `launch_backend` afterwards.\n\n"
+        "Inputs:\n"
+        "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
+        "- `user_request`: the user's request, as close to their original "
+        "wording as possible.\n"
+        "- `agent_understanding`: how you understand the task, based on the "
+        "whole conversation so far.\n"
+        "- `known_data` (optional): anything already known about the data "
+        "needed — descriptions, or scratchpad references (pad name, cell) "
+        "if you already fetched something.\n"
+        "- `user_preferences` (optional): relevant known preferences (style, "
+        "preferred APIs, etc.).\n\n"
+        "Returns a `status`:\n"
+        '- `generated` — done. `files_written` are the artifact\'s own files '
+        "(report those), `internal_files` are generation inputs like "
+        "`spec.md` (do NOT present them as deliverables), `trace` lists the "
+        "steps and their outcomes.\n"
+        "- `needs_confirmation` — a brief was drafted but the user could not "
+        "be asked. Show `brief_summary`; if they agree, call again with the "
+        "SAME `user_request`.\n"
+        "- `cancelled` — the user declined. Do not build the artifact by "
+        "hand.\n"
+        "- `stopped_over_budget` — the turn ran out of tokens and the "
+        "pipeline stopped cleanly; what it finished is on disk.\n\n"
+        "Every status but `generated` carries an `instruction` saying what to "
+        "do next — follow it. On a technical failure, report it to the user "
+        "and ask how to proceed; NEVER fall back to building the artifact "
+        "yourself."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Slug of an already-registered artifact.",
+            },
+            "user_request": {
+                "type": "string",
+                "description": (
+                    "The user's request, as close to their original wording "
+                    "as possible. This identifies the work: a repeat call "
+                    "carrying the same request continues where the previous "
+                    "one stopped, a different one starts over."
+                ),
+            },
+            "agent_understanding": {
+                "type": "string",
+                "description": (
+                    "How you understand the task, from the whole "
+                    "conversation. If the user asked for a change after "
+                    "seeing the brief, put the change here and keep "
+                    "`user_request` unchanged."
+                ),
+            },
+            "known_data": {
+                "type": "string",
+                "description": (
+                    "What is already known about the data needed — "
+                    "descriptions, or scratchpad references (pad name, cell) "
+                    "if you already fetched something."
+                ),
+            },
+            "user_preferences": {
+                "type": "string",
+                "description": (
+                    "Relevant known user preferences (style, preferred APIs, "
+                    "etc.)."
+                ),
+            },
+        },
+        "required": ["slug", "user_request", "agent_understanding"],
+    },
+    handler=handle_generate_artifact,
+    prompt=(
+        "ARTIFACT GENERATION:\n"
+        "`generate_artifact` builds an already-registered artifact end to "
+        "end — gathering data, agreeing a brief with the user, writing the "
+        "requirements, the technical spec and the code, with verification "
+        "and (for fullstack) a launch and health check. Use it INSTEAD of "
+        "writing artifact files yourself in the scratchpad.\n"
+        "  1. Call `create_artifact` to register the slug and pick the type "
+        "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
+        "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
+        "agent_understanding=..., known_data?, user_preferences?)`. It asks "
+        "the user anything it still needs, so do not pre-interview them for "
+        "it.\n"
+        "  3. Follow the `instruction` in the result. `needs_confirmation` "
+        "means show `brief_summary` and, if the user agrees, call again with "
+        "the SAME `user_request` — that repeat call IS the confirmation. A "
+        "correction goes in `agent_understanding`, with `user_request` left "
+        "as it was.\n"
+        "Do NOT call `launch_backend` for a fullstack artifact built this "
+        "way — the tool launches and health-checks it itself."
+    ),
+)
+
 
 
 RECALL_TOOL = ToolDef(

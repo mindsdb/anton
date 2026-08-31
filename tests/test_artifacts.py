@@ -434,6 +434,130 @@ def test_reconcile_excludes_published_json(store: ArtifactStore):
     assert {f.path for f in opened.files} == {"dashboard.html"}
 
 
+def test_reconcile_excludes_the_backend_log(store: ArtifactStore):
+    """`launch_artifact_backend` writes backend.log into the artifact folder.
+    Every other copy of the housekeeping set already excluded it — cowork-server's
+    artifacts service, `publish_access`, and the publish bundle — so listing it
+    here made the agent's view disagree with the UI's."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    (folder / "backend.log").write_text("INFO: started")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"backend.py"}
+
+
+def test_reconcile_excludes_generation_inputs(store: ArtifactStore):
+    """prd.md / spec.md / openapi.json are what the generator built FROM, not
+    what it built. Listed among `files[]` they inflate file_count, show up in
+    the README, and invite the agent to hand the user a spec as a deliverable."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    (folder / "requirements.txt").write_text("fastapi")
+    (folder / "prd.md").write_text("## Goal\nx")
+    (folder / "spec.md").write_text("# Spec")
+    (folder / "openapi.json").write_text("{}")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"backend.py", "requirements.txt"}
+
+
+def test_excluded_set_covers_every_generation_input():
+    """The exclusion list is derived from the same constants the generators
+    write through — a fourth generation input added there must not need a
+    second edit here to stay out of `files[]`."""
+    from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
+    from anton.core.artifacts.store import _EXCLUDED_FROM_FILES
+
+    assert set(GENERATION_INPUT_FILES) <= _EXCLUDED_FROM_FILES
+
+
+def test_discovery_json_is_a_generation_input_not_an_artifact_file():
+    """The discovery checkpoint sits next to dashboard.html and must never be
+    reported to the user as part of what was built."""
+    from anton.core.artifacts.internal_files import (
+        DISCOVERY_FILENAME,
+        GENERATION_INPUT_FILES,
+    )
+
+    assert DISCOVERY_FILENAME in GENERATION_INPUT_FILES
+
+
+def test_housekeeping_set_still_mirrors_cowork_server():
+    """The set is documented as mirroring cowork-server's artifacts service
+    (`cowork/services/artifacts.py:132`), and `publish_access` plus the publish
+    bundle carry their own copies. Drift means the agent and the UI disagree on
+    what an artifact contains — which is exactly how backend.log ended up
+    counted here and nowhere else. The STATE runtime entries (PR #259) are in
+    anton's three copies; cowork-server's copy does not know them yet."""
+    from anton.core.artifacts.store import _HOUSEKEEPING_FILES
+
+    assert _HOUSEKEEPING_FILES == {
+        "metadata.json", "README.md", "backend.log", ".published.json",
+        ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
+        ".state_manifest.published.json",
+    }
+
+
+def test_housekeeping_set_matches_publish_access_copy():
+    """anton's own two copies must never drift from each other."""
+    from anton.core.artifacts.store import _HOUSEKEEPING_FILES
+    from anton.publish_access import _HOUSEKEEPING_FILES as ACCESS_COPY
+
+    assert _HOUSEKEEPING_FILES == ACCESS_COPY
+
+
+def test_housekeeping_dirs_match_publish_access_copy():
+    """Reserved DIRECTORIES are a second set, and it drifts just as quietly.
+
+    `publish_access` matches on the path's first component, so a directory name
+    also "works" inside `_HOUSEKEEPING_FILES` there — which is how `.revisions`
+    arrived in the staging merge, breaking the lock above. The store matches
+    whole relative paths and cannot fold directories in, so both sides keep the
+    split and both sides are locked.
+    """
+    from anton.core.artifacts.store import _HOUSEKEEPING_DIRS
+    from anton.publish_access import _HOUSEKEEPING_DIRS as ACCESS_COPY
+
+    assert _HOUSEKEEPING_DIRS == ACCESS_COPY
+
+
+def test_reconcile_excludes_state_runtime_files(store: ArtifactStore):
+    """A locally-run stateful backend writes its SQLite store (and WAL/SHM side
+    files) into the artifact folder; publishing adds the schema snapshot. All
+    of it is runtime bookkeeping. `state_manifest.json` itself is a deliverable
+    the publisher bundles — it stays visible."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateful-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "backend.py").write_text("app = 1")
+    (folder / "state_manifest.json").write_text('{"version": 1}')
+    (folder / ".anton_state.db").write_text("sqlite")
+    (folder / ".anton_state.db-wal").write_text("wal")
+    (folder / ".anton_state.db-shm").write_text("shm")
+    (folder / ".state_manifest.published.json").write_text("{}")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"backend.py", "state_manifest.json"}
+
+
+def test_a_nested_file_named_like_a_generation_input_is_kept(store: ArtifactStore):
+    """The exclusion is by exact relative path, not by basename: a
+    `static/openapi.json` the artifact genuinely serves is its own content."""
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateless-app"
+    )
+    folder = store.folder_for(artifact.slug)
+    (folder / "static").mkdir()
+    (folder / "static" / "openapi.json").write_text("{}")
+    (folder / "openapi.json").write_text("{}")
+    opened = store.open(artifact.slug)
+    assert {f.path for f in opened.files} == {"static/openapi.json"}
+
 def test_reconcile_excludes_revision_journal(store: ArtifactStore):
     artifact = store.create(name="Dash", description="x", type="html-app")
     folder = store.folder_for(artifact.slug)
@@ -635,6 +759,38 @@ def test_update_primary_and_port_together(store: ArtifactStore):
     updated = store.update(artifact.slug, primary="index.html", port=5000)
     assert updated.primary == "index.html"
     assert updated.port == 5000
+
+
+def test_update_type(store: ArtifactStore):
+    artifact = store.create(name="X", description="x", type="html-app")
+    updated = store.update(artifact.slug, type="fullstack-stateless-app")
+    assert updated is not None
+    assert updated.type == "fullstack-stateless-app"
+    reloaded = store.open(artifact.slug)
+    assert reloaded.type == "fullstack-stateless-app"
+
+
+def test_update_type_together_with_other_fields(store: ArtifactStore):
+    artifact = store.create(name="X", description="x", type="html-app")
+    updated = store.update(artifact.slug, type="document", primary="report.pdf")
+    assert updated.type == "document"
+    assert updated.primary == "report.pdf"
+
+
+def test_update_invalid_type_raises(store: ArtifactStore):
+    artifact = store.create(name="X", description="x", type="html-app")
+    with pytest.raises(ValueError, match="type"):
+        store.update(artifact.slug, type="not-a-real-type")
+    # Rejected before any write — the artifact's type is untouched.
+    reloaded = store.open(artifact.slug)
+    assert reloaded.type == "html-app"
+
+
+def test_update_missing_slug_still_returns_none_not_valueerror(store: ArtifactStore):
+    """A missing slug and a bad `type` are different failure causes — the
+    ValueError must not fire before the existence check, or a caller testing
+    for a missing artifact via `is None` would see an exception instead."""
+    assert store.update("does-not-exist", type="not-a-real-type") is None
 
 
 def test_update_omitted_field_unchanged(store: ArtifactStore):

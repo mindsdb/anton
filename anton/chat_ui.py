@@ -364,8 +364,15 @@ class StreamDisplay:
         plausible label like "[recommended] postgres" would otherwise be
         rendered as a Rich tag and swallowed, while one containing "[/]" would
         raise MarkupError out of here and kill the turn mid-dispatch.
+
+        `request.compact` skips the option list and the "Pick one or more"
+        hint entirely — for a prompt that already spells out the choice in
+        prose (e.g. a PRD brief ending in its own "continue, or changes?"
+        sentence), repeating it as a numbered list under the text is noise.
         """
         self._console.print(f"\n[bold]{escape(request.prompt)}[/]")
+        if request.compact:
+            return
         for index, option in enumerate(request.options, start=1):
             icon = "📁" if option.kind == "folder" else "📄" if option.kind == "file" else ""
             prefix = f"{icon} " if icon else ""
@@ -522,7 +529,16 @@ class StreamDisplay:
             self._line1_fun = random.choice(THINKING_MESSAGES)  # noqa: S311
             self._line2_status = random.choice(WORKING_FOOTER_MESSAGES)  # noqa: S311
             self._line3_peek = ""
-            self._update_spinner()
+            # `_update_spinner()` alone is a no-op once `phase="interactive"`
+            # has torn the Live context down (`_live = None`) — e.g. right
+            # after an `ask_user`/`elicit()` answer, with no tool-result line
+            # printed in between to implicitly restart it. Recreate it here
+            # so this phase always leaves a running spinner behind, not just
+            # when one happened to already be running.
+            if self._live is None:
+                self._start_spinner()
+            else:
+                self._update_spinner()
             return
 
         if phase == "reasoning_done":

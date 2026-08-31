@@ -46,6 +46,10 @@ def test_valid_choice_passes():
     assert validate_request(_choice(select="many")) is True
 
 
+def test_default_value_matching_an_option_passes():
+    assert validate_request(_choice(default_value="pg")) is True
+
+
 @pytest.mark.parametrize(
     "request_",
     [
@@ -57,10 +61,12 @@ def test_valid_choice_passes():
         _choice(options=(AskOption(value="pg", label="a"), AskOption(value="pg", label="b"))),
         _choice(options=(AskOption(value="", label="a"), AskOption(value="b", label="b"))),
         _choice(select="several"),
+        _choice(default_value="nope"),
     ],
     ids=[
         "empty-prompt", "blank-prompt", "no-options", "one-option",
         "eleven-options", "duplicate-values", "empty-value", "bad-select",
+        "default-not-an-option",
     ],
 )
 def test_invalid_choice_rejected(request_):
@@ -73,8 +79,11 @@ def test_path_request_ignores_choice_rules():
     assert validate_request(AskRequest(prompt="", kind="path")) is False
 
 
-def test_budget_constant_is_three():
-    assert MAX_QUESTIONS_PER_TURN == 3
+def test_budget_constant_is_eight():
+    """Raised from 3 to 8 to give generate_prd's phase 2 (brief confirm +
+    revise cycles) room without starving the main agent's own questions in
+    the same turn — see prd-design.md, "Limits and error handling"."""
+    assert MAX_QUESTIONS_PER_TURN == 8
 
 
 # ─── TurnEmitter + session wiring ───────────────────────────────────────
@@ -719,6 +728,46 @@ async def test_cli_choice_escape_and_empty_input_are_cancelled(cli_elicitor, mon
         assert (await cli_elicitor.ask("q1", _choice())).status == "cancelled"
 
 
+async def test_cli_choice_forwards_the_default_value_to_prompt_or_cancel(cli_elicitor, monkeypatch):
+    """`prompt_or_cancel` already substitutes its own `default` kwarg for a
+    blank Enter and shows it in the prompt's suffix — `_ask_choice` only
+    has to forward the default option's `value`, not reimplement blank-input
+    handling itself."""
+    mock = AsyncMock(return_value="pg")
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", mock)
+    await cli_elicitor.ask("q1", _choice(default_value="pg"))
+    assert mock.call_args.kwargs["default"] == "pg"
+
+
+async def test_cli_choice_without_a_default_passes_an_empty_default(cli_elicitor, monkeypatch):
+    mock = AsyncMock(return_value="1")
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", mock)
+    await cli_elicitor.ask("q1", _choice())
+    assert mock.call_args.kwargs["default"] == ""
+
+
+async def test_cli_choice_resolves_a_typed_value_directly_not_just_by_number(cli_elicitor, monkeypatch):
+    """Covers both a user typing an option's value by hand and
+    `prompt_or_cancel`'s own blank-Enter default substitution — from
+    `_ask_choice`'s side, both arrive as the same string."""
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="pg")
+    )
+    answer = await cli_elicitor.ask("q1", _choice(default_value="pg"))
+    assert answer == AskAnswer(status="answered", values=("pg",))
+
+
+async def test_cli_choice_compact_drops_the_descriptive_caption(cli_elicitor, monkeypatch):
+    """`compact` pairs with `show_question` skipping the option list — the
+    remaining input point should be bare, not the usual "Send the answer
+    number..." caption. `prompt_or_cancel`'s own default-value suffix
+    (e.g. "(accept):") still carries the hint."""
+    mock = AsyncMock(return_value="accept")
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", mock)
+    await cli_elicitor.ask("q1", _choice(default_value="pg", compact=True))
+    assert mock.call_args.args[0] == ""
+
+
 # ─── CLI elicitor — _ask_path (browse mode) ─────────────────────────────
 
 
@@ -952,6 +1001,28 @@ def test_show_question_escapes_rich_markup_in_model_controlled_text():
     assert "Which [bold]one[/] to use?" in text
     assert "[dim]fast[/]" in text
     assert "mysql [/]" in text
+
+
+def test_show_question_compact_skips_the_option_list():
+    """A prompt that already spells out the choice in prose (e.g. a PRD
+    brief ending in its own "continue, or changes?" sentence) should not
+    also get a numbered list repeating it underneath."""
+    from rich.console import Console
+
+    from anton.chat_ui import StreamDisplay
+
+    console = Console(record=True, width=100)
+    StreamDisplay(console).show_question(
+        AskRequest(
+            prompt="Continue, or any changes?",
+            options=(AskOption(value="accept", label="Accept"), AskOption(value="cancel", label="Cancel")),
+            compact=True,
+        )
+    )
+    text = console.export_text()
+    assert "Continue, or any changes?" in text
+    assert "Accept" not in text
+    assert "1." not in text
 
 
 # ─── goal mode: without_ask_user ────────────────────────────────────────
