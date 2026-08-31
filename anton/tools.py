@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import uuid
 from typing import TYPE_CHECKING
@@ -73,21 +74,39 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     from rich.console import Console
     console = session._console or Console(quiet=True)
 
-    dropped_scrubbed = [
-        k for k, v in known_variables.items() if SCRUBBED_VALUE_RE.match(v)
-    ]
+    # Resolve markers naming an already-vaulted field (reused password); drop
+    # the rest (provider keys, [REDACTED_API_KEY], stale markers) — the model
+    # can't influence _DS_SECRET_VARS, so this is what ENG-463 relies on.
+    from anton.utils.datasources import _DS_SECRET_VARS
+
+    resolved_from_vault = []
+    dropped_scrubbed = []
+    for k, v in list(known_variables.items()):
+        if not SCRUBBED_VALUE_RE.match(v):
+            continue
+        marker_key = v[1:-1]
+        resolved = os.environ.get(marker_key, "") if marker_key in _DS_SECRET_VARS else ""
+        if resolved:
+            known_variables[k] = resolved
+            resolved_from_vault.append(k)
+        else:
+            dropped_scrubbed.append(k)
+
     if dropped_scrubbed:
-        known_variables = {
-            k: v
-            for k, v in known_variables.items()
-            if not SCRUBBED_VALUE_RE.match(v)
-        }
+        for k in dropped_scrubbed:
+            del known_variables[k]
         console.print()
         console.print(
             f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
             f"for {', '.join(dropped_scrubbed)} — those bracketed strings are "
             f"scrub-markers, not real credentials. Pass the actual secret "
             f"values instead."
+        )
+    if resolved_from_vault:
+        console.print()
+        console.print(
+            f"[anton.muted](anton)[/] Reusing the existing vaulted value for "
+            f"{', '.join(sorted(resolved_from_vault))}."
         )
 
     # ── Telemetry: connection attempt ────────────────────────────────
@@ -391,6 +410,13 @@ _CONNECT_DATASOURCE_DESCRIPTION_TAIL = (
     "vars like any other connection.\n\n"
     "Partial credentials are fine — save what the user provided. Ask for missing "
     "pieces in a later turn only if needed. Never invent values.\n\n"
+    "If a value in chat appears as a bracketed placeholder like [DS_POSTGRES_ABC12__PASSWORD] "
+    "instead of a real value, that means it was already masked before reaching you — the user "
+    "is referencing a credential already saved from an earlier connection (e.g. reusing the "
+    "same password for a second database). Pass that placeholder string through as-is in "
+    "known_variables; it resolves server-side to the real value without you ever seeing it. "
+    "Never invent a bracketed placeholder yourself — only pass one exactly as it appeared in "
+    "the conversation.\n\n"
     "Do NOT print any message before calling this tool — it handles the user-facing output."
 )
 
