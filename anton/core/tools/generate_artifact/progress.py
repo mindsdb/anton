@@ -2,7 +2,7 @@
 
 `GenState.step_started` turns an FSM node name into one of these lines and
 pushes it onto the progress channel; `handle_generate_artifact` forwards them
-as `ToolProgress` markers. The node names themselves (`make_api_spec`,
+as `ToolProgress` markers. The node names themselves (`make_tech_spec`,
 `make_api_spec`) are graph vocabulary and must never reach a user, so the
 mapping is explicit rather than derived from the identifier.
 
