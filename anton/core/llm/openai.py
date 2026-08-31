@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import NoReturn
 
 import openai
@@ -19,6 +19,7 @@ from .provider import (
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
+    ProviderAuthError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -42,6 +43,8 @@ from .provider import (
 
 logger = logging.getLogger(__name__)
 
+AsyncAPIKeyProvider = Callable[[], Awaitable[str]]
+
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
     """Map a provider HTTP error onto anton's typed/curated exceptions.
@@ -51,8 +54,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     previous four copy-pasted blocks had already diverged in wording.
 
     Mapping policy:
-      - 401 → ConnectionError with the invalid-key copy (cowork-server's
-        provider_auth detection keys on this exact phrase).
+      - 401 → ProviderAuthError with the invalid-key copy.
       - 403 with a structured gateway code (``model_access_denied`` /
         ``model_disabled``) → ModelUnavailableError carrying the code +
         model, with actionable copy. Detection is code-exact on purpose:
@@ -74,8 +76,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     ``code`` sits at top level. The gateway's 429 is FastAPI-style
     (``{"detail": …}``, no envelope) and passes through untouched. Both
     fields are therefore read from the top level first, with an envelope
-    fallback for clients that deliver the wire shape unmodified (anton's
-    pyproject allows ``openai>=1.0``, and proxies exist that re-wrap).
+    fallback for clients that deliver the wire shape unmodified (anton requires
+    ``openai>=2.21.0``, and proxies exist that re-wrap).
     The originally shipped ENG-598 mapper read only
     ``body["error"]["code"]`` — a key the SDK had already peeled off —
     which left the model-403 card dead in production.
@@ -93,7 +95,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     _foreign = origin_is_known_third_party(exc)
 
     if exc.status_code == 401:
-        raise ConnectionError(
+        raise ProviderAuthError(
             "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
@@ -827,7 +829,12 @@ class OpenAIProvider(LLMProvider):
         vision_format: str = "openai",
         flavor: str = FLAVOR_OPENAI_COMPATIBLE_GENERIC,
         reasoning_effort: str | None = None,
+        api_key_provider: AsyncAPIKeyProvider | None = None,
     ) -> None:
+        # Keep the construction-time value separate from the live supplier.
+        # ChatSession passes export_connection_info() into ScratchpadManager,
+        # whose subprocess/env boundary cannot carry a callable. The main-process
+        # async OpenAI client can ask the supplier for a fresh bearer per request.
         self._api_key = api_key
         self._base_url = base_url
         self._ssl_verify = ssl_verify
@@ -860,12 +867,13 @@ class OpenAIProvider(LLMProvider):
 
         import httpx
 
+        client_api_key = api_key_provider if api_key_provider is not None else api_key
         if api_version and _is_azure_endpoint(base_url):
             # Azure OpenAI: use the dedicated client which handles deployment
             # URL construction and api-version automatically.
             azure_kwargs: dict = {"api_version": api_version}
-            if api_key:
-                azure_kwargs["api_key"] = api_key
+            if client_api_key:
+                azure_kwargs["api_key"] = client_api_key
             if base_url:
                 azure_kwargs["azure_endpoint"] = base_url
             if not ssl_verify:
@@ -873,8 +881,8 @@ class OpenAIProvider(LLMProvider):
             self._client = AsyncAzureOpenAI(**azure_kwargs)
         else:
             kwargs: dict = {}
-            if api_key:
-                kwargs["api_key"] = api_key
+            if client_api_key:
+                kwargs["api_key"] = client_api_key
             if base_url:
                 kwargs["base_url"] = base_url
             if not ssl_verify:

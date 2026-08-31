@@ -482,6 +482,21 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+class ProviderAuthError(ConnectionError):
+    """Raised when a provider rejects its credential with HTTP 401.
+
+    The type distinguishes an authentication refusal from unrelated
+    ``ConnectionError`` failures. It remains a ``ConnectionError`` subclass so
+    in-process callers written against the previous 401 mapping keep working.
+    The client stamps ``role`` on a confirmed refusal so hosts can attribute
+    the recovery action to the provider that actually failed.
+    """
+
+    def __init__(self, message: str, *, role: str | None = None):
+        super().__init__(message)
+        self.role = role
+
+
 class StructuredOutputError(ValueError):
     """Raised when a forced-tool-call structured-output call yields no usable call.
 
