@@ -100,12 +100,12 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # hatch-vcs derives the version by describing against tags, and the
           # default fetch-depth of 1 fetches none of them.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
       - id: resolve
@@ -162,7 +162,7 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - uses: mindsdb/github-actions/setup-env@main
       - id: build
         uses: mindsdb/github-actions/build-push-ecr@main
