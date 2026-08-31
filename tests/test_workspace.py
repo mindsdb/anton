@@ -247,3 +247,77 @@ class TestSecretVault:
         assert os.environ.get("ANTON_TEST_REMOVE_XYZ") == "val"
         ws.remove_secret("ANTON_TEST_REMOVE_XYZ")
         assert os.environ.get("ANTON_TEST_REMOVE_XYZ") is None
+
+
+class TestSecretVaultEncoding:
+    # AntonSettings reads .anton/.env with env_file_encoding="utf-8"
+    # (anton/config/settings.py). The vault must therefore be written as
+    # UTF-8, not in the host locale: on a Windows code page (cp1252) a bare
+    # write_text() stores a non-ASCII secret as bytes the settings loader
+    # cannot decode, so every later AntonSettings() raises UnicodeDecodeError.
+
+    def test_non_ascii_secret_is_stored_as_utf8(self, ws):
+        ws.initialize()
+        ws.set_secret("ANTON_MINDS_MIND_NAME", "café_mind")
+
+        raw = ws.env_path.read_bytes()
+        assert "café_mind" in raw.decode("utf-8")
+
+    def test_secret_outside_the_host_code_page_is_storable(self, ws):
+        # 密钥 has no cp1252 representation, so a bare write_text() raises
+        # UnicodeEncodeError and the secret is never stored at all.
+        ws.initialize()
+        ws.set_secret("ANTON_MINDS_DATASOURCE", "密钥")
+        assert ws.get_secret("ANTON_MINDS_DATASOURCE") == "密钥"
+
+    def test_settings_can_load_a_vault_holding_a_non_ascii_secret(self, ws):
+        from anton.config.settings import AntonSettings
+
+        ws.initialize()
+        ws.set_secret("ANTON_MINDS_MIND_NAME", "café_mind")
+        assert AntonSettings(_env_file=str(ws.env_path)).minds_mind_name == "café_mind"
+
+    def test_anton_md_is_read_as_utf8(self, ws):
+        ws.initialize()
+        ws.anton_md_path.write_text("café", encoding="utf-8")
+        assert ws.read_anton_md() == "café"
+
+    def test_workspace_file_io_never_relies_on_the_host_locale(self, tmp_path):
+        # PEP 597: under `-X warn_default_encoding` every locale-default text
+        # open() emits an EncodingWarning. Asserting that none names
+        # workspace.py keeps this regression visible on UTF-8 CI too, where
+        # the behavioural tests above pass whether or not the bug is present.
+        import subprocess
+        import sys
+
+        import anton.workspace as workspace_mod
+
+        repo_root = Path(workspace_mod.__file__).resolve().parent.parent
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "import tempfile, warnings\n"
+            "from pathlib import Path\n"
+            "from anton.workspace import Workspace\n"
+            "with warnings.catch_warnings(record=True) as caught:\n"
+            "    warnings.simplefilter('always')\n"
+            "    ws = Workspace(Path(tempfile.mkdtemp()))\n"
+            "    ws.initialize()\n"
+            "    ws.set_secret('K', 'v')\n"
+            "    ws.load_env()\n"
+            "    ws.read_anton_md()\n"
+            "    ws.remove_secret('K')\n"
+            "for w in caught:\n"
+            "    if w.category is EncodingWarning:\n"
+            "        print(f'{w.filename}:{w.lineno}')\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [sys.executable, "-X", "warn_default_encoding", str(probe)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(repo_root)},
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        offenders = [ln for ln in proc.stdout.splitlines() if "workspace.py" in ln]
+        assert offenders == [], f"locale-default text I/O in workspace.py: {offenders}"

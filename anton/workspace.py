@@ -120,13 +120,14 @@ class Workspace:
         # Create anton.md if it doesn't exist
         if create_anton_md and not self._anton_md.is_file():
             self._anton_md.write_text(
-                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d"))
+                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d")),
+                encoding="utf-8",
             )
             actions.append(f"Created {self._anton_md}")
 
         # Create .env if it doesn't exist
         if not self._env_file.is_file():
-            self._env_file.write_text("# Anton environment variables\n")
+            self._env_file.write_text("# Anton environment variables\n", encoding="utf-8")
             actions.append(f"Created {self._env_file}")
 
         # Visible artifacts directory at the workspace root. Replaces
@@ -150,7 +151,7 @@ class Workspace:
         """Read anton.md content. Returns None if it doesn't exist."""
         if not self._anton_md.is_file():
             return None
-        return self._anton_md.read_text()
+        return self._anton_md.read_text(encoding="utf-8")
 
     def anton_md_modified_since_last_read(self) -> bool:
         """Check if anton.md has been modified since last read_anton_md_tracked()."""
@@ -187,7 +188,7 @@ class Workspace:
         result: dict[str, str] = {}
         if not self._env_file.is_file():
             return result
-        for line in self._env_file.read_text().splitlines():
+        for line in self._env_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -217,7 +218,7 @@ class Workspace:
         lines: list[str] = []
         replaced = False
         if self._env_file.is_file():
-            for line in self._env_file.read_text().splitlines():
+            for line in self._env_file.read_text(encoding="utf-8").splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith("#") and "=" in stripped:
                     existing_key = stripped.partition("=")[0].strip()
@@ -230,7 +231,7 @@ class Workspace:
         if not replaced:
             lines.append(f"{key}={value}")
 
-        self._env_file.write_text("\n".join(lines) + "\n")
+        self._env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         # Also set in current process environment
         os.environ[key] = value
@@ -245,7 +246,7 @@ class Workspace:
 
         lines: list[str] = []
         found = False
-        for line in self._env_file.read_text().splitlines():
+        for line in self._env_file.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and "=" in stripped:
                 existing_key = stripped.partition("=")[0].strip()
@@ -255,7 +256,7 @@ class Workspace:
             lines.append(line)
 
         if found:
-            self._env_file.write_text("\n".join(lines) + "\n")
+            self._env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
             os.environ.pop(key, None)
 
         return found
