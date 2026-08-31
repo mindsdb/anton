@@ -1,22 +1,18 @@
-"""ENG-1310 — a persistent provider-auth failure must propagate, not flatten.
+"""A confirmed provider-auth failure propagates without flattening.
 
-A `ConnectionError` (anton's "Invalid API key — …" copy for a 401 from the
-LLM gateway, see `openai.py`/`anthropic.py`) used to fall into a generic
+A `ProviderAuthError` (anton's typed 401 mapping from
+`openai.py`/`anthropic.py`) used to fall into a generic
 `except Exception` branch and get dumped into the chat as "An unexpected
 error occurred: Invalid API key … Please try again or rephrase your
 request." instead of reaching cowork-server's `turn_errors.is_auth_error()`,
 which already renders the correct "Reconnect MindsHub" / BYOK-key card.
 
-Two sites in `turn_stream` needed the same auth-shaped check, mirroring how
-ENG-1139 treats `EndpointConfigurationError` (also deterministic — retrying
-can't fix it):
+`LLMClient` now confirms the first typed refusal once before it reaches the
+session. The session must propagate the second refusal without spending its
+generic retry budget or injecting misleading recovery history.
 
-1. The immediate re-raise at the top of the retry loop — an invalid key
-   fails on the FIRST attempt instead of burning the count-based retry
-   budget on doomed retries.
-2. The retry-exhaustion fallback's own wrap-up call — belt-and-suspenders
-   for the case where retries were legitimately spent on a DIFFERENT
-   failure and the key only turns out to be bad on the final summary call.
+Both session re-raise sites remain covered: the main turn loop and the final
+wrap-up call made after unrelated errors exhausted their own retry budget.
 """
 
 from __future__ import annotations
@@ -28,7 +24,7 @@ import pytest
 
 from tests.conftest import make_mock_llm
 
-from anton.core.llm.provider import EndpointConfigurationError
+from anton.core.llm.provider import EndpointConfigurationError, ProviderAuthError
 from anton.core.session import ChatSession, ChatSessionConfig, _is_provider_auth_error
 
 _AUTH_ERROR_MESSAGE = "Invalid API key — check your OpenAI API key configuration."
@@ -83,19 +79,17 @@ async def _run_turn(session: ChatSession, prompt: str = "what's in my inbox?"):
     return events
 
 
-async def test_persistent_auth_failure_fails_immediately_without_wasting_retries(workspace):
-    """An invalid key can't be fixed by retrying — it must fail on the first
-    attempt, the same way EndpointConfigurationError (ENG-1139) does, not
-    after burning the count-based retry budget on doomed re-attempts."""
+async def test_session_does_not_retry_a_confirmed_auth_failure(workspace):
+    """The LLMClient boundary already confirmed this refusal once."""
     mock_llm = make_mock_llm()
-    script = _AlwaysRaisingPlanStream(ConnectionError(_AUTH_ERROR_MESSAGE))
+    script = _AlwaysRaisingPlanStream(ProviderAuthError(_AUTH_ERROR_MESSAGE))
     mock_llm.plan_stream = script
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
 
-    with pytest.raises(ConnectionError, match="Invalid API key"):
+    with pytest.raises(ProviderAuthError, match="Invalid API key"):
         await _run_turn(session)
 
-    assert script.calls == 1, "an auth failure must not be retried"
+    assert script.calls == 1, "the session must not add a third provider attempt"
 
 
 async def test_auth_failure_on_the_final_wrapup_call_still_reraises(workspace):
@@ -107,12 +101,12 @@ async def test_auth_failure_on_the_final_wrapup_call_still_reraises(workspace):
     mock_llm = make_mock_llm()
     script = _ScriptedExceptionPlanStream(
         [RuntimeError("boom"), RuntimeError("boom"), RuntimeError("boom"),
-         ConnectionError(_AUTH_ERROR_MESSAGE)]
+         ProviderAuthError(_AUTH_ERROR_MESSAGE)]
     )
     mock_llm.plan_stream = script
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
 
-    with pytest.raises(ConnectionError, match="Invalid API key"):
+    with pytest.raises(ProviderAuthError, match="Invalid API key"):
         await _run_turn(session)
 
     # 3 retry attempts (max_auto_retries=2) on the unrelated RuntimeError,
@@ -120,11 +114,9 @@ async def test_auth_failure_on_the_final_wrapup_call_still_reraises(workspace):
     assert script.calls == 4
 
 
-def test_is_provider_auth_error_matches_only_the_invalid_key_copy():
-    """The predicate both re-raise sites share — pinned directly so the two
-    call sites can't drift from each other (review feedback on ENG-1310)."""
-    assert _is_provider_auth_error(ConnectionError(_AUTH_ERROR_MESSAGE))
-    assert _is_provider_auth_error(ConnectionError("INVALID API KEY — case insensitive"))
+def test_is_provider_auth_error_matches_only_the_canonical_type():
+    assert _is_provider_auth_error(ProviderAuthError(_AUTH_ERROR_MESSAGE))
+    assert not _is_provider_auth_error(ConnectionError(_AUTH_ERROR_MESSAGE))
     assert not _is_provider_auth_error(ConnectionError("temporarily unavailable"))
     assert not _is_provider_auth_error(RuntimeError(_AUTH_ERROR_MESSAGE))
 
@@ -149,7 +141,7 @@ async def test_endpoint_configuration_error_on_the_final_wrapup_call_still_rerai
 
 
 async def test_generic_connection_error_still_falls_back_to_chat_text(workspace):
-    """Only the auth-shaped message re-raises — an unrelated ConnectionError
+    """Only the typed auth refusal re-raises — an unrelated ConnectionError
     (e.g. the generic 'temporarily unavailable' case) keeps the existing
     fallback-text behavior instead of failing the turn."""
     mock_llm = make_mock_llm()
