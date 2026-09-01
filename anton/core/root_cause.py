@@ -117,6 +117,7 @@ _SENTINEL_REASONS = {
     "scratchpad_missing_name": (TIER_SELF, "missing_name"),
     "missing_name": (TIER_SELF, "missing_argument"),
     "missing_slug": (TIER_SELF, "missing_argument"),
+    "missing_task": (TIER_SELF, "missing_argument"),
     "missing_description": (TIER_SELF, "missing_argument"),
     "invalid_type": (TIER_SELF, "invalid_argument"),
     "invalid_port": (TIER_SELF, "invalid_argument"),
@@ -129,6 +130,16 @@ _SENTINEL_REASONS = {
     # genuinely absent resource — but the agent chose the identifier and can
     # list the real ones, so it resolves to the non-tripping side.
     "artifact_not_found": (TIER_SELF, "unknown_resource"),
+    # edit_artifact could not land a diff. Self-inflicted rather than a
+    # wall: nothing in the environment is missing, the model's own diff
+    # did not match the file, and the tool result tells it to make the
+    # change with the scratchpad instead. Built as f"yolo_{status}" in
+    # the handler, so the tree scan cannot see these — they are listed
+    # here because the runtime classifier would otherwise bucket a
+    # perfectly ordinary fallback as unclassified.
+    "yolo_patch_failed": (TIER_SELF, "edit_not_applied"),
+    "yolo_no_diff": (TIER_SELF, "edit_not_applied"),
+    "yolo_error": (TIER_SELF, "edit_not_applied"),
     "unknown_datasource": (TIER_SELF, "unknown_resource"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
