@@ -422,51 +422,58 @@ class TestNonInteractiveSave:
 
     @pytest.mark.asyncio
     async def test_scrubbed_marker_for_vaulted_field_resolves_and_saves(
-        self, vault_dir, monkeypatch
+        self, vault_dir
     ):
-        """ENG-1957: a marker naming an already-vaulted field resolves via
-        os.environ instead of being dropped — the model reuses a password
-        from an earlier connection without ever seeing it."""
-        marker_key = "DS_POSTGRES_ABC12__PASSWORD"
-        monkeypatch.setenv(marker_key, "s3cr3t-reused")
-        _DS_SECRET_VARS.add(marker_key)
-        try:
-            session = _make_session(vault_dir)
-            with _patch_test_ok():
-                await handle_connect_datasource(
-                    session,
-                    {
-                        "engine": "postgres",
-                        "known_variables": {
-                            "host": "db.example.com",
-                            "database": "sales",
-                            "user": "admin",
-                            "password": f"[{marker_key}]",
-                        },
+        """ENG-1957: a marker naming a field of a connection already saved in
+        THIS session's own vault resolves instead of being dropped — the
+        model reuses a password from an earlier connection without ever
+        seeing it."""
+        session = _make_session(vault_dir)
+        session._data_vault.save(
+            "postgres",
+            "abc12345",
+            {
+                "host": "db.example.com",
+                "port": "5432",
+                "database": "sales",
+                "user": "admin",
+                "password": "s3cr3t-reused",
+            },
+        )
+        marker = "[DS_POSTGRES_ABC12345__PASSWORD]"
+        with _patch_test_ok():
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db2.example.com",
+                        "database": "analytics",
+                        "user": "admin",
+                        "password": marker,
                     },
-                )
-            conns = session._data_vault.list_connections()
-            assert len(conns) == 1
-            saved = session._data_vault.load("postgres", conns[0]["name"])
-            assert saved["password"] == "s3cr3t-reused"
-            printed = " ".join(
-                str(c.args[0])
-                for c in session._console.print.call_args_list
-                if c.args
+                },
             )
-            assert "Reusing the existing vaulted value" in printed
-            assert "password" in printed
-        finally:
-            _DS_SECRET_VARS.discard(marker_key)
+        conns = session._data_vault.list_connections()
+        assert len(conns) == 2
+        new_conn = next(c for c in conns if c["name"] != "abc12345")
+        saved = session._data_vault.load("postgres", new_conn["name"])
+        assert saved["password"] == "s3cr3t-reused"
+        printed = " ".join(
+            str(c.args[0])
+            for c in session._console.print.call_args_list
+            if c.args
+        )
+        assert "Reusing the existing vaulted value" in printed
+        assert "password" in printed
 
     @pytest.mark.asyncio
     async def test_provider_key_marker_does_not_resolve_even_if_env_var_exists(
         self, vault_dir, monkeypatch
     ):
-        """Security-critical (ENG-463): a marker naming a key NOT in
-        _DS_SECRET_VARS must stay dropped even when a same-named env var
-        happens to hold a real secret — only the closed vaulted-field set
-        may be resolved."""
+        """Security-critical (ENG-463): a marker naming a provider key must
+        stay dropped even when a same-named env var holds a real secret —
+        it isn't a namespaced field of any connection in this vault."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-actual-platform-secret")
         session = _make_session(vault_dir)
         interactive = _fake_interactive(session)
@@ -494,6 +501,50 @@ class TestNonInteractiveSave:
         )
         assert "scrubbed-placeholder" in printed
         assert "Reusing the existing vaulted value" not in printed
+
+    @pytest.mark.asyncio
+    async def test_another_sessions_live_test_credential_does_not_resolve(
+        self, vault_dir, monkeypatch
+    ):
+        """Security-critical (ENG-1957 follow-up): a flat DS_* marker left in
+        os.environ/_DS_SECRET_VARS by another session's in-flight connection
+        test (see run_connection_test in verify.py) must NOT resolve just
+        because it's process-global — only namespaced fields of THIS
+        session's own vault may resolve. This is what actually closes the
+        cross-session leak, not merely restricting to secret fields."""
+        marker_key = "DS_PASSWORD"
+        monkeypatch.setenv(marker_key, "another-sessions-live-test-value")
+        _DS_SECRET_VARS.add(marker_key)
+        try:
+            session = _make_session(vault_dir)
+            interactive = _fake_interactive(session)
+            with patch(
+                "anton.commands.datasource.handle_connect_datasource",
+                new=interactive,
+            ):
+                await handle_connect_datasource(
+                    session,
+                    {
+                        "engine": "postgres",
+                        "known_variables": {
+                            "host": "db.example.com",
+                            "database": "sales",
+                            "user": "admin",
+                            "password": f"[{marker_key}]",
+                        },
+                    },
+                )
+            interactive.assert_called_once()
+            assert session._data_vault.list_connections() == []
+            printed = " ".join(
+                str(c.args[0])
+                for c in session._console.print.call_args_list
+                if c.args
+            )
+            assert "scrubbed-placeholder" in printed
+            assert "Reusing the existing vaulted value" not in printed
+        finally:
+            _DS_SECRET_VARS.discard(marker_key)
 
     @pytest.mark.asyncio
     async def test_yolo_dedups_matching_connection(self, vault_dir):

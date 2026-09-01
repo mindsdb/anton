@@ -74,18 +74,20 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     from rich.console import Console
     console = session._console or Console(quiet=True)
 
-    # Resolve markers naming an already-vaulted field (reused password); drop
-    # the rest (provider keys, [REDACTED_API_KEY], stale markers) — the model
-    # can't influence _DS_SECRET_VARS, so this is what ENG-463 relies on.
-    from anton.utils.datasources import _DS_SECRET_VARS
+    from anton.core.datasources.data_vault import LocalDataVault
+    vault = session._data_vault or LocalDataVault()
+
+    # Resolve markers naming a field already saved in THIS vault (reused
+    # password); drop the rest. Scoped to `vault`, not global os.environ —
+    # see unscrub_marker's docstring.
+    from anton.utils.datasources import unscrub_marker
 
     resolved_from_vault = []
     dropped_scrubbed = []
     for k, v in list(known_variables.items()):
         if not SCRUBBED_VALUE_RE.match(v):
             continue
-        marker_key = v[1:-1]
-        resolved = os.environ.get(marker_key, "") if marker_key in _DS_SECRET_VARS else ""
+        resolved = unscrub_marker(vault, v)
         if resolved:
             known_variables[k] = resolved
             resolved_from_vault.append(k)
@@ -121,9 +123,6 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     if _settings:
         from anton.analytics import send_event
         send_event(_settings, "ds_connect_attempt", engine=engine)
-
-    from anton.core.datasources.data_vault import LocalDataVault
-    vault = session._data_vault or LocalDataVault()
 
     if known_variables:
         from anton.core.datasources.datasource_registry import (
