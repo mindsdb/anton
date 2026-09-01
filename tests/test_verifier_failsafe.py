@@ -1257,3 +1257,55 @@ async def test_mixed_classes_do_not_depend_on_arrival_order(workspace):
         assert session._verifier_latch_reason == "mixed"
     finally:
         await session.close()
+
+
+async def test_a_carried_mixed_reason_survives_the_round_trip(workspace):
+    """`mixed` is emitted, so it must also be accepted: dropping it made a
+    restored latch book `latched_hard` and named a cause that was not the
+    cause."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    carried = {
+        "model": "claude-sonnet-4-6", "no_verdict_failures": 2,
+        "latched": True, "reason": "mixed", "skips": 0,
+    }
+    session = _make_session(workspace, mock_llm, initial_verifier_latch=carried)
+    try:
+        assert session._verifier_latch_reason == "mixed"
+        assert session.verifier_latch["reason"] == "mixed"
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("failures", [0, 1])
+async def test_a_latch_below_the_threshold_is_ignored(workspace, failures):
+    """Only a denial latches before the threshold, so this record could not have
+    come from a real session. Trusting it would switch verification off on
+    storage nobody can account for."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    session = _make_session(workspace, mock_llm, initial_verifier_latch={
+        "model": "claude-sonnet-4-6", "no_verdict_failures": failures,
+        "latched": True, "reason": "truncated", "skips": 0,
+    })
+    try:
+        assert session._verifier_latched is False
+        assert session._verifier_no_verdict_failures == 0
+    finally:
+        await session.close()
+
+
+async def test_a_denied_latch_carries_no_counted_failures(workspace):
+    """The one legitimate latched-with-zero record: a denial latches on the
+    first occurrence, so the consistency check must not reject it."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    session = _make_session(workspace, mock_llm, initial_verifier_latch={
+        "model": "claude-sonnet-4-6", "no_verdict_failures": 0,
+        "latched": True, "reason": "denied", "skips": 0,
+    })
+    try:
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "denied"
+    finally:
+        await session.close()

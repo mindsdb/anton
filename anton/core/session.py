@@ -454,6 +454,20 @@ _DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # is how they drifted out of date.
 _LATCHING_VERDICT_FAILURES = ("hard", "truncated")
 
+# Values `_verifier_latch_reason` can hold, and therefore what a host can hand
+# back. Named because it is emitted in one place (`_note_latch_class`, plus
+# "denied" on its own branch) and validated in another, and those two drifted:
+# "mixed" was emitted but not accepted, so a restored mixed latch silently
+# booked `latched_hard`.
+_LATCH_REASONS = ("hard", "truncated", "mixed", "denied")
+
+# Verdict calls producing no verdict before the latch engages. Two, because the
+# first can be a one-off and ENG-1079 wants its honest diagnosis for that. A
+# deterministic denial is the exception: it recurs by construction, so it
+# latches on the first, which is why a latched record can legitimately carry
+# zero counted failures.
+_VERIFIER_LATCH_THRESHOLD = 2
+
 # Turns a latched session skips before spending one verdict call to see whether
 # the cause has gone away (user switched model, gateway fix shipped). Without a
 # re-probe the latch is permanent for the session and "reset on a successful
@@ -1454,17 +1468,23 @@ class ChatSession:
         if stored.get("model") != self._llm.coding_model:
             return
         try:
-            failures = int(stored.get("no_verdict_failures") or 0)
-            skips = int(stored.get("skips") or 0)
+            failures = max(0, int(stored.get("no_verdict_failures") or 0))
+            skips = max(0, int(stored.get("skips") or 0))
         except (TypeError, ValueError):
             return
-        self._verifier_no_verdict_failures = max(0, failures)
-        self._verifier_latch_skips = max(0, skips)
-        self._verifier_latched = bool(stored.get("latched"))
+        latched = bool(stored.get("latched"))
         reason = stored.get("reason")
-        self._verifier_latch_reason = (
-            reason if reason in ("hard", "truncated", "denied") else ""
-        )
+        if reason not in _LATCH_REASONS:
+            reason = ""
+        # A state this session could not have produced: only a deterministic
+        # denial latches before the threshold. Ignore the whole record rather
+        # than switch verification off on a latch we cannot account for.
+        if latched and reason != "denied" and failures < _VERIFIER_LATCH_THRESHOLD:
+            return
+        self._verifier_no_verdict_failures = failures
+        self._verifier_latch_skips = skips
+        self._verifier_latched = latched
+        self._verifier_latch_reason = reason
 
     @property
     def verifier_latch(self) -> dict | None:
@@ -5708,7 +5728,7 @@ class ChatSession:
                         if self._turn_cost is not None:
                             self._turn_cost.verification_skipped = True
                         break
-                    if self._verifier_no_verdict_failures >= 2:
+                    if self._verifier_no_verdict_failures >= _VERIFIER_LATCH_THRESHOLD:
                         # Threshold reached: the cause is established, so latch
                         # and skip the diagnosis on this turn too — a second
                         # "checking in" message plus a second full-history call
