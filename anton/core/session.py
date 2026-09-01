@@ -390,10 +390,11 @@ class _VerifierVerdict(BaseModel):
 # An EXHAUSTED ladder now counts toward the latch, where a single truncation
 # once did not. The old rule read one truncation as a tail sample of a model's
 # verbosity rather than proof about the next call, which holds inside a long
-# session; it does not hold for a host that rebuilds the session per message,
-# where the ladder is exhausted every message and the counter never survives to
-# a second sample. Typed transients still never latch — see
-# `_TRANSIENT_VERDICT_ERRORS`.
+# session, but it was never what the code saw: `retrying` is false at the last
+# budget, so the only truncation ever reaching the latch check is an EXHAUSTED
+# ladder, not one sample. Against the distribution above — 16 calls spanning
+# 245-1654 output tokens — blowing past 4096 twice is a statement about the
+# model. Typed transients still never latch, see `_TRANSIENT_VERDICT_ERRORS`.
 #
 # Accepted cost, worth knowing: this truncation is NOT an i.i.d. property of the
 # model. `_build_verify_request` renders a transcript that grows with the
@@ -454,18 +455,10 @@ _DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # is how they drifted out of date.
 _LATCHING_VERDICT_FAILURES = ("hard", "truncated")
 
-# Values `_verifier_latch_reason` can hold, and therefore what a host can hand
-# back. Named because it is emitted in one place (`_note_latch_class`, plus
-# "denied" on its own branch) and validated in another, and those two drifted:
-# "mixed" was emitted but not accepted, so a restored mixed latch silently
-# booked `latched_hard`.
-_LATCH_REASONS = ("hard", "truncated", "mixed", "denied")
-
 # Verdict calls producing no verdict before the latch engages. Two, because the
 # first can be a one-off and ENG-1079 wants its honest diagnosis for that. A
 # deterministic denial is the exception: it recurs by construction, so it
-# latches on the first, which is why a latched record can legitimately carry
-# zero counted failures.
+# latches on its own branch at the first occurrence.
 _VERIFIER_LATCH_THRESHOLD = 2
 
 # Turns a latched session skips before spending one verdict call to see whether
@@ -1026,9 +1019,6 @@ class ChatSessionConfig:
     data_vault: DataVault | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
-    #: Latch state a host persisted from this conversation's previous session
-    #: — see `ChatSession.verifier_latch`. Ignored unless its model matches.
-    initial_verifier_latch: dict | None = field(default=None, kw_only=True)
     history_store: HistoryStore | None = None
     session_id: str | None = None
     # WHICH AGENT ran this session. Surfaced on telemetry / langfuse traces, and
@@ -1168,7 +1158,8 @@ class ChatSession:
         # multi-step turn pays a full-history diagnosis call and shows the
         # "checking in" message (ENG-1155). Two such failures with no successful
         # verdict between them latch; a successful verdict clears it. Scoped to
-        # this session unless a host carries it — see `verifier_latch`.
+        # this session: Cowork rebuilds it per message, so a persistent failure
+        # there still diagnoses per message until a host carries this state.
         self._verifier_no_verdict_failures = 0
         self._verifier_latched = False
         self._verifier_latch_skips = 0
@@ -1183,7 +1174,6 @@ class ChatSession:
         self._resilience_nudge_at = s.resilience_nudge_at
         self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
-        self._restore_verifier_latch(config.initial_verifier_latch)
         # Router (ENG-648): explicit host override wins; otherwise the
         # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
         # tests pass bare CoreSettings-shaped objects.
@@ -1453,95 +1443,6 @@ class ChatSession:
             self._verifier_latch_reason = failure
         elif current != "mixed":
             self._verifier_latch_reason = "mixed"
-
-    def _restore_verifier_latch(self, stored: object) -> None:
-        """Adopt latch state a host persisted from an earlier session.
-
-        Ignored unless `model` matches the model this session would verify
-        with: state gathered against a model that cannot produce a verdict
-        says nothing about the one the user has since switched to. Ignored on
-        any malformed shape — this arrives from a host's storage, and no value
-        in it is worth failing a turn over.
-        """
-        if not isinstance(stored, dict):
-            return
-        if stored.get("model") != self._llm.coding_model:
-            return
-        try:
-            raw_failures = stored.get("no_verdict_failures")
-            raw_skips = stored.get("skips")
-            if isinstance(raw_failures, bool) or isinstance(raw_skips, bool):
-                return
-            failures = max(0, int(raw_failures or 0))
-            skips = max(0, int(raw_skips or 0))
-        except (TypeError, ValueError):
-            return
-        latched = stored.get("latched")
-        if not isinstance(latched, bool):
-            # Not `bool(...)`: this comes from a host's storage, where the
-            # string "false" would coerce to True and switch verification off.
-            return
-        reason = stored.get("reason")
-        if reason not in _LATCH_REASONS:
-            reason = ""
-        # A state this session could not have produced: a latch is only
-        # reachable at the threshold, and a denied latch is never carried (see
-        # `verifier_latch`). Ignore the whole record rather than switch
-        # verification off on a latch nothing accounts for.
-        if latched and failures < _VERIFIER_LATCH_THRESHOLD:
-            return
-        self._verifier_no_verdict_failures = failures
-        self._verifier_latch_skips = skips
-        self._verifier_latched = latched
-        self._verifier_latch_reason = reason
-
-    @property
-    def verifier_latch(self) -> dict | None:
-        """Latch state to carry to this conversation's next session.
-
-        A host that rebuilds this object per message must persist this and hand
-        it back as `initial_verifier_latch`, or the counter restarts at zero
-        every message: one message contributes at most one failure, so the
-        threshold of two is never reached and every message pays a hand-back.
-
-        UNLIKE `last_compaction`, None does NOT mean "keep what you stored" —
-        it means there is nothing to carry, so clear it. A successful verdict
-        resets the counter and the latch, and that reset has to reach storage
-        or verification stays off for the rest of the conversation.
-
-        A DENIED latch is deliberately not carried. Its cause is the wallet or
-        model access, which can change between one message and the next, and the
-        denied branch is built on recovery being "simply the next message" for a
-        host like this. Carrying it would stretch a top-up recovery across a
-        whole re-probe window to save one silent verdict call per message, and
-        that path shows the user nothing either way.
-
-        Only the local/desktop path carries this today. The pod gets its turn as
-        a `TurnRequestV1` and cowork-server owns all persistence, so the cloud
-        path needs a field on that contract and one on the reply stream before
-        it can — deliberately not done here.
-        """
-        if self._verifier_latch_reason == "denied":
-            return None
-        if not self._verifier_no_verdict_failures and not self._verifier_latched:
-            return None
-        if (
-            self._verifier_latched
-            and self._verifier_no_verdict_failures < _VERIFIER_LATCH_THRESHOLD
-        ):
-            # Never emit what `_restore_verifier_latch` would refuse. A denial
-            # latches without incrementing the counter, and a re-probe can
-            # reclassify that latch off "denied", which leaves a latch the
-            # threshold cannot explain. Carry nothing rather than a record that
-            # is silently dropped on the way back in.
-            return None
-        return {
-            "model": self._llm.coding_model,
-            "no_verdict_failures": self._verifier_no_verdict_failures,
-            "latched": self._verifier_latched,
-            "reason": self._verifier_latch_reason,
-            "skips": self._verifier_latch_skips,
-        }
 
     def _record_root_cause(
         self, tool_ok: bool | None, reason: str, result_text: str
