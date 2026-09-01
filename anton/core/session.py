@@ -1028,7 +1028,7 @@ class ChatSessionConfig:
     initial_history: list[dict] | None = None
     #: Latch state a host persisted from this conversation's previous session
     #: — see `ChatSession.verifier_latch`. Ignored unless its model matches.
-    initial_verifier_latch: dict | None = None
+    initial_verifier_latch: dict | None = field(default=None, kw_only=True)
     history_store: HistoryStore | None = None
     session_id: str | None = None
     # WHICH AGENT ran this session. Surfaced on telemetry / langfuse traces, and
