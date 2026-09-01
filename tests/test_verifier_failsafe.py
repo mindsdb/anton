@@ -1331,3 +1331,56 @@ async def test_a_non_boolean_latched_value_is_ignored(workspace, latched):
         assert session._verifier_no_verdict_failures == 0
     finally:
         await session.close()
+
+
+@pytest.mark.parametrize("failures, latched, reason, skips", [
+    (1, False, "truncated", 0),
+    (1, False, "hard", 0),
+    (2, True, "truncated", 0),
+    (2, True, "hard", 3),
+    (2, True, "mixed", 9),
+    (5, True, "mixed", 0),
+])
+async def test_whatever_is_emitted_survives_being_restored(
+    workspace, failures, latched, reason, skips
+):
+    """The emitter and the validator have drifted twice on this branch. This
+    pins the invariant instead: anything `verifier_latch` hands out must come
+    back unchanged, so a record can never be emitted and then silently dropped.
+    """
+    mock_llm = make_mock_llm()
+    source = _make_session(workspace, mock_llm)
+    try:
+        source._verifier_no_verdict_failures = failures
+        source._verifier_latched = latched
+        source._verifier_latch_reason = reason
+        source._verifier_latch_skips = skips
+        carried = source.verifier_latch
+        assert carried is not None
+    finally:
+        await source.close()
+
+    restored = _make_session(workspace, mock_llm, initial_verifier_latch=carried)
+    try:
+        assert restored.verifier_latch == carried, (
+            "the restore dropped or altered a record the property emitted"
+        )
+    finally:
+        await restored.close()
+
+
+@pytest.mark.parametrize("reason", ["denied", "truncated"])
+async def test_a_latch_the_threshold_cannot_explain_is_never_emitted(workspace, reason):
+    """A denial latches without incrementing the counter, and a re-probe can
+    reclassify that latch off "denied" — leaving latched=True with one counted
+    failure, which the restore refuses. Emit nothing rather than that."""
+    mock_llm = make_mock_llm()
+    session = _make_session(workspace, mock_llm)
+    try:
+        session._verifier_latched = True
+        session._verifier_no_verdict_failures = 1
+        session._verifier_latch_reason = reason
+
+        assert session.verifier_latch is None
+    finally:
+        await session.close()

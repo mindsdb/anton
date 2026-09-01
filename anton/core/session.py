@@ -1515,10 +1515,25 @@ class ChatSession:
         host like this. Carrying it would stretch a top-up recovery across a
         whole re-probe window to save one silent verdict call per message, and
         that path shows the user nothing either way.
+
+        Only the local/desktop path carries this today. The pod gets its turn as
+        a `TurnRequestV1` and cowork-server owns all persistence, so the cloud
+        path needs a field on that contract and one on the reply stream before
+        it can — deliberately not done here.
         """
         if self._verifier_latch_reason == "denied":
             return None
         if not self._verifier_no_verdict_failures and not self._verifier_latched:
+            return None
+        if (
+            self._verifier_latched
+            and self._verifier_no_verdict_failures < _VERIFIER_LATCH_THRESHOLD
+        ):
+            # Never emit what `_restore_verifier_latch` would refuse. A denial
+            # latches without incrementing the counter, and a re-probe can
+            # reclassify that latch off "denied", which leaves a latch the
+            # threshold cannot explain. Carry nothing rather than a record that
+            # is silently dropped on the way back in.
             return None
         return {
             "model": self._llm.coding_model,
