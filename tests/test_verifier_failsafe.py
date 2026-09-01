@@ -62,6 +62,13 @@ def _scratchpad_response(text: str, action: str, name: str, code: str = "") -> L
     )
 
 
+# Anchors into the verifier-failure hand-back (session.py). Shared because the
+# denied-verdict tests assert this text NEVER enters history — anchored on a
+# string the prompt no longer contains, those assertions would pass vacuously.
+_HANDBACK_ANCHOR = "automatic check on whether the task is complete"
+_HANDBACK_PROGRESS = "Confirming what was completed..."
+
+
 class _FakeAsyncIter:
     def __init__(self, items):
         self._items = items
@@ -116,14 +123,27 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         # exactly one more model call happens (the honest diagnosis) — not a
         # forced "Continue working" continuation, and not silence.
         progress_msgs = [e.message for e in events if isinstance(e, StreamTaskProgress)]
-        assert "Something went wrong — checking in with you..." in progress_msgs
+        assert _HANDBACK_PROGRESS in progress_msgs
         assert call_count == 3
 
         history_texts = [
             m["content"] for m in session.history
             if m.get("role") == "user" and isinstance(m.get("content"), str)
         ]
-        assert any("task-completion check failed to run" in t for t in history_texts)
+        assert any(_HANDBACK_ANCHOR in t for t in history_texts)
+        # The hand-back must not read as a failed turn, and must not invite the
+        # model to restate a path from memory: asked where the file went, it
+        # named the path it MEANT to write and the user went looking there.
+        assert any("Your reply above stands" in t for t in history_texts)
+        assert any(
+            "Never state a path you intended to write" in t for t in history_texts
+        )
+        # It must not claim the work was clean either. Only the tool-round count
+        # gates this path, so a turn whose tool calls failed lands here too, and
+        # a "nothing went wrong" framing would be the same misreport inverted.
+        assert any(
+            "including any tool that returned an error" in t for t in history_texts
+        )
         assert not any("Continue working on the original request" in t for t in history_texts)
         # The model must be asked for a solvability self-assessment, not just
         # a status dump — otherwise "let me know how to proceed" is a vague
@@ -139,12 +159,14 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         await session.close()
 
 
-async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(workspace):
+async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(workspace, caplog):
     """The ENG-1081 ladder can run dry: a verdict truncated at 2048 AND at the
     4096 retry (narrating model, huge session) used to fall into the same
     silent fake-COMPLETE this file exists to remove. Exhausted budgets are not
     a verdict either — the honest-diagnosis path must fire for them too.
     """
+    import logging
+
     from anton.core.llm.provider import StructuredOutputError
     from anton.core.session import _VERIFIER_TOKEN_BUDGETS
 
@@ -186,16 +208,36 @@ async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(worksp
 
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
     try:
-        events = [e async for e in session.turn_stream("run my script")]
+        with caplog.at_level(logging.INFO):
+            events = [e async for e in session.turn_stream("run my script")]
 
         assert budgets_seen == list(_VERIFIER_TOKEN_BUDGETS), (
             "the ladder must exhaust every budget before giving up"
         )
         progress_msgs = [e.message for e in events if isinstance(e, StreamTaskProgress)]
-        assert "Something went wrong — checking in with you..." in progress_msgs, (
+        assert _HANDBACK_PROGRESS in progress_msgs, (
             "exhausted budgets must fail toward the diagnosis, not a silent COMPLETE"
         )
         assert call_count == 3
+        # Only the attempt that ends the ladder is a failure; the retried one is
+        # not, so a default-level (WARNING) log carries exactly one of the two.
+        attempts = [
+            r for r in caplog.records
+            if "completion-verifier verdict=" in r.getMessage()
+            and "output_tokens=" in r.getMessage()
+        ]
+        ladder = [logging.INFO] * (len(_VERIFIER_TOKEN_BUDGETS) - 1)
+        assert [r.levelno for r in attempts] == ladder + [logging.WARNING]
+        # This clause carries the dominant free-tier failure, so the line has to
+        # name the exception type or a support log cannot say what broke.
+        assert all("error=StructuredOutputError" in r.getMessage() for r in attempts)
+        # And the line naming the failure class must itself clear WARNING, or a
+        # customer's default log cannot say why the turn handed back.
+        gave_up = [
+            r for r in caplog.records
+            if "failing toward an honest diagnosis" in r.getMessage()
+        ]
+        assert [r.levelno for r in gave_up] == [logging.WARNING]
     finally:
         await session.close()
 
@@ -837,9 +879,8 @@ async def test_empty_diagnosis_is_logged_not_circular(workspace, caplog):
 #
 # A wallet 402 / allowance 429 (TokenLimitExceeded, code-exact per ENG-1169) or
 # a 404'd/403'd model (ModelUnavailableError) recurs on every retry by
-# construction. The turn's work already succeeded — telling the user "the
-# task-completion check failed to run (internal error)" and streaming an
-# apology is a misreport (measured: 208 aux-call wallet-402s across 33 users in
+# construction. The turn's work already succeeded — telling the user an
+# internal check failed and streaming an apology is a misreport (measured: 208 aux-call wallet-402s across 33 users in
 # 14 days, every one surfaced as an internal error). The denied path must be
 # SILENT: no history injection, no diagnosis stream, latch on call one.
 #
@@ -885,18 +926,18 @@ async def test_denied_verdict_latches_silently_on_first_occurrence(
                     diagnoses += 1
 
         # Silent: no diagnosis stream ever fires, and the user never sees the
-        # "Something went wrong — checking in with you..." progress line.
+        # hand-back's progress line.
         assert diagnoses == 0, (
             f"denied verdicts must not stream a diagnosis, got {diagnoses}"
         )
-        assert not any("Something went wrong" in m for m in progress_messages)
-        # The "internal error" SYSTEM injection must never enter history —
-        # it persists into every later turn's payload once appended.
+        assert not any(_HANDBACK_PROGRESS in m for m in progress_messages)
+        # The hand-back SYSTEM injection must never enter history — it persists
+        # into every later turn's payload once appended.
         assert not any(
-            "task-completion check failed" in str(m.get("content", ""))
+            _HANDBACK_ANCHOR in str(m.get("content", ""))
             for m in session._history
             if isinstance(m, dict)
-        ), "the internal-error injection reached history on a denied verdict"
+        ), "the hand-back injection reached history on a denied verdict"
         # Latched on the FIRST call: turns 2-4 pay nothing.
         assert calls["n"] == 1, (
             f"denied verdict must latch on the first occurrence, got {calls['n']} calls"
@@ -963,7 +1004,7 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
         assert session._verifier_latched is True
         assert diagnoses == 0
         assert not any(
-            "task-completion check failed" in str(m.get("content", ""))
+            _HANDBACK_ANCHOR in str(m.get("content", ""))
             for m in session._history
             if isinstance(m, dict)
         )

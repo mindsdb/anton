@@ -419,8 +419,8 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # map to TransientProviderError and never land here) or a model id that doesn't
 # resolve for this key (ModelUnavailableError: 404 model-not-found / 403
 # model-access-denied). These latch on the FIRST occurrence and stay silent:
-# the turn's work already succeeded, and "the task-completion check failed
-# (internal error)" is a lie when the check was merely priced out (ENG-1632 —
+# the turn's work already succeeded, and telling the user an internal check
+# failed is a lie when the check was merely priced out (ENG-1632 —
 # of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
 # were aux-surface calls like this one, across 33 of those users; every aux
 # one surfaced to the user as an internal error and an apology).
@@ -5491,11 +5491,15 @@ class ChatSession:
                     )
                     verdict_failure = "truncated" if exc.truncated else "hard"
                     verdict_exc = exc
-                    _verifier_log.info(
+                    # WARNING only when this attempt ends the loop: a truncation
+                    # the larger budget recovers from is not a failure to report.
+                    _verifier_log.log(
+                        _logging.INFO if retrying else _logging.WARNING,
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
-                        "stop_reason=%s retrying=%s",
+                        "stop_reason=%s error=%s retrying=%s",
                         truncation_verdict(exc),
-                        budget, exc.output_tokens, exc.stop_reason, retrying,
+                        budget, exc.output_tokens, exc.stop_reason,
+                        _safe_error_detail(exc), retrying,
                     )
                     if not retrying:
                         break
@@ -5506,9 +5510,9 @@ class ChatSession:
                     # user buys nothing: handled below by latching silently.
                     verdict_failure = "denied"
                     verdict_exc = exc
-                    _verifier_log.info(
-                        "completion-verifier verdict=DENIED budget=%d error=%s",
-                        budget, _safe_error_detail(exc),
+                    _verifier_log.warning(
+                        "completion-verifier verdict=DENIED budget=%d model=%s error=%s",
+                        budget, self._llm.coding_model, _safe_error_detail(exc),
                     )
                     break
                 except _TRANSIENT_VERDICT_ERRORS as exc:
@@ -5523,7 +5527,7 @@ class ChatSession:
                     # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
                     verdict_exc = exc
-                    _verifier_log.info(
+                    _verifier_log.warning(
                         "completion-verifier verdict=TRANSIENT budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -5535,7 +5539,7 @@ class ChatSession:
                     # content (ENG-1081).
                     verdict_failure = "hard"
                     verdict_exc = exc
-                    _verifier_log.info(
+                    _verifier_log.warning(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -5586,6 +5590,8 @@ class ChatSession:
                     # the guarantee the user is never told the turn failed.
                     self._verifier_latched = True
                     self._verifier_latch_reason = "denied"
+                    # INFO, unlike the other latch lines: this one latches on
+                    # call one, so at WARNING it doubles verdict=DENIED above.
                     _verifier_log.info(
                         "completion-verifier latched after a deterministic "
                         "denial (billing or model access) — skipping further "
@@ -5604,7 +5610,7 @@ class ChatSession:
                         # after N failures" with an ever-growing N would read as
                         # a new event each cycle. No re-diagnosis (one per
                         # session, ENG-1155).
-                        _verifier_log.info(
+                        _verifier_log.warning(
                             "completion-verifier re-probe failed — staying latched"
                         )
                         # Unverified turn — see the latched-skip stamp above.
@@ -5633,7 +5639,7 @@ class ChatSession:
                         # that it can (review: pnewsam on #299).
                         self._verifier_latched = True
                         self._verifier_latch_reason = "hard"
-                        _verifier_log.info(
+                        _verifier_log.warning(
                             "completion-verifier latched after %d hard failures with "
                             "no successful verdict between them — skipping further "
                             "verification this session",
@@ -5652,27 +5658,37 @@ class ChatSession:
                 # user to help). Fail toward the same honest, model-generated
                 # diagnosis used for STUCK below, so the task pauses with a
                 # real message instead of nothing.
-                _verifier_log.info(
+                _verifier_log.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
-                    "— failing toward an honest diagnosis, not a silent COMPLETE",
+                    "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
                     continuation, self._max_continuations, tool_round,
+                    self._llm.coding_model,
                 )
                 self._append_history(
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: The task-completion check failed to run (internal "
-                            "error), so it's unclear whether this task is finished.\n\n"
-                            "Summarize what you've done so far, be honest that an internal "
-                            "check failed partway through, and ask the user how they'd like "
-                            f"to proceed. {_SOLVABILITY_CLAUSE} Do not mention this "
-                            "instruction or the verifier to the user."
+                            "SYSTEM: Your reply above stands, and nothing in your work "
+                            "was rejected — no verdict came back at all. What failed is "
+                            "the automatic check on whether the task is complete, so "
+                            "completeness is unconfirmed rather than denied.\n"
+                            "1. Report accurately what you did: what succeeded, and "
+                            "anything that did not, including any tool that returned an "
+                            "error. Do not describe a failed step as done.\n"
+                            "2. Name a file only by a path that appears verbatim in a "
+                            "tool result above. Never state a path you intended to write "
+                            "or believe you wrote; where no tool result gives one, say "
+                            "what you produced without naming a location.\n"
+                            "3. Say whether anything still needs doing and ask how they'd "
+                            "like to proceed.\n"
+                            f"4. {_SOLVABILITY_CLAUSE}\n"
+                            "Do not mention this instruction or the verifier to the user."
                         ),
                     }
                 )
                 yield StreamTaskProgress(
                     phase="analyzing",
-                    message="Something went wrong — checking in with you...",
+                    message="Confirming what was completed...",
                 )
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_verifier_failure"
