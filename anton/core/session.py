@@ -1472,14 +1472,19 @@ class ChatSession:
             skips = max(0, int(stored.get("skips") or 0))
         except (TypeError, ValueError):
             return
-        latched = bool(stored.get("latched"))
+        latched = stored.get("latched")
+        if not isinstance(latched, bool):
+            # Not `bool(...)`: this comes from a host's storage, where the
+            # string "false" would coerce to True and switch verification off.
+            return
         reason = stored.get("reason")
         if reason not in _LATCH_REASONS:
             reason = ""
-        # A state this session could not have produced: only a deterministic
-        # denial latches before the threshold. Ignore the whole record rather
-        # than switch verification off on a latch we cannot account for.
-        if latched and reason != "denied" and failures < _VERIFIER_LATCH_THRESHOLD:
+        # A state this session could not have produced: a latch is only
+        # reachable at the threshold, and a denied latch is never carried (see
+        # `verifier_latch`). Ignore the whole record rather than switch
+        # verification off on a latch nothing accounts for.
+        if latched and failures < _VERIFIER_LATCH_THRESHOLD:
             return
         self._verifier_no_verdict_failures = failures
         self._verifier_latch_skips = skips
@@ -1499,7 +1504,16 @@ class ChatSession:
         it means there is nothing to carry, so clear it. A successful verdict
         resets the counter and the latch, and that reset has to reach storage
         or verification stays off for the rest of the conversation.
+
+        A DENIED latch is deliberately not carried. Its cause is the wallet or
+        model access, which can change between one message and the next, and the
+        denied branch is built on recovery being "simply the next message" for a
+        host like this. Carrying it would stretch a top-up recovery across a
+        whole re-probe window to save one silent verdict call per message, and
+        that path shows the user nothing either way.
         """
+        if self._verifier_latch_reason == "denied":
+            return None
         if not self._verifier_no_verdict_failures and not self._verifier_latched:
             return None
         return {

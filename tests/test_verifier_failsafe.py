@@ -1295,17 +1295,39 @@ async def test_a_latch_below_the_threshold_is_ignored(workspace, failures):
         await session.close()
 
 
-async def test_a_denied_latch_carries_no_counted_failures(workspace):
-    """The one legitimate latched-with-zero record: a denial latches on the
-    first occurrence, so the consistency check must not reject it."""
+async def test_a_denied_latch_is_not_carried(workspace):
+    """A denial's cause is the wallet, which can change between messages, and
+    the denied branch is built on recovery being the next message. Carrying it
+    would stretch a top-up recovery across a whole re-probe window."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=TokenLimitExceeded(
+        "402: Your wallet has no balance to cover the model 'haiku'."
+    ))
+    session = _make_session(workspace, mock_llm)
+    try:
+        await _run_one_turn(session, mock_llm, "message one")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "denied"
+        assert session.verifier_latch is None, (
+            "a denied latch must not be carried, so the host clears the column "
+            "and the next message verifies again"
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("latched", ["false", "true", 1, 0, None])
+async def test_a_non_boolean_latched_value_is_ignored(workspace, latched):
+    """From a host's storage, so `bool("false")` would be True and would switch
+    verification off for the conversation."""
     mock_llm = make_mock_llm()
     mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
     session = _make_session(workspace, mock_llm, initial_verifier_latch={
-        "model": "claude-sonnet-4-6", "no_verdict_failures": 0,
-        "latched": True, "reason": "denied", "skips": 0,
+        "model": "claude-sonnet-4-6", "no_verdict_failures": 2,
+        "latched": latched, "reason": "truncated", "skips": 0,
     })
     try:
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "denied"
+        assert session._verifier_latched is False
+        assert session._verifier_no_verdict_failures == 0
     finally:
         await session.close()
