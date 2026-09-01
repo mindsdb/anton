@@ -5498,6 +5498,17 @@ class ChatSession:
                     # attempt. ProviderAuthError subclasses ConnectionError,
                     # so it must stay ahead of the broad transient-verdict
                     # catch below or a confirmed verifier 401 is swallowed.
+                    #
+                    # This is deliberately unlike the wallet 402 and model 403
+                    # on this same call, which break and latch quietly per the
+                    # aux-surface reasoning at _DENIED_VERDICT_ERRORS: those
+                    # say the request was refused, while a confirmed 401 says
+                    # the credential is dead for every later call too. ENG-2116
+                    # requires a confirmed refusal on a required planning,
+                    # coding, or verifier call to reach the host as
+                    # provider_auth so the reconnect action survives. The cost
+                    # is that a turn whose reply already streamed still ends in
+                    # an auth error.
                     raise
                 except _DENIED_VERDICT_ERRORS as exc:
                     # Deterministic denial — see _DENIED_VERDICT_ERRORS (and the
