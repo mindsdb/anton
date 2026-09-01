@@ -84,6 +84,69 @@ def test_resolve_restricted_empty_degrades_to_public():
     assert eff == {"mode": "public"}
 
 
+def test_resolve_restricted_owner_only_does_not_degrade():
+    """Explicit owner_only is a valid selection: empty emails + no org stays restricted."""
+    eff, _, acc_v, owner = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, None
+    )
+    assert eff == {"mode": "restricted", "emails": [], "org_allowed": False}
+    assert acc_v == 1
+    assert owner["mode"] == "restricted"
+    assert owner["emails"] == []
+    assert owner["org_allowed"] is False
+    assert owner["owner_only"] is True
+
+
+def test_resolve_restricted_owner_only_canonicalized_away_when_emails_present():
+    """The owner always has access, so owner_only carries no meaning next to emails."""
+    _, _, _, owner = resolve_access(
+        None, {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "owner_only": True}, None
+    )
+    assert owner["owner_only"] is False
+
+
+def test_resolve_restricted_owner_only_canonicalized_away_when_org_allowed():
+    _, _, _, owner = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": True, "owner_only": True}, None
+    )
+    assert owner["owner_only"] is False
+
+
+def test_resolve_owner_only_to_emails_and_back_bumps_access_version():
+    """Each switch must invalidate viewer grants."""
+    prev = {"mode": "restricted", "emails": [], "org_allowed": False,
+            "owner_only": True, "access_version": 5}
+    _, _, acc_v, owner = resolve_access(
+        None, {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False}, prev
+    )
+    assert acc_v == 6
+
+    _, _, acc_v2, _ = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, owner
+    )
+    assert acc_v2 == 7
+
+
+def test_resolve_owner_only_unchanged_keeps_access_version():
+    prev = {"mode": "restricted", "emails": [], "org_allowed": False,
+            "owner_only": True, "access_version": 4}
+    _, _, acc_v, _ = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, prev
+    )
+    assert acc_v == 4
+
+
+def test_resolve_legacy_restricted_entry_without_owner_only_key_keeps_version():
+    """A pre-ENG-1769 entry has no owner_only key: prev.get() returns None and a
+    naive `False != None` comparison would bump the version on an unchanged
+    re-publish, resetting every viewer's grant."""
+    prev = {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "access_version": 3}
+    _, _, acc_v, _ = resolve_access(
+        None, {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False}, prev
+    )
+    assert acc_v == 3
+
+
 def test_parse_emails_splits_and_validates():
     valid, invalid = parse_emails("a@x.com, b@x.com foo@ ; c@y.io")
     assert valid == ["a@x.com", "b@x.com", "c@y.io"]
@@ -104,8 +167,34 @@ def test_access_from_owner_side_password():
 def test_access_from_owner_side_restricted():
     entry = {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": True}
     assert access_from_owner_side(entry) == {
-        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": True,
+        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": True, "owner_only": False,
     }
+
+
+def test_access_from_owner_side_restricted_owner_only():
+    entry = {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}
+    assert access_from_owner_side(entry) == {
+        "mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True,
+    }
+
+
+def test_access_from_owner_side_restricted_legacy_entry_has_false_flag():
+    """Pre-ENG-1769 entries have no owner_only key — it must read as False, not None."""
+    entry = {"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False}
+    assert access_from_owner_side(entry)["owner_only"] is False
+
+
+def test_keep_republish_of_owner_only_stays_restricted():
+    """The regression this exists for: without owner_only in the round-trip, a
+    'keep' re-publish reconstructs an empty selection which degrades to public,
+    silently making a private artifact world-readable."""
+    _, _, _, owner = resolve_access(
+        None, {"mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True}, None
+    )
+    reconstructed = access_from_owner_side(owner)
+    eff, _, _, owner2 = resolve_access(None, reconstructed, owner)
+    assert eff["mode"] == "restricted"
+    assert owner2["owner_only"] is True
 
 
 def test_access_from_owner_side_public_and_legacy():
@@ -188,7 +277,56 @@ async def test_prompt_access_restricted():
     fp = _FakePrompt(["restricted", "a@x.com, b@x.com", "y"])
     assert await prompt_access(fp) == {
         "mode": "restricted", "emails": ["a@x.com", "b@x.com"], "org_allowed": True,
+        "owner_only": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_empty_input_is_owner_only():
+    """Empty emails + no org is now a valid, explicit 'only me' selection."""
+    fp = _FakePrompt(["restricted", "", "n"])
+    assert await prompt_access(fp) == {
+        "mode": "restricted", "emails": [], "org_allowed": False, "owner_only": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_valid_emails_not_owner_only():
+    fp = _FakePrompt(["restricted", "a@x.com", "n"])
+    assert await prompt_access(fp) == {
+        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "owner_only": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_org_only_not_owner_only():
+    fp = _FakePrompt(["restricted", "", "y"])
+    assert await prompt_access(fp) == {
+        "mode": "restricted", "emails": [], "org_allowed": True, "owner_only": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_invalid_email_reprompts():
+    """A malformed address must NOT be silently dropped into an owner-only publish."""
+    fp = _FakePrompt(["restricted", "colleague@corp", "a@x.com", "n"])
+    result = await prompt_access(fp)
+    assert result == {
+        "mode": "restricted", "emails": ["a@x.com"], "org_allowed": False, "owner_only": False,
+    }
+    # The org question is asked once, after the email input finally validates.
+    assert sum("organization" in label for label in fp.asked) == 1
+    # The rejected token is echoed back in the re-prompt label.
+    assert any("colleague@corp" in label for label in fp.asked)
+
+
+@pytest.mark.asyncio
+async def test_prompt_access_restricted_mixed_input_reprompts():
+    """Valid + invalid together is still blocked: no silent 'invalid ignored'."""
+    fp = _FakePrompt(["restricted", "a@x.com bad", "a@x.com", "n"])
+    result = await prompt_access(fp)
+    assert result["emails"] == ["a@x.com"]
+    assert sum("organization" in label for label in fp.asked) == 1
 
 
 @pytest.mark.asyncio

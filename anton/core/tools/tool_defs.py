@@ -80,6 +80,8 @@ SCRATCHPAD_TOOL = ToolDef(
         "sample(var) inspects any variable with type-aware formatting — DataFrames get "
         "shape/dtypes/head, dicts get keys/values, lists get length/items. "
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
+        "get_llm, agentic_loop, web_search, sample, and progress are already available "
+        "as globals in the scratchpad — do not import them.\n"
         "All .anton/.env secrets are available as environment variables (os.environ)."
     ),
     input_schema={
@@ -464,11 +466,15 @@ SELECT_PATH_TOOL = ToolDef(
         "`start_dir` to seed the starting folder.\n"
         "• PICK — you already found several matches and need the user to disambiguate. "
         "Pass an explicit `candidates` list, OR a glob `pattern` (optionally under "
-        "`base_dir`) to find matches within the project. Exactly one match resolves "
-        "immediately with no prompt; zero matches tells you to refine.\n\n"
+        "`base_dir`) to find matches within the project. Exactly one `pattern` match "
+        "resolves immediately with no prompt; zero matches tells you to refine. A "
+        "single explicit candidate is NOT accepted silently — it is your guess, not "
+        "the user's choice, so the user is asked to confirm it first.\n\n"
         'On selection the tool returns {"status":"resolved","path":"<absolute path>"} '
         "— use that path directly and keep going. Other statuses: 'cancelled' (user "
-        "dismissed), 'no_matches', 'invalid', and 'picker_unavailable' (this host "
+        "dismissed or declined), 'no_matches', 'invalid', 'needs_confirmation' (confirm "
+        "the named candidate with the user before using it — never present it as "
+        "chosen until they agree), and 'picker_unavailable' (this host "
         "cannot render a picker). On 'picker_unavailable' follow the `message` in the "
         "result: in PICK mode it carries the `candidates` it found, so ask which of "
         "those the user meant; in BROWSE mode the file is somewhere you cannot reach, "
@@ -536,27 +542,38 @@ SELECT_PATH_TOOL = ToolDef(
 # forbidden here and by the harness file-access policy, guessing is forbidden.
 # The model resolved it by inventing the data (ENG-1357).
 #
-# PICK mode still earns its place without an elicitor: exactly one match
+# PICK mode still earns its place without an elicitor: a lone pattern match
 # auto-resolves with no user interaction, and ≥2 returns the candidate list so
 # the agent can ask in plain text — legitimate, because those paths are ones it
 # already found inside the project, not a path the user must type from memory.
+# A lone *explicit* candidate is the exception (ENG-1852): it is the model's
+# own guess echoed back, so it needs the user's confirmation (a choice card
+# where one renders, else 'needs_confirmation').
 SELECT_PATH_TOOL_PICK_ONLY = replace(
     SELECT_PATH_TOOL,
     description=(
         "Disambiguate between file/folder paths you have ALREADY located inside "
         "the project. Pass an explicit `candidates` list, OR a glob `pattern` "
         "(optionally under `base_dir`).\n\n"
-        "Exactly one match resolves immediately and you get the path back. Zero "
-        "matches tells you to refine. Two or more comes back as "
+        "Exactly one `pattern` match resolves immediately and you get the path "
+        "back. Zero matches tells you to refine. Two or more comes back as "
         "'picker_unavailable' WITH the candidates it found — ask the user which "
-        "of those they meant.\n\n"
+        "of those they meant. A single explicit candidate is NOT accepted "
+        "silently: it is your guess, not the user's choice, so the user is shown "
+        "a confirmation card first (or you get 'needs_confirmation' back — "
+        "confirm with the user before using it).\n\n"
         "This host cannot render an interactive file browser, so there is no "
         "BROWSE mode: you cannot ask the user to navigate to a file whose "
         "location you do not know. If the file is not in the project, ask the "
-        "user to attach it to the conversation.\n\n"
+        "user to attach it to the conversation. Never offer a path inside the "
+        "project as a substitute for a file or folder the user asked for "
+        "outside it — say plainly that this host cannot reach it, and ask them "
+        "to attach the files instead.\n\n"
         'Returns {"status":"resolved","path":"<absolute path>"} on success. '
-        "Other statuses: 'no_matches', 'invalid', 'picker_unavailable'. Never "
-        "re-ask in plain text after a resolved selection."
+        "Other statuses: 'no_matches', 'invalid', 'cancelled' (the user declined "
+        "or dismissed the confirmation), 'needs_confirmation', "
+        "'picker_unavailable'. Never re-ask in plain text after a resolved "
+        "selection."
     ),
     prompt=(
         "When the user refers to a file or folder without giving a path you can "
@@ -565,7 +582,9 @@ SELECT_PATH_TOOL_PICK_ONLY = replace(
         "between the matches. Do not guess which one they meant. If the file is "
         "not in the project at all, ask the user to attach it to the "
         "conversation; this host has no file browser, so do not ask them to "
-        "navigate to it and do not ask them to type or paste a path."
+        "navigate to it and do not ask them to type or paste a path. Never "
+        "offer a folder inside the project as a substitute for one the user "
+        "asked for outside it."
     ),
     # `replace()` copies input_schema by reference, so the schema must be
     # overridden too — otherwise the model is told two different things by the

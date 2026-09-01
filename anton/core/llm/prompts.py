@@ -97,6 +97,8 @@ multi-step AI workflows like classification, extraction, or analysis with struct
 the configured LLM's native web search and returns the model's narrative answer with source \
 links as a string. Use it for current/real-time information from within scratchpad code. The \
 call is synchronous.
+- get_llm, agentic_loop, and web_search are already available as globals inside \
+scratchpad code — do not import them.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE>_<NAME>__<FIELD> \
@@ -130,11 +132,7 @@ add more — installed packages persist across resets.
 
 {conversation_discipline}
 
-RUNTIME IDENTITY:
-{runtime_context}
-- You know what LLM provider and model you are running on. NEVER ask the user which \
-LLM or API they want — you already know. When building tools or code that needs an LLM, \
-use YOUR OWN provider and SDK (the one from the runtime info above).
+{runtime_identity_section}
 
 PROBLEM-SOLVING RESILIENCE:
 - When something fails (HTTP 403, import error, timeout, blocked request, etc.), pause \
@@ -254,7 +252,9 @@ writes across requests. Use ONLY when that state genuinely cannot live in an \
 external data source; prefer stateless when in doubt (see BACKEND & FULLSTACK \
 section) → `type="fullstack-stateful-app"`, `primary="static/index.html"`. \
 The frontend lives in a `static/` subfolder of the artifact, served by \
-`backend.py`.
+`backend.py`. Light durable state uses the platform `STATE` store (declare \
+`state_manifest.json`); heavy/relational data uses an external connected \
+database.
 
 WHEN NOT TO REGISTER:
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
@@ -450,17 +450,21 @@ SCRATCHPAD_STUCK_NUDGE = (
     "native call may be hanging — give that call its own timeout. Reuse the "
     "SAME scratchpad; do not rename it."
 )
-# An install failure is neither a size nor a liveness problem — shrinking the
-# cell cannot make a package install, and a reset throws away a venv that may
-# already hold most of the download (ENG-1275). Routed on "auto-install" in
-# the error text, ahead of the other scratchpad branches.
+# A missing package is neither a size nor a liveness problem — shrinking the
+# cell cannot conjure an import. Routed on "auto-install" in the error text,
+# ahead of the other scratchpad branches.
+# Must not coach re-declaring the failed name (ENG-1635): a hallucinated
+# import that gets echoed into 'packages' is the same unattended install one
+# turn later, with the agent as the only approver.
 SCRATCHPAD_INSTALL_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps failing on a package install, not "
-    "on its logic. Do not shrink or split the cell — that cannot make a "
-    "package install. Install the package explicitly with the scratchpad's "
-    "install action (double-check the PyPI name), then rerun the same cell. "
-    "If the explicit install also fails or times out, tell the user instead "
-    "of retrying."
+    "\n\nSYSTEM: This scratchpad cell keeps failing on a missing module, not "
+    "on its logic — imports never install anything. Do not shrink or split "
+    "the cell. Question the import itself first: get_llm, agentic_loop, "
+    "web_search, sample and progress are already globals (no import), and a "
+    "name recovered from a failing import may not be a real package at all. "
+    "Install a package only when you can name the real PyPI distribution "
+    "this task needs; if an install fails or times out, tell the user "
+    "instead of retrying."
 )
 # A budget kill with zero output is ambiguous — a stuck call and silent heavy
 # work look identical from outside. Say so, rather than confidently claiming

@@ -204,6 +204,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         cells: list[Cell] | None = None,
         workspace_path: Path | None = None,
         session_id: str | None = None,
+        scratchpad_ds_env: dict[str, str] | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -227,6 +228,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # conversation's UUID as `session_id`). Only used to scope the namespace
         # snapshot — see `_session_snapshot_path`.
         self._session_id: str | None = session_id
+        # DS_* overlay for this pad's subprocess; None keeps legacy full-copy behaviour.
+        self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -243,6 +246,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
+
+    def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
+        self._scratchpad_ds_env = ds_env
 
     def _session_snapshot_path(self, *, create: bool = False) -> Path | None:
         """Where this pad's namespace snapshot lives, or None if it can't be written.
@@ -600,10 +606,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
+        if self._scratchpad_ds_env is not None:
+            # Never trust inherited DS_* values — strip them, then overlay
+            # exactly what this pad should see.
+            for key in [k for k in env if k.startswith("DS_")]:
+                del env[key]
+            env.update(self._scratchpad_ds_env)
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
+        else:
+            env.pop("ANTON_SCRATCHPAD_MODEL", None)
         if self._coding_provider:
             env["ANTON_SCRATCHPAD_PROVIDER"] = self._coding_provider
+        else:
+            env.pop("ANTON_SCRATCHPAD_PROVIDER", None)
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -656,10 +672,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if uv:
             env["ANTON_UV_PATH"] = uv
 
-        # The in-cell auto-installer (scratchpad_boot) runs pip/uv under this
-        # budget. Pass the resolved setting so the worker's timer and the
-        # parent's kill windows in _read_result run off one number — they
-        # used to be independent constants that drifted apart (ENG-1275).
+        # scratchpad_boot no longer auto-installs on ModuleNotFoundError, so
+        # this var (and _read_result's install-span handling below) is dead;
+        # left wired rather than reworking the kill-window logic in one pass.
         env["ANTON_CELL_INSTALL_TIMEOUT"] = str(CoreSettings().cell_install_timeout)
 
         # Namespace snapshot path (ENG-1124). The boot script reads
@@ -1050,12 +1065,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         last_notice = 0.0
         last_output = 0.0
 
-        # In-cell auto-install span (ENG-1275). While the worker's installer
-        # runs, both kill windows defer to the install budget — the same
-        # cell_install_timeout the worker was handed at spawn — plus a grace
-        # margin, so the worker's own named install error wins the race
-        # against a parent kill. The cell's budget resumes, install time
-        # excluded, when the end marker arrives.
+        # Dead since scratchpad_boot dropped its in-cell auto-installer: the
+        # markers this deferral watches for are never emitted anymore. Left
+        # in place rather than unpicking it from the kill-window logic below.
         install_budget = float(s.cell_install_timeout)
         installing: str | None = None
         install_started = 0.0
@@ -1252,6 +1264,16 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         needed = [p for p in packages if p.lower() not in self._installed_packages]
         if not needed:
             return "All packages already installed."
+        # Belt for every caller (the tool paths reject earlier, with a typed
+        # reason): nothing flag-, URL- or path-shaped may reach pip's argv
+        # (ENG-1635 — a single "--index-url=…" entry redirects resolution for
+        # the whole call). Lazy import: this module must stay importable
+        # without the tools layer.
+        from anton.core.utils.scratchpad import reject_invalid_packages
+
+        refused = reject_invalid_packages(needed)
+        if refused:
+            return refused
         self._ensure_venv()
 
         uv = self._find_uv()
@@ -1335,6 +1357,7 @@ def local_scratchpad_runtime_factory(
     cells: list[Cell] | None,
     workspace_path: Path | None,
     session_id: str | None = None,
+    scratchpad_ds_env: dict[str, str] | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1345,4 +1368,5 @@ def local_scratchpad_runtime_factory(
         cells=cells,
         workspace_path=workspace_path,
         session_id=session_id,
+        scratchpad_ds_env=scratchpad_ds_env,
     )

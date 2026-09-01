@@ -13,7 +13,7 @@ import secrets
 import zipfile
 from pathlib import Path
 
-from anton.core.artifacts.models import Artifact
+from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
@@ -39,7 +39,29 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
 
 # Filenames inside an artifact folder that are housekeeping — never bundled.
-_FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.json"}
+# The .anton_state.db* entries are defensive: _zip_fullstack is allowlist-based
+# so root files are not bundled anyway, but this guards against future changes
+# (and covers the WAL side-files, where -wal holds the freshest data).
+# Local snapshot of the last-published state key schema (for the client-side
+# schema-change warning). Never bundled.
+_STATE_SNAPSHOT = ".state_manifest.published.json"
+_FULLSTACK_EXCLUDED = {
+    "metadata.json",
+    "README.md",
+    "backend.log",
+    ".published.json",
+    ".revisions",
+    ".anton_state.db",
+    ".anton_state.db-wal",
+    ".anton_state.db-shm",
+    _STATE_SNAPSHOT,
+}
+
+
+class StatePublishBlocked(Exception):
+    """Publish aborted: a previously published state collection disappeared from
+    the new schema, which would orphan its stored data. Tooling-level error
+    (not an anton_state runtime error) — surfaced to the publish caller."""
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
@@ -47,7 +69,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # Owner-side housekeeping files that must never enter the published
 # bundle. `.published.json` in particular holds the artifact's plaintext
 # access password (for the in-app eye-reveal) and must stay local.
-_BUNDLE_SKIP_NAMES = {".published.json"}
+_BUNDLE_SKIP_NAMES = {".published.json", ".revisions"}
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without
@@ -181,15 +203,15 @@ def _zip_html(path: Path) -> bytes:
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
             parent = path.resolve().parent
             for ref in _find_referenced_files(path):
-                arc_name = str(ref.relative_to(parent))
-                _write_scrubbed(zf, ref, arc_name)
+                _write_scrubbed(zf, ref, ref.relative_to(parent).as_posix())
         else:
             # Directory — include all files except owner-side housekeeping
             # (e.g. `.published.json`, which holds the plaintext access
             # password and must never be published).
             for f in sorted(path.rglob("*")):
-                if f.is_file() and f.name not in _BUNDLE_SKIP_NAMES:
-                    _write_scrubbed(zf, f, str(f.relative_to(path)))
+                rel = f.relative_to(path)
+                if f.is_file() and not any(part in _BUNDLE_SKIP_NAMES for part in rel.parts):
+                    _write_scrubbed(zf, f, rel.as_posix())
     return buf.getvalue()
 
 
@@ -233,7 +255,97 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
                     continue
                 _write_scrubbed(zf, f, arc_name)
                 included.append(arc_name)
+
+        manifest = artifact_dir / "state_manifest.json"
+        if manifest.is_file():
+            _write_scrubbed(zf, manifest, "state_manifest.json")
+            included.append("state_manifest.json")
+
+        included.extend(_vendor_anton_state(zf))
     return buf.getvalue(), included
+
+
+def _read_state_manifest(artifact_dir: Path) -> dict | None:
+    """Parse state_manifest.json from the artifact dir, or None if absent.
+
+    Included in the publish payload so the provisioning pipeline (subplan #4)
+    can read the schema without unzipping the bundle.
+    """
+    path = artifact_dir / "state_manifest.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _state_key_shape(manifest: dict) -> tuple:
+    """Normalised key schema (pk/sk name+type) for compatibility comparison."""
+    def attr(a):
+        return (a["name"], a.get("type", "S")) if a else None
+    return (attr(manifest.get("pk")), attr(manifest.get("sk")))
+
+
+def _warn_state_schema_change(artifact_dir: Path, manifest: dict) -> str | None:
+    """Warn (non-blocking) if the key schema changed vs the last publish — on a
+    shared table that orphans old data (no per-artifact key schema for AWS to
+    reject). Read-only: does NOT write the snapshot (see _save_state_snapshot)."""
+    snap = artifact_dir / _STATE_SNAPSHOT
+    if not snap.is_file():
+        return None
+    try:
+        prev = json.loads(snap.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if _state_key_shape(prev) == _state_key_shape(manifest):
+        return None
+    warning = (
+        "WARNING: state key schema changed since the last publish — existing "
+        "stored data will become UNREACHABLE (its keys are encoded under the old "
+        "schema). Migrations are out of scope in v1."
+    )
+    print(warning)
+    return warning
+
+
+def _save_state_snapshot(artifact_dir: Path, manifest: dict) -> None:
+    """Record the just-published key schema for the next publish's comparison.
+    Called ONLY after a successful /upload, so a failed publish doesn't hide the
+    next real change."""
+    (artifact_dir / _STATE_SNAPSHOT).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def _blocked_collection_drops(artifact_dir: Path, manifest: dict) -> set[str]:
+    """Collections present in the last published manifest but missing from the new
+    one — their stored data (keyed by artifact_id in the shared table) would be
+    orphaned. Empty when there is no snapshot (first publish) or nothing was
+    removed (adding a collection is safe)."""
+    snap = artifact_dir / _STATE_SNAPSHOT
+    if not snap.is_file():
+        return set()
+    try:
+        prev = json.loads(snap.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return set()
+    return set(prev.get("collections", [])) - set(manifest.get("collections", []))
+
+
+def _vendor_anton_state(zf: zipfile.ZipFile) -> list[str]:
+    """Copy the `anton_state` package into the bundle under `anton_state/`.
+
+    The published artifact imports `anton_state` from its own directory (the
+    runner puts the artifact dir on sys.path), so the SDK travels with the
+    bundle — version-locked, offline, no index needed.
+    """
+    import anton_state
+
+    pkg_dir = Path(anton_state.__file__).resolve().parent
+    added: list[str] = []
+    for f in sorted(pkg_dir.rglob("*.py")):
+        if "__pycache__" in f.parts:
+            continue
+        arc_name = f"anton_state/{f.relative_to(pkg_dir).as_posix()}"
+        _write_scrubbed(zf, f, arc_name)
+        added.append(arc_name)
+    return added
 
 
 def _collect_datasource_secrets(
@@ -277,6 +389,7 @@ def publish(
     pwd_version: int = 1,
     access: dict | None = None,
     access_version: int = 1,
+    artifact_key: str | None = None,
     vault: DataVault | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
@@ -303,6 +416,8 @@ def publish(
                   See `build_access_payload` for the outbound shape.
         access_version: Monotonic version bumped whenever the restricted list/
                   org flag changes, invalidating previously issued grants.
+        artifact_key: Stable ``artifact/<uuid>`` identity shared by the draft,
+                  every published version, and its comment threads.
         vault: Credential store to resolve datasource secrets from. Defaults
                   to anton's local vault (`~/.anton/data_vault`); cowork-server
                   passes its own vault so published secrets match where the
@@ -314,6 +429,7 @@ def publish(
         raise FileNotFoundError(f"Path not found: {file_path}")
 
     payload_dict: dict = {}
+    state_manifest = None
 
     artifact = _load_artifact_metadata(file_path) if file_path.is_dir() else None
     if artifact is not None and artifact.type in FULLSTACK_ARTIFACT_TYPES:
@@ -323,14 +439,43 @@ def publish(
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
         payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
+        state_manifest = _read_state_manifest(file_path)
+        if state_manifest is not None:
+            _warn_state_schema_change(file_path, state_manifest)  # before upload
+            dropped = _blocked_collection_drops(file_path, state_manifest)
+            if dropped:
+                raise StatePublishBlocked(
+                    f"Collections {sorted(dropped)} exist in the published version "
+                    f"but are missing from the new schema — their stored data would "
+                    f"be orphaned. Unpublish the artifact and publish again with the "
+                    f"new schema (the old data is not migrated)."
+                )
+            payload_dict["state_manifest"] = state_manifest
         if missing:
             payload_dict["missing_datasources"] = missing
+        artifact_key = artifact_key or artifact_key_for(artifact.id)
     else:
         zipped = _zip_html(file_path)
+        # A static artifact publishes its primary *file*, not its folder, so the
+        # identity sits in the metadata.json next to that file. Derive it here
+        # too: otherwise only fullstack publishes carry `artifact_key` and the
+        # upload lambda locks static artifacts to the legacy
+        # `{user_dir}/{report_id}` key, detaching them from their drafts and
+        # comment threads. cowork-server passes the key explicitly, so this only
+        # covers a direct anton publish.
+        # Only the artifact root is consulted (a file's own folder), never an
+        # ancestor: publishing one page out of an artifact would otherwise mint
+        # a second report under the same key, and the auth rule is per key.
+        if not artifact_key:
+            owner = artifact if file_path.is_dir() else _load_artifact_metadata(file_path.parent)
+            if owner is not None:
+                artifact_key = artifact_key_for(owner.id)
 
     payload_dict["file_payload"] = base64.b64encode(zipped).decode()
     if report_id:
         payload_dict["report_id"] = report_id
+    if artifact_key:
+        payload_dict["artifact_key"] = artifact_key
     # Access control: send the hash (never the plaintext) and, for restricted
     # mode, the normalized email list + org flag (auth is the source of truth;
     # neither the list nor the password plaintext enters the zip bundle). A
@@ -346,6 +491,10 @@ def publish(
 
     url = f"{publish_url.rstrip('/')}/upload"
     raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    # Upload succeeded (minds_request raises on failure): record the published
+    # key schema so the next publish can warn on an incompatible change.
+    if state_manifest is not None:
+        _save_state_snapshot(file_path, state_manifest)
     return json.loads(raw)
 
 

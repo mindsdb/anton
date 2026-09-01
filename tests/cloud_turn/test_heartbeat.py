@@ -15,7 +15,9 @@ async def test_stream_turn_emits_heartbeat_during_slow_turn(monkeypatch):
     from anton.core.llm.provider import StreamTextDelta
 
     class SlowSession:
-        async def turn_stream(self, user_input):
+        # `**kwargs` as every other fake in tests/ does: the entrypoint passes
+        # trace_metadata (ENG-1459) and may pass more later.
+        async def turn_stream(self, user_input, **kwargs):
             await asyncio.sleep(0.25)  # quiet period longer than the heartbeat interval
             yield StreamTextDelta(text="done")
 
@@ -30,3 +32,33 @@ async def test_stream_turn_emits_heartbeat_during_slow_turn(monkeypatch):
     assert "heartbeat" in kinds
     assert kinds[-1] == "turn_completed"
     assert {"kind": "delta", "text": "done"} in events
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_emits_heartbeat_during_a_slow_synchronous_session_builder(monkeypatch):
+    """session_builder (build_cloud_chat_session in production) can block the
+    calling thread synchronously — e.g. a turn-key OAuth token fetch per
+    connector — before turn_stream() ever starts. The heartbeat ticker must
+    keep firing during that window too, not just once streaming begins."""
+    import time
+
+    from anton.core.llm.provider import StreamTextDelta
+
+    class FastSession:
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamTextDelta(text="done")
+
+        def close(self): ...
+
+    def slow_builder(req):
+        time.sleep(0.25)  # quiet period longer than the heartbeat interval
+        return FastSession()
+
+    monkeypatch.setenv("ANTON_CLOUD_TURN_HEARTBEAT_SECONDS", "0.05")
+    events = []
+    raw = '{"protocol_version":1,"conversation_id":"c","input":"hi"}'
+    await m.stream_turn(raw, emit=events.append, session_builder=slow_builder)
+
+    kinds = [e["kind"] for e in events]
+    assert "heartbeat" in kinds
+    assert kinds[-1] == "turn_completed"

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from anton.config.settings import AntonSettings
+from anton.core.llm.identity import build_runtime_context  # noqa: F401 — re-export
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.minds_client import refresh_knowledge
 
@@ -19,38 +20,10 @@ if TYPE_CHECKING:
     from anton.workspace import Workspace
 
 
-def build_runtime_context(settings: AntonSettings) -> str:
-    """Build runtime context string including Minds datasource info if configured."""
-    ctx = (
-        f"- Provider: {settings.planning_provider}\n"
-        f"- Planning model: {settings.planning_model}\n"
-        f"- Coding model: {settings.coding_model}\n"
-        f"- Workspace: {settings.workspace_path}\n"
-        f"- Memory mode: {settings.memory_mode}"
-    )
-    if settings.minds_api_key and (
-        settings.minds_mind_name or settings.minds_datasource
-    ):
-        engine = settings.minds_datasource_engine or "unknown"
-        ctx += f"\n\n**CONNECTED MIND (Minds):**\n"
-        if settings.minds_mind_name:
-            ctx += f"- Mind: {settings.minds_mind_name}\n"
-        if settings.minds_datasource:
-            ctx += (
-                f"- Datasource: {settings.minds_datasource}\n"
-                f"- Engine: {engine}\n"
-            )
-        ctx += (
-            f"- Minds URL: {settings.minds_url}\n"
-            f"- To query data, use the scratchpad with the built-in `query_minds_data()` function.\n"
-            f"  It is pre-loaded in the scratchpad namespace — DO NOT import it. Just call it directly.\n"
-            f'  Example: result = query_minds_data("SELECT * FROM users LIMIT 5")\n'
-            f"  Returns dict with 'type', 'data' (list of rows), 'column_names', 'error_message'.\n"
-            f'  Optional: query_minds_data("SELECT ...", datasource="other_ds")\n'
-        )
-        if settings.minds_datasource:
-            ctx += f"- Write SQL appropriate for the {engine} engine.\n"
-    return ctx
+# build_runtime_context lives in anton.core.llm.identity (import-light, so the
+# cloud pod can use it); re-exported here because cowork-server imports it from
+# this module: `from anton.chat_session import build_runtime_context`.
+__all__ = ["build_runtime_context", "get_runtime_factory", "rebuild_session"]
 
 
 def get_runtime_factory(settings: AntonSettings):
@@ -88,6 +61,7 @@ def rebuild_session(
     """Rebuild LLMClient + ChatSession after settings change."""
     from anton.core.llm.client import LLMClient
     from anton.chat import ChatSession
+    from anton.core.llm.tracing import HARNESS_ANTON, SURFACE_CLI
     from anton.core.session import ChatSessionConfig
     from anton.tools import DEFAULT_SESSION_TOOLS
 
@@ -120,7 +94,12 @@ def rebuild_session(
         # telemetry as "" — which meant BOTH "this is the CLI" and "the host
         # didn't identify itself", so the two could never be told apart and the
         # ambiguity got worse with every new host.
-        harness="cli",
+        # WHICH AGENT: the CLI runs anton, so that is what it reports
+        # (ENG-1694). It said "cli" until then, which described the host and
+        # left "did this run anton or hermes?" unanswerable.
+        harness=HARNESS_ANTON,
+        # WHERE it ran — the other axis, and now the only place "cli" appears.
+        surface=SURFACE_CLI,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,

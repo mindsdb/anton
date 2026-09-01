@@ -165,16 +165,46 @@ _pending_lock = threading.Lock()
 #                    cache_read_tokens, cache_creation_tokens, llm_calls,
 #                    rounds, continuations, peak_context_tokens, duration_ms,
 #                    {planning,coding,router}_{model,tokens,calls},
-#                    unknown_{tokens,calls}, llm_provider, harness,
+#                    unknown_{tokens,calls}, llm_provider, endpoint_class,
+#                    error_type, grace_granted + grace_tokens ("", "round",
+#                    "ceiling", or "ceiling,round" — the one-time round-cap /
+#                    spend-ceiling extensions granted this turn, and the
+#                    ceiling one's size), verifier_failure + verifier_error_type
+#                    (WHY the completion verifier produced no verdict — the
+#                    loop's truncated/transient/hard/denied class and the
+#                    content-free exception type; "" on verified turns; ENG-1858),
+#                    harness, surface (desktop / web / cli — WHERE
+#                    the user was, "" when the host did not say; ENG-1945),
 #                    anton_version, conversation_id, turn_index
 #
 #   rule_retrieval   outcome, when_rules, kept_rules, rules_chars,
 #                    stop_reason, input_tokens, output_tokens, duration_ms
 #                    (anton/core/memory/cortex.py::_emit_rule_retrieval)
 #
+#   tool_completed   name, ok ("true"/"false"/"unknown" — the dispatch loop's
+#                    definitive verdict, never a prose guess; "unknown" is an
+#                    unmigrated handler or a cancelled exec), duration_ms
+#                    (human wait already subtracted), error_type (exception
+#                    CLASS name when the failure was a raise, "" otherwise —
+#                    never the message, which carries paths and user input).
+#                    One event per executed tool call; tool arguments and
+#                    result content are deliberately absent (ENG-1486).
+#                    surface mirrors turn_completed's (ENG-1945).
+#                    conversation_id + turn_index mirror turn_completed's
+#                    values, so a tool row joins to its parent turn row and,
+#                    via Langfuse sessionId, to the gateway trace.
+#                    (anton/core/session.py::_emit_tool_completed)
+#
 # An event NOT listed here keeps the collector path, so moving one is an
 # explicit decision rather than something that happens by default.
-_POSTHOG_EVENTS = frozenset({"turn_completed", "rule_retrieval"})
+_POSTHOG_EVENTS = frozenset(
+    {
+        "turn_completed",
+        "rule_retrieval",
+        "scratchpad_package_installed",
+        "tool_completed",
+    }
+)
 
 # `$lib` names the sender, matching the convention the other emitters follow
 # (`cowork-desktop`, `mindshub-site-beacon`), so a per-emitter breakdown in
@@ -230,8 +260,37 @@ def get_installation_id() -> str:
     networking), a random UUID is persisted to ``~/.anton/.installation_id``
     as a one-time fallback. Computed once per process and cached.
 
+    **The format is depended on outside this repo.** cowork-server serves this
+    value on ``/health`` and cowork's renderer validates it as **lowercase
+    hex** before stamping it as the join key that connects anton's per-turn
+    cost events to an identified user (ENG-1689). Those consumers deliberately
+    do *not* pin the width, so widening the ``[:16]`` truncation is safe —
+    moving off lowercase hex is not, and would silently drop the key rather
+    than fail loudly.
+
+    Two limits worth knowing before changing either, since both are the change
+    someone would plausibly make:
+
+    - **The width freedom stops at 64.** The consumer bound is ``{8,64}``, so
+      anything up to a full SHA-256 hexdigest is fine, including dropping the
+      truncation entirely. A longer digest left untruncated is not — SHA-512 is
+      128 hex characters and would be rejected.
+    - **A replacement sentinel must stay NON-HEX.** cowork-server filters
+      ``"unknown"`` by name, but cowork's renderer rejects it only because it
+      fails the hex test — and the renderer is the side that mints the join
+      key. So a hex-shaped sentinel (``"0000000000000000"`` being the obvious
+      accident) would pass validation and stamp every unfingerprintable machine
+      with the *same* key, merging them into one identity. That is the exact
+      over-merge this value is guarded against, arriving through the door the
+      guard is assumed to cover.
+
+    The ``"unknown"`` return below exists for that reason: every
+    unfingerprintable machine reports the same string, so it must never be
+    usable as a join key.
+
     Returns:
-        A 16-character hex string (64 bits of entropy).
+        A 16-character hex string (64 bits of entropy), or ``"unknown"`` when
+        the machine cannot be fingerprinted at all.
     """
     global _cached_aid
     if _cached_aid is not None:

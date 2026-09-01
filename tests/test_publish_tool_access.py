@@ -131,3 +131,62 @@ async def test_tool_fullstack_from_inner_file_publishes_folder(tmp_path):
         )
     args, _ = fake_publish.call_args
     assert Path(args[0]) == art  # normalized up to the fullstack folder
+
+
+@pytest.mark.asyncio
+async def test_tool_owner_only_publishes_restricted(tmp_path):
+    """An explicit owner_only from the agent must NOT degrade to public."""
+    f = _artifact(tmp_path)
+    fake_publish = mock.Mock(return_value={"view_url": "u", "report_id": "r", "md5": "m", "version": 1})
+    with mock.patch("anton.publisher.publish", fake_publish), \
+         mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
+         mock.patch("webbrowser.open"):
+        await tools.handle_publish_or_preview(
+            _session(tmp_path),
+            {"file_path": str(f), "action": "publish",
+             "access_mode": "restricted", "emails": [], "owner_only": True},
+        )
+    _, kwargs = fake_publish.call_args
+    assert kwargs["access"] == {"mode": "restricted", "emails": [], "org_allowed": False}
+    entry = json.loads((f.parent / ".published.json").read_text())[f.name]
+    assert entry["mode"] == "restricted"
+    assert entry["owner_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_tool_restricted_without_owner_only_still_degrades(tmp_path):
+    """The safety net for careless programmatic callers stays in place."""
+    f = _artifact(tmp_path)
+    fake_publish = mock.Mock(return_value={"view_url": "u", "report_id": "r", "md5": "m", "version": 1})
+    with mock.patch("anton.publisher.publish", fake_publish), \
+         mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
+         mock.patch("webbrowser.open"):
+        await tools.handle_publish_or_preview(
+            _session(tmp_path),
+            {"file_path": str(f), "action": "publish", "access_mode": "restricted", "emails": []},
+        )
+    _, kwargs = fake_publish.call_args
+    assert kwargs["access"] == {"mode": "public"}
+
+
+@pytest.mark.asyncio
+async def test_tool_restricted_invalid_email_returns_error(tmp_path):
+    """A malformed address must not collapse into an owner-only or public publish."""
+    f = _artifact(tmp_path)
+    fake_publish = mock.Mock(return_value={"view_url": "u", "report_id": "r", "md5": "m", "version": 1})
+    with mock.patch("anton.publisher.publish", fake_publish), \
+         mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
+         mock.patch("webbrowser.open"):
+        out = await tools.handle_publish_or_preview(
+            _session(tmp_path),
+            {"file_path": str(f), "action": "publish",
+             "access_mode": "restricted", "emails": ["colleague@corp"]},
+        )
+    assert "colleague@corp" in out
+    assert "INVALID" in out
+    fake_publish.assert_not_called()
+
+
+def test_publish_tool_schema_exposes_owner_only():
+    props = tools.PUBLISH_TOOL.input_schema["properties"]
+    assert props["owner_only"]["type"] == "boolean"

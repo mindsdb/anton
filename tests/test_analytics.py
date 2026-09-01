@@ -178,6 +178,20 @@ def test_turn_completed_goes_to_posthog_not_the_collector(monkeypatch):
     assert body["event"] == "turn_completed"
 
 
+def test_scratchpad_package_installed_goes_to_posthog_not_the_collector(monkeypatch):
+    """The collector allowlists only five property names — 'package' would be
+    dropped there, so this event must take the direct path to survive."""
+    _clear_ci(monkeypatch)
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(_PosthogSettings(), "scratchpad_package_installed", package="numpy")
+
+    assert len(captured) == 1
+    _, body = captured[0]
+    assert body["event"] == "scratchpad_package_installed"
+    assert body["properties"]["package"] == "numpy"
+
+
 def test_unregistered_events_still_use_the_collector(monkeypatch):
     """Scope guard. Only names in `_POSTHOG_EVENTS` move; nothing else does.
 
@@ -784,3 +798,96 @@ def test_short_lived_process_loses_its_event_without_the_flush():
         time.sleep(0.2)
 
     assert received == []
+
+
+# ── The suite's own kill switch (ENG-2055) ──────────────────────────
+#
+# `tests/conftest.py` turns analytics off for the whole suite. Nothing asserted
+# that it worked, in either direction: the same 2,709 tests passed whether the
+# switch held or was silently cancelled, which is why a developer's exported
+# `ANTON_ANALYTICS_ENABLED` shipped real events to production for four months
+# before anyone noticed.
+#
+# So this cannot be an in-process assertion. By the time any test runs, conftest
+# has already executed in an interpreter the test did not control, and asserting
+# on the result would pass for the wrong reason on a clean machine — exactly the
+# environment CI provides. The child below reproduces the *defeated* case: the
+# variable is exported before the interpreter starts, which is the only shape in
+# which the bug is visible.
+
+#: Imports the suite's conftest the way pytest does — for its module-level side
+#: effect — then reports what a freshly resolved AntonSettings believes.
+_KILL_SWITCH_CHILD = """
+import sys
+sys.path.insert(0, {tests_dir!r})
+import conftest  # noqa: F401  -- imported for its module-level kill switch
+from anton.config.settings import AntonSettings
+sys.stdout.write("enabled=%s" % AntonSettings().analytics_enabled)
+"""
+
+
+def _resolve_analytics_enabled_in_child(**env_overrides: str) -> str:
+    # No CI-marker scrub here, unlike `_run_child` above. That scrub is
+    # load-bearing there because the child calls `send_event`, which consults
+    # `_is_ci()`. This child does not: it resolves `AntonSettings`, and
+    # `analytics_enabled` comes from `ANTON_ANALYTICS_ENABLED` alone. Verified
+    # in both directions — with every marker in `_CI_MARKERS` set, the fix still
+    # reports `enabled=False` and the `setdefault` mutant still reports
+    # `enabled=True`. Scrubbing here would be a no-op dressed as a guard, which
+    # is the exact defect this test exists to prevent.
+    env = dict(os.environ)
+    env.update(env_overrides)
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    result = subprocess.run(
+        [sys.executable, "-c", _KILL_SWITCH_CHILD.format(tests_dir=tests_dir)],
+        check=True, timeout=30, env=env, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def test_the_suite_kill_switch_beats_an_exported_variable():
+    """conftest must win over the developer's environment, not defer to it.
+
+    Mutation-verified: restore `os.environ.setdefault(...)` in conftest and this
+    fails with `enabled=True`, because the exported value is then already
+    present and `setdefault` declines to write.
+    """
+    assert _resolve_analytics_enabled_in_child(
+        ANTON_ANALYTICS_ENABLED="true"
+    ) == "enabled=False"
+
+
+def test_a_test_can_still_re_enable_analytics_for_itself(monkeypatch):
+    """The switch is machine-wide, not a wall — but the flag is only half of it.
+
+    `monkeypatch.setenv` runs long after conftest import and `AntonSettings`
+    reads the environment at construction, so a test can still flip the flag for
+    itself. Asserted so nobody "restores" the shell-level escape hatch believing
+    that case was lost with it.
+
+    The other half is asserted because conftest blanks the sinks too: flipping
+    the flag re-enables the *setting*, not sending. `send_event` returns at
+    `if not settings.analytics_url` before either sink is reached, so a test that
+    needs to exercise the send path must set ANTON_ANALYTICS_URL — and
+    ANTON_POSTHOG_KEY for the direct sink — as well. Left unsaid, the next
+    developer flips the flag, sees nothing sent, and concludes the guard broke.
+
+    The second half is checked at the sender rather than at the resolved
+    setting, which also makes this the only test that fails if the sink blanking
+    is removed from conftest.
+    """
+    monkeypatch.setenv("ANTON_ANALYTICS_ENABLED", "true")
+    from anton.config.settings import AntonSettings
+
+    settings = AntonSettings()
+    assert settings.analytics_enabled is True
+
+    # The flag alone does not restore sending. Asserted on "nothing was handed
+    # to a sender thread", not on the settings values, so it stays true however
+    # the guards inside send_event are later rearranged.
+    spawned: list = []
+    monkeypatch.setattr(analytics, "_spawn", lambda fn, *a: spawned.append(fn))
+    monkeypatch.setattr(analytics, "_is_ci", lambda: False)
+    analytics.send_event(settings, "turn_completed", tokens_total="1")  # direct sink
+    analytics.send_event(settings, "ds_connect_attempt")  # collector sink
+    assert spawned == []

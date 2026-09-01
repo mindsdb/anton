@@ -2,14 +2,17 @@
 
 Assembles a :class:`~anton.core.session.ChatSession` scoped to the tenant's
 mounted workspace with the desktop-only, tenant-leaky behaviours OFF. It does
-NOT call the desktop ``build_chat_session`` (which loads workspace ``.env``,
-uses ``~/.anton`` personal memory, and injects vault creds into ``os.environ``).
+NOT call the desktop ``build_chat_session`` (which loads workspace ``.env``
+and uses ``~/.anton`` personal memory).
 
 Safety posture (all internal — nothing here is on the wire):
 
 * Trusted pod-side workspace mount, never taken from the request.
 * No dotenv loading (``AntonSettings(_env_file=None)``, shared into Workspace).
-* Connectors / data-vault / disk history OFF.
+* Data vault is a live :class:`~anton.core.datasources.data_vault.TurnKeyDataVault`
+  only when the turn carries an ``oauth`` block (Google Drive/Gmail via
+  auth's turn-key endpoint) — ``None`` (connectors OFF) otherwise. Disk
+  history stays OFF regardless.
 * Memory never persists pod-side: cowork sends the tenant's slots per turn, and
   writes are reported back for cowork to apply (see :func:`_build_cortex`).
 * Only reviewed, headless-safe tools are exposed (scratchpad + artifacts).
@@ -26,6 +29,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
@@ -524,7 +528,8 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     from anton.config.settings import AntonSettings
     from anton.core.backends.local import local_scratchpad_runtime_factory
     from anton.core.llm.client import LLMClient
-    from anton.core.session import ChatSession, ChatSessionConfig
+    from anton.core.llm.identity import build_runtime_context
+    from anton.core.session import ChatSession, ChatSessionConfig, SystemPromptContext
     from anton.workspace import Workspace
 
     base = resolve_trusted_workspace_path()
@@ -570,7 +575,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     settings.skill_drafts_root.mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(base, settings=settings)
-    workspace.initialize()
+    # create_anton_md=False: in the cloud, .anton/anton.md is cowork-server's
+    # staged copy of the project instructions. A pod-written template gets
+    # deleted by the next staging pass, and the pod's cached NFS handle then
+    # fails every stat with ESTALE under gVisor (ENG-1817).
+    workspace.initialize(create_anton_md=False)
     # No apply_env_to_process(): loading workspace .env into the process env
     # would expose tenant secrets to cell code.
 
@@ -578,19 +587,53 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
 
     cortex = _build_cortex(request.memory, llm_client)
 
+    # Connectors ON only when this turn carries an oauth block (Google
+    # Drive/Gmail today) — clears+reinjects DS_* env before the sandbox subprocess inherits it.
+    data_vault = None
+    if request.oauth:
+        from anton.core.datasources.data_vault import TurnKeyDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        data_vault = TurnKeyDataVault(request.oauth)
+        restore_namespaced_env(data_vault)
+    else:
+        # No vault this turn — still clear, so a prior call's DS_* vars
+        # can never survive into a turn with nothing of its own to reset them.
+        from anton.utils.datasources import clear_ds_env
+
+        clear_ds_env()
+
     config = ChatSessionConfig(
         llm_client=llm_client,
         settings=settings,
         workspace=workspace,
         session_id=request.conversation_id,
-        harness="cloud",
+        # WHICH AGENT: this pod image is "anton + boot" — the agent running here
+        # IS anton, so "cloud" was factually wrong, not merely overloaded
+        # (ENG-1694). Where it ran comes from `surface` below, which cowork
+        # sends; every web turn executes in a pod and only web turns do, so
+        # "ran in a pod" needs no field of its own today.
+        harness=HARNESS_ANTON,
+        # ENG-1638: the pod used to pass no prompt context, so RUNTIME IDENTITY
+        # rendered empty while still telling the model it "already knows" its
+        # model — and a Grok session answered "No — I'm Anton, not Grok". The
+        # configured block is the same one desktop injects; the serving-model
+        # line is derived by the session from the provider's response.
+        system_prompt_context=SystemPromptContext(
+            runtime_context=build_runtime_context(settings),
+        ),
+        # WHERE the user was, which this pod cannot know on its own — only the
+        # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
+        # driven directly rather than by cowork; an unset surface reads as
+        # "nobody declared one", which is the honest answer for a standalone run.
+        surface=(request.trace or {}).get("surface"),
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
         cortex=cortex,                      # org memory; writes are reported, not stored
         episodic=None,
         self_awareness=None,
-        data_vault=None,                    # connectors OFF
+        data_vault=data_vault,              # connectors ON iff request.oauth is set
         history_store=None,                 # disk history OFF (DB authoritative)
         tools=[],                           # no host connector/publish tools
         tool_allowlist=CLOUD_TOOL_ALLOWLIST,  # only reviewed tools survive the build

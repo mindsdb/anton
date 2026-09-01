@@ -10,7 +10,12 @@ import pytest
 from anton.chat import ChatSession
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.session import ChatSessionConfig
-from anton.tools import handle_connect_datasource
+from anton.tools import (
+    CONNECT_DATASOURCE_TOOL,
+    CONNECT_DATASOURCE_TOOL_NO_CONSOLE,
+    DEFAULT_SESSION_TOOLS,
+    handle_connect_datasource,
+)
 
 _UUID8 = re.compile(r"^[0-9a-f]{8}$")
 
@@ -20,8 +25,7 @@ def vault_dir(tmp_path):
     return tmp_path / "vault"
 
 
-def _make_session(vault_dir):
-    """Return a minimal ChatSession wired for tool-handler tests."""
+def _mock_llm_client():
     from anton.core.llm.provider import ProviderConnectionInfo
 
     mock_llm = AsyncMock()
@@ -32,8 +36,20 @@ def _make_session(vault_dir):
     mock_llm.coding_model = "claude-sonnet-4-6"
     mock_llm.planning_provider = MagicMock()
     mock_llm.planning_provider.native_web_tools = MagicMock(return_value=set())
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
-    session._console = MagicMock()
+    return mock_llm
+
+
+def _make_session(vault_dir, console=None):
+    """Return a minimal ChatSession wired for tool-handler tests.
+
+    `console=None` matches real Cowork construction (no `config.console` is
+    ever passed there) — callers that need a console for the handler itself
+    override `session._console` afterward, same as before.
+    """
+    session = ChatSession(ChatSessionConfig(
+        llm_client=_mock_llm_client(), console=console, tools=list(DEFAULT_SESSION_TOOLS),
+    ))
+    session._console = MagicMock() if console is None else console
     session._scratchpads = AsyncMock()
     session._data_vault = LocalDataVault(vault_dir=vault_dir)
     session._settings = None
@@ -64,6 +80,37 @@ def _patch_test_fail():
         "anton.commands.datasource.verify.run_connection_test",
         new=AsyncMock(return_value=False),
     )
+
+
+class TestConnectDatasourceToolDescriptionGating:
+    """ENG-1849 step 4: don't advertise the interactive prompt flow to a
+    host that has no console to prompt in."""
+
+    def test_no_console_at_init_swaps_in_the_no_console_description(self, vault_dir):
+        session = _make_session(vault_dir, console=None)
+        registered = {t.name: t for t in session._extra_tools}
+        tool = registered["connect_new_datasource"]
+        assert tool.description == CONNECT_DATASOURCE_TOOL_NO_CONSOLE.description
+        assert "(b) Interactive" not in tool.description
+
+    def test_console_at_init_keeps_the_full_description(self, vault_dir):
+        session = _make_session(vault_dir, console=MagicMock())
+        registered = {t.name: t for t in session._extra_tools}
+        tool = registered["connect_new_datasource"]
+        assert tool.description == CONNECT_DATASOURCE_TOOL.description
+        assert "(b) Interactive" in tool.description
+
+    def test_no_console_variant_requires_known_variables(self, vault_dir):
+        """The no-console tool has no prompt flow to fall back on, so its
+        schema must require known_variables — not just say so in prose."""
+        session = _make_session(vault_dir, console=None)
+        registered = {t.name: t for t in session._extra_tools}
+        tool = registered["connect_new_datasource"]
+        assert tool.input_schema["required"] == ["engine", "known_variables"]
+        # Sharing engine/properties by reference is fine — only `required`
+        # needs to differ from the full-description variant.
+        assert tool.input_schema is not CONNECT_DATASOURCE_TOOL.input_schema
+        assert CONNECT_DATASOURCE_TOOL.input_schema["required"] == ["engine"]
 
 
 class TestNonInteractiveSave:
@@ -446,6 +493,71 @@ class TestNonInteractiveSave:
         with patch("anton.commands.datasource.handle_connect_datasource", new=interactive):
             await handle_connect_datasource(session, {"engine": "postgres"})
         interactive.assert_called_once()
+        assert session._data_vault.list_connections() == []
+
+
+class TestNoConsole:
+    """Regression coverage for ENG-1849: mode (a) must not require a console."""
+
+    @pytest.mark.asyncio
+    async def test_saves_with_no_console(self, vault_dir):
+        """known_variables save to the vault even with session._console = None."""
+        session = _make_session(vault_dir)
+        session._console = None
+        with _patch_test_ok():
+            result = await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com",
+                        "database": "sales",
+                        "user": "admin",
+                        "password": "x",
+                    },
+                },
+            )
+        assert result.startswith("Saved connection")
+        assert len(session._data_vault.list_connections()) == 1
+
+    @pytest.mark.asyncio
+    async def test_scrubbed_placeholder_warning_does_not_raise_with_no_console(
+        self, vault_dir
+    ):
+        """The scrub-marker warning path must not call None.print()."""
+        session = _make_session(vault_dir)
+        session._console = None
+        with _patch_test_ok():
+            result = await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com",
+                        "database": "sales",
+                        "user": "admin",
+                        "password": "[DS_POSTGRES_OLD__PASSWORD]",
+                    },
+                },
+            )
+        # password was dropped as a scrub-marker, so it's a missing required
+        # field → falls through to interactive, which also has no console.
+        assert "Interactive connection setup isn't available" in result
+        # The model gets no other channel for this (console output isn't
+        # visible to it) — the bail-out message must name the rejected
+        # field itself, not just say "interactive setup unavailable".
+        assert "password" in result
+        assert "scrub" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_interactive_fallback_without_console_returns_actionable_message(
+        self, vault_dir
+    ):
+        """No known_variables + no console → clear message, not a crash/hang."""
+        session = _make_session(vault_dir)
+        session._console = None
+        result = await handle_connect_datasource(session, {"engine": "postgres"})
+        assert "Interactive connection setup isn't available" in result
         assert session._data_vault.list_connections() == []
 
 

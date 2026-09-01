@@ -20,6 +20,7 @@ from anton.clipboard import (
     replace_at_image_paths,
     save_clipboard_image,
 )
+from anton.core.llm.tracing import HARNESS_ANTON, SURFACE_CLI
 from anton.core.session import ChatSession, ChatSessionConfig, _is_provider_auth_error
 from anton.core.llm.prompt_builder import SystemPromptContext
 from anton.core.llm.provider import (
@@ -896,6 +897,8 @@ async def _handle_unpublish(
     import json as _json
     from pathlib import Path as _Path
 
+    from anton.publisher import _STATE_SNAPSHOT
+
     removed_report_id = selected.get("report_id") or ""
     removed_md5 = selected.get("md5") or ""
     artifacts_root = _Path(settings.artifacts_dir)
@@ -919,6 +922,20 @@ async def _handle_unpublish(
             if matches:
                 del data[key]
                 changed = True
+                # Reset the state-snapshot baseline so a later /publish with a
+                # changed collection set is treated as fresh (not blocked).
+                # Modern layout: snapshot sits next to .published.json. Legacy
+                # root .published.json uses "{slug}/" keys → snapshot lives in
+                # the per-artifact subdir named by the key.
+                snap_dirs = [pub_file.parent]
+                if key.endswith("/"):
+                    snap_dirs.append(pub_file.parent / key.rstrip("/"))
+                for snap_dir in snap_dirs:
+                    snap = snap_dir / _STATE_SNAPSHOT
+                    try:
+                        snap.unlink()
+                    except OSError:
+                        pass
         if changed:
             try:
                 pub_file.write_text(_json.dumps(data, indent=2), encoding="utf-8")
@@ -1395,7 +1412,12 @@ async def _chat_loop(
         session_id=current_session_id,
         # ENG-1495: see the note on the same field in chat_session.py — an unset
         # `harness` is indistinguishable from a host that forgot to set one.
-        harness="cli",
+        # WHICH AGENT: the CLI runs anton, so that is what it reports
+        # (ENG-1694). It said "cli" until then, which described the host and
+        # left "did this run anton or hermes?" unanswerable.
+        harness=HARNESS_ANTON,
+        # WHERE it ran — the other axis, and now the only place "cli" appears.
+        surface=SURFACE_CLI,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,

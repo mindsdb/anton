@@ -13,6 +13,10 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    cell_failure_reason,
+    install_call_installed_something,
+    reject_invalid_packages,
+    send_package_install_event,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +83,116 @@ def _artifact_store(session: "ChatSession"):
     return ArtifactStore(workspace.artifacts_dir)
 
 
+def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = "") -> None:
+    """Record that THIS turn created or opened `slug`.
+
+    Two records, for two different readers:
+
+    * `session._artifacts_touched` — in-memory, per-turn. The host reads it
+      after the turn to build the turn's artifact cards. This is what makes
+      attribution correct without diffing the artifacts directory: several
+      turns can share one project-wide artifacts folder and each still knows
+      exactly what it touched.
+    * `provenance` in the artifact's own `metadata.json`, via
+      `record_turn()` — durable, and the only record that survives the
+      process. Answers "which conversations have ever worked on this?" for
+      any later reader.
+
+    Best-effort: attribution is bookkeeping, so a failure here must never
+    fail the tool call the agent actually made.
+    """
+    try:
+        session._artifacts_touched.add(slug)
+    except AttributeError:
+        # A session predating this field (or a test double) still gets
+        # durable provenance below.
+        pass
+    conversation_id = str(getattr(session, "_session_id", "") or "")
+    if not conversation_id:
+        # No host conversation to attribute to (a bare CLI session). The
+        # in-memory set above is still useful; provenance would be a row
+        # keyed by nothing.
+        return
+    try:
+        store.record_turn(
+            slug,
+            conversation_id=conversation_id,
+            conversation_title=None,
+            turn_index=getattr(session, "_turn_count", 0) + 1,
+            summary=summary,
+            files_touched=[],
+        )
+    except Exception:
+        _log.warning("could not record turn provenance for artifact %s", slug, exc_info=True)
+
+
+def _artifact_content_mtime(folder: Path) -> float:
+    """Max mtime across an artifact folder's user-content files.
+
+    Excludes the store's own housekeeping files, mirroring cowork-server's
+    `content_mtime` gate so both sides agree on what "changed" means.
+    """
+    from anton.core.artifacts.store import (
+        METADATA_FILENAME,
+        PUBLISHED_FILENAME,
+        README_FILENAME,
+    )
+
+    housekeeping = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
+    try:
+        return max(
+            (
+                p.stat().st_mtime
+                for p in folder.rglob("*")
+                if p.is_file()
+                and not p.is_symlink()
+                and str(p.relative_to(folder)) not in housekeeping
+            ),
+            default=0.0,
+        )
+    except OSError:
+        return 0.0
+
+
+def _snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
+    """slug -> content mtime, for every artifact folder that exists right now."""
+    root = store.root
+    if not root.is_dir():
+        return {}
+    mtimes: dict[str, float] = {}
+    for child in root.iterdir():
+        if child.is_dir() and (child / "metadata.json").is_file():
+            mtimes[child.name] = _artifact_content_mtime(child)
+    return mtimes
+
+
+def _track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
+    """Catch an artifact edit the agent made without calling `open_artifact`.
+
+    `open_artifact` is how attribution is SUPPOSED to work (see
+    `_track_artifact` above), but nothing forces the agent to call it again
+    once it already has an artifact's path from earlier in the conversation —
+    it can (and in practice does) just write straight into a remembered
+    folder via the scratchpad, skipping the tool call entirely. Without this,
+    that edit's `_artifacts_touched` stays empty and the host can never card
+    it, even though the file genuinely changed this turn (ENG-1933 follow-up).
+
+    Scoped to THIS cell's own execution window — the snapshot taken right
+    before `pad.execute` vs. right after — rather than the whole turn, to
+    keep the diff-based race this reintroduces (a concurrent sibling
+    conversation happening to bump some other artifact's mtime) as narrow as
+    possible: seconds, not minutes. Narrower than the pre-ENG-1933 exposure,
+    not zero — the same trade-off `index_turn_artifacts` already accepts for
+    Hermes's edits.
+    """
+    already_touched = getattr(session, "_artifacts_touched", None) or ()
+    after = _snapshot_existing_artifact_mtimes(store)
+    for slug, prev_mtime in before.items():
+        current = after.get(slug)
+        if current is not None and current > prev_mtime and slug not in already_touched:
+            _track_artifact(session, store, slug, summary="Edited via scratchpad")
+
+
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     """Create a fresh artifact folder + metadata.json + README.md.
 
@@ -118,6 +232,7 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
         primary=primary if isinstance(primary, str) else None,
     )
     folder = store.folder_for(artifact.slug)
+    _track_artifact(session, store, artifact.slug, summary=f"Created artifact: {name}")
     return SideEffectResult(
         success=True,
         message=(
@@ -213,6 +328,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
         )
     datasources = [d.slug for d in artifact.datasources]
+    _track_artifact(session, store, artifact.slug, summary=f"Updated artifact metadata: {artifact.name}")
     return SideEffectResult(
         success=True,
         message=(
@@ -364,6 +480,11 @@ async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
     if artifact is None:
         return f"Error: no artifact found for slug `{slug}`."
     folder = store.folder_for(artifact.slug)
+    # Opening is how the agent gets an artifact's path in order to write to
+    # it, so this is the turn's declaration of intent to modify. Tracked here
+    # rather than at write time because the writes themselves happen in
+    # scratchpad cells the tool layer never sees.
+    _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
     return json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
@@ -513,6 +634,16 @@ async def handle_scratchpad(
         )
         await _fire_pre_execute(session, prelim_cell)
 
+        # Snapshot existing artifacts' content mtimes before the cell runs, so
+        # an edit the cell makes without a prior `open_artifact` call this
+        # turn still gets attributed below (see `_track_edits_since`).
+        artifact_store = _artifact_store(session)
+        before_artifact_mtimes = (
+            _snapshot_existing_artifact_mtimes(artifact_store)
+            if artifact_store is not None
+            else {}
+        )
+
         cell = await pad.execute(
             code,
             description=description,
@@ -527,6 +658,8 @@ async def handle_scratchpad(
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
+            if artifact_store is not None:
+                _track_edits_since(session, artifact_store, before_artifact_mtimes)
         # The runtime's verdict: a raised error/timeout/kill is a failure;
         # stderr-only output (warnings) is not, and stdout containing words
         # like "failed" is not either — the streak reads this flag, never the
@@ -536,7 +669,7 @@ async def handle_scratchpad(
         return ToolOutcome(
             content=format_cell_result(cell),
             ok=not error,
-            reason=error.splitlines()[-1][:160] if error else "",
+            reason=cell_failure_reason(error),
         )
 
     elif action == "view":
@@ -576,8 +709,16 @@ async def handle_scratchpad(
         packages = tc_input.get("packages", [])
         if not packages:
             return "No packages specified."
+        refused = reject_invalid_packages(packages)
+        if refused:
+            return ToolOutcome(
+                content=refused, ok=False, reason="package_install_rejected"
+            )
         pad = await session._scratchpads.get_or_create(name)
-        return await pad.install_packages(packages)
+        result = await pad.install_packages(packages)
+        if install_call_installed_something(result):
+            send_package_install_event(session, packages)
+        return result
 
     else:
         return f"Unknown scratchpad action: {action}"
@@ -829,6 +970,108 @@ def _status(status: str, message: str = "", **extra) -> str:
     return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
 
 
+def _needs_confirmation(candidate: "Path", label: str) -> str:
+    """The model-supplied candidate cannot be silently accepted and no
+    confirmation card can render on this host: hand the decision back."""
+    return _status(
+        "needs_confirmation",
+        f"You supplied '{label}' as the only candidate — that is your guess, not "
+        "the user's choice, so it was not accepted. Ask the user to confirm it "
+        "before using it, and do not present it as chosen or connected until "
+        "they do. If they asked for a file or folder outside the project, no "
+        "path inside the project is an answer: tell them plainly that this host "
+        "cannot reach paths outside the project, and ask them to attach the "
+        "relevant files to the conversation.",
+        candidates=[str(candidate)],
+    )
+
+
+async def _confirm_single_candidate(
+    session: "ChatSession", candidate: "Path", root: "Path", timeout_s: "int | None"
+) -> str:
+    """Confirm a model-supplied single candidate with the user (ENG-1852).
+
+    A lone entry in ``candidates`` is the model's own guess echoed back, not a
+    discovery: in a fresh project exactly one directory exists (``skills``), so
+    silently resolving it reported folders nobody chose as connected — to the
+    first-run prompt "give you access to a folder on my computer", no less.
+    Confirmation is enforced here rather than in the prompt, because the model
+    already narrates such guesses as decisions ("I'll use it as the folder").
+
+    Renders a yes/no choice card (supported on every cowork host, which has no
+    path picker). Where no card can render either, returns
+    ``needs_confirmation`` so the model must ask in plain text.
+    """
+    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+    try:
+        label = str(candidate.relative_to(root))
+    except ValueError:
+        label = str(candidate)
+    noun = "folder" if candidate.is_dir() else "file"
+    request = AskRequest(
+        prompt=f"Only one candidate was found — use this {noun}?",
+        kind="choice",
+        timeout_s=timeout_s,
+        options=(
+            AskOption(value="yes", label=f"Yes — use {label}", kind=noun, style="primary"),
+            AskOption(value="no", label="No — that's not it"),
+        ),
+    )
+    try:
+        answer = await elicit(session, f"path:{uuid.uuid4().hex}", request)
+    except Exception as exc:  # noqa: BLE001 — the card is host code
+        _log.warning("select_path confirmation elicitor failed: %s", exc, exc_info=True)
+        return _status("error", f"Selection failed: {exc}")
+    if answer.status == "unavailable":
+        return _needs_confirmation(candidate, label)
+    if answer.status == "cancelled":
+        return _status(
+            "cancelled",
+            "The user dismissed the confirmation without choosing. Ask how they "
+            "would like to proceed.",
+        )
+    if answer.status == "limit":
+        return _status(
+            "error",
+            "Too many questions this turn; do not use the candidate without the "
+            "user's confirmation — ask in plain text.",
+        )
+    if answer.status != "answered":
+        return _status("error", f"The confirmation did not return an answer ({answer.status}).")
+    typed = (answer.text or "").strip()
+    if "yes" in answer.values:
+        # Deliberately NOT auto_resolved: the user confirmed this path.
+        return _status(
+            "resolved",
+            f'The user added: "{typed}"' if typed else "",
+            path=str(candidate),
+        )
+    if typed and "no" not in answer.values:
+        # A free-typed reply is not a decline the user made — it may even be
+        # the word "yes" — so assert nothing; hand it over verbatim. Parsing
+        # typed affirmations here would be a worse failure than one re-ask.
+        return _status(
+            "cancelled",
+            f'The user typed a reply instead of choosing an option: "{typed}". '
+            f"'{label}' is not confirmed — do not use it or present it as "
+            "connected; act on their reply. If it reads as agreement, call "
+            "select_path again for an explicit confirmation. If they want a "
+            "file or folder outside the project, tell them plainly that this "
+            "host cannot reach it and ask them to attach the relevant files "
+            "to the conversation.",
+        )
+    return _status(
+        "cancelled",
+        f"The user declined '{label}'. Do not use this path and do not present "
+        "it as connected. Ask what they actually meant — and if it is a file or "
+        "folder outside the project, tell them plainly that this host cannot "
+        "reach paths outside the project, and ask them to attach the relevant "
+        "files to the conversation."
+        + (f' The user said: "{typed}"' if typed else ""),
+    )
+
+
 def _finalize_browse_choice(chosen: "str | None", kind: str, root: "Path") -> str:
     """Validate a browse-mode pick: any existing path of the requested kind."""
     if chosen is None:
@@ -858,9 +1101,11 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
       is not offered browse at all, because ``session.py`` registers
       ``SELECT_PATH_TOOL_PICK_ONLY`` there (ENG-1357).
     * **pick** — ``candidates`` or ``pattern`` given: disambiguate concrete
-      matches within the project. Auto-resolves a single match and reports
-      "no matches" for none, so the picker appears only for a genuine (≥2)
-      ambiguity.
+      matches within the project. A single *pattern* match auto-resolves and
+      zero matches reports "no matches"; a single model-supplied candidate is
+      confirmed with the user first (ENG-1852) — via the path picker where one
+      renders, a yes/no choice card elsewhere, or ``needs_confirmation`` when
+      neither can.
 
     The result is fed back as the tool result, so the agent continues without a
     separate user message.
@@ -940,7 +1185,16 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             ),
         )
     if len(candidates) == 1:
-        return _status("resolved", auto_resolved=True, path=str(candidates[0]))
+        if not has_candidates:
+            # A lone *pattern* match is a genuine discovery — the glob searched
+            # the project and found exactly one thing — so resolving it without
+            # a prompt is safe. A lone *explicit* candidate is not (ENG-1852):
+            # it is the model's own guess echoed back, so it must be confirmed
+            # by the user — via the confirmation card below, or by picking it
+            # in the path picker where one renders.
+            return _status("resolved", auto_resolved=True, path=str(candidates[0]))
+        if not can_pick:
+            return await _confirm_single_candidate(session, candidates[0], root, timeout_s)
     if not can_pick:
         return _status(
             "picker_unavailable",
