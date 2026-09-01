@@ -382,15 +382,18 @@ class _VerifierVerdict(BaseModel):
 # "task complete".
 #
 # 2048 is sized from a measured distribution, not one sample: 16 identical calls
-# spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is also
-# why *truncation* never latches — one truncation is a tail sample, not proof
-# about the next turn — and why the 4096 retry exists rather than a single bigger
-# budget. 1024 was measurably too small. Nothing pays for headroom it doesn't
-# use; first-party models answer in 43–115 tokens either way.
+# spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is why
+# the 4096 retry exists rather than a single bigger budget. 1024 was measurably
+# too small. Nothing pays for headroom it doesn't use; first-party models answer
+# in 43–115 tokens either way.
 #
-# A *hard* failure does latch, which is a different claim: a 400 rejecting the
-# forced `tool_choice` is a statement about the model, not about this transcript
-# (ENG-1095/ENG-1155). See `_verifier_latched`.
+# An EXHAUSTED ladder now counts toward the latch, where a single truncation
+# once did not. The old rule read one truncation as a tail sample of a model's
+# verbosity rather than proof about the next call, which holds inside a long
+# session; it does not hold for a host that rebuilds the session per message,
+# where the ladder is exhausted every message and the counter never survives to
+# a second sample. Typed transients still never latch — see
+# `_TRANSIENT_VERDICT_ERRORS`.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
 
 # Verdict-call failures that are transient by nature rather than statements about
@@ -441,6 +444,13 @@ _DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # re-probe the latch is permanent for the session and "reset on a successful
 # verdict" can never fire, since a latched session makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
+
+# Verdict calls that produce no verdict before the latch engages. Two, because
+# the first can be a one-off and ENG-1079 wants its honest diagnosis for that.
+# A host that rebuilds this session per message must lower it to 1: there every
+# message contributes at most one and the counter dies with the session, so two
+# is unreachable and every message pays a hand-back.
+_VERIFIER_LATCH_THRESHOLD = 2
 
 # Floor for the tokens held back from the spend ceiling (ENG-1286).
 #
@@ -994,6 +1004,10 @@ class ChatSessionConfig:
     data_vault: DataVault | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
+    #: Verdict failures before the latch engages; None uses
+    #: `_VERIFIER_LATCH_THRESHOLD`. A host that rebuilds this session per
+    #: message wants 1 — see that constant.
+    verifier_latch_threshold: int | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
     # WHICH AGENT ran this session. Surfaced on telemetry / langfuse traces, and
@@ -1133,13 +1147,20 @@ class ChatSession:
         # latch, each multi-step turn pays a full-history diagnosis call and
         # shows the "checking in" message (ENG-1155). Session-scoped: a hard
         # failure twice in a row latches, a successful verdict clears it.
-        self._verifier_hard_failures = 0
+        self._verifier_no_verdict_failures = 0
         self._verifier_latched = False
         self._verifier_latch_skips = 0
-        # Why the latch is set — "hard" (capability, ENG-1095) or "denied"
-        # (billing/model access, ENG-1632) — so the skip log names the real
-        # cause instead of reporting "0 hard failures" for a denied latch.
+        # Why the latch is set — the failing verdict class ("hard" per
+        # ENG-1095, "truncated") or "denied" (billing/model access, ENG-1632) —
+        # so the skip log and the books name the real cause.
         self._verifier_latch_reason = ""
+        # Only None means "unset": a passed 0 must not read as the default and
+        # silently double the threshold it was trying to lower.
+        self._verifier_latch_threshold = (
+            _VERIFIER_LATCH_THRESHOLD
+            if config.verifier_latch_threshold is None
+            else max(1, int(config.verifier_latch_threshold))
+        )
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -5412,15 +5433,13 @@ class ChatSession:
             # latched and does NOT re-diagnose (the latched branch below breaks
             # before the diagnosis), so the cost is one verdict call per
             # _VERIFIER_LATCH_REPROBE_TURNS turns.
-            # A re-probe that TRUNCATES (or hits a typed TransientProviderError)
-            # instead is intended to fall through to the honest diagnosis below,
-            # and it leaves the latch set: neither counts toward or against the
-            # latch (truncation is a tail sample, see _VERIFIER_TOKEN_BUDGETS;
-            # typed transients never latch by definition), so only a successful
-            # verdict clears it. A latched session re-probing into a
-            # persistently-verbose model therefore diagnoses once per re-probe
-            # cycle rather than never — matching "every truncated turn keeps its
-            # honest diagnosis".
+            # A re-probe that TRUNCATES now counts like any other no-verdict
+            # outcome, so it stays latched and does NOT re-diagnose: an
+            # exhausted ladder is evidence about the model, not a tail sample
+            # (see _VERIFIER_TOKEN_BUDGETS). A re-probe hitting a typed
+            # TransientProviderError still falls through to the honest
+            # diagnosis and leaves the latch set — those never latch by
+            # definition, so only a successful verdict clears it.
             if self._verifier_latched:
                 self._verifier_latch_skips += 1
                 if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
@@ -5430,8 +5449,9 @@ class ChatSession:
                         "continuation=%d/%d tool_rounds=%d",
                         "deterministic denial: billing or model access"
                         if self._verifier_latch_reason == "denied"
-                        else f"{self._verifier_hard_failures} hard failures "
-                        "with no successful verdict between them",
+                        else f"{self._verifier_no_verdict_failures} verdict calls "
+                        "that produced no verdict with no successful verdict "
+                        "between them",
                         self._verifier_latch_skips,
                         _VERIFIER_LATCH_REPROBE_TURNS, continuation,
                         self._max_continuations, tool_round,
@@ -5549,7 +5569,7 @@ class ChatSession:
                 # A working verdict clears the latch: whatever was failing
                 # (transient provider error, a model the user has since changed)
                 # is no longer failing.
-                self._verifier_hard_failures = 0
+                self._verifier_no_verdict_failures = 0
                 self._verifier_latched = False
                 self._verifier_latch_reason = ""
                 status = verdict.status
@@ -5602,8 +5622,8 @@ class ChatSession:
                     if self._turn_cost is not None:
                         self._turn_cost.verification_skipped = True
                     break
-                if verdict_failure == "hard":
-                    self._verifier_hard_failures += 1
+                if verdict_failure in ("hard", "truncated"):
+                    self._verifier_no_verdict_failures += 1
                     if self._verifier_latched:
                         # A failed re-probe: the cause is still there. Stay
                         # latched with its own log line — re-announcing "latched
@@ -5617,33 +5637,33 @@ class ChatSession:
                         if self._turn_cost is not None:
                             self._turn_cost.verification_skipped = True
                         break
-                    if self._verifier_hard_failures >= 2:
-                        # Second hard failure in a row: the first could have been
-                        # transient, this one establishes the pattern. Latch and
-                        # skip the diagnosis on this turn too — a second
+                    if self._verifier_no_verdict_failures >= self._verifier_latch_threshold:
+                        # Threshold reached: the cause is established, so latch
+                        # and skip the diagnosis on this turn too — a second
                         # "checking in" message plus a second full-history call
                         # buys nothing once the cause is known to recur. One
                         # diagnosis per session (ENG-1155).
                         #
-                        # "Hard" = neither truncation nor anything in
-                        # `_TRANSIENT_VERDICT_ERRORS` (see that except-clause
-                        # above). Connection drops and timeouts are transient and
-                        # never latch; what remains is the shape ENG-1095 has —
-                        # a provider that rejects the call itself.
+                        # Counted: a provider that rejects the call itself
+                        # (ENG-1095's 400 on forced `tool_choice`) and a ladder
+                        # exhausted by a narrating model. Not counted: anything
+                        # in `_TRANSIENT_VERDICT_ERRORS`; a deterministic denial
+                        # latched on its own branch above.
                         #
-                        # Not strictly "consecutive" either: the counter is reset
-                        # only by a *successful* verdict, so hard → truncated →
-                        # hard still latches on the second hard failure. That is
-                        # deliberate — only a real verdict proves the model can
-                        # produce one, and a truncation in between is no evidence
-                        # that it can (review: pnewsam on #299).
+                        # Not strictly "consecutive": the counter is reset only
+                        # by a *successful* verdict, since only a real verdict
+                        # proves the model can produce one.
+                        #
+                        # The reason carries the class, so the books can tell
+                        # latched_hard from latched_truncated rather than
+                        # mislabelling one as the other.
                         self._verifier_latched = True
-                        self._verifier_latch_reason = "hard"
+                        self._verifier_latch_reason = verdict_failure
                         _verifier_log.warning(
-                            "completion-verifier latched after %d hard failures with "
-                            "no successful verdict between them — skipping further "
-                            "verification this session",
-                            self._verifier_hard_failures,
+                            "completion-verifier latched after %d verdict calls that "
+                            "produced no verdict (%s) with no successful verdict "
+                            "between them — skipping further verification this session",
+                            self._verifier_no_verdict_failures, verdict_failure,
                         )
                         # Unverified turn — see the latched-skip stamp above.
                         if self._turn_cost is not None:

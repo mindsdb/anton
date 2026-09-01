@@ -368,8 +368,11 @@ async def test_budget_exhausted_diagnosis_is_persisted_as_streamed(workspace):
         await session.close()
 
 
-def _make_session(workspace, mock_llm) -> ChatSession:
-    return ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+def _make_session(workspace, mock_llm, *, verifier_latch_threshold=None) -> ChatSession:
+    return ChatSession(ChatSessionConfig(
+        llm_client=mock_llm, workspace=workspace,
+        verifier_latch_threshold=verifier_latch_threshold,
+    ))
 
 
 def _tool_then_text_plan(diagnosis: str = "DIAGNOSIS: internal check failed."):
@@ -454,10 +457,10 @@ async def test_deterministic_hard_failure_latches_after_one_diagnosis(workspace,
         await session.close()
 
 
-async def test_truncation_does_not_latch(workspace):
-    """A blown budget is one model being verbose on one transcript — a tail
-    sample, not a capability problem. Only hard failures latch (ENG-1155);
-    truncation keeps its ENG-1081 retry ladder and its honest diagnosis.
+async def test_an_exhausted_ladder_latches_at_the_threshold(workspace):
+    """A ladder exhausted at every budget counts toward the latch, the same as
+    a provider that rejects the call. The ENG-1081 retry ladder still runs in
+    full first, and the first such turn still gets its honest diagnosis.
     """
     from anton.core.llm.provider import StructuredOutputError
 
@@ -482,9 +485,20 @@ async def test_truncation_does_not_latch(workspace):
             if state["n"] >= 3:
                 diagnoses += 1
 
-        assert session._verifier_latched is False, "truncation must not latch"
-        assert diagnoses == 3, (
-            f"every truncated turn still gets its honest diagnosis, got {diagnoses}"
+        # Reversal, deliberate: an exhausted ladder now counts toward the
+        # latch. The old rule read one truncation as a tail sample of a model's
+        # verbosity, which holds inside a long session but not for a host that
+        # rebuilds the session per message, where the ladder is exhausted every
+        # message. The first turn still gets its honest diagnosis; the second
+        # reaches the default threshold of two and latches.
+        assert session._verifier_latched is True, (
+            "an exhausted ladder must count toward the latch"
+        )
+        assert session._verifier_latch_reason == "truncated", (
+            "the books must show what actually latched, not a fixed 'hard'"
+        )
+        assert diagnoses == 1, (
+            f"one honest diagnosis, then silence — not one per turn, got {diagnoses}"
         )
     finally:
         await session.close()
@@ -518,7 +532,7 @@ async def test_successful_verdict_clears_the_latch_counter(workspace):
 
         # fail, succeed, fail → never two in a row.
         assert session._verifier_latched is False
-        assert session._verifier_hard_failures == 1
+        assert session._verifier_no_verdict_failures == 1
     finally:
         await session.close()
 
@@ -674,7 +688,7 @@ async def test_latched_verifier_reprobes_and_can_recover(workspace):
         assert session._verifier_latched is False, (
             "a successful re-probe must clear the latch"
         )
-        assert session._verifier_hard_failures == 0
+        assert session._verifier_no_verdict_failures == 0
     finally:
         await session.close()
 
@@ -719,7 +733,7 @@ async def test_transient_provider_errors_never_latch(workspace, exc_factory, lab
         assert session._verifier_latched is False, (
             "transient provider errors must never latch the session"
         )
-        assert session._verifier_hard_failures == 0
+        assert session._verifier_no_verdict_failures == 0
         # Verification keeps being attempted every turn, rather than being
         # switched off after two blips.
         assert calls["n"] == 4, (
@@ -781,13 +795,12 @@ async def test_failed_reprobe_stays_latched_without_rediagnosis(workspace, caplo
         await session.close()
 
 
-async def test_latched_truncating_reprobe_diagnoses_and_stays_latched(workspace):
+async def test_latched_truncating_reprobe_stays_latched_without_rediagnosing(workspace):
     """A latched session whose re-probe TRUNCATES (the user switched from a
-    hard-failing model to a persistently-verbose one) falls through to the
-    honest diagnosis and leaves the latch set — truncation never counts toward
-    or against the latch, so only a successful verdict clears it. Pins the
-    deliberate interaction between the latch and "every truncated turn keeps
-    its honest diagnosis" (see the re-probe comment in session.py).
+    hard-failing model to a persistently-verbose one) stays latched and does
+    not re-diagnose: an exhausted ladder is now evidence about the model, so it
+    takes the failed-re-probe path like any other no-verdict outcome. Only a
+    successful verdict clears the latch.
     """
     from anton.core.llm.provider import StructuredOutputError
     from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
@@ -820,9 +833,9 @@ async def test_latched_truncating_reprobe_diagnoses_and_stays_latched(workspace)
         assert session._verifier_latched is True, (
             "a truncating re-probe must not clear the latch"
         )
-        assert diagnoses == 2, (
-            f"expected the latch-time diagnosis plus one on the truncating "
-            f"re-probe, got {diagnoses}"
+        assert diagnoses == 1, (
+            f"the latch-time diagnosis only: a truncating re-probe must not "
+            f"re-diagnose, got {diagnoses}"
         )
     finally:
         await session.close()
@@ -945,7 +958,7 @@ async def test_denied_verdict_latches_silently_on_first_occurrence(
         assert session._verifier_latched is True
         # Denied is not a capability failure — the hard counter stays clean so
         # a later hard failure still gets its honest one-per-session diagnosis.
-        assert session._verifier_hard_failures == 0
+        assert session._verifier_no_verdict_failures == 0
         announcements = [
             r for r in caplog.records
             if "latched after a deterministic denial" in r.message
@@ -1010,3 +1023,80 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
         )
     finally:
         await session.close()
+
+
+# ── A host that rebuilds the session per message ─────────────────────────────
+#
+# Cowork builds a fresh ChatSession for every message, so the no-verdict counter
+# dies with the session: each message contributes at most one, the default
+# threshold of two is unreachable, and every message paid a full-history
+# hand-back. Such a host lowers the threshold to one instead of persisting the
+# counter — at one the turn already ends silently on the reply that streamed, so
+# carrying state across messages would only save the ladder's calls, not change
+# what the user sees.
+
+
+def _always_truncated():
+    from anton.core.llm.provider import StructuredOutputError
+
+    async def truncated(_schema, *, system, messages, max_tokens):
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    return truncated
+
+
+@pytest.mark.parametrize("failure, reason", [
+    (_always_truncated(), "truncated"),
+    (AsyncMock(side_effect=RuntimeError("400 tool_choice not supported")), "hard"),
+])
+async def test_a_threshold_of_one_latches_on_the_first_no_verdict(workspace, failure, reason):
+    """One message, no hand-back: the reported bug was the user seeing that
+    message on every turn."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=failure) if not isinstance(
+        failure, AsyncMock
+    ) else failure
+    session = _make_session(workspace, mock_llm, verifier_latch_threshold=1)
+    try:
+        plan, state = _tool_then_text_plan()
+        mock_llm.plan_stream = plan
+        progress = []
+        async for event in session.turn_stream("create a file"):
+            if isinstance(event, StreamTaskProgress):
+                progress.append(event.message or "")
+
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == reason
+        # Two plan calls, not three: the third would be the hand-back diagnosis.
+        assert state["n"] == 2, (
+            f"the first message must not pay a diagnosis call, got {state['n']}"
+        )
+        assert _HANDBACK_PROGRESS not in progress, (
+            "a host that rebuilds per message must not show the hand-back at all"
+        )
+    finally:
+        await session.close()
+
+
+async def test_the_default_threshold_is_unchanged_for_long_sessions(workspace):
+    """The CLI keeps one honest diagnosis before the latch: only a host that
+    says so gets the single-sample behaviour."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    default = _make_session(workspace, mock_llm)
+    lowered = _make_session(workspace, mock_llm, verifier_latch_threshold=1)
+    try:
+        from anton.core.session import _VERIFIER_LATCH_THRESHOLD
+
+        assert default._verifier_latch_threshold == _VERIFIER_LATCH_THRESHOLD == 2
+        assert lowered._verifier_latch_threshold == 1
+        # A threshold below one would latch before any verdict call ran.
+        assert _make_session(
+            workspace, mock_llm, verifier_latch_threshold=0
+        )._verifier_latch_threshold == 1
+    finally:
+        await default.close()
+        await lowered.close()
