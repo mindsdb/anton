@@ -103,7 +103,12 @@ jobs:
           set -euo pipefail
           : "${MINDS_API_KEY:?MINDSHUB_API_KEY secret is not set}"
           : "${REPO_TOKEN:?no read token — set the GH_EVALS_READ_TOKEN secret or pass repo_token}"
-          : "${LANGFUSE_PUBLIC_KEY:?no Langfuse key — token and cost columns would be empty}"
+          # All three or none — a partial Langfuse config silently drops to empty
+          # token/cost columns downstream instead of the clear error this step
+          # exists to give.
+          : "${LANGFUSE_HOST:?no Langfuse host — token and cost columns would be empty}"
+          : "${LANGFUSE_PUBLIC_KEY:?no Langfuse public key — token and cost columns would be empty}"
+          : "${LANGFUSE_SECRET_KEY:?no Langfuse secret key — token and cost columns would be empty}"
 
       - name: Check out anton
         if: steps.fork.outputs.skip != '1'
@@ -121,6 +126,18 @@ jobs:
       #    fire on a PR that IS staging;
       #  - a branch that moves mid-run would make the two halves of the comparison
       #    disagree about what "baseline" meant.
+      # `pull_request` runs already give ANTON_SHA as a sha; a manual `workflow_dispatch`
+      # with `anton_ref: staging` does not — resolve it from the checkout above so
+      # cowork_evals' duplicate-variant check (a raw string compare of the two refs)
+      # sees the same sha on both sides when anton_ref and BASELINE_REF are the same
+      # commit, instead of "staging" vs a resolved sha never matching.
+      - name: Resolve the anton commit
+        if: steps.fork.outputs.skip != '1'
+        working-directory: anton
+        run: |
+          set -euo pipefail
+          echo "ANTON_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Resolve the baseline commit
         id: baseline
         if: steps.fork.outputs.skip != '1'
@@ -217,8 +234,10 @@ jobs:
             echo "<sub>anton \`${SHA:0:8}\` · cowork-server \`$COWORK_REF\` · $REPEATS replicates</sub>"
           } > comment.md
           # One comment per PR, edited in place: a fresh comment per run buries the
-          # conversation under near-identical tables.
-          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+          # conversation under near-identical tables. --paginate covers PRs past the
+          # 30-comment first page; --jq runs per page, but an empty page contributes
+          # no output, so the concatenated result is still just the one matching id.
+          id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
                  --jq "[.[] | select(.body | startswith(\"$marker\")) | .id] | first // empty")
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@comment.md
