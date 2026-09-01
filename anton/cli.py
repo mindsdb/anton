@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import importlib
+import logging
 import os
 import shutil
 import subprocess
@@ -38,6 +39,12 @@ from anton.commands.datasource import (
     handle_test_datasource
 )
 from anton.minds_client import minds_v1_base, resolve_and_probe, test_llm
+
+# The CLI configures no logging, so without a handler on the package logger
+# Python's lastResort writes WARNING and above straight to stderr — into the
+# middle of the rich Live render. Propagation is untouched, so a host that does
+# configure logging (the cowork sidecar, the cloud pod) still emits them.
+logging.getLogger("anton").addHandler(logging.NullHandler())
 
 
 def _build_scratchpad_manager(

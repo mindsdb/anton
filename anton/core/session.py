@@ -419,8 +419,8 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # map to TransientProviderError and never land here) or a model id that doesn't
 # resolve for this key (ModelUnavailableError: 404 model-not-found / 403
 # model-access-denied). These latch on the FIRST occurrence and stay silent:
-# the turn's work already succeeded, and "the task-completion check failed
-# (internal error)" is a lie when the check was merely priced out (ENG-1632 —
+# the turn's work already succeeded, and telling the user an internal check
+# failed is a lie when the check was merely priced out (ENG-1632 —
 # of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
 # were aux-surface calls like this one, across 33 of those users; every aux
 # one surfaced to the user as an internal error and an apology).
@@ -5496,9 +5496,10 @@ class ChatSession:
                     _verifier_log.log(
                         _logging.INFO if retrying else _logging.WARNING,
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
-                        "stop_reason=%s retrying=%s",
+                        "stop_reason=%s error=%s retrying=%s",
                         truncation_verdict(exc),
-                        budget, exc.output_tokens, exc.stop_reason, retrying,
+                        budget, exc.output_tokens, exc.stop_reason,
+                        _safe_error_detail(exc), retrying,
                     )
                     if not retrying:
                         break
@@ -5510,8 +5511,8 @@ class ChatSession:
                     verdict_failure = "denied"
                     verdict_exc = exc
                     _verifier_log.warning(
-                        "completion-verifier verdict=DENIED budget=%d error=%s",
-                        budget, _safe_error_detail(exc),
+                        "completion-verifier verdict=DENIED budget=%d model=%s error=%s",
+                        budget, self._llm.coding_model, _safe_error_detail(exc),
                     )
                     break
                 except _TRANSIENT_VERDICT_ERRORS as exc:
@@ -5589,7 +5590,9 @@ class ChatSession:
                     # the guarantee the user is never told the turn failed.
                     self._verifier_latched = True
                     self._verifier_latch_reason = "denied"
-                    _verifier_log.warning(
+                    # INFO, unlike the other latch lines: this one latches on
+                    # call one, so at WARNING it doubles verdict=DENIED above.
+                    _verifier_log.info(
                         "completion-verifier latched after a deterministic "
                         "denial (billing or model access) — skipping further "
                         "verification this session; turn ends on the "
@@ -5657,20 +5660,21 @@ class ChatSession:
                 # real message instead of nothing.
                 _verifier_log.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
-                    "— failing toward an honest diagnosis, not a silent COMPLETE",
+                    "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
                     continuation, self._max_continuations, tool_round,
+                    self._llm.coding_model,
                 )
                 self._append_history(
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: This turn's work finished and the reply you just "
-                            "gave stands. What failed is only the automatic follow-up "
-                            "check on whether the task is fully complete, so nothing "
-                            "about the work itself went wrong and there is no error for "
-                            "the user to fix.\n"
-                            "1. Tell the user what you completed. Lead with the result, "
-                            "not with the check.\n"
+                            "SYSTEM: Your reply above stands, and nothing in your work "
+                            "was rejected — no verdict came back at all. What failed is "
+                            "the automatic check on whether the task is complete, so "
+                            "completeness is unconfirmed rather than denied.\n"
+                            "1. Report accurately what you did: what succeeded, and "
+                            "anything that did not, including any tool that returned an "
+                            "error. Do not describe a failed step as done.\n"
                             "2. Name a file only by a path that appears verbatim in a "
                             "tool result above. Never state a path you intended to write "
                             "or believe you wrote; where no tool result gives one, say "

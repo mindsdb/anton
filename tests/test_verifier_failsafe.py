@@ -65,7 +65,7 @@ def _scratchpad_response(text: str, action: str, name: str, code: str = "") -> L
 # Anchors into the verifier-failure hand-back (session.py). Shared because the
 # denied-verdict tests assert this text NEVER enters history — anchored on a
 # string the prompt no longer contains, those assertions would pass vacuously.
-_HANDBACK_ANCHOR = "automatic follow-up check"
+_HANDBACK_ANCHOR = "automatic check on whether the task is complete"
 _HANDBACK_PROGRESS = "Confirming what was completed..."
 
 
@@ -134,9 +134,15 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         # The hand-back must not read as a failed turn, and must not invite the
         # model to restate a path from memory: asked where the file went, it
         # named the path it MEANT to write and the user went looking there.
-        assert any("the reply you just gave stands" in t for t in history_texts)
+        assert any("Your reply above stands" in t for t in history_texts)
         assert any(
             "Never state a path you intended to write" in t for t in history_texts
+        )
+        # It must not claim the work was clean either. Only the tool-round count
+        # gates this path, so a turn whose tool calls failed lands here too, and
+        # a "nothing went wrong" framing would be the same misreport inverted.
+        assert any(
+            "including any tool that returned an error" in t for t in history_texts
         )
         assert not any("Continue working on the original request" in t for t in history_texts)
         # The model must be asked for a solvability self-assessment, not just
@@ -220,7 +226,11 @@ async def test_truncation_exhausting_every_budget_also_gets_the_diagnosis(worksp
             if "completion-verifier verdict=" in r.getMessage()
             and "output_tokens=" in r.getMessage()
         ]
-        assert [r.levelno for r in attempts] == [logging.INFO, logging.WARNING]
+        ladder = [logging.INFO] * (len(_VERIFIER_TOKEN_BUDGETS) - 1)
+        assert [r.levelno for r in attempts] == ladder + [logging.WARNING]
+        # This clause carries the dominant free-tier failure, so the line has to
+        # name the exception type or a support log cannot say what broke.
+        assert all("error=StructuredOutputError" in r.getMessage() for r in attempts)
         # And the line naming the failure class must itself clear WARNING, or a
         # customer's default log cannot say why the turn handed back.
         gave_up = [
@@ -869,9 +879,8 @@ async def test_empty_diagnosis_is_logged_not_circular(workspace, caplog):
 #
 # A wallet 402 / allowance 429 (TokenLimitExceeded, code-exact per ENG-1169) or
 # a 404'd/403'd model (ModelUnavailableError) recurs on every retry by
-# construction. The turn's work already succeeded — telling the user "the
-# task-completion check failed to run (internal error)" and streaming an
-# apology is a misreport (measured: 208 aux-call wallet-402s across 33 users in
+# construction. The turn's work already succeeded — telling the user an
+# internal check failed and streaming an apology is a misreport (measured: 208 aux-call wallet-402s across 33 users in
 # 14 days, every one surfaced as an internal error). The denied path must be
 # SILENT: no history injection, no diagnosis stream, latch on call one.
 #
