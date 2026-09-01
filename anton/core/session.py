@@ -1468,8 +1468,12 @@ class ChatSession:
         if stored.get("model") != self._llm.coding_model:
             return
         try:
-            failures = max(0, int(stored.get("no_verdict_failures") or 0))
-            skips = max(0, int(stored.get("skips") or 0))
+            raw_failures = stored.get("no_verdict_failures")
+            raw_skips = stored.get("skips")
+            if isinstance(raw_failures, bool) or isinstance(raw_skips, bool):
+                return
+            failures = max(0, int(raw_failures or 0))
+            skips = max(0, int(raw_skips or 0))
         except (TypeError, ValueError):
             return
         latched = stored.get("latched")
