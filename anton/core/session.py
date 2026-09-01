@@ -445,13 +445,6 @@ _DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # verdict" can never fire, since a latched session makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
 
-# Verdict calls that produce no verdict before the latch engages. Two, because
-# the first can be a one-off and ENG-1079 wants its honest diagnosis for that.
-# A host that rebuilds this session per message must lower it to 1: there every
-# message contributes at most one and the counter dies with the session, so two
-# is unreachable and every message pays a hand-back.
-_VERIFIER_LATCH_THRESHOLD = 2
-
 # Floor for the tokens held back from the spend ceiling (ENG-1286).
 #
 # TWO calls land after the last check that passed, not one: the call that
@@ -1004,10 +997,9 @@ class ChatSessionConfig:
     data_vault: DataVault | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
-    #: Verdict failures before the latch engages; None uses
-    #: `_VERIFIER_LATCH_THRESHOLD`. A host that rebuilds this session per
-    #: message wants 1 — see that constant.
-    verifier_latch_threshold: int | None = None
+    #: Latch state a host persisted from this conversation's previous session
+    #: — see `ChatSession.verifier_latch`. Ignored unless its model matches.
+    initial_verifier_latch: dict | None = None
     history_store: HistoryStore | None = None
     session_id: str | None = None
     # WHICH AGENT ran this session. Surfaced on telemetry / langfuse traces, and
@@ -1156,16 +1148,12 @@ class ChatSession:
         self._verifier_latch_reason = ""
         # Only None means "unset": a passed 0 must not read as the default and
         # silently double the threshold it was trying to lower.
-        self._verifier_latch_threshold = (
-            _VERIFIER_LATCH_THRESHOLD
-            if config.verifier_latch_threshold is None
-            else max(1, int(config.verifier_latch_threshold))
-        )
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
+        self._restore_verifier_latch(config.initial_verifier_latch)
         # Router (ENG-648): explicit host override wins; otherwise the
         # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
         # tests pass bare CoreSettings-shaped objects.
@@ -1422,6 +1410,56 @@ class ChatSession:
             "covered_through": min(self._last_compacted_count, self._seed_len),
         }
 
+
+    def _restore_verifier_latch(self, stored: object) -> None:
+        """Adopt latch state a host persisted from an earlier session.
+
+        Ignored unless `model` matches the model this session would verify
+        with: state gathered against a model that cannot produce a verdict
+        says nothing about the one the user has since switched to. Ignored on
+        any malformed shape — this arrives from a host's storage, and no value
+        in it is worth failing a turn over.
+        """
+        if not isinstance(stored, dict):
+            return
+        if stored.get("model") != self._llm.coding_model:
+            return
+        try:
+            failures = int(stored.get("no_verdict_failures") or 0)
+            skips = int(stored.get("skips") or 0)
+        except (TypeError, ValueError):
+            return
+        self._verifier_no_verdict_failures = max(0, failures)
+        self._verifier_latch_skips = max(0, skips)
+        self._verifier_latched = bool(stored.get("latched"))
+        reason = stored.get("reason")
+        self._verifier_latch_reason = (
+            reason if reason in ("hard", "truncated", "denied") else ""
+        )
+
+    @property
+    def verifier_latch(self) -> dict | None:
+        """Latch state to carry to this conversation's next session.
+
+        A host that rebuilds this object per message must persist this and hand
+        it back as `initial_verifier_latch`, or the counter restarts at zero
+        every message: one message contributes at most one failure, so the
+        threshold of two is never reached and every message pays a hand-back.
+
+        UNLIKE `last_compaction`, None does NOT mean "keep what you stored" —
+        it means there is nothing to carry, so clear it. A successful verdict
+        resets the counter and the latch, and that reset has to reach storage
+        or verification stays off for the rest of the conversation.
+        """
+        if not self._verifier_no_verdict_failures and not self._verifier_latched:
+            return None
+        return {
+            "model": self._llm.coding_model,
+            "no_verdict_failures": self._verifier_no_verdict_failures,
+            "latched": self._verifier_latched,
+            "reason": self._verifier_latch_reason,
+            "skips": self._verifier_latch_skips,
+        }
 
     def _record_root_cause(
         self, tool_ok: bool | None, reason: str, result_text: str
@@ -5418,9 +5456,9 @@ class ChatSession:
                 # Consolidation still runs after diagnosis
                 break
 
-            # A verifier that already failed hard twice in a row will keep
-            # failing for the rest of the session (ENG-1095's forced-tool_choice
-            # 400 is per-model, not per-call). Skip the verdict rather than pay a
+            # A verifier that already produced no verdict twice will keep
+            # failing for this model (ENG-1095's forced-tool_choice 400 is
+            # per-model, not per-call). Skip the verdict rather than pay a
             # full-history diagnosis every turn and show "checking in" each time
             # (ENG-1155). The turn ends on the model's own answer, which is
             # already in history — unverified, but that beats a per-turn
@@ -5450,8 +5488,8 @@ class ChatSession:
                         "deterministic denial: billing or model access"
                         if self._verifier_latch_reason == "denied"
                         else f"{self._verifier_no_verdict_failures} verdict calls "
-                        "that produced no verdict with no successful verdict "
-                        "between them",
+                        f"({self._verifier_latch_reason or 'hard'}) that produced no "
+                        "verdict with no successful verdict between them",
                         self._verifier_latch_skips,
                         _VERIFIER_LATCH_REPROBE_TURNS, continuation,
                         self._max_continuations, tool_round,
@@ -5484,9 +5522,9 @@ class ChatSession:
                 self._history, user_message
             )
             verdict = None
-            # Truncation vs hard failure decides whether this counts toward the
-            # latch: a blown budget is a tail sample of one model's verbosity,
-            # an identical hard error twice is a capability problem (ENG-1155).
+            # Which class of no-verdict failure this was. Everything except a
+            # typed transient counts toward the latch; the class is kept so the
+            # books can name it (ENG-1155/ENG-1858).
             verdict_failure: str | None = None
             # The last attempt's exception, kept only long enough to stamp
             # its TYPE on the turn books below (ENG-1858). `except ... as exc`
@@ -5637,7 +5675,7 @@ class ChatSession:
                         if self._turn_cost is not None:
                             self._turn_cost.verification_skipped = True
                         break
-                    if self._verifier_no_verdict_failures >= self._verifier_latch_threshold:
+                    if self._verifier_no_verdict_failures >= 2:
                         # Threshold reached: the cause is established, so latch
                         # and skip the diagnosis on this turn too — a second
                         # "checking in" message plus a second full-history call

@@ -368,10 +368,10 @@ async def test_budget_exhausted_diagnosis_is_persisted_as_streamed(workspace):
         await session.close()
 
 
-def _make_session(workspace, mock_llm, *, verifier_latch_threshold=None) -> ChatSession:
+def _make_session(workspace, mock_llm, *, initial_verifier_latch=None) -> ChatSession:
     return ChatSession(ChatSessionConfig(
         llm_client=mock_llm, workspace=workspace,
-        verifier_latch_threshold=verifier_latch_threshold,
+        initial_verifier_latch=initial_verifier_latch,
     ))
 
 
@@ -485,12 +485,8 @@ async def test_an_exhausted_ladder_latches_at_the_threshold(workspace):
             if state["n"] >= 3:
                 diagnoses += 1
 
-        # Reversal, deliberate: an exhausted ladder now counts toward the
-        # latch. The old rule read one truncation as a tail sample of a model's
-        # verbosity, which holds inside a long session but not for a host that
-        # rebuilds the session per message, where the ladder is exhausted every
-        # message. The first turn still gets its honest diagnosis; the second
-        # reaches the default threshold of two and latches.
+        # An exhausted ladder is evidence about the model, not a tail sample
+        # of its verbosity: the first turn diagnoses, the second latches.
         assert session._verifier_latched is True, (
             "an exhausted ladder must count toward the latch"
         )
@@ -1025,15 +1021,14 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
         await session.close()
 
 
-# ── A host that rebuilds the session per message ─────────────────────────────
+# ── Carrying the latch across a rebuilt session ──────────────────────────────
 #
-# Cowork builds a fresh ChatSession for every message, so the no-verdict counter
-# dies with the session: each message contributes at most one, the default
-# threshold of two is unreachable, and every message paid a full-history
-# hand-back. Such a host lowers the threshold to one instead of persisting the
-# counter — at one the turn already ends silently on the reply that streamed, so
-# carrying state across messages would only save the ladder's calls, not change
-# what the user sees.
+# The latch is ChatSession state and Cowork rebuilds ChatSession per message, so
+# the counter restarted at zero on every message: one message contributes at
+# most one failure, the threshold is two, and every message paid a hand-back.
+# Carrying the counter is what lets message one diagnose and the rest go quiet.
+# The `verification_skipped` stamp on these paths is covered by
+# test_turn_cost_terminals.py; nothing here adds a stamp site.
 
 
 def _always_truncated():
@@ -1048,55 +1043,143 @@ def _always_truncated():
     return truncated
 
 
-@pytest.mark.parametrize("failure, reason", [
-    (_always_truncated(), "truncated"),
-    (AsyncMock(side_effect=RuntimeError("400 tool_choice not supported")), "hard"),
-])
-async def test_a_threshold_of_one_latches_on_the_first_no_verdict(workspace, failure, reason):
-    """One message, no hand-back: the reported bug was the user seeing that
-    message on every turn."""
-    mock_llm = make_mock_llm()
-    mock_llm.generate_object_code = AsyncMock(side_effect=failure) if not isinstance(
-        failure, AsyncMock
-    ) else failure
-    session = _make_session(workspace, mock_llm, verifier_latch_threshold=1)
-    try:
-        plan, state = _tool_then_text_plan()
-        mock_llm.plan_stream = plan
-        progress = []
-        async for event in session.turn_stream("create a file"):
-            if isinstance(event, StreamTaskProgress):
-                progress.append(event.message or "")
+async def _run_one_turn(session, mock_llm, message: str):
+    plan, state = _tool_then_text_plan()
+    mock_llm.plan_stream = plan
+    progress = []
+    async for event in session.turn_stream(message):
+        if isinstance(event, StreamTaskProgress):
+            progress.append(event.message or "")
+    return progress, state
 
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == reason
-        # Two plan calls, not three: the third would be the hand-back diagnosis.
-        assert state["n"] == 2, (
-            f"the first message must not pay a diagnosis call, got {state['n']}"
-        )
-        assert _HANDBACK_PROGRESS not in progress, (
-            "a host that rebuilds per message must not show the hand-back at all"
-        )
+
+async def test_the_first_message_diagnoses_and_carries_its_counter(workspace):
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    session = _make_session(workspace, mock_llm)
+    try:
+        progress, state = await _run_one_turn(session, mock_llm, "message one")
+        # Criterion 2: the user is told once, with the reworded hand-back.
+        assert state["n"] == 3
+        assert _HANDBACK_PROGRESS in progress
+        assert session.verifier_latch == {
+            "model": "claude-sonnet-4-6",
+            "no_verdict_failures": 1,
+            "latched": False,
+            "reason": "",
+            "skips": 0,
+        }
     finally:
         await session.close()
 
 
-async def test_the_default_threshold_is_unchanged_for_long_sessions(workspace):
-    """The CLI keeps one honest diagnosis before the latch: only a host that
-    says so gets the single-sample behaviour."""
+async def test_the_second_message_latches_on_the_carried_counter(workspace):
+    """Criterion 3: the same failure is diagnosed once, not every message."""
     mock_llm = make_mock_llm()
     mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
-    default = _make_session(workspace, mock_llm)
-    lowered = _make_session(workspace, mock_llm, verifier_latch_threshold=1)
+    first = _make_session(workspace, mock_llm)
     try:
-        from anton.core.session import _VERIFIER_LATCH_THRESHOLD
-
-        assert default._verifier_latch_threshold == _VERIFIER_LATCH_THRESHOLD == 2
-        assert lowered._verifier_latch_threshold == 1
-        # A threshold below one would latch before any verdict call ran.
-        assert _make_session(
-            workspace, mock_llm, verifier_latch_threshold=0
-        )._verifier_latch_threshold == 1
+        await _run_one_turn(first, mock_llm, "message one")
+        carried = first.verifier_latch
     finally:
-        await default.close()
-        await lowered.close()
+        await first.close()
+
+    second = _make_session(workspace, mock_llm, initial_verifier_latch=carried)
+    try:
+        progress, state = await _run_one_turn(second, mock_llm, "message two")
+        assert second._verifier_latched is True
+        assert second.verifier_latch["reason"] == "truncated"
+        assert state["n"] == 2, (
+            f"message two must not pay a second diagnosis, got {state['n']}"
+        )
+        assert _HANDBACK_PROGRESS not in progress
+    finally:
+        await second.close()
+
+
+async def test_a_latch_carried_for_another_model_is_ignored(workspace):
+    """A user who switches models gets verification back."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    session = _make_session(workspace, mock_llm, initial_verifier_latch={
+        "model": "some-other-model", "no_verdict_failures": 1,
+        "latched": True, "reason": "truncated", "skips": 0,
+    })
+    try:
+        assert session._verifier_no_verdict_failures == 0
+        assert session._verifier_latched is False
+        _, state = await _run_one_turn(session, mock_llm, "message one")
+        assert state["n"] == 3, "verification must really have run"
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("stored", [
+    None, "not a dict", 42, {},
+    {"model": "claude-sonnet-4-6", "no_verdict_failures": "many"},
+    {"model": "claude-sonnet-4-6", "no_verdict_failures": None, "skips": [1]},
+    {"model": "claude-sonnet-4-6", "no_verdict_failures": 1, "reason": "bogus"},
+])
+async def test_a_malformed_carried_latch_is_ignored(workspace, stored):
+    """It arrives from a host's storage; nothing in it is worth failing a turn."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    session = _make_session(workspace, mock_llm, initial_verifier_latch=stored)
+    try:
+        assert session._verifier_latch_reason in ("", "hard", "truncated", "denied")
+        if not isinstance(stored, dict) or "no_verdict_failures" not in stored:
+            assert session._verifier_no_verdict_failures == 0
+            assert session._verifier_latched is False
+    finally:
+        await session.close()
+
+
+async def test_the_carried_skip_count_drives_the_reprobe(workspace):
+    """Carrying `latched` without `skips` would restart the skip count every
+    message, making every message a re-probe: one verdict call each."""
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    latched = {
+        "model": "claude-sonnet-4-6", "no_verdict_failures": 2,
+        "latched": True, "reason": "truncated", "skips": 0,
+    }
+
+    early = _make_session(workspace, mock_llm, initial_verifier_latch=latched)
+    try:
+        await _run_one_turn(early, mock_llm, "message three")
+        assert mock_llm.generate_object_code.await_count == 0
+        assert early.verifier_latch["skips"] == 1
+    finally:
+        await early.close()
+
+    mock_llm.generate_object_code.reset_mock()
+    due = _make_session(workspace, mock_llm, initial_verifier_latch={
+        **latched, "skips": _VERIFIER_LATCH_REPROBE_TURNS - 1,
+    })
+    try:
+        await _run_one_turn(due, mock_llm, "message thirteen")
+        assert mock_llm.generate_object_code.await_count == 2, (
+            "the carried skip count must let the re-probe fire, ladder and all"
+        )
+    finally:
+        await due.close()
+
+
+async def test_a_successful_verdict_clears_the_carried_state(workspace):
+    """None means "clear what you stored", not "keep it", or a conversation
+    that recovers stays unverified."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="done")
+    )
+    session = _make_session(workspace, mock_llm, initial_verifier_latch={
+        "model": "claude-sonnet-4-6", "no_verdict_failures": 1,
+        "latched": False, "reason": "", "skips": 0,
+    })
+    try:
+        await _run_one_turn(session, mock_llm, "message two")
+        assert session.verifier_latch is None
+    finally:
+        await session.close()
