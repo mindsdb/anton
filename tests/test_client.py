@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pydantic import BaseModel
+
 from anton.config.settings import AntonSettings
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import (
@@ -13,6 +15,12 @@ from anton.core.llm.provider import (
     StreamTextDelta,
     Usage,
 )
+
+
+class _Schema(BaseModel):
+    """Minimal forced-tool-call schema for the structured-output role tests."""
+
+    answer: str
 
 
 @pytest.fixture()
@@ -354,6 +362,48 @@ class TestRouterRole:
         )
         assert client.router_provider is coding
         assert client.router_model == "model-b"
+
+
+class TestStructuredOutputRole:
+    """The forced-tool-call path shares `_generate_object_with`, so its auth
+    confirmation and role stamp are separate from the plan/code call sites
+    tested above. Without these, dropping the wrapper or swapping the two role
+    strings leaves the suite green while the host attributes a reconnect card
+    to a provider that did not fail."""
+
+    async def test_generate_object_confirms_and_attributes_to_planning(
+        self, mock_providers
+    ):
+        planning, coding = mock_providers
+        planning.complete = AsyncMock(side_effect=ProviderAuthError("Invalid API key"))
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+
+        with pytest.raises(ProviderAuthError) as err:
+            await client.generate_object(_Schema, system="sys", messages=[])
+
+        assert planning.complete.await_count == 2
+        assert err.value.role == "planning"
+
+    async def test_generate_object_code_attributes_to_coding(self, mock_providers):
+        planning, coding = mock_providers
+        coding.complete = AsyncMock(side_effect=ProviderAuthError("Invalid API key"))
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+
+        with pytest.raises(ProviderAuthError) as err:
+            await client.generate_object_code(_Schema, system="sys", messages=[])
+
+        assert coding.complete.await_count == 2
+        assert err.value.role == "coding"
 
 
 class TestLLMClientFromSettings:

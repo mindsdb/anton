@@ -871,6 +871,19 @@ class OpenAIProvider(LLMProvider):
         if api_version and _is_azure_endpoint(base_url):
             # Azure OpenAI: use the dedicated client which handles deployment
             # URL construction and api-version automatically.
+            if api_key_provider is not None:
+                # AsyncAzureOpenAI._prepare_options fully overrides the base
+                # hook and never chains to super(), so AsyncOpenAI's
+                # _refresh_api_key never runs and the supplier is never
+                # awaited. The base __init__ has already replaced a callable
+                # api_key with "", so the client would send an empty api-key
+                # header on every request and 401 forever. Refuse at
+                # construction instead of failing on the first call.
+                raise EndpointConfigurationError(
+                    "Azure OpenAI cannot refresh credentials per request: "
+                    "AsyncAzureOpenAI ignores a callable api_key. Pass a "
+                    "static api_key for Azure endpoints."
+                )
             azure_kwargs: dict = {"api_version": api_version}
             if client_api_key:
                 azure_kwargs["api_key"] = client_api_key
