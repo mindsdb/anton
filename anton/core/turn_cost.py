@@ -142,8 +142,10 @@ class TurnCost:
     # turns, 3x the tokens of a completed one) had no groupable cause. Values
     # are the classification the verdict loop already draws for the latch —
     # `truncated` / `transient` / `hard` / `denied` — plus `latched_hard` /
-    # `latched_truncated` / `latched_denied` for turns that never made the call
-    # because an earlier one latched. Empty when a verdict was produced or the verifier was
+    # `latched_truncated` / `latched_mixed` / `latched_denied` for turns that
+    # never made the call because an earlier one latched. `latched_mixed` means
+    # the counted failures were not all the same class, so neither names the
+    # cause on its own. Empty when a verdict was produced or the verifier was
     # not applicable. Stamped at the loop's exits, never read from latch
     # state at emit (late finalizers would see a later turn's latch).
     verifier_failure: str = ""

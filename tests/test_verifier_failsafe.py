@@ -490,6 +490,13 @@ async def test_an_exhausted_ladder_latches_at_the_threshold(workspace):
         assert session._verifier_latched is True, (
             "an exhausted ladder must count toward the latch"
         )
+        # The ladder must run in FULL before anything counts, or this rule
+        # silently becomes "one truncation latches" and halves the verifier's
+        # real recovery rate. Two turns reach the verifier, two budgets each.
+        assert mock_llm.generate_object_code.await_count == 4, (
+            f"expected the full ladder on each verifying turn, got "
+            f"{mock_llm.generate_object_code.await_count} calls"
+        )
         assert session._verifier_latch_reason == "truncated", (
             "the books must show what actually latched, not a fixed 'hard'"
         )
@@ -1066,7 +1073,7 @@ async def test_the_first_message_diagnoses_and_carries_its_counter(workspace):
             "model": "claude-sonnet-4-6",
             "no_verdict_failures": 1,
             "latched": False,
-            "reason": "",
+            "reason": "truncated",
             "skips": 0,
         }
     finally:
@@ -1181,5 +1188,72 @@ async def test_a_successful_verdict_clears_the_carried_state(workspace):
     try:
         await _run_one_turn(session, mock_llm, "message two")
         assert session.verifier_latch is None
+    finally:
+        await session.close()
+
+
+async def test_a_failed_reprobe_updates_the_latch_attribution(workspace):
+    """Latching `hard` then re-probing into a truncation must not keep booking
+    `latched_hard`: the books would name a cause that is no longer the cause."""
+    from anton.core.llm.provider import StructuredOutputError
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def hard_then_truncated(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("400 tool_choice not supported")
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=hard_then_truncated)
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            await _run_one_turn(session, mock_llm, f"step {turn}")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "hard"
+
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
+            await _run_one_turn(session, mock_llm, f"later {turn}")
+
+        # The re-probe truncated, so the attribution is no longer purely hard.
+        assert session._verifier_latch_reason == "mixed", (
+            "a re-probe failing a different way must reach the books"
+        )
+    finally:
+        await session.close()
+
+
+async def test_mixed_classes_do_not_depend_on_arrival_order(workspace):
+    """One exhausted ladder plus one hard rejection is neither latched_hard nor
+    latched_truncated, whichever arrived last."""
+    from anton.core.llm.provider import StructuredOutputError
+
+    state = {"turn": 0}
+
+    async def truncated_then_hard(_schema, *, system, messages, max_tokens):
+        if state["turn"] == 0:
+            raise StructuredOutputError(
+                "no tool call", truncated=True, output_tokens=max_tokens,
+                max_tokens=max_tokens, stop_reason="stop",
+            )
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=truncated_then_hard)
+    session = _make_session(workspace, mock_llm)
+    try:
+        await _run_one_turn(session, mock_llm, "step one")
+        assert session._verifier_latch_reason == "truncated"
+
+        state["turn"] = 1
+        await _run_one_turn(session, mock_llm, "step two")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "mixed"
     finally:
         await session.close()
