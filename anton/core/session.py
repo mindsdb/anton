@@ -1449,7 +1449,7 @@ class ChatSession:
         neither `latched_hard` nor `latched_truncated`.
         """
         current = self._verifier_latch_reason
-        if not current or current == failure:
+        if not current or current == "denied" or current == failure:
             self._verifier_latch_reason = failure
         elif current != "mixed":
             self._verifier_latch_reason = "mixed"
