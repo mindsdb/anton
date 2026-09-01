@@ -19,8 +19,10 @@ import anton.core.session as session_mod
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.session import (
     CLOUD_TOOL_ALLOWLIST,
+    _ARTIFACTS_ROOT_ENV,
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
+    resolve_trusted_artifacts_root,
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -184,6 +186,63 @@ def test_resolver_rejects_parent_traversal(monkeypatch):
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, "/workspace/../etc")
     with pytest.raises(ValueError, match=r"\.\."):
         resolve_trusted_workspace_path()
+
+
+# ── project artifacts root (ENG-2056, never from the wire) ──────────────────
+
+def test_project_artifacts_root_overrides_derived_default(tmp_path, monkeypatch):
+    # ENG-2056: the workspace mount is per-conversation, so the derived
+    # `<workspace>/.anton/artifacts` hides sibling tasks' artifacts. With the
+    # controller's project-artifacts mount announced via env, the session must
+    # use it — for the settings AND the workspace the artifact tools read.
+    root = tmp_path / "project-artifacts"
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(root))
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.settings.artifacts_dir == str(root.resolve())
+    assert cfg.workspace.artifacts_dir == root.resolve()
+    assert cfg.settings.artifacts_dir != str(tmp_path.resolve() / ".anton" / "artifacts")
+
+
+def test_project_artifacts_root_created_when_missing(tmp_path, monkeypatch):
+    root = tmp_path / "mounts" / "project-artifacts"
+    assert not root.exists()
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(root))
+    _build(tmp_path, monkeypatch)
+    assert root.is_dir()
+
+
+def test_artifacts_default_unchanged_when_env_unset(tmp_path, monkeypatch):
+    # Desktop and current cloud installs: no env var, behaviour identical to
+    # before — artifacts derive under the workspace's .anton dir.
+    monkeypatch.delenv(_ARTIFACTS_ROOT_ENV, raising=False)
+    _, cfg = _build(tmp_path, monkeypatch)
+    derived = tmp_path.resolve() / ".anton" / "artifacts"
+    assert cfg.settings.artifacts_dir == str(derived)
+    assert cfg.workspace.artifacts_dir == derived
+
+
+def test_artifacts_resolver_unset_or_blank_is_none(monkeypatch):
+    monkeypatch.delenv(_ARTIFACTS_ROOT_ENV, raising=False)
+    assert resolve_trusted_artifacts_root() is None
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "  ")
+    assert resolve_trusted_artifacts_root() is None
+
+
+def test_artifacts_resolver_uses_env(tmp_path, monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(tmp_path))
+    assert resolve_trusted_artifacts_root() == tmp_path.resolve()
+
+
+def test_artifacts_resolver_rejects_relative_path(monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "not/absolute")
+    with pytest.raises(ValueError, match="absolute"):
+        resolve_trusted_artifacts_root()
+
+
+def test_artifacts_resolver_rejects_parent_traversal(monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "/project-artifacts/../etc")
+    with pytest.raises(ValueError, match=r"\.\."):
+        resolve_trusted_artifacts_root()
 
 
 def test_artifact_tools_cannot_escape_workspace(tmp_path):
