@@ -1125,6 +1125,42 @@ async def test_mixed_classes_do_not_depend_on_arrival_order(workspace):
         await session.close()
 
 
+async def test_mixed_reached_the_other_way_round_is_still_mixed(workspace):
+    """The reverse order, which reaches `mixed` at the THRESHOLD gate rather
+    than through an already-latched re-probe. That is a different code path, and
+    it is where `_note_latch_class`'s `current == failure` short-circuit would
+    regress to keeping `hard`."""
+    from anton.core.llm.provider import StructuredOutputError
+
+    state = {"turn": 0}
+
+    async def hard_then_truncated(_schema, *, system, messages, max_tokens):
+        if state["turn"] == 0:
+            raise RuntimeError("400 tool_choice not supported")
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=hard_then_truncated)
+    session = _make_session(workspace, mock_llm)
+    try:
+        await _run_one_turn(session, mock_llm, "step one")
+        assert session._verifier_latch_reason == "hard"
+        assert session._verifier_latched is False, "one failure must not latch"
+
+        state["turn"] = 1
+        await _run_one_turn(session, mock_llm, "step two")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "mixed"
+        assert session._verifier_last_no_verdict == "truncated", (
+            "the window follows the truncation that failed last"
+        )
+    finally:
+        await session.close()
+
+
 async def test_a_denied_latch_accumulates_when_the_reprobe_fails_differently(workspace):
     """A denial latches on call one with the counter untouched. If its re-probe
     then fails for a capability reason, the denial does NOT drop out of the
