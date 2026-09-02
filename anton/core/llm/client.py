@@ -81,6 +81,18 @@ class LLMClient:
         # swallowed (see _notify_usage).
         self.usage_listener = None  # Callable[[str, str, Usage], None] | None
 
+    async def aclose(self) -> None:
+        """Close provider transports. The three roles may share objects."""
+        seen: set[int] = set()
+        for p in (self._planning_provider, self._coding_provider, self._router_provider):
+            if p is None or id(p) in seen:
+                continue
+            seen.add(id(p))
+            try:
+                await p.aclose()
+            except Exception:
+                pass  # a cleanup-only failure must not break shutdown; cancellation propagates
+
     def _notify_usage(self, role: str, model: str, usage, listener=None) -> None:
         """Report one call's usage to the turn-cost accumulator.
 
