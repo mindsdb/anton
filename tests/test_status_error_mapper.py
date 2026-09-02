@@ -3,8 +3,7 @@
 One mapper (`openai._raise_for_status_error`) serves all four call paths
 (chat/stream × completions/responses). These tests pin the mapping policy:
 
-- 401 → ConnectionError with the exact invalid-key copy (cowork-server's
-  provider_auth detection string-matches it).
+- 401 → ProviderAuthError with the exact invalid-key copy.
 - 429 + quota detail → TokenLimitExceeded (and it outranks any 403 logic).
 - 403 + structured gateway code → ModelUnavailableError carrying code+model,
   with actionable copy per code.
@@ -32,6 +31,7 @@ from anton.core.llm.provider import (
     ContentValidationError,
     EndpointConfigurationError,
     ModelUnavailableError,
+    ProviderAuthError,
     TokenLimitExceeded,
     TransientProviderError,
     classify_transient,
@@ -96,24 +96,23 @@ def test_sdk_unwraps_error_envelope():
 
 # ── 401 ───────────────────────────────────────────────────────────────
 
-def test_401_maps_to_invalid_key_connection_error():
+def test_401_json_maps_to_provider_auth_error():
     exc = _sdk_error(401, json_body={"error": {"message": "bad key"}})
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(ProviderAuthError) as err:
         _raise_for_status_error(exc, "sonnet")
-    # cowork-server's provider_auth detection keys on this exact phrase.
+    # Keep the user-facing copy stable even though downstream classification
+    # now keys on the canonical exception type.
     assert "Invalid API key" in str(err.value)
     assert not isinstance(err.value, ModelUnavailableError)
-    # session.py's own re-raise checks (ENG-1310) key on this predicate, not
-    # the raw text — pin against the REAL mapper output so an edit to this
-    # copy that drops "invalid api key" fails here too, not just silently in
-    # production (review feedback on ENG-1310).
+    # Pin the real mapper output to the same canonical predicate used by the
+    # session; unrelated ConnectionError text must not enter this path.
     assert _is_provider_auth_error(err.value)
 
 
 def test_401_html_body_maps_to_invalid_key():
     # nginx auth walls return HTML — the 401 branch must not need a body.
     exc = _sdk_error(401, text_body="<html>401 Authorization Required</html>")
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(ProviderAuthError) as err:
         _raise_for_status_error(exc, "sonnet")
     assert "Invalid API key" in str(err.value)
     assert _is_provider_auth_error(err.value)
@@ -261,7 +260,7 @@ def _wire_shaped_error(status_code, body):
     body — bypassing the SDK's parse-and-unwrap on purpose. This is the only
     way to hand the mapper an envelope-shaped ``exc.body``: the pinned SDK
     always peels ``error`` (see test_sdk_unwraps_error_envelope), but
-    anton's pyproject allows ``openai>=1.0`` and proxies exist that re-wrap,
+    anton's pyproject allows newer OpenAI 2.x releases and proxies can re-wrap,
     so the mapper's envelope fallback must stay pinned by a test that the
     MockTransport route physically cannot produce."""
     # A real MindsHub host — the origin is load-bearing since ENG-1693, and
@@ -483,8 +482,8 @@ def test_unrelated_invalid_request_error_falls_through_to_generic():
 
 
 def test_content_validation_error_is_a_connection_error():
-    # Subclasses ConnectionError so call sites that only know the legacy
-    # mapping (string-matching "invalid api key" etc.) keep working unchanged.
+    # Preserve generic ConnectionError compatibility for legacy callers while
+    # typed readers distinguish content-shape failures from provider auth.
     assert issubclass(ContentValidationError, ConnectionError)
 
 
@@ -598,7 +597,7 @@ def test_wallet_denial_code_reads_both_dialects():
 
 # ── the anthropic twin (ENG-1169) ─────────────────────────────────────
 
-def test_anthropic_401_maps_to_invalid_key_connection_error():
+def test_anthropic_401_maps_to_provider_auth_error():
     # No real-SDK 401 coverage existed for the anthropic mapper before this
     # (review feedback on ENG-1310) — only openai's 401 was pinned against
     # actual SDK output; anthropic's own "Invalid API key — …" copy was
@@ -607,7 +606,7 @@ def test_anthropic_401_maps_to_invalid_key_connection_error():
         "type": "authentication_error",
         "message": "invalid x-api-key",
     }})
-    with pytest.raises(ConnectionError) as err:
+    with pytest.raises(ProviderAuthError) as err:
         _raise_anthropic(exc, model="claude-sonnet")
     assert "Invalid API key" in str(err.value)
     assert _is_provider_auth_error(err.value)
