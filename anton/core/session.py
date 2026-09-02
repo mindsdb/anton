@@ -475,6 +475,11 @@ _VERIFIER_LATCH_REPROBE_TURNS = 10
 # calls, and at 3 turns that is ~0.67 verdict calls per turn against ~0.1 for a
 # capability latch at 10. Bought deliberately: recovery is plausible here and
 # impossible there, so the spend buys a real chance of verification coming back.
+#
+# 3 is a judgment, not a measurement, and so was the 10 above it. What would
+# settle it is how often a verdict call recovers k turns after a truncation,
+# read from turn_completed's verifier_failure per conversation. Nobody has
+# read it yet. Do not cite either window as evidence-backed.
 _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED = 3
 
 
