@@ -3997,14 +3997,20 @@ class TestCustomDatasourceConnectFlow:
 
         async def _exec(_code):
             attempt["n"] += 1
-            seen_hosts.append(os.environ.get("DS_HOST", ""))
             if attempt["n"] == 1:
                 return make_cell(stdout="", stderr="invalid host")
             return make_cell(stdout="ok")
 
         pad = make_pad()
         pad.execute = AsyncMock(side_effect=_exec)
-        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        # The attempt's credentials reach the pad through its own env, so read
+        # what each attempt handed the pad rather than this process's environ.
+        async def _get_or_create(_name, *, ds_env_override=None):
+            seen_hosts.append((ds_env_override or {}).get("DS_HOST", ""))
+            return pad
+
+        session._scratchpads.get_or_create = AsyncMock(side_effect=_get_or_create)
         session._llm = self._make_llm(
             self._make_spec(
                 [

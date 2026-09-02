@@ -26,20 +26,19 @@ async def test_underscore_prefixed_credentials_not_injected_as_env(tmp_path):
     pad.reset = AsyncMock()
     pad.install_packages = AsyncMock(return_value="")
 
-    # `run_connection_test()` calls `restore_namespaced_env(vault)` in a
-    # `finally` block right after the snippet runs — that clears os.environ
-    # and reinjects it from the vault, so asserting on os.environ *after*
-    # the function returns would see post-restore state, not what the test
-    # snippet actually saw. Capture DS_* env at execution time instead, via
-    # the mock the code actually calls (`pad.execute`, not `pad.run`).
+    # The snippet's credentials are handed to the pad as its own env, never
+    # written to this process's, so capture what the pad was given.
     captured: dict[str, str] = {}
 
     async def _execute(_snippet):
-        captured.update({k: v for k, v in os.environ.items() if k.startswith("DS_")})
         return MagicMock(stdout="ok", stderr="", error=None)
 
+    async def _get_or_create(_name, *, ds_env_override=None):
+        captured.update(ds_env_override or {})
+        return pad
+
     pad.execute = AsyncMock(side_effect=_execute)
-    scratchpads.get_or_create = AsyncMock(return_value=pad)
+    scratchpads.get_or_create = AsyncMock(side_effect=_get_or_create)
 
     credentials = {"host": "db.example.com", "_user_label": "postgres 2"}
     await run_connection_test(
@@ -220,3 +219,32 @@ async def test_run_connection_test_scrubs_the_credential_under_test(tmp_path):
 
     assert "s3cr3t_under_test" not in captured["scrubbed"]
     assert "[DS_PASSWORD]" in captured["scrubbed"]
+
+
+@pytest.mark.asyncio
+async def test_connection_test_never_writes_the_process_env(tmp_path):
+    """Testing a connection must not publish its credentials process-wide, or
+    a concurrent turn's cell could read the credential under test."""
+    vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    engine_def = DatasourceEngine(
+        engine="postgresql",
+        display_name="PostgreSQL",
+        fields=[DatasourceField(name="password", required=True, description="pw")],
+        test_snippet="print('ok')",
+    )
+    pad = AsyncMock()
+    pad.reset = AsyncMock()
+    pad.install_packages = AsyncMock(return_value="")
+    pad.execute = AsyncMock(return_value=MagicMock(stdout="ok", stderr="", error=None))
+    scratchpads = MagicMock()
+    scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+    before = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+    await run_connection_test(
+        MagicMock(), scratchpads, vault, engine_def,
+        {"password": "s3cr3t-under-test"}, engine_def.fields,
+    )
+    after = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+
+    assert after == before
+    assert "s3cr3t-under-test" not in str(after)
