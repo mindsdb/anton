@@ -6,10 +6,8 @@ import os
 import re
 import shutil
 import yaml
-from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from anton.core.datasources.data_vault import (
@@ -28,29 +26,49 @@ logger = logging.getLogger(__name__)
 
 
 class _ContextScopedSet:
-    """A set[str]-like object isolated per asyncio context (one per turn),
-    backed by a ContextVar. Callers use add()/clear()/`in`/len()/iteration
-    exactly like a plain set; a concurrently-running turn's context never
-    sees this turn's writes.
+    """A set[str] scoped to the turn that opened it.
+
+    The ContextVar holds a MUTABLE set, opened once per turn and mutated in
+    place after that. Mutating in place is what makes a tool handler's
+    registration visible to the turn that dispatched it: every tool call runs
+    in its own task, and `asyncio.create_task` copies the context, so a child
+    task's `ContextVar.set()` is discarded when it finishes — but a change to
+    the set the parent already holds is not.
     """
 
     def __init__(self, name: str) -> None:
-        self._cv: ContextVar[frozenset[str]] = ContextVar(name, default=frozenset())
+        self._cv: ContextVar[set[str] | None] = ContextVar(name, default=None)
 
     def add(self, item: str) -> None:
-        self._cv.set(self._cv.get() | {item})
+        current = self._cv.get()
+        if current is None:
+            current = set()
+            self._cv.set(current)
+        current.add(item)
 
     def clear(self) -> None:
-        self._cv.set(frozenset())
+        # Open a scope only when this context has none; otherwise empty the one
+        # already open, so a mid-turn rebuild stays visible to its own turn.
+        current = self._cv.get()
+        if current is None:
+            self._cv.set(set())
+        else:
+            current.clear()
+
+    def reset(self) -> None:
+        """Drop the scope entirely. For teardown, not for a mid-turn rebuild."""
+        self._cv.set(None)
 
     def __contains__(self, item: object) -> bool:
-        return item in self._cv.get()
+        return item in (self._cv.get() or ())
 
     def __iter__(self):
-        return iter(self._cv.get())
+        # A snapshot: scrub_credentials iterates while a concurrent tool task
+        # may still be registering into the same set.
+        return iter(tuple(self._cv.get() or ()))
 
     def __len__(self) -> int:
-        return len(self._cv.get())
+        return len(self._cv.get() or ())
 
 
 class _ContextScopedEnvValues:
@@ -65,15 +83,22 @@ class _ContextScopedEnvValues:
     """
 
     def __init__(self, name: str) -> None:
-        # None means "this context never set a map", which is what separates a
-        # turn with no connections (an empty map) from a plain os.environ user.
-        self._cv: ContextVar[Mapping[str, str] | None] = ContextVar(name, default=None)
+        # None means "this context never opened a map", which separates a turn
+        # with no connections (an empty map) from a plain os.environ user.
+        self._cv: ContextVar[dict[str, str] | None] = ContextVar(name, default=None)
 
     def set(self, values: dict[str, str]) -> None:
-        self._cv.set(MappingProxyType(dict(values)))
+        # In place when a map is already open, for the same reason
+        # _ContextScopedSet mutates in place: a tool call runs in its own task.
+        current = self._cv.get()
+        if current is None:
+            self._cv.set(dict(values))
+        else:
+            current.clear()
+            current.update(values)
 
     def reset(self) -> None:
-        """Back to "never set", so get() reads os.environ again."""
+        """Back to "never opened", so get() reads os.environ again."""
         self._cv.set(None)
 
     def get(self, key: str, default: str = "") -> str:
@@ -138,9 +163,9 @@ _SECRET_KEY_PATTERN = re.compile(
 
 
 def _reset_registered_ds_vars() -> None:
-    """Clear the DS_* var registries so they can be rebuilt from current vault state."""
-    _DS_SECRET_VARS.clear()
-    _DS_KNOWN_VARS.clear()
+    """Drop all DS_* scope, so nothing survives into a turn with no vault."""
+    _DS_SECRET_VARS.reset()
+    _DS_KNOWN_VARS.reset()
     _ds_env_values.reset()
 
 
@@ -492,7 +517,10 @@ def restore_namespaced_env(vault: DataVault) -> None:
     at once without seeing each other's credentials, and a connection this
     turn has disabled cannot be reinstated by another turn.
     """
-    _reset_registered_ds_vars()
+    # Empty in place rather than _reset_registered_ds_vars(), which drops the
+    # scope: dropping it here would hide a mid-turn rebuild from its own turn.
+    _DS_SECRET_VARS.clear()
+    _DS_KNOWN_VARS.clear()
     dreg = DatasourceRegistry()
     env_values: dict[str, str] = {}
     for conn in vault.list_connections():

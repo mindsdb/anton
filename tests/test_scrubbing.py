@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from unittest.mock import patch
 
@@ -307,3 +308,62 @@ class TestTurnMapIsAuthoritative:
 
         assert "shell-set-secret" not in result
         assert "[DS_MANUAL__PASSWORD]" in result
+
+
+class TestRegistrationFromInsideAToolCall:
+    """Every tool call runs in its own task (`asyncio.create_task` in
+    session.py), and that copies the context. A connect made mid-turn must
+    still be scrubbed from the rest of the turn's output, so the per-turn
+    state has to be mutated in place rather than reassigned.
+    """
+
+    async def test_a_mid_turn_connect_is_scrubbed_by_its_own_turn(self, tmp_path):
+        from anton.core.datasources.data_vault import LocalDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+
+        # The turn opens its scope, as the host does before any tool runs.
+        restore_namespaced_env(vault)
+
+        # Mid-turn the user hands the agent a password; the tool handler that
+        # saves it runs in its own task.
+        async def connect_tool() -> None:
+            vault.save(
+                "postgres", "prod", {"password": "given-mid-turn"}, secure_keys=["password"]
+            )
+            restore_namespaced_env(vault)
+
+        await asyncio.create_task(connect_tool())
+
+        # Back in the turn's own context, which is what scrubs cell output.
+        assert "DS_POSTGRES_PROD__PASSWORD" in _DS_SECRET_VARS
+        result = scrub_credentials("traceback: password=given-mid-turn")
+        assert "given-mid-turn" not in result
+        assert "[DS_POSTGRES_PROD__PASSWORD]" in result
+
+    async def test_a_concurrent_turn_still_cannot_see_it(self, tmp_path):
+        """Mutating in place must not reintroduce cross-turn bleed: a sibling
+        turn opens its own scope and sees only its own vault."""
+        from anton.core.datasources.data_vault import LocalDataVault
+        from anton.utils.datasources import restore_namespaced_env, set_ds_env_values
+
+        vault_a = LocalDataVault(vault_dir=tmp_path / "a")
+        vault_a.save("postgres", "prod", {"password": "turn-a-pw"}, secure_keys=["password"])
+        vault_b = LocalDataVault(vault_dir=tmp_path / "b")
+
+        async def turn(vault) -> str:
+            restore_namespaced_env(vault)
+            await asyncio.sleep(0)
+            return scrub_credentials("saw turn-a-pw")
+
+        # Each turn runs as its own task, the way the streaming producers do.
+        out_a, out_b = await asyncio.gather(
+            asyncio.create_task(turn(vault_a)),
+            asyncio.create_task(turn(vault_b)),
+        )
+
+        assert "turn-a-pw" not in out_a
+        # Turn B has no such connection, so it has no value to redact with and
+        # must not have acquired turn A's.
+        assert "turn-a-pw" in out_b
