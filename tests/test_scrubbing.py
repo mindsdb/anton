@@ -335,12 +335,12 @@ class TestRegistrationFromInsideAToolCall:
 
     async def test_a_mid_turn_connect_is_scrubbed_by_its_own_turn(self, tmp_path):
         from anton.core.datasources.data_vault import LocalDataVault
-        from anton.utils.datasources import restore_namespaced_env
+        from anton.utils.datasources import begin_ds_turn_scope, restore_namespaced_env
 
         vault = LocalDataVault(vault_dir=tmp_path / "vault")
 
-        # The turn opens its scope, as the host does before any tool runs.
-        restore_namespaced_env(vault)
+        # What turn()/turn_stream() do before dispatching any tool.
+        begin_ds_turn_scope()
 
         # Mid-turn the user hands the agent a password; the tool handler that
         # saves it runs in its own task.
@@ -383,3 +383,47 @@ class TestRegistrationFromInsideAToolCall:
         # Turn B has no such connection, so it has no value to redact with and
         # must not have acquired turn A's.
         assert "turn-a-pw" in out_b
+
+
+class TestTheTurnBoundaryOpensTheScope:
+    """A host that registers nothing up front still has to scrub a credential
+    the user hands over mid-turn. The turn boundary is what guarantees it."""
+
+    async def test_without_a_scope_a_mid_turn_connect_is_lost(self, tmp_path):
+        """Documents why the turn boundary has to open one: the tool task's
+        writes go into a context copy that is discarded."""
+        from anton.core.datasources.data_vault import LocalDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+
+        async def connect_tool() -> None:
+            vault.save("postgres", "p", {"password": "no-scope-pw"}, secure_keys=["password"])
+            restore_namespaced_env(vault)
+
+        await asyncio.create_task(connect_tool())
+
+        assert "no-scope-pw" in scrub_credentials("pw no-scope-pw")
+
+    async def test_the_turn_entry_points_open_one(self):
+        """turn() and turn_stream() must both call it — a host reaching only
+        one of them would keep the hole."""
+        import inspect
+
+        from anton.core.session import ChatSession
+
+        for method in (ChatSession.turn, ChatSession.turn_stream):
+            assert "begin_ds_turn_scope()" in inspect.getsource(method), method.__name__
+
+    async def test_opening_a_scope_does_not_change_what_a_reader_sees(self, monkeypatch):
+        """It seeds from the ambient DS_*, so a host relying on the os.environ
+        fallback keeps scrubbing exactly as before."""
+        from anton.utils.datasources import begin_ds_turn_scope
+
+        _DS_SECRET_VARS.add("DS_AMBIENT__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_AMBIENT__PASSWORD")
+        monkeypatch.setenv("DS_AMBIENT__PASSWORD", "ambient-value")
+
+        begin_ds_turn_scope()
+
+        assert "ambient-value" not in scrub_credentials("pw ambient-value")

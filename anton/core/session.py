@@ -102,6 +102,7 @@ from anton.core.utils.scratchpad import (
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
 from anton.utils.datasources import (
+    begin_ds_turn_scope,
     build_datasource_context,
     scrub_credentials,
 )
@@ -3600,6 +3601,7 @@ class ChatSession:
             self._append_history({"role": "user", "content": results})
 
     async def turn(self, user_input: str | list[dict]) -> str:
+        begin_ds_turn_scope()
         user_input = _scrub_user_input(user_input)
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
@@ -3991,6 +3993,9 @@ class ChatSession:
         is what makes questions unavailable on the non-streaming `turn()`
         path: nothing there would render them.
         """
+        # Before any tool task is spawned, so a connect made mid-turn registers
+        # into a container this turn still holds (see begin_ds_turn_scope).
+        begin_ds_turn_scope()
         self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0

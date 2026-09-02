@@ -55,6 +55,14 @@ class _ContextScopedSet:
         else:
             current.clear()
 
+    def begin_scope(self) -> None:
+        """Open this turn's own container, carrying over what is visible now.
+
+        Opened in the turn's context, so a tool task's in-place write reaches a
+        container the turn still holds instead of a copy that is discarded.
+        """
+        self._cv.set(set(self._cv.get() or ()))
+
     def reset(self) -> None:
         """Drop the scope entirely. For teardown, not for a mid-turn rebuild."""
         self._cv.set(None)
@@ -97,6 +105,17 @@ class _ContextScopedEnvValues:
             current.clear()
             current.update(values)
 
+    def begin_scope(self) -> None:
+        """Open this turn's own map, seeded so readers see no change.
+
+        With nothing open, get() reads os.environ, so an unopened scope seeds
+        from the ambient DS_* rather than from nothing.
+        """
+        current = self._cv.get()
+        if current is None:
+            current = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+        self._cv.set(dict(current))
+
     def reset(self) -> None:
         """Back to "never opened", so get() reads os.environ again."""
         self._cv.set(None)
@@ -124,6 +143,17 @@ _DS_KNOWN_VARS = _ContextScopedSet("ds_known_vars")
 
 # DS_* name -> value overrides for the current turn (see _ContextScopedEnvValues).
 _ds_env_values = _ContextScopedEnvValues("ds_env_values")
+
+
+def begin_ds_turn_scope() -> None:
+    """Open the per-turn DS_* scope. Call once at the start of a turn.
+
+    Without it a host that never opened one loses any registration a tool
+    handler makes, because tool calls are dispatched in their own task.
+    """
+    _DS_SECRET_VARS.begin_scope()
+    _DS_KNOWN_VARS.begin_scope()
+    _ds_env_values.begin_scope()
 
 
 def set_ds_env_values(values: dict[str, str]) -> None:
