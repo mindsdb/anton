@@ -67,8 +67,8 @@ def _build_backend_env(
     sees only the datasources it declared.
     """
     env = {**os.environ}
-    # extra_env first, so the DS_* strip below also covers anything a project
-    # .env tried to smuggle in — the same order local.py uses for a pad.
+    # Before the strip, so a caller's DS_* survive only when ds_env is None;
+    # a project .env cannot add one to a backend that declared its own.
     env.update(extra_env or {})
     if ds_env is not None:
         for key in [k for k in env if k.startswith("DS_")]:

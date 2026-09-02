@@ -306,14 +306,15 @@ class TestTurnMapIsAuthoritative:
         """
         from anton.utils.datasources import set_ds_env_values
 
-        # Registered as secret but NOT as known, i.e. the coarse-net case.
-        _DS_SECRET_VARS.add("DS_SHELL_SET__PASSWORD")
+        # In neither registry, the only reachable coarse-net state: every
+        # register_* helper adds to KNOWN before SECRET.
         monkeypatch.setenv("DS_SHELL_SET__PASSWORD", "shell-value")
 
         set_ds_env_values({})
         result = scrub_credentials("pw shell-value")
 
         assert "shell-value" not in result
+        assert "[DS_SHELL_SET__PASSWORD]" in result
 
     def test_a_caller_that_never_set_a_map_still_reads_environ(self, monkeypatch):
         """The CLI and os.environ-based tests keep working unchanged."""
