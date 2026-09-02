@@ -387,14 +387,11 @@ class _VerifierVerdict(BaseModel):
 # too small. Nothing pays for headroom it doesn't use; first-party models answer
 # in 43–115 tokens either way.
 #
-# An EXHAUSTED ladder now counts toward the latch, where a single truncation
-# once did not. The old rule read one truncation as a tail sample of a model's
-# verbosity rather than proof about the next call, which holds inside a long
-# session, but it was never what the code saw: `retrying` is false at the last
-# budget, so the only truncation ever reaching the latch check is an EXHAUSTED
-# ladder, not one sample. Against the distribution above — 16 calls spanning
-# 245-1654 output tokens — blowing past 4096 twice is a statement about the
-# model. Typed transients still never latch, see `_TRANSIENT_VERDICT_ERRORS`.
+# An EXHAUSTED ladder counts toward the latch. `retrying` is false at the last
+# budget, so the only truncation that ever reaches the latch check is one that
+# blew past 4096 after already blowing past 2048 — never a single sample of a
+# model's verbosity. Against the distribution above that is a statement about
+# the model. Typed transients never latch, see `_TRANSIENT_VERDICT_ERRORS`.
 #
 # Accepted cost, worth knowing: unlike a rejected `tool_choice`, this is a
 # STOCHASTIC failure. Two unlucky ladders with no successful verdict between
@@ -471,6 +468,12 @@ _VERIFIER_LATCH_REPROBE_TURNS = 10
 # that exhausted the ladder twice may still fit a verdict next time. A provider
 # that rejects the forced `tool_choice` rejects every call, so re-probing it
 # more often only spends tokens on a certain 400.
+#
+# The shorter window is the EXPENSIVE one, which is easy to read backwards. A
+# truncating re-probe runs the whole ladder before it gives up, so it costs two
+# calls, and at 3 turns that is ~0.67 verdict calls per turn against ~0.1 for a
+# capability latch at 10. Bought deliberately: recovery is plausible here and
+# impossible there, so the spend buys a real chance of verification coming back.
 _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED = 3
 
 
@@ -1456,13 +1459,16 @@ class ChatSession:
         window.
 
         "mixed" once the classes differ, so attribution never depends on which
-        failure arrived last. A denial accumulates like any other class rather
-        than being overwritten: a re-probe failing some other way is no evidence
-        the wallet was topped up.
+        failure arrived last. A denial is the exception and STAYS the reason: it
+        is the only class the user can act on, one call failing another way is
+        no evidence the wallet was topped up, and the re-probe turn books its
+        own class anyway, so nothing is lost by keeping the actionable label.
         """
         self._verifier_last_no_verdict = failure
         current = self._verifier_latch_reason
-        if not current or current == failure:
+        if current == "denied" or failure == "denied":
+            self._verifier_latch_reason = "denied"
+        elif not current or current == failure:
             self._verifier_latch_reason = failure
         elif current != "mixed":
             self._verifier_latch_reason = "mixed"
@@ -5475,9 +5481,10 @@ class ChatSession:
             # unreachable — a latched session skips every verdict call, so there
             # is never another success to reset on. A re-probe that produces no
             # verdict stays latched and does NOT re-diagnose (the latched branch
-            # below breaks before the diagnosis), so the cost is one verdict
-            # call per window — see `_reprobe_turns_for` for why the window
-            # depends on what failed last. A re-probe hitting a typed
+            # below breaks before the diagnosis), so the cost is one FAILED
+            # verdict attempt per window — which for a truncation is the whole
+            # ladder, two calls, not one. See `_reprobe_turns_for` for why the
+            # window depends on what failed last. A re-probe hitting a typed
             # TransientProviderError still falls through to the honest
             # diagnosis and leaves the latch set — those never latch by
             # definition, so only a successful verdict clears it.
@@ -5677,8 +5684,8 @@ class ChatSession:
                 if verdict_failure in _LATCHING_VERDICT_FAILURES:
                     self._verifier_no_verdict_failures += 1
                     # Before the latched check, so a failed re-probe joins the
-                    # evidence too: latching "hard" then re-probing into a
-                    # truncation used to keep reporting latched_hard forever.
+                    # evidence rather than leaving the books naming only
+                    # whichever class happened to latch first.
                     self._note_latch_class(verdict_failure)
                     if self._verifier_latched:
                         # A failed re-probe: the cause is still there. Stay

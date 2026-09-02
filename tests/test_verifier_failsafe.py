@@ -1161,11 +1161,12 @@ async def test_mixed_reached_the_other_way_round_is_still_mixed(workspace):
         await session.close()
 
 
-async def test_a_denied_latch_accumulates_when_the_reprobe_fails_differently(workspace):
+async def test_a_denied_latch_keeps_naming_the_denial(workspace):
     """A denial latches on call one with the counter untouched. If its re-probe
-    then fails for a capability reason, the denial does NOT drop out of the
-    books: one call failing a different way is no evidence the wallet was topped
-    up, and `denied` is the only class with a user remedy attached to it.
+    then fails for a capability reason, the reason STAYS `denied`: one call
+    failing another way is no evidence the wallet was topped up, and `denied` is
+    the only class the user can act on. Collapsing it into `mixed` would drop
+    that population out of the books, which is the one ENG-1632 sized.
     """
     from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
 
@@ -1195,12 +1196,12 @@ async def test_a_denied_latch_accumulates_when_the_reprobe_fails_differently(wor
 
         assert calls["n"] == 2, "exactly one re-probe should have spent a call"
         assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "mixed", (
+        assert session._verifier_latch_reason == "denied", (
             "a differently-failing re-probe is no evidence the denial was paid, "
-            "so the denial stays in the evidence"
+            "and the actionable class must not vanish into 'mixed'"
         )
         assert session._verifier_last_no_verdict == "hard", (
-            "the window follows what failed last, not the accumulated evidence"
+            "the window still follows what failed last, not the books label"
         )
     finally:
         await session.close()
