@@ -1122,3 +1122,43 @@ async def test_mixed_classes_do_not_depend_on_arrival_order(workspace):
         assert session._verifier_latch_reason == "mixed"
     finally:
         await session.close()
+
+
+async def test_a_denied_latch_relabels_when_the_reprobe_fails_differently(workspace):
+    """A denial latches on call one with the counter untouched. If its re-probe
+    then fails for a capability reason, the books must name the cause that is
+    failing NOW, not the one from ten turns ago — the denial may have been paid.
+    """
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def denied_then_hard(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TokenLimitExceeded(
+                "402: Your wallet has no balance to cover the model 'haiku'."
+            )
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=denied_then_hard)
+    session = _make_session(workspace, mock_llm)
+    try:
+        await _run_one_turn(session, mock_llm, "message one")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "denied"
+        assert session._verifier_no_verdict_failures == 0, (
+            "a denial latches on its own branch without counting"
+        )
+
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
+            await _run_one_turn(session, mock_llm, f"later {turn}")
+
+        assert calls["n"] == 2, "exactly one re-probe should have spent a call"
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "hard", (
+            "the books must follow the cause that is failing now"
+        )
+    finally:
+        await session.close()
