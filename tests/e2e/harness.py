@@ -112,23 +112,36 @@ class E2EConfig:
 # response stream at interpreter exit (upstream, pydantic/httpx2). It is not
 # anton output, so strip it before assertions rather than weakening them.
 _UPSTREAM_ASYNCGEN_NOISE_START = "an error occurred during closing of asynchronous generator"
-_UPSTREAM_ASYNCGEN_NOISE_END = "generator didn't stop after athrow()"
+# The exception line, not the bare phrase: the block's traceback also contains
+# `raise RuntimeError("generator didn't stop after athrow()")`, and ending the
+# strip there would leave the final line behind.
+_UPSTREAM_ASYNCGEN_NOISE_END = "RuntimeError: generator didn't stop after athrow()"
 
 
 def _strip_upstream_asyncgen_noise(text: str) -> tuple[str, bool]:
-    """Return (text without the upstream block, whether one was removed)."""
+    """Return (text without complete upstream blocks, whether one was removed).
+
+    Only a block closed by the end marker is stripped. An unterminated block —
+    upstream wording change, or stderr cut off by the TimeoutExpired path — is
+    not provably noise, and dropping the rest of stderr there would let a real
+    traceback vanish before the assertions see it.
+    """
     if _UPSTREAM_ASYNCGEN_NOISE_START not in text:
         return text, False
-    kept, skipping, found = [], False, False
+    kept: list[str] = []
+    block: list[str] = []  # candidate block, restored if it never closes
+    skipping, found = False, False
     for line in text.splitlines(keepends=True):
-        if _UPSTREAM_ASYNCGEN_NOISE_START in line:
-            skipping, found = True, True
+        if not skipping and _UPSTREAM_ASYNCGEN_NOISE_START in line:
+            skipping, block = True, [line]
             continue
         if skipping:
+            block.append(line)
             if _UPSTREAM_ASYNCGEN_NOISE_END in line:
-                skipping = False
+                skipping, block, found = False, [], True
             continue
         kept.append(line)
+    kept.extend(block)
     return "".join(kept), found
 
 
@@ -256,6 +269,12 @@ def assert_not_output(result: RunResult, *patterns: str) -> None:
 def assert_exit_ok(result: RunResult) -> None:
     assert not result.timed_out, f"Command timed out\n{result}"
     assert result.returncode == 0, f"Expected exit 0, got {result.returncode}\n{result}"
+    # The stripped block is still a regression: it means a provider HTTP pool
+    # reached interpreter exit unclosed. This is the only assertion that would
+    # catch the original symptom coming back.
+    assert not result.upstream_asyncgen_noise, (
+        f"asyncgen finalization noise on stderr — a provider pool was not closed\n{result}"
+    )
 
 
 def assert_exit_fail(result: RunResult) -> None:
