@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -818,11 +819,15 @@ async def _aclose_stream(stream: object) -> None:
     """
     if stream is None:
         return
-    # SDK streams expose close(); plain async generators expose aclose().
-    closer = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+    # Prefer aclose (plain async generators); SDK streams expose close(). The
+    # order matters: an object with a sync close() beside an async aclose()
+    # must not short-circuit onto the sync one and leak with no diagnostic.
+    closer = getattr(stream, "aclose", None) or getattr(stream, "close", None)
     if closer is not None:
         try:
-            await closer()
+            result = closer()
+            if inspect.isawaitable(result):
+                await result
         except Exception:
             pass
 
@@ -897,7 +902,6 @@ class OpenAIProvider(LLMProvider):
             if not ssl_verify:
                 azure_kwargs["http_client"] = httpx.AsyncClient(verify=False)
             self._client = AsyncAzureOpenAI(**azure_kwargs)
-            register_provider(self)
         else:
             kwargs: dict = {}
             if api_key:
@@ -907,7 +911,10 @@ class OpenAIProvider(LLMProvider):
             if not ssl_verify:
                 kwargs["http_client"] = httpx.AsyncClient(verify=False)
             self._client = openai.AsyncOpenAI(**kwargs)
-            register_provider(self)
+
+        # After the if/else, not per branch: a future client flavor must not be
+        # able to skip registration and leave its pool unclosed.
+        register_provider(self)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(

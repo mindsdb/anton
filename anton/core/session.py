@@ -982,6 +982,9 @@ class ChatSessionConfig:
     to ChatSession — the session never needs to know where values came from.
     """
 
+    # Ownership transfers with it: ChatSession.close() closes the client's
+    # provider transports. A host that shares one client across sessions must
+    # not close both sessions.
     llm_client: LLMClient
     runtime_factory: ScratchpadRuntimeFactory = field(default=local_scratchpad_runtime_factory)
     cells: list[Cell] | None = None

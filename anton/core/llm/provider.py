@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -10,31 +11,75 @@ if TYPE_CHECKING:
 
 
 # Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
-# event loop finalizes its async generators, so every entry point closes these.
-# Strong refs on purpose: a provider collected before shutdown leaves its pool
-# to the async-generator finalizer, which is the noise we are preventing.
-_LIVE_PROVIDERS: list = []
+# event loop finalizes its async generators, so entry points that own the loop
+# drain this registry before it dies. Weak refs: long-lived hosts that consume
+# anton as a library (cowork-server) build providers per turn and never drain,
+# so strong refs would pin every provider and its pool for the process
+# lifetime. A provider collected before the drain hands its pool to the GC —
+# the pre-registry behavior, and silent while the loop is still running.
+_LIVE_PROVIDERS: weakref.WeakSet[LLMProvider] = weakref.WeakSet()
 
 
-def register_provider(provider: object) -> None:
-    _LIVE_PROVIDERS.append(provider)
+def register_provider(provider: LLMProvider) -> None:
+    _LIVE_PROVIDERS.add(provider)
 
 
-def unregister_provider(provider: object) -> None:
-    """Drop a closed provider so long-running hosts do not accumulate them."""
-    try:
-        _LIVE_PROVIDERS.remove(provider)
-    except ValueError:
-        pass
+def unregister_provider(provider: LLMProvider) -> None:
+    """Drop a closed provider so the exit drain does not close it twice."""
+    _LIVE_PROVIDERS.discard(provider)
 
 
 async def close_live_providers() -> None:
-    providers, _LIVE_PROVIDERS[:] = list(_LIVE_PROVIDERS), []
+    providers = list(_LIVE_PROVIDERS)
+    _LIVE_PROVIDERS.clear()
     for provider in providers:
         try:
             await provider.aclose()
         except Exception:
             pass  # a cleanup-only failure must not break shutdown; cancellation propagates
+
+
+def _is_upstream_asyncgen_noise(context: dict) -> bool:
+    """One known upstream error, matched narrowly.
+
+    httpx2 abandons httpcore2's byte-stream ``__aiter__`` generators
+    (``PoolByteStream``, ``HTTP11ConnectionByteStream``, ...) when a response
+    is closed mid-body — every SSE stream ends this way — and at loop shutdown
+    the ``athrow(GeneratorExit)`` trips httpcore2's ``safe_async_iterate``:
+    RuntimeError("generator didn't stop after athrow()"). Present through
+    httpcore2 2.12; harmless — the pool is already closed — but it prints a
+    traceback on every clean exit. Matched by the generator's source file, not
+    its class name: which stream class is left abandoned varies run to run.
+    """
+    exc = context.get("exception")
+    agen = context.get("asyncgen")
+    code = getattr(agen, "ag_code", None)
+    return (
+        isinstance(exc, RuntimeError)
+        and "didn't stop after athrow" in str(exc)
+        and "httpcore2" in getattr(code, "co_filename", "")
+    )
+
+
+def install_asyncgen_noise_filter() -> None:
+    """Silence the upstream error above on the running loop.
+
+    Everything else still reaches the default handler. Callers that own their
+    event loop (CLI entry points) install this; a host with its own exception
+    handler is left alone.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    if loop.get_exception_handler() is not None:
+        return
+
+    def _handler(loop, context):
+        if _is_upstream_asyncgen_noise(context):
+            return
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
 
 
 @dataclass
