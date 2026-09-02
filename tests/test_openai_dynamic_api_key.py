@@ -87,7 +87,7 @@ def _completion_body() -> dict:
 
 
 async def test_a_401_on_the_stale_token_is_confirmed_with_the_rotated_one():
-    """The join the two halves of ENG-2116 are only useful together.
+    """The two halves of ENG-2116 are only useful together.
 
     ``test_live_requests_reread_api_key_without_rebuilding_provider`` proves the
     per-request re-read but never returns a 401, and ``tests/test_client.py``

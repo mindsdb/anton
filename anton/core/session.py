@@ -590,10 +590,10 @@ def _verifier_error_type(exc: BaseException | None) -> str:
 def _is_provider_auth_error(exc: BaseException) -> bool:
     """Whether ``exc`` is the canonical provider HTTP-401 mapping.
 
-    ``LLMClient`` already made the one bounded confirmation attempt before
-    this reaches the session. The session must therefore propagate this typed
-    second refusal, while unrelated ``ConnectionError`` values keep their
-    existing recovery behavior.
+    ``LLMClient`` propagates this after a failed confirmation, or immediately
+    when a stream has emitted an event and cannot be replayed. The session must
+    propagate either terminal refusal, while unrelated ``ConnectionError``
+    values keep their existing recovery behavior.
     """
     return isinstance(exc, ProviderAuthError)
 
@@ -4178,9 +4178,10 @@ class ChatSession:
                     ):
                         raise
 
-                    # LLMClient already retried a typed provider-auth 401 once.
-                    # A refusal reaching this loop is the confirmation failure,
-                    # so propagate it for the host's reconnect/update-key card.
+                    # LLMClient propagates a typed provider-auth 401 after a
+                    # failed confirmation, or immediately after stream output
+                    # to avoid replay. Either terminal refusal must reach the
+                    # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
 
@@ -4387,9 +4388,9 @@ class ChatSession:
                                 # mapping exists server-side.
                                 raise
                             if _is_provider_auth_error(e):
-                                # LLMClient already spent the one auth
-                                # confirmation attempt. Preserve the typed second
-                                # refusal for the host's auth-error mapping.
+                                # Preserve a refusal after failed confirmation,
+                                # or the first refusal after stream output, for
+                                # the host's auth-error mapping.
                                 raise
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)

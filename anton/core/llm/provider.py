@@ -488,8 +488,10 @@ class ProviderAuthError(ConnectionError):
     The type distinguishes an authentication refusal from unrelated
     ``ConnectionError`` failures. It remains a ``ConnectionError`` subclass so
     in-process callers written against the previous 401 mapping keep working.
-    The client stamps ``role`` on a confirmed refusal so hosts can attribute
-    the recovery action to the provider that actually failed.
+    The client stamps ``role`` on a terminal refusal so hosts can attribute
+    the recovery action to the provider that actually failed. A refusal is
+    terminal after a failed confirmation, or immediately when a stream has
+    emitted an event and replay would duplicate output.
     """
 
     def __init__(self, message: str, *, role: str | None = None):

@@ -1,4 +1,4 @@
-"""A confirmed provider-auth failure propagates without flattening.
+"""A terminal provider-auth failure propagates without flattening.
 
 A `ProviderAuthError` (anton's typed 401 mapping from
 `openai.py`/`anthropic.py`) used to fall into a generic
@@ -7,9 +7,10 @@ error occurred: Invalid API key … Please try again or rephrase your
 request." instead of reaching cowork-server's `turn_errors.is_auth_error()`,
 which already renders the correct "Reconnect MindsHub" / BYOK-key card.
 
-`LLMClient` now confirms the first typed refusal once before it reaches the
-session. The session must propagate the second refusal without spending its
-generic retry budget or injecting misleading recovery history.
+`LLMClient` confirms a typed refusal once before output. A streaming refusal
+after output propagates immediately to avoid replay. The session must propagate
+either terminal refusal without spending its generic retry budget or injecting
+misleading recovery history.
 
 Both session re-raise sites remain covered: the main turn loop and the final
 wrap-up call made after unrelated errors exhausted their own retry budget.
