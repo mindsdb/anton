@@ -599,6 +599,44 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+def _tool_failure_cause(ok: "bool | None", reason: str) -> "tuple[str, str]":
+    """`(tier, class)` for one failed tool call, or `("", "")` (ENG-2247).
+
+    Reuses `root_cause.classify` — the SAME vocabulary the turn-level
+    `root_cause_*` tally is built from — so a tool row and its turn cannot
+    disagree about what a failure was. A parallel taxonomy here would put two
+    spellings of one failure in two fields.
+
+    **Deliberately does NOT touch `RootCauseLedger`.** That ledger drops every
+    non-trip-eligible class one line into `add()` (`if not rc.trip_eligible:
+    return`), and that early return is how "structurally cannot trip" is
+    implemented for ENG-1531's breaker — widening it to keep `self_inflicted`
+    names would arm the breaker on the agent's own `NameError`s, the exact
+    ENG-836 ping-pong the tier exists to exclude. Reading the classifier
+    directly bypasses the ledger, so nothing a trip rung reads can change.
+
+    `result_text` is deliberately not taken. `classify` consults it only to
+    build the `identifier` of a reason-less failure; the CLASS in that branch is
+    the constant `"unclassified"` either way. So the class is identical with or
+    without it — which is what lets this run at the emit site, where the result
+    has not been assigned yet, instead of reordering the dispatch loop.
+
+    Only a handler's explicit `ok is False` produces a cause. `ok is None` is an
+    unmigrated handler (ENG-2248): the event already reports `ok="unknown"`, and
+    attaching a cause to a call we cannot say failed would invent a verdict.
+
+    Never raises: it runs on the reporting path, where an escape would turn a
+    handled tool failure into a dead turn.
+    """
+    if ok is not False:
+        return "", ""
+    try:
+        rc = classify_root_cause(reason or "", "")
+        return rc.tier, rc.cls
+    except Exception:  # pragma: no cover - defensive; classify is total
+        return "", ""
+
+
 def _safe_error_type(exc: BaseException) -> str:
     """The exception's class name, and nothing else, for analytics.
 
@@ -3063,6 +3101,8 @@ class ChatSession:
         ok: bool | None,
         duration_ms: float,
         error_type: str,
+        root_cause_tier: str = "",
+        root_cause_class: str = "",
     ) -> None:
         """Per-tool-call analytics event (ENG-1486).
 
@@ -3130,6 +3170,14 @@ class ChatSession:
                 surface=str(getattr(self, "_surface", None) or ""),
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
+                # WHY the call failed, in `root_cause.py`'s vocabulary
+                # (ENG-2247). `error_type` above only fills in when the failure
+                # was a RAISE; `scratchpad` — 79% of tool volume, 9.35% of it
+                # failing — returns a verdict instead, so 83% of failures
+                # reached analytics with no cause at all. Both empty on success
+                # and on an unmigrated handler; see `_tool_failure_cause`.
+                root_cause_tier=root_cause_tier,
+                root_cause_class=root_cause_class,
             )
         except Exception:
             # Analytics must never affect the tool call that just ran.
@@ -3871,11 +3919,16 @@ class ChatSession:
                 # elicitation is structurally unavailable on this path (no
                 # emitter to render a question), so there is no wait to
                 # subtract.
+                _rc_tier, _rc_class = _tool_failure_cause(
+                    outcome.ok, outcome.reason
+                )
                 self._emit_tool_completed(
                     name=tc.name,
                     ok=outcome.ok,
                     duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
                     error_type=_tool_error_type,
+                    root_cause_tier=_rc_tier,
+                    root_cause_class=_rc_class,
                 )
                 result = outcome.content
 
@@ -5246,6 +5299,9 @@ class ChatSession:
                     # tool performance. Fixing it needs a session-scoped
                     # accumulator behind `prompt_or_cancel`, which is a change
                     # to the CLI prompt path rather than to this event.
+                    _rc_tier, _rc_class = _tool_failure_cause(
+                        tool_ok, tool_reason
+                    )
                     self._emit_tool_completed(
                         name=tc.name,
                         ok=tool_ok,
@@ -5255,6 +5311,8 @@ class ChatSession:
                             0.0,
                         ) * 1000.0,
                         error_type=_tool_error_type,
+                        root_cause_tier=_rc_tier,
+                        root_cause_class=_rc_class,
                     )
 
                     if isinstance(result_text, list):

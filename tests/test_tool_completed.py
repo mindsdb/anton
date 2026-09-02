@@ -12,8 +12,12 @@ harness shape as ``test_root_cause_wiring.py``) and assert on what
   unconditional success);
 - ``error_type`` is the exception CLASS name and never the message —
   ``str(exc)`` routinely embeds file paths and user input;
-- the payload is exactly {name, ok, duration_ms, error_type, conversation_id,
-  turn_index}, all strings — no tool arguments, no result content;
+- the payload is exactly {name, ok, duration_ms, error_type, surface,
+  conversation_id, turn_index, root_cause_tier, root_cause_class}, all strings
+  — no tool arguments, no result content. ``surface`` joined in ENG-1945 and the
+  two ``root_cause_*`` keys in ENG-2247; the exact-keys assertion is widened
+  deliberately each time rather than loosened, because "no surprise keys" is the
+  property that keeps arguments and result prose out;
 - human wait (``answer_wait_s``, accumulated by ``elicit()``) is subtracted
   from the duration — which covers ``ask_user`` and ``select_path``, the only
   tools that elicit. It does NOT cover the interactive branch, whose tools
@@ -163,14 +167,15 @@ async def test_unmigrated_handler_verdict_is_unknown_not_a_guess(workspace):
 # ── Payload contract ─────────────────────────────────────────────────
 
 
-async def test_payload_is_exactly_the_seven_keys_all_strings(workspace):
+async def test_payload_is_exactly_the_nine_keys_all_strings(workspace):
     """No arguments, no result content, no surprise keys — and str values only,
     because send_event's extras are wire parameters (tests/test_ask_user.py:496).
     """
     session = _session(workspace, [ToolOutcome(content="secret result body", ok=True)])
     events = await _tool_completed_calls(session)
     assert set(events[0]) == {"name", "ok", "duration_ms", "error_type",
-                              "surface", "conversation_id", "turn_index"}
+                              "surface", "conversation_id", "turn_index",
+                              "root_cause_tier", "root_cause_class"}
     assert all(isinstance(v, str) for v in events[0].values())
     assert "secret result body" not in json.dumps(events[0])
     int(events[0]["duration_ms"])  # numeric string, parseable
@@ -417,3 +422,102 @@ def test_tool_completed_goes_to_posthog_not_the_collector(monkeypatch):
     assert body["event"] == "tool_completed"
     assert body["properties"]["name"] == "scratchpad"
     assert body["properties"]["ok"] == "false"
+
+
+# ── Why it failed (ENG-2247) ─────────────────────────────────────────
+
+
+async def test_a_returned_verdict_failure_carries_its_cause(workspace):
+    """The whole point: `scratchpad`'s failure shape gets a groupable cause.
+
+    A cell that errors is a normal outcome, not a raise, so `error_type` is
+    empty here BY DESIGN — that is the 83% of failures that reached analytics
+    with nothing to group on before this.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nNameError: name 'wb' is not defined",
+        ok=False, reason="NameError: name 'wb' is not defined",
+    )])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["ok"] == "false"
+    assert ev["error_type"] == ""          # no raise -> no exception class
+    assert ev["root_cause_tier"] == "self_inflicted"
+    assert ev["root_cause_class"] == "NameError"
+
+
+async def test_an_environment_wall_is_distinguishable_from_an_agent_bug(workspace):
+    """The tier is the actionable half: whose fault is it.
+
+    `NameError` and `ModuleNotFoundError` are both `ok=false` with an empty
+    `error_type`; without the tier they are the same row.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nModuleNotFoundError: No module named 'pyodbc'",
+        ok=False, reason="ModuleNotFoundError: No module named 'pyodbc'",
+    )])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["root_cause_tier"] == "external_wall"
+    assert ev["root_cause_class"] == "missing_dependency"
+
+
+async def test_success_carries_no_cause(workspace):
+    """Empty, not a placeholder — a cause on a successful call is a lie."""
+    session = _session(workspace, [ToolOutcome(content="fine", ok=True)])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["root_cause_tier"] == ""
+    assert ev["root_cause_class"] == ""
+
+
+async def test_an_unmigrated_handler_gets_no_cause(workspace):
+    """`ok=None` means the handler declared nothing (ENG-2248's population).
+
+    The event already reports `ok="unknown"`; attaching a cause would invent a
+    verdict from prose the model can influence — the ENG-1276 defect one level
+    up, and the reason `_record_root_cause` keeps that population
+    non-trip-eligible. Text that LOOKS like a failure must not change this.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error] Task failed: something broke", ok=None)])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["ok"] == "unknown"
+    assert ev["root_cause_tier"] == ""
+    assert ev["root_cause_class"] == ""
+
+
+async def test_the_cause_is_the_shared_classifier_verbatim(workspace):
+    """Pins the two views together so they cannot drift.
+
+    The turn-level `root_cause_*` tally and this per-call field must come from
+    ONE vocabulary; a second taxonomy would put two spellings of the same
+    failure in two fields. Asserted against `classify` itself rather than
+    against hardcoded strings, so extending the vocabulary cannot silently
+    desync the event.
+    """
+    from anton.core.root_cause import classify
+
+    for reason in ("NameError: x", "ModuleNotFoundError: No module named 'z'",
+                   "TimeoutError: slow", "scratchpad_empty_code",
+                   "RuntimeError: boom"):
+        session = _session(workspace, [ToolOutcome(
+            content="[error]", ok=False, reason=reason)])
+        ev = (await _tool_completed_calls(session))[0]
+        expected = classify(reason, "")
+        assert ev["root_cause_tier"] == expected.tier, reason
+        assert ev["root_cause_class"] == expected.cls, reason
+
+
+async def test_no_prose_from_the_reason_reaches_the_payload(workspace):
+    """`reason` is prose — traceback lines, handler messages — and carries file
+    paths and user input. Only the closed-vocabulary class may be emitted.
+    """
+    secret = "/Users/someone/.aws/credentials could not be opened"
+    session = _session(workspace, [ToolOutcome(
+        content=f"[error]\nPermissionError: {secret}",
+        ok=False, reason=f"PermissionError: {secret}",
+    )])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["root_cause_class"] == "permission_denied"
+    blob = json.dumps(ev)
+    assert secret not in blob
+    assert ".aws" not in blob
+    assert "someone" not in blob

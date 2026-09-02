@@ -192,6 +192,19 @@ _pending_lock = threading.Lock()
 #                    One event per executed tool call; tool arguments and
 #                    result content are deliberately absent (ENG-1486).
 #                    surface mirrors turn_completed's (ENG-1945).
+#                    root_cause_tier + root_cause_class (WHY it failed, in
+#                    `anton/core/root_cause.py`'s vocabulary — `self_inflicted`
+#                    / `transient` / `external_wall` / `unclassified`, and the
+#                    class within it, which for a self-inflicted failure IS the
+#                    exception name). `error_type` above only fills in on a
+#                    RAISE; the dominant tool returns a verdict instead, so 83%
+#                    of failures had no cause before ENG-2247. Both are "" on
+#                    success and on an unmigrated handler (`ok="unknown"`).
+#                    Read them as a PAIR with `ok` — a cause only exists where
+#                    the handler said `ok=false`. Same vocabulary as
+#                    turn_completed's `root_cause_*` tally, so the per-call and
+#                    per-turn views cannot disagree; unlike that tally, these
+#                    are per CALL and carry no cumulative-ledger caveat.
 #                    conversation_id + turn_index mirror turn_completed's
 #                    values, so a tool row joins to its parent turn row and,
 #                    via Langfuse sessionId, to the gateway trace.
