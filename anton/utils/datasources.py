@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,8 @@ from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML
 
 if TYPE_CHECKING:
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
+
+logger = logging.getLogger(__name__)
 
 
 class _ContextScopedSet:
@@ -51,31 +54,40 @@ class _ContextScopedSet:
 
 
 class _ContextScopedEnvValues:
-    """Per-turn DS_* name -> value overrides, falling back to os.environ
-    when a key has no explicit per-turn value. The explicit override — set
-    by restore_namespaced_env() — is what closes the concurrent-turn race;
-    the fallback keeps CLI (which never calls set()) and any caller that
-    still just does monkeypatch.setenv()/os.environ writes working exactly
-    as before.
+    """Per-turn DS_* name -> value map, used to scrub credential values.
+
+    A turn that has called set() is authoritative: a key missing from its map
+    has no known value for this turn, and os.environ is NOT consulted, because
+    another turn may hold a different value under the same name and redacting
+    with it would both miss this turn's secret and disclose the other's.
+    Callers that never call set() (the CLI, tests writing os.environ directly)
+    keep reading os.environ exactly as before.
     """
 
     def __init__(self, name: str) -> None:
-        self._cv: ContextVar[Mapping[str, str]] = ContextVar(
-            name, default=MappingProxyType({})
-        )
+        # None means "this context never set a map", which is what separates a
+        # turn with no connections (an empty map) from a plain os.environ user.
+        self._cv: ContextVar[Mapping[str, str] | None] = ContextVar(name, default=None)
 
     def set(self, values: dict[str, str]) -> None:
         self._cv.set(MappingProxyType(dict(values)))
 
+    def reset(self) -> None:
+        """Back to "never set", so get() reads os.environ again."""
+        self._cv.set(None)
+
     def get(self, key: str, default: str = "") -> str:
         overrides = self._cv.get()
-        if key in overrides:
-            return overrides[key]
-        return os.environ.get(key, default)
+        if overrides is None:
+            return os.environ.get(key, default)
+        return overrides.get(key, default)
 
     def items(self):
+        # os.environ stays in the union here on purpose: it preserves the
+        # coarse unknown-DS_* net for a var set outside the vault. Over-redacting
+        # another turn's value is harmless; emitting one is what get() prevents.
         merged = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
-        merged.update(self._cv.get())
+        merged.update(self._cv.get() or {})
         return merged.items()
 
 
@@ -129,6 +141,7 @@ def _reset_registered_ds_vars() -> None:
     """Clear the DS_* var registries so they can be rebuilt from current vault state."""
     _DS_SECRET_VARS.clear()
     _DS_KNOWN_VARS.clear()
+    _ds_env_values.reset()
 
 
 def parse_connection_slug(
@@ -490,9 +503,14 @@ def restore_namespaced_env(vault: DataVault) -> None:
         try:
             env_values.update(vault.env_for(conn["engine"], conn["name"]) or {})
         except Exception:
-            # One bad connection's value lookup must not block the rest —
-            # it just won't be in this turn's scrub-value map.
-            pass
+            # One bad connection's value lookup must not block the rest, but it
+            # leaves that connection's secrets unscrubbable for this turn, so
+            # say so. Names only, never a value.
+            logger.warning(
+                "Could not resolve values for %s/%s; its credentials will not be "
+                "scrubbed from this turn's output",
+                conn["engine"], conn["name"], exc_info=True,
+            )
     _ds_env_values.set(env_values)
 
 

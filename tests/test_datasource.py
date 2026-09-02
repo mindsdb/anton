@@ -26,6 +26,7 @@ from anton.commands.datasource import (
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
+    _reset_registered_ds_vars,
     build_datasource_context,
     register_secret_vars,
     restore_namespaced_env,
@@ -230,8 +231,7 @@ def clean_ds_state():
     """Clear _DS_SECRET_VARS, _DS_KNOWN_VARS, and all DS_* env vars around each test."""
 
     def _clean():
-        _DS_SECRET_VARS.clear()
-        _DS_KNOWN_VARS.clear()
+        _reset_registered_ds_vars()
         for k in list(os.environ):
             if k.startswith("DS_"):
                 del os.environ[k]

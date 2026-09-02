@@ -9,6 +9,7 @@ from anton.core.session import _scrub_user_input
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
+    _reset_registered_ds_vars,
     scrub_credentials,
 )
 
@@ -17,8 +18,7 @@ from anton.utils.datasources import (
 def clean_ds_state():
     """Clear _DS_SECRET_VARS, _DS_KNOWN_VARS, and all DS_* env vars around each test."""
     def _clean():
-        _DS_SECRET_VARS.clear()
-        _DS_KNOWN_VARS.clear()
+        _reset_registered_ds_vars()
         for k in list(os.environ):
             if k.startswith("DS_"):
                 del os.environ[k]
@@ -274,3 +274,36 @@ class TestOAuthEngineRegistryCollision:
         # registered these as known.
         assert email in result
         assert "gmail.readonly" in result
+
+
+class TestTurnMapIsAuthoritative:
+    """Once a turn has a value map, os.environ is not consulted for a missing
+    key: another turn may hold a different value under the same name."""
+
+    def test_a_missing_key_is_not_read_from_environ(self, monkeypatch):
+        from anton.utils.datasources import set_ds_env_values
+
+        key = "DS_ACME_CRM_PROD__TOKEN"
+        _DS_SECRET_VARS.add(key)
+        _DS_KNOWN_VARS.add(key)
+
+        # Another turn's value for the same var name, still in the process env.
+        monkeypatch.setenv(key, "another-turns-token")
+        # This turn has a map, and the key is not in it (its lookup failed).
+        set_ds_env_values({})
+
+        result = scrub_credentials("log line mentioning another-turns-token")
+
+        # Redacting here would both miss this turn's secret and confirm the
+        # other turn's value by substituting it.
+        assert "another-turns-token" in result
+
+    def test_a_caller_that_never_set_a_map_still_reads_environ(self, monkeypatch):
+        """The CLI and os.environ-based tests keep working unchanged."""
+        _DS_SECRET_VARS.add("DS_MANUAL__PASSWORD")
+        monkeypatch.setenv("DS_MANUAL__PASSWORD", "shell-set-secret")
+
+        result = scrub_credentials("pw shell-set-secret")
+
+        assert "shell-set-secret" not in result
+        assert "[DS_MANUAL__PASSWORD]" in result
