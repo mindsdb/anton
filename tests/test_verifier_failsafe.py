@@ -430,14 +430,13 @@ async def test_deterministic_hard_failure_latches_after_one_diagnosis(workspace,
             f"latched session kept calling the verifier ({verdict_calls} calls)"
         )
         assert session._verifier_latched is True
-        # Anchor on a substring unique to the ANNOUNCEMENT line. The previous
+        # Anchor on a substring unique to the ANNOUNCEMENT line. An earlier
         # assertion matched "latched after N consecutive hard failures", which
-        # the per-turn *skip* log also contained — so it passed on turns 3-4
-        # without ever guarding the announcement it was written for
-        # (review: pnewsam on #299).
+        # the per-turn *skip* log also contained — so it passed without ever
+        # guarding the announcement it was written for.
         announcements = [
             r for r in caplog.records
-            if "skipping further verification this session" in r.message
+            if "skipping verification until the next re-probe" in r.message
         ]
         assert len(announcements) == 1, (
             f"the latch must announce itself exactly once, got {len(announcements)}"
@@ -454,10 +453,10 @@ async def test_deterministic_hard_failure_latches_after_one_diagnosis(workspace,
         await session.close()
 
 
-async def test_truncation_does_not_latch(workspace):
-    """A blown budget is one model being verbose on one transcript — a tail
-    sample, not a capability problem. Only hard failures latch (ENG-1155);
-    truncation keeps its ENG-1081 retry ladder and its honest diagnosis.
+async def test_an_exhausted_ladder_latches_at_the_threshold(workspace):
+    """A ladder exhausted at every budget counts toward the latch, the same as
+    a provider that rejects the call. The ENG-1081 retry ladder still runs in
+    full first, and the first such turn still gets its honest diagnosis.
     """
     from anton.core.llm.provider import StructuredOutputError
 
@@ -482,9 +481,23 @@ async def test_truncation_does_not_latch(workspace):
             if state["n"] >= 3:
                 diagnoses += 1
 
-        assert session._verifier_latched is False, "truncation must not latch"
-        assert diagnoses == 3, (
-            f"every truncated turn still gets its honest diagnosis, got {diagnoses}"
+        # An exhausted ladder is evidence about the model, not a tail sample
+        # of its verbosity: the first turn diagnoses, the second latches.
+        assert session._verifier_latched is True, (
+            "an exhausted ladder must count toward the latch"
+        )
+        # The ladder must run in FULL before anything counts, or this rule
+        # silently becomes "one truncation latches" and halves the verifier's
+        # real recovery rate. Two turns reach the verifier, two budgets each.
+        assert mock_llm.generate_object_code.await_count == 4, (
+            f"expected the full ladder on each verifying turn, got "
+            f"{mock_llm.generate_object_code.await_count} calls"
+        )
+        assert session._verifier_latch_reason == "truncated", (
+            "the books must show what actually latched, not a fixed 'hard'"
+        )
+        assert diagnoses == 1, (
+            f"one honest diagnosis, then silence — not one per turn, got {diagnoses}"
         )
     finally:
         await session.close()
@@ -518,7 +531,7 @@ async def test_successful_verdict_clears_the_latch_counter(workspace):
 
         # fail, succeed, fail → never two in a row.
         assert session._verifier_latched is False
-        assert session._verifier_hard_failures == 1
+        assert session._verifier_no_verdict_failures == 1
     finally:
         await session.close()
 
@@ -674,7 +687,7 @@ async def test_latched_verifier_reprobes_and_can_recover(workspace):
         assert session._verifier_latched is False, (
             "a successful re-probe must clear the latch"
         )
-        assert session._verifier_hard_failures == 0
+        assert session._verifier_no_verdict_failures == 0
     finally:
         await session.close()
 
@@ -719,7 +732,7 @@ async def test_transient_provider_errors_never_latch(workspace, exc_factory, lab
         assert session._verifier_latched is False, (
             "transient provider errors must never latch the session"
         )
-        assert session._verifier_hard_failures == 0
+        assert session._verifier_no_verdict_failures == 0
         # Verification keeps being attempted every turn, rather than being
         # switched off after two blips.
         assert calls["n"] == 4, (
@@ -781,13 +794,12 @@ async def test_failed_reprobe_stays_latched_without_rediagnosis(workspace, caplo
         await session.close()
 
 
-async def test_latched_truncating_reprobe_diagnoses_and_stays_latched(workspace):
+async def test_latched_truncating_reprobe_stays_latched_without_rediagnosing(workspace):
     """A latched session whose re-probe TRUNCATES (the user switched from a
-    hard-failing model to a persistently-verbose one) falls through to the
-    honest diagnosis and leaves the latch set — truncation never counts toward
-    or against the latch, so only a successful verdict clears it. Pins the
-    deliberate interaction between the latch and "every truncated turn keeps
-    its honest diagnosis" (see the re-probe comment in session.py).
+    hard-failing model to a persistently-verbose one) stays latched and does
+    not re-diagnose: an exhausted ladder is now evidence about the model, so it
+    takes the failed-re-probe path like any other no-verdict outcome. Only a
+    successful verdict clears the latch.
     """
     from anton.core.llm.provider import StructuredOutputError
     from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
@@ -820,9 +832,9 @@ async def test_latched_truncating_reprobe_diagnoses_and_stays_latched(workspace)
         assert session._verifier_latched is True, (
             "a truncating re-probe must not clear the latch"
         )
-        assert diagnoses == 2, (
-            f"expected the latch-time diagnosis plus one on the truncating "
-            f"re-probe, got {diagnoses}"
+        assert diagnoses == 1, (
+            f"the latch-time diagnosis only: a truncating re-probe must not "
+            f"re-diagnose, got {diagnoses}"
         )
     finally:
         await session.close()
@@ -945,7 +957,7 @@ async def test_denied_verdict_latches_silently_on_first_occurrence(
         assert session._verifier_latched is True
         # Denied is not a capability failure — the hard counter stays clean so
         # a later hard failure still gets its honest one-per-session diagnosis.
-        assert session._verifier_hard_failures == 0
+        assert session._verifier_no_verdict_failures == 0
         announcements = [
             r for r in caplog.records
             if "latched after a deterministic denial" in r.message
@@ -1007,6 +1019,302 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
             _HANDBACK_ANCHOR in str(m.get("content", ""))
             for m in session._history
             if isinstance(m, dict)
+        )
+    finally:
+        await session.close()
+
+
+# ── Latch attribution and the re-probe window ────────────────────────────────
+#
+# Two questions the latch answers separately. WHAT produced no verdict, which
+# accumulates across failures and names the turn in the books, and WHAT WOULD
+# FAIL NEXT, which is only ever the last class and picks the re-probe window.
+# One string served both once, and "mixed" being absorbing was the result.
+#
+# All of this is session-scoped. Cowork rebuilds ChatSession per message, so a
+# persistent failure there still diagnoses per message; that is a separate,
+# unbuilt fix and nothing here covers it.
+
+
+def _always_truncated():
+    from anton.core.llm.provider import StructuredOutputError
+
+    async def truncated(_schema, *, system, messages, max_tokens):
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    return truncated
+
+
+async def _run_one_turn(session, mock_llm, message: str):
+    plan, state = _tool_then_text_plan()
+    mock_llm.plan_stream = plan
+    progress = []
+    async for event in session.turn_stream(message):
+        if isinstance(event, StreamTaskProgress):
+            progress.append(event.message or "")
+    return progress, state
+
+
+async def test_a_failed_reprobe_updates_the_latch_attribution(workspace):
+    """Latching `hard` then re-probing into a truncation must not keep booking
+    `latched_hard`: the books would name a cause that is no longer the cause."""
+    from anton.core.llm.provider import StructuredOutputError
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def hard_then_truncated(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("400 tool_choice not supported")
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=hard_then_truncated)
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            await _run_one_turn(session, mock_llm, f"step {turn}")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "hard"
+
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
+            await _run_one_turn(session, mock_llm, f"later {turn}")
+
+        # The re-probe truncated, so the attribution is no longer purely hard.
+        assert session._verifier_latch_reason == "mixed", (
+            "a re-probe failing a different way must reach the books"
+        )
+    finally:
+        await session.close()
+
+
+async def test_mixed_classes_do_not_depend_on_arrival_order(workspace):
+    """One exhausted ladder plus one hard rejection is neither latched_hard nor
+    latched_truncated, whichever arrived last."""
+    from anton.core.llm.provider import StructuredOutputError
+
+    state = {"turn": 0}
+
+    async def truncated_then_hard(_schema, *, system, messages, max_tokens):
+        if state["turn"] == 0:
+            raise StructuredOutputError(
+                "no tool call", truncated=True, output_tokens=max_tokens,
+                max_tokens=max_tokens, stop_reason="stop",
+            )
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=truncated_then_hard)
+    session = _make_session(workspace, mock_llm)
+    try:
+        await _run_one_turn(session, mock_llm, "step one")
+        assert session._verifier_latch_reason == "truncated"
+
+        state["turn"] = 1
+        await _run_one_turn(session, mock_llm, "step two")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "mixed"
+    finally:
+        await session.close()
+
+
+async def test_mixed_reached_the_other_way_round_is_still_mixed(workspace):
+    """The reverse order, which reaches `mixed` at the THRESHOLD gate rather
+    than through an already-latched re-probe. That is a different code path, and
+    it is where `_note_latch_class`'s `current == failure` short-circuit would
+    regress to keeping `hard`."""
+    from anton.core.llm.provider import StructuredOutputError
+
+    state = {"turn": 0}
+
+    async def hard_then_truncated(_schema, *, system, messages, max_tokens):
+        if state["turn"] == 0:
+            raise RuntimeError("400 tool_choice not supported")
+        raise StructuredOutputError(
+            "no tool call", truncated=True, output_tokens=max_tokens,
+            max_tokens=max_tokens, stop_reason="stop",
+        )
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=hard_then_truncated)
+    session = _make_session(workspace, mock_llm)
+    try:
+        await _run_one_turn(session, mock_llm, "step one")
+        assert session._verifier_latch_reason == "hard"
+        assert session._verifier_latched is False, "one failure must not latch"
+
+        state["turn"] = 1
+        await _run_one_turn(session, mock_llm, "step two")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "mixed"
+        assert session._verifier_last_no_verdict == "truncated", (
+            "the window follows the truncation that failed last"
+        )
+    finally:
+        await session.close()
+
+
+async def test_a_denied_latch_keeps_naming_the_denial(workspace):
+    """A denial latches on call one with the counter untouched. If its re-probe
+    then fails for a capability reason, the reason STAYS `denied`: one call
+    failing another way is no evidence the wallet was topped up, and `denied` is
+    the only class the user can act on. Collapsing it into `mixed` would drop
+    that population out of the books, which is the one ENG-1632 sized.
+    """
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def denied_then_hard(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TokenLimitExceeded(
+                "402: Your wallet has no balance to cover the model 'haiku'."
+            )
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=denied_then_hard)
+    session = _make_session(workspace, mock_llm)
+    try:
+        await _run_one_turn(session, mock_llm, "message one")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "denied"
+        assert session._verifier_no_verdict_failures == 0, (
+            "a denial latches on its own branch without counting"
+        )
+
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
+            await _run_one_turn(session, mock_llm, f"later {turn}")
+
+        assert calls["n"] == 2, "exactly one re-probe should have spent a call"
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "denied", (
+            "a differently-failing re-probe is no evidence the denial was paid, "
+            "and the actionable class must not vanish into 'mixed'"
+        )
+        assert session._verifier_last_no_verdict == "hard", (
+            "the window still follows what failed last, not the books label"
+        )
+    finally:
+        await session.close()
+
+
+def test_the_reprobe_window_follows_the_last_failure_not_the_evidence():
+    """The window is a prediction about what a re-probe would hit, so it keys on
+    the LAST no-verdict class. A truncation can recover, a rejected `tool_choice`
+    cannot, and a truncation ten turns ago says nothing about a model that has
+    been rejecting the call ever since."""
+    from anton.core.session import (
+        _VERIFIER_LATCH_REPROBE_TURNS,
+        _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED,
+        _reprobe_turns_for,
+    )
+
+    assert _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED < _VERIFIER_LATCH_REPROBE_TURNS
+    assert _reprobe_turns_for("truncated") == _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+    assert _reprobe_turns_for("hard") == _VERIFIER_LATCH_REPROBE_TURNS
+    assert _reprobe_turns_for("denied") == _VERIFIER_LATCH_REPROBE_TURNS
+    assert _reprobe_turns_for("") == _VERIFIER_LATCH_REPROBE_TURNS
+
+
+async def test_the_short_window_is_given_back_when_truncation_stops(workspace):
+    """Regression: keying the window on the ACCUMULATED reason made "mixed"
+    absorbing, so one truncation during a hard latch's re-probe dropped the
+    session to the short window for good — re-probing a deterministic 400 three
+    times as often forever, against a cause that can never clear. The evidence
+    stays mixed; the window follows what failed last and comes back."""
+    from anton.core.llm.provider import StructuredOutputError
+    from anton.core.session import (
+        _VERIFIER_LATCH_REPROBE_TURNS,
+        _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED,
+    )
+
+    mock_llm = make_mock_llm()
+    calls = {"n": 0}
+
+    async def hard_then_one_truncating_reprobe(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        # 1-2 latch `hard`; 3-4 are one re-probe's ladder, truncating; the 400
+        # is back from then on.
+        if calls["n"] in (3, 4):
+            raise StructuredOutputError(
+                "no tool call", truncated=True, output_tokens=max_tokens,
+                max_tokens=max_tokens, stop_reason="stop",
+            )
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=hard_then_one_truncating_reprobe
+    )
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            await _run_one_turn(session, mock_llm, f"step {turn}")
+        assert session._verifier_latch_reason == "hard"
+
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
+            await _run_one_turn(session, mock_llm, f"later {turn}")
+        assert session._verifier_latch_reason == "mixed", (
+            "the truncating re-probe joins the evidence"
+        )
+        assert session._verifier_last_no_verdict == "truncated"
+
+        # Short window now, correctly: a truncation is what failed last.
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED):
+            await _run_one_turn(session, mock_llm, f"short {turn}")
+        assert session._verifier_last_no_verdict == "hard", (
+            "that re-probe hit the 400 again"
+        )
+
+        # ...and the long window is back, because the 400 is what fails now.
+        spent = calls["n"]
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS - 1):
+            await _run_one_turn(session, mock_llm, f"after {turn}")
+        assert calls["n"] == spent, (
+            "a mixed latch whose last failure was a 400 must get the long window "
+            "back; an absorbing 'mixed' re-probes at 3 turns forever"
+        )
+        assert session._verifier_latch_reason == "mixed", (
+            "the accumulated evidence still includes the truncation"
+        )
+    finally:
+        await session.close()
+
+
+async def test_a_truncation_latch_reprobes_within_the_short_window(workspace):
+    """End to end: the latch engages on the second exhausted ladder, then the
+    verifier is tried again after the short window rather than the long one."""
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            await _run_one_turn(session, mock_llm, f"step {turn}")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "truncated"
+        # Two verifying turns, two budgets each.
+        latch_calls = mock_llm.generate_object_code.await_count
+        assert latch_calls == 4
+
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED - 1):
+            await _run_one_turn(session, mock_llm, f"skip {turn}")
+        assert mock_llm.generate_object_code.await_count == latch_calls, (
+            "still inside the window: no verdict call"
+        )
+
+        await _run_one_turn(session, mock_llm, "re-probe turn")
+        assert mock_llm.generate_object_code.await_count > latch_calls, (
+            "the short window must let the re-probe fire"
         )
     finally:
         await session.close()
