@@ -140,7 +140,7 @@ def _reexec() -> None:
 # Core dependencies from pyproject.toml that anton needs at runtime
 _REQUIRED_PACKAGES: dict[str, str] = {
     "anthropic": "anthropic>=0.42.0",
-    "openai": "openai>=1.0",
+    "openai": "openai>=2.21.0",
     "pydantic": "pydantic>=2.0",
     "pydantic_settings": "pydantic-settings>=2.0",
     "prompt_toolkit": "prompt-toolkit>=3.0",

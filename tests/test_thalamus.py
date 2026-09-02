@@ -11,9 +11,12 @@ import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from anton.core.llm.client import LLMClient
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.llm.provider import (
+    LLMProvider,
     LLMResponse,
+    ProviderAuthError,
     StreamComplete,
     StreamTextDelta,
     ToolCall,
@@ -353,6 +356,28 @@ class TestSessionThalamus:
         reply = await session.turn("hi")
         assert reply == "Handled anyway."
         llm.plan.assert_called_once()
+
+    async def test_confirmed_router_auth_failure_falls_back_to_planning(self):
+        planning = AsyncMock(spec=LLMProvider)
+        planning.complete = AsyncMock(return_value=_response("Handled anyway."))
+        coding = AsyncMock(spec=LLMProvider)
+        router = AsyncMock(spec=LLMProvider)
+        router.complete = AsyncMock(side_effect=ProviderAuthError("Invalid API key"))
+        llm = LLMClient(
+            planning_provider=planning,
+            planning_model="planning-model",
+            coding_provider=coding,
+            coding_model="coding-model",
+            router_provider=router,
+            router_model="router-model",
+        )
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+
+        reply = await session.turn("hi")
+
+        assert reply == "Handled anyway."
+        assert router.complete.await_count == 2
+        planning.complete.assert_awaited_once()
 
     async def test_image_turns_skip_thalamus(self):
         llm = make_mock_llm()

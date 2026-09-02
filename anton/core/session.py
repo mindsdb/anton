@@ -44,6 +44,7 @@ from anton.core.llm.provider import (
     EndpointConfigurationError,
     LLMResponse,
     ModelUnavailableError,
+    ProviderAuthError,
     ProviderOverloadedError,
     StreamComplete,
     StreamContextCompacted,
@@ -634,18 +635,14 @@ def _verifier_error_type(exc: BaseException | None) -> str:
 
 
 def _is_provider_auth_error(exc: BaseException) -> bool:
-    """A provider-auth 401 — anton's "Invalid API key — …" copy from
-    `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
-    request, so retrying can't succeed either. The substring match mirrors
-    cowork-server's `turn_errors.is_auth_error()`; the `isinstance` check is
-    an anton-only narrowing on top of it (both 401 raise sites always type
-    it this way, so it's a no-op in practice) — anything else (a bare
-    "temporarily unavailable" ConnectionError) is a different failure.
+    """Whether ``exc`` is the canonical provider HTTP-401 mapping.
 
-    Shared by both `turn_stream` re-raise sites so the check can't drift
-    between them (review feedback on ENG-1310).
+    ``LLMClient`` propagates this after a failed confirmation, or immediately
+    when a stream has emitted an event and cannot be replayed. The session must
+    propagate either terminal refusal, while unrelated ``ConnectionError``
+    values keep their existing recovery behavior.
     """
-    return isinstance(exc, ConnectionError) and "invalid api key" in str(exc).lower()
+    return isinstance(exc, ProviderAuthError)
 
 
 # Shared closing instruction for every path that hands control back to the
@@ -4252,8 +4249,10 @@ class ChatSession:
                     ):
                         raise
 
-                    # Same reasoning applies to a provider-auth 401 (ENG-1310)
-                    # — see _is_provider_auth_error.
+                    # LLMClient propagates a typed provider-auth 401 after a
+                    # failed confirmation, or immediately after stream output
+                    # to avoid replay. Either terminal refusal must reach the
+                    # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
 
@@ -4460,13 +4459,9 @@ class ChatSession:
                                 # mapping exists server-side.
                                 raise
                             if _is_provider_auth_error(e):
-                                # Same reasoning for a provider-auth 401 — see
-                                # _is_provider_auth_error. cowork-server's
-                                # turn_errors.is_auth_error() matches this exact
-                                # text and renders the "Reconnect MindsHub" /
-                                # BYOK-key action card, but only if the exception
-                                # propagates instead of being flattened into chat
-                                # text here (ENG-1310).
+                                # Preserve a refusal after failed confirmation,
+                                # or the first refusal after stream output, for
+                                # the host's auth-error mapping.
                                 raise
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
@@ -5578,6 +5573,23 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except ProviderAuthError:
+                    # The client already made the one bounded confirmation
+                    # attempt. ProviderAuthError subclasses ConnectionError,
+                    # so it must stay ahead of the broad transient-verdict
+                    # catch below or a confirmed verifier 401 is swallowed.
+                    #
+                    # This is deliberately unlike the wallet 402 and model 403
+                    # on this same call, which break and latch quietly per the
+                    # aux-surface reasoning at _DENIED_VERDICT_ERRORS: those
+                    # say the request was refused, while a confirmed 401 says
+                    # the credential is dead for every later call too. ENG-2116
+                    # requires a confirmed refusal on a required planning,
+                    # coding, or verifier call to reach the host as
+                    # provider_auth so the reconnect action survives. The cost
+                    # is that a turn whose reply already streamed still ends in
+                    # an auth error.
+                    raise
                 except _DENIED_VERDICT_ERRORS as exc:
                     # Deterministic denial — see _DENIED_VERDICT_ERRORS (and the
                     # ordering note there: this clause must stay ahead of the

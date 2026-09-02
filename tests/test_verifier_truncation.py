@@ -29,6 +29,7 @@ from tests.conftest import make_mock_llm
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import (
     LLMResponse,
+    ProviderAuthError,
     StreamComplete,
     StructuredOutputError,
     ToolCall,
@@ -455,6 +456,24 @@ async def test_non_truncated_failure_is_not_retried(workspace):
         await session.close()
 
     assert calls == [_VERIFIER_TOKEN_BUDGETS[0]], "must not pay for a hopeless retry"
+
+
+async def test_confirmed_verifier_auth_failure_propagates(workspace):
+    """A second typed 401 is terminal even though the type is also an OSError."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=ProviderAuthError("Invalid API key")
+    )
+
+    session = _session_that_uses_a_tool(mock_llm, workspace)
+    try:
+        with pytest.raises(ProviderAuthError, match="Invalid API key"):
+            async for _ in session.turn_stream("build me a dashboard"):
+                pass
+    finally:
+        await session.close()
+
+    mock_llm.generate_object_code.assert_awaited_once()
 
 
 async def test_attempts_are_bounded_and_the_ladder_runs_before_the_latch(workspace):

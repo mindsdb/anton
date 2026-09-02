@@ -13,6 +13,7 @@ from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
+    ProviderAuthError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -47,7 +48,7 @@ def _raise_for_status_error(
     failures are classified first; only what's left is offered to the transient
     classifier, and the generic "unavailable" copy is the last resort.
 
-    - 401 → ConnectionError (invalid-key copy; cowork-server keys on this phrase).
+    - 401 → ProviderAuthError (canonical provider-credential refusal).
     - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
     - 402/429 with an M3 gate wallet code (``wallet_empty`` /
       ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
@@ -60,7 +61,7 @@ def _raise_for_status_error(
     - anything else → the generic "temporarily unavailable" ConnectionError.
     """
     if exc.status_code == 401:
-        raise ConnectionError(
+        raise ProviderAuthError(
             "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
         ) from exc
 

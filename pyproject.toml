@@ -20,7 +20,8 @@ classifiers = [
 ]
 dependencies = [
     "anthropic>=0.42.0",
-    "openai>=1.0",
+    # Async API-key suppliers are part of the OpenAI 2.21 client contract.
+    "openai>=2.21.0",
     # Imported at module scope; arrived transitively via anthropic/openai until
     # both moved to httpx2.
     "httpx>=0.27,<1",
