@@ -259,3 +259,31 @@ async def test_the_non_streaming_turn_path_stamps_an_id_too(workspace):
     assert seen[0]["turn_index"] == seen[1]["turn_index"]
     assert seen[0]["turn_attempt_id"] != seen[1]["turn_attempt_id"]
     assert all(r["turn_attempt_id"] for r in seen)
+
+
+async def test_two_turns_in_ONE_session_get_different_ids(workspace):
+    """Per TURN, not per session — the CLI never rebuilds.
+
+    Every other test here builds a fresh ChatSession per turn, which is what
+    cowork-server does. The CLI does not: it keeps one session for the whole
+    conversation. So an id that were merely per-SESSION would satisfy all of
+    them while leaving every CLI turn sharing one id and the join ambiguous
+    again. Found by mutation: making `attempt_id` a stable per-session value
+    passed the entire suite before this test existed.
+    """
+    session = _session(workspace)
+    seen = []
+    for _ in range(3):
+        with patch("anton.analytics.send_event") as sent:
+            async for _ in session.turn_stream("go"):
+                pass
+        rows = [c.kwargs for c in sent.call_args_list
+                if c.args[1] == "turn_completed"]
+        assert len(rows) == 1
+        seen.append(rows[0])
+
+    ids = [r["turn_attempt_id"] for r in seen]
+    assert len(set(ids)) == 3, f"expected 3 distinct ids across 3 turns, got {ids}"
+    # turn_index DOES advance here — the session was never rebuilt — so this
+    # also pins that the two fields stay independent.
+    assert len({r["turn_index"] for r in seen}) == 3
