@@ -729,6 +729,60 @@ async def test_hard_latch_and_failed_reprobe_turns_also_stamp_verification_skipp
     assert why[-1] == ("hard", "RuntimeError")
 
 
+async def test_a_truncation_latch_books_latched_truncated(workspace):
+    # `latched_truncated` and `latched_mixed` reach analytics like any other
+    # value and neither had a test here, so a regression in the latched-skip
+    # stamp would have shipped silently.
+    from anton.core.llm.provider import StructuredOutputError
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+
+    calls = {"n": 0}
+
+    async def truncate_then_reject(_schema, *, system, messages, max_tokens):
+        calls["n"] += 1
+        # The first two turns exhaust the ladder (four calls) and latch
+        # `truncated`; the re-probe after the short window rejects the call,
+        # which makes the accumulated evidence `mixed`.
+        if calls["n"] <= 4:
+            raise StructuredOutputError(
+                "no tool call", truncated=True, output_tokens=max_tokens,
+                max_tokens=max_tokens, stop_reason="stop",
+            )
+        raise RuntimeError("400 tool_choice not supported")
+
+    mock_llm = _verdict_llm("COMPLETE", tool_rounds=1)
+    mock_llm.generate_object_code = AsyncMock(side_effect=truncate_then_reject)
+    session = ChatSession(
+        ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-tr")
+    )
+    _stub_tools(session)
+    why = []
+    with patch("anton.analytics.send_event") as send:
+        for i in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED + 3):
+            plans = [
+                _Iter([StreamComplete(response=_tool_call(1))]),
+                _Iter([StreamComplete(response=_text("reply"))]),
+            ]
+            mock_llm.plan_stream = MagicMock(
+                side_effect=lambda **kw: plans.pop(0) if plans else _Iter(
+                    [StreamComplete(response=_text("diagnosis or reply"))]
+                )
+            )
+            async for _ in session.turn_stream(f"step {i}"):
+                pass
+            k = send.call_args.kwargs
+            why.append((k["verifier_failure"], k["verifier_error_type"]))
+
+    # Turns 1 and 2 made the call and exhausted the ladder.
+    assert why[0] == ("truncated", "StructuredOutputError:no_call")
+    assert why[1] == ("truncated", "StructuredOutputError:no_call")
+    # Then skipped turns, booking the class that actually latched.
+    assert why[2] == ("latched_truncated", "")
+    # The re-probe rejects, so the evidence becomes mixed from here on.
+    assert ("hard", "RuntimeError") in why[3:], why[3:]
+    assert why[-1] == ("latched_mixed", ""), why
+
+
 # ─── error_type: naming the failure, not just counting it (ENG-1689) ─────────
 
 # Every session here carries a `session_id` deliberately: ENG-1692's guard

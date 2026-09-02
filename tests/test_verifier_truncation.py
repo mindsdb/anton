@@ -29,6 +29,7 @@ from tests.conftest import make_mock_llm
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import (
     LLMResponse,
+    ProviderAuthError,
     StreamComplete,
     StructuredOutputError,
     ToolCall,
@@ -457,14 +458,34 @@ async def test_non_truncated_failure_is_not_retried(workspace):
     assert calls == [_VERIFIER_TOKEN_BUDGETS[0]], "must not pay for a hopeless retry"
 
 
-async def test_attempts_are_bounded_and_repeat_each_turn(workspace):
-    """Truncation retries are bounded by the budget list — and are re-tried on a
-    later turn rather than latched off.
+async def test_confirmed_verifier_auth_failure_propagates(workspace):
+    """A second typed 401 is terminal even though the type is also an OSError."""
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=ProviderAuthError("Invalid API key")
+    )
 
-    Output length varies ~6.7x per call for an identical request, so one
-    truncation is a tail sample, not proof the model can never fit a verdict.
-    Latching the retry off on that evidence would bring silent stops back.
+    session = _session_that_uses_a_tool(mock_llm, workspace)
+    try:
+        with pytest.raises(ProviderAuthError, match="Invalid API key"):
+            async for _ in session.turn_stream("build me a dashboard"):
+                pass
+    finally:
+        await session.close()
+
+    mock_llm.generate_object_code.assert_awaited_once()
+
+
+async def test_attempts_are_bounded_and_the_ladder_runs_before_the_latch(workspace):
+    """Every turn that verifies runs the FULL budget list, and the latch engages
+    only after a second exhausted ladder — never mid-ladder.
+
+    That ordering is the whole distinction between "an exhausted ladder counts"
+    and "one truncation counts": output length varies ~6.7x per call, so the
+    4096 retry is where most truncations recover. Counting the 2048 truncation
+    would halve the verifier's real recovery rate.
     """
+    per_turn: list[list[int]] = []
     budgets: list[int] = []
 
     async def fake_verdict(_schema, *, system, messages, max_tokens):
@@ -479,19 +500,23 @@ async def test_attempts_are_bounded_and_repeat_each_turn(workspace):
 
     session = _session_that_uses_a_tool(mock_llm, workspace)
     try:
-        async for _ in session.turn_stream("first turn"):
-            pass
-        assert budgets == list(_VERIFIER_TOKEN_BUDGETS), "bounded by the budget list"
-
-        budgets.clear()
-        mock_llm.plan_stream.next_turn()
-        async for _ in session.turn_stream("second turn"):
-            pass
+        for n in range(3):
+            budgets.clear()
+            if n:
+                mock_llm.plan_stream.next_turn()
+            async for _ in session.turn_stream(f"turn {n}"):
+                pass
+            per_turn.append(list(budgets))
     finally:
         await session.close()
 
-    assert budgets == list(_VERIFIER_TOKEN_BUDGETS), (
-        "a later turn gets a fresh chance — the retry is not latched off"
+    ladder = list(_VERIFIER_TOKEN_BUDGETS)
+    assert per_turn[0] == ladder, "bounded by the budget list"
+    assert per_turn[1] == ladder, (
+        "the second turn must still run the ladder in full before it latches"
+    )
+    assert per_turn[2] == [], (
+        "two exhausted ladders latch, so the third turn spends nothing"
     )
 
 
