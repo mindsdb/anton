@@ -521,3 +521,74 @@ async def test_no_prose_from_the_reason_reaches_the_payload(workspace):
     assert secret not in blob
     assert ".aws" not in blob
     assert "someone" not in blob
+
+
+def _closed_vocabulary() -> set:
+    """Every class `classify` can return, derived from the module, not copied.
+
+    Derived so that EXTENDING the vocabulary keeps the guard passing, while a
+    value from outside the tables — the unbounded-cardinality failure — fails it.
+    """
+    import anton.core.root_cause as R
+
+    closed = set(R._SELF_INFLICTED) | set(R._TRANSIENT) | set(R._WALL_TYPES.values())
+    closed |= {cls for _, cls in R._SENTINEL_REASONS.values()}
+    closed |= set(R._STATUS_WALLS.values())
+    closed |= {f"http_{code}" for code in R._STATUS_TRANSIENT}
+    return closed | {"unclassified"}
+
+
+def test_the_emitted_class_is_always_from_the_closed_vocabulary():
+    """Bounded cardinality is a property of the FIELD, not of today's inputs.
+
+    A PostHog property with unbounded values is expensive and useless as a
+    breakdown. `reason` is attacker-and-model-influenced prose, so the guard
+    that matters is that nothing derived from it can widen the value space.
+    Adversarial reasons included: a novel exception type, a bare sentence, an
+    injected-looking string, and text carrying a status code.
+    """
+    from anton.core.session import _tool_failure_cause
+
+    closed = _closed_vocabulary()
+    tiers = {"self_inflicted", "transient", "external_wall", "unclassified"}
+    reasons = [
+        "NameError: x", "ModuleNotFoundError: No module named 'z'",
+        "TimeoutError: slow", "PermissionError: nope", "scratchpad_empty_code",
+        "RuntimeError: boom", "SomeVendorSpecificError: novel type",
+        "just a sentence with no exception in it", "",
+        "HTTPError: 503 upstream", "KeyError: 404",
+        "Error: {'sql': 'DROP TABLE users'} failed",
+        "x" * 4000,
+    ]
+    for reason in reasons:
+        tier, cls = _tool_failure_cause(False, reason)
+        assert cls in closed, f"{reason[:40]!r} minted a novel class {cls!r}"
+        assert tier in tiers, f"{reason[:40]!r} minted a novel tier {tier!r}"
+
+
+async def test_the_tool_row_and_the_turn_tally_agree_on_the_tier(workspace):
+    """The per-call field and the per-turn counter must describe one reality.
+
+    They come from the same classifier but by different routes — this one reads
+    it directly, the tally goes through `RootCauseLedger`. A divergence would
+    mean two published numbers disagreeing about the same failure.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nNameError: name 'wb' is not defined",
+        ok=False, reason="NameError: name 'wb' is not defined",
+    )])
+    with patch("anton.analytics.send_event") as sent:
+        async for _ in session.turn_stream("go"):
+            pass
+    tool = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
+    turn = [c.kwargs for c in sent.call_args_list if c.args[1] == "turn_completed"]
+    assert len(tool) == 1 and len(turn) == 1
+
+    assert tool[0]["root_cause_tier"] == "self_inflicted"
+    # The turn tally counted the SAME failure into the SAME tier.
+    assert str(turn[0]["root_cause_self_inflicted"]) == "1"
+    assert str(turn[0]["root_cause_failures"]) == "1"
+    # And it stayed out of the trip-eligible rungs — the safety contract this
+    # change must not disturb (ENG-1531 / ENG-836).
+    assert str(turn[0]["root_cause_wall"]) == "0"
+    assert turn[0]["root_cause_top_class"] == ""
