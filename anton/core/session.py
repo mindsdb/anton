@@ -467,6 +467,26 @@ _VERIFIER_LATCH_THRESHOLD = 2
 # verdict" can never fire, since a latched session makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
 
+# Shorter window when truncation is among the evidence. Verifier truncation is
+# NOT an i.i.d. property of the model: `_build_verify_request` renders a
+# transcript that grows with the session, so a verbose but WORKING model
+# truncates more as a long session runs on, and a full window with no
+# verification is a real cost for a model that is otherwise fine. A capability
+# rejection makes the same statement on every call, so it keeps the long window.
+_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED = 3
+
+
+def _reprobe_turns_for(latch_reason: str) -> int:
+    """Skipped turns before a latched session spends one verdict call again.
+
+    Keyed on the latch reason, not one global number: see
+    `_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED`. "mixed" takes the short window
+    too — truncation is among its evidence, so it carries the same doubt.
+    """
+    if latch_reason in ("truncated", "mixed"):
+        return _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+    return _VERIFIER_LATCH_REPROBE_TURNS
+
 # Floor for the tokens held back from the spend ceiling (ENG-1286).
 #
 # TWO calls land after the last check that passed, not one: the call that
@@ -5463,7 +5483,8 @@ class ChatSession:
             # definition, so only a successful verdict clears it.
             if self._verifier_latched:
                 self._verifier_latch_skips += 1
-                if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
+                reprobe_turns = _reprobe_turns_for(self._verifier_latch_reason)
+                if self._verifier_latch_skips < reprobe_turns:
                     _verifier_log.info(
                         "completion-verifier skipped — latched (%s) "
                         "(skip %d/%d before re-probe); "
@@ -5474,7 +5495,7 @@ class ChatSession:
                         f"({self._verifier_latch_reason or 'hard'}) that produced no "
                         "verdict with no successful verdict between them",
                         self._verifier_latch_skips,
-                        _VERIFIER_LATCH_REPROBE_TURNS, continuation,
+                        reprobe_turns, continuation,
                         self._max_continuations, tool_round,
                     )
                     # Stamp the books: this turn books ended_by="completed"

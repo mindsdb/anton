@@ -1162,3 +1162,52 @@ async def test_a_denied_latch_relabels_when_the_reprobe_fails_differently(worksp
         )
     finally:
         await session.close()
+
+
+def test_the_reprobe_window_is_shorter_when_truncation_is_the_evidence():
+    """A verbose but working model truncates more as the transcript grows, so a
+    truncation latch must re-test soon. A capability rejection says the same
+    thing on every call and keeps the long window."""
+    from anton.core.session import (
+        _VERIFIER_LATCH_REPROBE_TURNS,
+        _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED,
+        _reprobe_turns_for,
+    )
+
+    assert _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED < _VERIFIER_LATCH_REPROBE_TURNS
+    assert _reprobe_turns_for("truncated") == _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+    assert _reprobe_turns_for("mixed") == _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+    assert _reprobe_turns_for("hard") == _VERIFIER_LATCH_REPROBE_TURNS
+    assert _reprobe_turns_for("denied") == _VERIFIER_LATCH_REPROBE_TURNS
+    assert _reprobe_turns_for("") == _VERIFIER_LATCH_REPROBE_TURNS
+
+
+async def test_a_truncation_latch_reprobes_within_the_short_window(workspace):
+    """End to end: the latch engages on the second exhausted ladder, then the
+    verifier is tried again after the short window rather than the long one."""
+    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(side_effect=_always_truncated())
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            await _run_one_turn(session, mock_llm, f"step {turn}")
+        assert session._verifier_latched is True
+        assert session._verifier_latch_reason == "truncated"
+        # Two verifying turns, two budgets each.
+        latch_calls = mock_llm.generate_object_code.await_count
+        assert latch_calls == 4
+
+        for turn in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED - 1):
+            await _run_one_turn(session, mock_llm, f"skip {turn}")
+        assert mock_llm.generate_object_code.await_count == latch_calls, (
+            "still inside the window: no verdict call"
+        )
+
+        await _run_one_turn(session, mock_llm, "re-probe turn")
+        assert mock_llm.generate_object_code.await_count > latch_calls, (
+            "the short window must let the re-probe fire"
+        )
+    finally:
+        await session.close()
