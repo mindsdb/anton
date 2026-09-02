@@ -299,6 +299,22 @@ class TestTurnMapIsAuthoritative:
         # other turn's value by substituting it.
         assert "another-turns-token" in result
 
+    def test_the_coarse_net_still_reads_environ_after_a_map_opens(self, monkeypatch):
+        """Only the labeled lookup is gated. A DS_* var the vault never
+        registered still gets caught by the unknown-DS_* net, which is what
+        keeps an operator-exported credential out of model context.
+        """
+        from anton.utils.datasources import set_ds_env_values
+
+        # Registered as secret but NOT as known, i.e. the coarse-net case.
+        _DS_SECRET_VARS.add("DS_SHELL_SET__PASSWORD")
+        monkeypatch.setenv("DS_SHELL_SET__PASSWORD", "shell-value")
+
+        set_ds_env_values({})
+        result = scrub_credentials("pw shell-value")
+
+        assert "shell-value" not in result
+
     def test_a_caller_that_never_set_a_map_still_reads_environ(self, monkeypatch):
         """The CLI and os.environ-based tests keep working unchanged."""
         _DS_SECRET_VARS.add("DS_MANUAL__PASSWORD")
