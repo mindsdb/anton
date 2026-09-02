@@ -31,6 +31,7 @@ from anton.chat_session import get_runtime_factory
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.client import LLMClient
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.datasources.data_vault import LocalDataVault
 
 from anton.commands.datasource import (
     handle_remove_data_source,
@@ -60,6 +61,9 @@ def _build_scratchpad_manager(
         coding_api_key=coding_conn.api_key or "",
         coding_base_url=coding_conn.base_url or "",
         workspace_path=settings.workspace_path,
+        # Without a vault the manager cannot derive a pad's DS_* and the pad
+        # falls back to inheriting the whole process env.
+        data_vault=LocalDataVault(),
     )
 
 
