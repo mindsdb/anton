@@ -484,17 +484,18 @@ def clear_ds_env() -> None:
 
 
 def restore_namespaced_env(vault: DataVault) -> None:
-    """Clear all DS_* vars, then reinject every saved connection as namespaced.
+    """Rebuild this turn's DS_* var registries and value map from the vault.
 
-    Clears via `vault.clear_ds_env()` rather than the module-level
-    `clear_ds_env()` so a vault implementation's own override runs.
+    Touches no process state: the values are recorded for the calling context
+    only, and reach a subprocess through its own env (the scratchpad manager
+    derives them from the same vault). Two turns on different vaults can run
+    at once without seeing each other's credentials, and a connection this
+    turn has disabled cannot be reinstated by another turn.
     """
     _reset_registered_ds_vars()
-    vault.clear_ds_env()
     dreg = DatasourceRegistry()
     env_values: dict[str, str] = {}
     for conn in vault.list_connections():
-        vault.inject_env(conn["engine"], conn["name"])  # flat=False by default
         edef = dreg.get(conn["engine"])
         if edef is not None and not _is_oauth_connection(vault, conn["engine"], conn["name"]):
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
