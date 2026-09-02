@@ -373,3 +373,39 @@ def test_launch_backend_overlay_never_overrides_process_env(tmp_path, monkeypatc
     extra_env = captured["extra_env"]
     assert extra_env["PROJECT_ONLY"] == "yes"
     assert "PATH" not in extra_env
+
+
+def test_launch_backend_says_when_a_declared_datasource_is_gone(tmp_path, monkeypatch, caplog):
+    """A connection deleted after the artifact declared it must be named in the
+    log, or the backend just dies on its first query with no explanation."""
+    import logging
+
+    from anton.core.artifacts import ArtifactStore
+    from anton.core.artifacts.models import DatasourceRef
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    sess = _Sess(tmp_path)
+    sess._data_vault = LocalDataVault(vault_dir=tmp_path / "vault")  # empty
+    sess._scratchpads = None
+    created = json.loads(
+        asyncio.run(
+            handle_create_artifact(
+                sess, {"name": "Gone", "description": "y", "type": "fullstack-stateless-app"},
+            )
+        ).content
+    )
+    slug = created["resource_id"]
+    ArtifactStore(sess._workspace.artifacts_dir).update(
+        slug, datasources=[DatasourceRef(engine="postgres", name="deleted")]
+    )
+
+    async def _fake_launch(**kwargs):
+        return {"slug": slug, "port": 1, "pid": 2, "url": "u", "log_path": "l", "proc": object()}
+
+    monkeypatch.setattr(
+        "anton.core.artifacts.backend_launcher.launch_artifact_backend", _fake_launch
+    )
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(handle_launch_backend(sess, {"slug": slug})).ok is True
+
+    assert "postgres/deleted" in caplog.text

@@ -397,21 +397,31 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
 
     # A subprocess, so its credentials go in its own env — and only for the
     # datasources the artifact declared.
-    vault = session._data_vault
+    vault = getattr(session, "_data_vault", None)
     ds_env: dict[str, str] = {}
     for ref in artifact.datasources:
         if vault is None:
             _log.warning("Artifact %s declares datasources but the session has no vault", slug)
             break
-        # Per-ref so one unreadable connection cannot deny the others; env_for
-        # is the pad's resolver and drops `_`-prefixed bookkeeping fields.
+        # Per-ref so one unreadable connection cannot deny the others, and
+        # env_for is the resolver a pad's own DS_* are built from.
         try:
-            ds_env.update(vault.env_for(ref.engine, ref.name) or {})
+            env = vault.env_for(ref.engine, ref.name)
         except Exception:
             _log.warning(
                 "Could not resolve %s/%s for backend %s", ref.engine, ref.name, slug,
                 exc_info=True,
             )
+            continue
+        if env is None:
+            # Declared in metadata but gone from the vault: the backend would
+            # fail on its first query with nothing saying why.
+            _log.warning(
+                "Artifact %s declares %s/%s, which is not in the vault",
+                slug, ref.engine, ref.name,
+            )
+            continue
+        ds_env.update(env)
 
     # Only-if-unset, like the scratchpad, so a project .env cannot override
     # PATH or a key this process already has.
