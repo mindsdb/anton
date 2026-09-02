@@ -46,6 +46,11 @@ class _ContextScopedSet:
             self._cv.set(current)
         current.add(item)
 
+    def discard(self, item: str) -> None:
+        current = self._cv.get()
+        if current is not None:
+            current.discard(item)
+
     def clear(self) -> None:
         # Open a scope only when this context has none; otherwise empty the one
         # already open, so a mid-turn rebuild stays visible to its own turn.
