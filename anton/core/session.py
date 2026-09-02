@@ -636,6 +636,15 @@ def _tool_failure_cause(ok: "bool | None", reason: str) -> "tuple[str, str]":
     unmigrated handler (ENG-2248): the event already reports `ok="unknown"`, and
     attaching a cause to a call we cannot say failed would invent a verdict.
 
+    **Emit `tier` and `cls` only — never `identifier`, and never `key`.**
+    `key` is `class:identifier` and is the tempting "more useful" field, but the
+    identifier is extracted from the reason and carries absolute paths and
+    internal hostnames verbatim: `permission_denied:/root/.ssh/id_rsa`,
+    `connection_refused:db.internal.corp:5432`. It is the nearer trap than
+    `reason`, because it sits on the object this function already destructures.
+    `test_no_prose_from_the_reason_reaches_the_payload` fails if either is
+    forwarded — verified by mutation, not by hope.
+
     Never raises: it runs on the reporting path, where an escape would turn a
     handled tool failure into a dead turn.
     """

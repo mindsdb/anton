@@ -502,6 +502,16 @@ async def test_the_cause_is_the_shared_classifier_verbatim(workspace):
     failure in two fields. Asserted against `classify` itself rather than
     against hardcoded strings, so extending the vocabulary cannot silently
     desync the event.
+
+    KNOWN LIMIT, stated so nobody reads more into a green run than is there:
+    this evaluates the same expression the implementation does, so it pins the
+    values but NOT the choice of inputs — were the correct call
+    `classify(reason, result_text)`, this would pass anyway. That gap is a
+    proven no-op rather than a risk: measured across 12 reasons x 7 result
+    texts, `(tier, cls)` is identical with and without `result_text` in all 84
+    combinations, because the only branch that reads it returns the constant
+    `"unclassified"` class. That equivalence is what lets the cause be derived
+    at the emit site, before the result is assigned.
     """
     from anton.core.root_cause import classify
 
@@ -602,3 +612,28 @@ async def test_the_tool_row_and_the_turn_tally_agree_on_the_tier(workspace):
     # change must not disturb (ENG-1531 / ENG-836).
     assert str(turn[0]["root_cause_wall"]) == "0"
     assert turn[0]["root_cause_top_class"] == ""
+
+
+async def test_the_nonstreaming_turn_path_stamps_the_cause_too(workspace):
+    """`turn()` has its OWN dispatch loop, its own emit, and its own cause call.
+
+    Every other test here drives `turn_stream`. Found by mutation: removing
+    both kwargs from the non-streaming emit alone left the entire suite green
+    (2,927 passed), so nothing guarded that call site — the same gap the
+    streaming tail had before `test_nonstreaming_turn_path_also_emits` was
+    written, one field later.
+
+    Raises `ValueError` rather than the sibling test's `RuntimeError` on
+    purpose: on this path `reason` is `type(exc).__name__`, and `ValueError` is
+    in `_SELF_INFLICTED` so it classifies distinctly, where `RuntimeError`
+    falls through to `unclassified` — too close to "absent" to prove anything.
+    """
+    session = _session(workspace, ValueError("bad argument"))
+    with patch("anton.analytics.send_event") as sent:
+        await session.turn("go")
+    events = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
+    assert len(events) == 1
+    assert events[0]["ok"] == "false"
+    assert events[0]["error_type"] == "ValueError"      # the raise path
+    assert events[0]["root_cause_tier"] == "self_inflicted"
+    assert events[0]["root_cause_class"] == "ValueError"
