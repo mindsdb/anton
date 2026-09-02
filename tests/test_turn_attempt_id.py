@@ -66,7 +66,14 @@ def _session(workspace, initial_history=None, session_id="conv-attempt"):
             ))
         return gen()
 
+    async def plan(**kw):
+        if llm.usage_listener:
+            llm.usage_listener("planning", "m", _usage())
+        return LLMResponse(content="done", tool_calls=[], usage=_usage(),
+                           stop_reason="end_turn")
+
     llm.plan_stream = plan_stream
+    llm.plan = plan
     s = ChatSession(ChatSessionConfig(
         llm_client=llm, workspace=workspace, session_id=session_id,
         initial_history=list(initial_history) if initial_history else None,
@@ -228,3 +235,27 @@ def test_the_id_is_stamped_at_books_open_not_read_at_emit():
     tc.add("planning", "m", _usage())
     tc.ended_by = "completed"
     assert tc.attempt_id == first
+
+
+async def test_the_non_streaming_turn_path_stamps_an_id_too(workspace):
+    """`turn()` opens its OWN books (`session.py:3632`) and emits separately.
+
+    The `default_factory` makes this true by construction, but the path is real
+    — the CLI's non-streaming API uses it — and "covered by construction" is
+    how the streaming path got a field the other one lacked in the first place.
+    Two runs, because the value being PRESENT is weaker than it being DISTINCT.
+    """
+    history = [_user("first"), _assistant("reply")]
+    seen = []
+    for _ in range(2):
+        session = _session(workspace, history)
+        with patch("anton.analytics.send_event") as sent:
+            await session.turn("go")
+        rows = [c.kwargs for c in sent.call_args_list
+                if c.args[1] == "turn_completed"]
+        assert len(rows) == 1
+        seen.append(rows[0])
+
+    assert seen[0]["turn_index"] == seen[1]["turn_index"]
+    assert seen[0]["turn_attempt_id"] != seen[1]["turn_attempt_id"]
+    assert all(r["turn_attempt_id"] for r in seen)
