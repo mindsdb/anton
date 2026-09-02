@@ -171,7 +171,9 @@ _pending_lock = threading.Lock()
 #                    spend-ceiling extensions granted this turn, and the
 #                    ceiling one's size), verifier_failure + verifier_error_type
 #                    (WHY the completion verifier produced no verdict — the
-#                    loop's truncated/transient/hard/denied class and the
+#                    loop's truncated/transient/hard/denied class, or
+#                    latched_{hard,truncated,denied,mixed} for a turn that made
+#                    no call because an earlier one latched, plus the
 #                    content-free exception type; "" on verified turns; ENG-1858),
 #                    harness, surface (desktop / web / cli — WHERE
 #                    the user was, "" when the host did not say; ENG-1945),

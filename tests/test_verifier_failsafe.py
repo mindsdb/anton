@@ -1024,14 +1024,16 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
         await session.close()
 
 
-# ── Carrying the latch across a rebuilt session ──────────────────────────────
+# ── Latch attribution and the re-probe window ────────────────────────────────
 #
-# The latch is ChatSession state and Cowork rebuilds ChatSession per message, so
-# the counter restarted at zero on every message: one message contributes at
-# most one failure, the threshold is two, and every message paid a hand-back.
-# Carrying the counter is what lets message one diagnose and the rest go quiet.
-# The `verification_skipped` stamp on these paths is covered by
-# test_turn_cost_terminals.py; nothing here adds a stamp site.
+# Two questions the latch answers separately. WHAT produced no verdict, which
+# accumulates across failures and names the turn in the books, and WHAT WOULD
+# FAIL NEXT, which is only ever the last class and picks the re-probe window.
+# One string served both once, and "mixed" being absorbing was the result.
+#
+# All of this is session-scoped. Cowork rebuilds ChatSession per message, so a
+# persistent failure there still diagnoses per message; that is a separate,
+# unbuilt fix and nothing here covers it.
 
 
 def _always_truncated():
