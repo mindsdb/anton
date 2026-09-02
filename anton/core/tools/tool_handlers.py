@@ -421,7 +421,14 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
                 slug, ref.engine, ref.name,
             )
             continue
-        ds_env.update(env)
+        # Enforced here, not left to the vault: TurnKeyDataVault.env_for does
+        # not drop `_`-prefixed bookkeeping though its contract says it does.
+        field_prefix = f"{ref.env_prefix}__"
+        for key, value in env.items():
+            field = key[len(field_prefix):] if key.startswith(field_prefix) else key
+            if field.startswith("_"):
+                continue
+            ds_env[key] = value
 
     # Only-if-unset, like the scratchpad, so a project .env cannot override
     # PATH or a key this process already has.

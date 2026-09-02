@@ -104,6 +104,7 @@ from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 from anton.utils.datasources import (
     begin_ds_turn_scope,
     build_datasource_context,
+    restore_namespaced_env,
     scrub_credentials,
 )
 from anton.core.settings import CoreSettings
@@ -3600,8 +3601,25 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": tool_uses})
             self._append_history({"role": "user", "content": results})
 
-    async def turn(self, user_input: str | list[dict]) -> str:
+    def _open_ds_turn_scope(self) -> None:
+        """Open this turn's DS_* scope and rebuild it from the session's vault.
+
+        Rebuilt here rather than trusted from the host: the pod builds its
+        session in a `run_in_executor` worker, whose ContextVar writes never
+        reach this task, which would leave the turn scrubbing against nothing.
+        """
         begin_ds_turn_scope()
+        if self._data_vault is None:
+            return
+        try:
+            restore_namespaced_env(self._data_vault)
+        except Exception:
+            logger.warning(
+                "Could not rebuild this turn's DS_* scrub state", exc_info=True
+            )
+
+    async def turn(self, user_input: str | list[dict]) -> str:
+        self._open_ds_turn_scope()
         user_input = _scrub_user_input(user_input)
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
@@ -3994,8 +4012,8 @@ class ChatSession:
         path: nothing there would render them.
         """
         # Before any tool task is spawned, so a connect made mid-turn registers
-        # into a container this turn still holds (see begin_ds_turn_scope).
-        begin_ds_turn_scope()
+        # into a container this turn still holds.
+        self._open_ds_turn_scope()
         self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0

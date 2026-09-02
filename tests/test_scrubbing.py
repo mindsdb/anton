@@ -414,7 +414,7 @@ class TestTheTurnBoundaryOpensTheScope:
         from anton.core.session import ChatSession
 
         for method in (ChatSession.turn, ChatSession.turn_stream):
-            assert "begin_ds_turn_scope()" in inspect.getsource(method), method.__name__
+            assert "_open_ds_turn_scope()" in inspect.getsource(method), method.__name__
 
     async def test_opening_a_scope_does_not_change_what_a_reader_sees(self, monkeypatch):
         """It seeds from the ambient DS_*, so a host relying on the os.environ
@@ -428,3 +428,48 @@ class TestTheTurnBoundaryOpensTheScope:
         begin_ds_turn_scope()
 
         assert "ambient-value" not in scrub_credentials("pw ambient-value")
+
+
+class TestTheTurnRebuildsFromItsOwnVault:
+    """A host may build the session off the event loop thread — the pod uses
+    run_in_executor so its heartbeat keeps firing. ContextVar writes made in
+    that worker never reach the turn's task, so the turn cannot trust them.
+    """
+
+    async def test_state_built_in_an_executor_is_rebuilt_by_the_turn(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from anton.core.datasources.data_vault import LocalDataVault
+        from anton.core.session import ChatSession, ChatSessionConfig
+        from anton.utils.datasources import restore_namespaced_env
+        from tests.conftest import make_mock_llm
+
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save(
+            "gmail", "primary", {"access_token": "ya29.live-token"},
+            secure_keys=["access_token"],
+        )
+
+        session = ChatSession(
+            ChatSessionConfig(llm_client=make_mock_llm(), data_vault=vault)
+        )
+
+        # The host's registration happens in a worker thread and is lost.
+        await asyncio.get_running_loop().run_in_executor(
+            None, restore_namespaced_env, vault
+        )
+        assert "ya29.live-token" in scrub_credentials("printed ya29.live-token")
+
+        # The turn boundary rebuilds it from the session's own vault.
+        session._open_ds_turn_scope()
+
+        result = scrub_credentials("printed ya29.live-token")
+        assert "ya29.live-token" not in result
+        assert "[DS_GMAIL_PRIMARY__ACCESS_TOKEN]" in result
+
+    async def test_a_session_without_a_vault_still_opens_a_scope(self):
+        from anton.core.session import ChatSession, ChatSessionConfig
+        from tests.conftest import make_mock_llm
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        session._open_ds_turn_scope()  # must not raise
