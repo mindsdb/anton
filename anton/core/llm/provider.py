@@ -9,6 +9,34 @@ if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
 
 
+# Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
+# event loop finalizes its async generators, so every entry point closes these.
+# Strong refs on purpose: a provider collected before shutdown leaves its pool
+# to the async-generator finalizer, which is the noise we are preventing.
+_LIVE_PROVIDERS: list = []
+
+
+def register_provider(provider: object) -> None:
+    _LIVE_PROVIDERS.append(provider)
+
+
+def unregister_provider(provider: object) -> None:
+    """Drop a closed provider so long-running hosts do not accumulate them."""
+    try:
+        _LIVE_PROVIDERS.remove(provider)
+    except ValueError:
+        pass
+
+
+async def close_live_providers() -> None:
+    providers, _LIVE_PROVIDERS[:] = list(_LIVE_PROVIDERS), []
+    for provider in providers:
+        try:
+            await provider.aclose()
+        except Exception:
+            pass  # a cleanup-only failure must not break shutdown; cancellation propagates
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -1048,6 +1076,10 @@ class ProviderConnectionInfo:
 
 
 class LLMProvider(ABC):
+
+    async def aclose(self) -> None:
+        """Release transport resources. No-op unless the provider holds a client."""
+        return None
     # Human-readable provider id (e.g. "anthropic", "openai-compatible").
     name: str = ""
 

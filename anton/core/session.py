@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import httpx
+import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
@@ -2114,8 +2114,14 @@ class ChatSession:
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
-        await self._reap_tracked_backends()
-        await self._scratchpads.close_all()
+        try:
+            await self._reap_tracked_backends()
+            await self._scratchpads.close_all()
+        finally:
+            # Provider clients own an HTTP pool. This runs even if the steps
+            # above raise, or the pool outlives the process.
+            if self._llm is not None:
+                await self._llm.aclose()
 
     async def emit(self, event) -> None:
         """Push an out-of-band event to the host, if one is listening.
