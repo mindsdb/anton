@@ -436,6 +436,35 @@ _DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
     ModelUnavailableError,
 )
 
+# Models that cannot answer a FORCED tool call, so a verdict call on them is
+# spent to produce nothing. Skipping beats discovering it twice per session:
+# the latch below needs two failures, and a host that rebuilds ChatSession per
+# message never reaches two, so every message paid the ladder AND an "internal
+# error" hand-back on a turn whose work had succeeded.
+#
+#   mindshub_air  narrates past the budget instead of reaching the call — 98.6%
+#                 of prod verdicts returned no tool call (ENG-1081). A MindsHub
+#                 alias, so the name does not collide with anyone's own model.
+#   kimi          rejects forced `tool_choice` outright with a 400 (ENG-1095).
+#                 A property of the model family, not of our gateway, so it
+#                 holds wherever the model is served.
+#
+# Matched on the requested alias, which is what `coding_model` holds — the
+# gateway resolves `mindshub_air` to a real model server-side and only echoes
+# that back on the response.
+#
+# Deliberately NOT provider-gated. The provider string has two vocabularies
+# depending on which host wrote the settings (ENG-1695), and the endpoint
+# classifier reads the PLANNING role, so neither answers the coding-role
+# question this needs. Both entries above justify themselves without it.
+#
+# Being out of date is bounded in both directions: an entry that the gateway
+# has since fixed costs that model its verification until the entry is removed,
+# and a broken model missing from the list falls through to the latch exactly
+# as it does today. This is an optimisation over the latch, not a replacement.
+_VERDICT_INCAPABLE_MODELS: frozenset[str] = frozenset({"mindshub_air", "kimi"})
+
+
 # Turns a latched session skips before spending one verdict call to see whether
 # the cause has gone away (user switched model, gateway fix shipped). Without a
 # re-probe the latch is permanent for the session and "reset on a successful
@@ -1140,6 +1169,9 @@ class ChatSession:
         # (billing/model access, ENG-1632) — so the skip log names the real
         # cause instead of reporting "0 hard failures" for a denied latch.
         self._verifier_latch_reason = ""
+        # The incapable-model skip is a per-turn decision, so its log line would
+        # otherwise repeat every turn saying nothing new.
+        self._verifier_incapable_announced = False
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -5358,6 +5390,36 @@ class ChatSession:
             # tool_round==0; raising verify_min_tool_rounds also skips trivial
             # single-round turns) or when we hit the max-rounds hard stop.
             if tool_round < self._verify_min_tool_rounds or _max_rounds_hit or _spend_ceiling_hit:
+                break
+
+            # This model cannot answer a forced tool call, so the verdict call
+            # would spend the whole ladder to produce nothing and then hand the
+            # user an "internal error" for a turn that worked. End on the
+            # model's own reply instead, and book the turn as unverified.
+            #
+            # Ahead of the latch rather than folded into it: the latch LEARNS
+            # this at the cost of two failures per session, which a host that
+            # rebuilds the session per message never finishes paying.
+            #
+            # No auto-upgrade to a capable model. Same call the denied branch
+            # makes below: a missing check beats a surprise bill.
+            if self._llm.coding_model in _VERDICT_INCAPABLE_MODELS:
+                if not self._verifier_incapable_announced:
+                    self._verifier_incapable_announced = True
+                    _verifier_log.info(
+                        "completion-verifier skipped — coding model %s cannot "
+                        "answer a forced tool call; turns end on the model's own "
+                        "reply, unverified",
+                        self._llm.coding_model,
+                    )
+                # Unverified, and analytics must not count it as a clean pass:
+                # without this the turn is byte-identical to a verified one and
+                # joins the honest-stop denominator (the ENG-1632 review's
+                # point, and what the verify_min_tool_rounds skip above still
+                # gets wrong).
+                if self._turn_cost is not None:
+                    self._turn_cost.verification_skipped = True
+                    self._turn_cost.verifier_failure = "skipped_incapable_model"
                 break
 
             # Append the assistant's final text so the verifier can see it.

@@ -1010,3 +1010,106 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
         )
     finally:
         await session.close()
+
+
+# ── Models that cannot answer a forced tool call ─────────────────────────────
+#
+# The latch learns this at the cost of two failures per session, which a host
+# that rebuilds ChatSession per message never finishes paying. Naming the models
+# skips the call outright, so the ladder is never spent and the user is never
+# told an internal error happened on a turn that worked.
+
+
+async def test_an_incapable_coding_model_skips_the_verdict_call(workspace, caplog):
+    """No verdict call at all, no ladder, and no hand-back — on every turn, not
+    just from the second one like the latch."""
+    import logging
+
+    mock_llm = make_mock_llm()
+    mock_llm.coding_model = "mindshub_air"
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=AssertionError("the verdict call must not be made")
+    )
+    session = _make_session(workspace, mock_llm)
+
+    diagnoses = 0
+    try:
+        with caplog.at_level(logging.INFO):
+            for turn in range(3):
+                plan, state = _tool_then_text_plan()
+                mock_llm.plan_stream = plan
+                async for _ in session.turn_stream(f"do step {turn}"):
+                    pass
+                # A third plan_stream call on a turn == a diagnosis fired.
+                if state["n"] >= 3:
+                    diagnoses += 1
+
+        assert mock_llm.generate_object_code.await_count == 0
+        assert diagnoses == 0, (
+            f"an incapable model must never produce a hand-back, got {diagnoses}"
+        )
+        # Once per session: the decision is per turn, so an unguarded log line
+        # would repeat every turn saying nothing new.
+        announcements = [
+            r for r in caplog.records
+            if "cannot answer a forced tool call" in r.message
+        ]
+        assert len(announcements) == 1, (
+            f"expected one announcement per session, got {len(announcements)}"
+        )
+        assert "mindshub_air" in announcements[0].message
+    finally:
+        await session.close()
+
+
+async def test_the_skipped_turn_is_booked_as_unverified(workspace):
+    """Without the stamp the turn is byte-identical in analytics to a verified
+    pass and silently joins the honest-stop denominator. That is what the
+    verify_min_tool_rounds skip still gets wrong."""
+    from unittest.mock import patch
+
+    mock_llm = make_mock_llm()
+    mock_llm.coding_model = "kimi"
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=AssertionError("the verdict call must not be made")
+    )
+    session = _make_session(
+        workspace, mock_llm
+    )
+    session._session_id = "conv-skip"
+    try:
+        with patch("anton.analytics.send_event") as send:
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream("do the thing"):
+                pass
+            k = send.call_args.kwargs
+        assert k["verification_skipped"] == "true"
+        assert k["verifier_failure"] == "skipped_incapable_model"
+        assert k["verifier_error_type"] == "", "no call was made, so no exception"
+        assert k["ended_by"] == "completed"
+    finally:
+        await session.close()
+
+
+async def test_an_unlisted_model_still_verifies_and_still_latches(workspace):
+    """The list is an optimisation over the latch, not a replacement: a model it
+    does not know about must keep today's behaviour exactly."""
+    mock_llm = make_mock_llm()
+    mock_llm.coding_model = "some-other-model"
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=RuntimeError("400 tool_choice not supported")
+    )
+    session = _make_session(workspace, mock_llm)
+    try:
+        for turn in range(2):
+            plan, _ = _tool_then_text_plan()
+            mock_llm.plan_stream = plan
+            async for _ in session.turn_stream(f"do step {turn}"):
+                pass
+        assert mock_llm.generate_object_code.await_count == 2
+        assert session._verifier_latched is True, (
+            "an unlisted model must still reach the latch the normal way"
+        )
+    finally:
+        await session.close()
