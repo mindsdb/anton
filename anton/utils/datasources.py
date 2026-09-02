@@ -89,6 +89,16 @@ _DS_KNOWN_VARS = _ContextScopedSet("ds_known_vars")
 # DS_* name -> value overrides for the current turn (see _ContextScopedEnvValues).
 _ds_env_values = _ContextScopedEnvValues("ds_env_values")
 
+
+def set_ds_env_values(values: dict[str, str]) -> None:
+    """Record this turn's DS_* name -> value map, used to scrub credentials.
+
+    Scoped to the calling context, so a concurrently running turn's map is
+    untouched.
+    """
+    _ds_env_values.set(values)
+
+
 # Provider credential env vars injected into the scratchpad execution env for
 # the code to USE. Their values must never reach the LLM (ENG-463): a model can
 # only emit a secret it can see, and the agent was caught writing a raw `mdb_`
