@@ -603,9 +603,20 @@ def _tool_failure_cause(ok: "bool | None", reason: str) -> "tuple[str, str]":
     """`(tier, class)` for one failed tool call, or `("", "")` (ENG-2247).
 
     Reuses `root_cause.classify` — the SAME vocabulary the turn-level
-    `root_cause_*` tally is built from — so a tool row and its turn cannot
-    disagree about what a failure was. A parallel taxonomy here would put two
-    spellings of one failure in two fields.
+    `root_cause_*` tally is built from — so for a string tool result the row
+    and its turn cannot disagree about what a failure was. A parallel taxonomy
+    here would put two spellings of one failure in two fields.
+
+    **Scoped to string results deliberately, and it is not a full agreement
+    guarantee.** This runs unconditionally at the emit, but
+    `_record_root_cause` is reached only from the string branch — the
+    multimodal arms `continue` past it. So a handler returning
+    `content=[...]` with `ok=False` puts a cause on the tool row that the turn
+    tally never counts (measured: row `self_inflicted`/`NameError`, tally
+    `root_cause_failures=0`). Unreachable today — no handler returns
+    multimodal content at all — but `ToolOutcome.content` permits it, so
+    whoever migrates the first one must add `_record_root_cause` to both list
+    arms, alongside the nudge the #308-review NOTE already asks for there.
 
     **Deliberately does NOT touch `RootCauseLedger`.** That ledger drops every
     non-trip-eligible class one line into `add()` (`if not rc.trip_eligible:

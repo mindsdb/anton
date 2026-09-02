@@ -350,6 +350,16 @@ async def test_nonstreaming_turn_path_also_emits(workspace):
     assert events[0]["ok"] == "false"
     assert events[0]["error_type"] == "RuntimeError"
     assert events[0]["name"] == "scratchpad"
+    # The cause too, not just the pre-ENG-2247 fields. `_emit_tool_completed`
+    # DEFAULTS both to "", so dropping them from this call site changes no
+    # payload key and would otherwise trip nothing — verified: the whole suite
+    # passed with them removed here, while the same removal at the streaming
+    # emit failed 5 tests. A seam guard that covers two of four fields is how
+    # the next host on this path silently undercounts again.
+    # `RuntimeError` is in none of _SELF_INFLICTED/_TRANSIENT/_WALL_TYPES, so
+    # it lands in classify()'s residual branch — the 31% `unclassified` bucket.
+    assert events[0]["root_cause_tier"] == "unclassified"
+    assert events[0]["root_cause_class"] == "unclassified"
 
 
 async def test_model_generated_tool_name_is_bounded(workspace):
