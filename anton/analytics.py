@@ -177,7 +177,14 @@ _pending_lock = threading.Lock()
 #                    content-free exception type; "" on verified turns; ENG-1858),
 #                    harness, surface (desktop / web / cli — WHERE
 #                    the user was, "" when the host did not say; ENG-1945),
-#                    anton_version, conversation_id, turn_index
+#                    anton_version, conversation_id, turn_index,
+#                    turn_attempt_id (unique per turn EXECUTION — `turn_index`
+#                    is only a position in the history and REPEATS across a
+#                    retried or cancelled attempt, so the pair
+#                    (conversation_id, turn_index) is NOT a unique key;
+#                    ENG-2243). Count attempts with turn_attempt_id, turns with
+#                    (conversation_id, turn_index). Absent on pre-ENG-2243
+#                    builds — read as unknown, never as a value.
 #
 #   rule_retrieval   outcome, when_rules, kept_rules, rules_chars,
 #                    stop_reason, input_tokens, output_tokens, duration_ms
@@ -228,6 +235,11 @@ _pending_lock = threading.Lock()
 #                    conversation_id + turn_index mirror turn_completed's
 #                    values, so a tool row joins to its parent turn row and,
 #                    via Langfuse sessionId, to the gateway trace.
+#                    turn_attempt_id also mirrors it, and is the key the join
+#                    should actually use: turn_index alone matched every retry
+#                    of the same turn (18.5% of these rows joined to more than
+#                    one turn row before ENG-2243). Empty when the tool ran
+#                    with no turn books open.
 #                    (anton/core/session.py::_emit_tool_completed)
 #
 # An event NOT listed here keeps the collector path, so moving one is an

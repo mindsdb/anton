@@ -3126,6 +3126,16 @@ class ChatSession:
                 # forensics.
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
+                # Unique per turn EXECUTION, where `turn_index` is a history
+                # position that repeats across retries (ENG-2243). This is the
+                # key `tool_completed` joins on; `turn_index` stays the field
+                # the Langfuse trace name and the artifact index are built
+                # from, so both readings remain available:
+                #   COUNT(DISTINCT turn_attempt_id) -> attempts
+                #   COUNT(DISTINCT conversation_id, turn_index) -> turns
+                # Absent on a pre-ENG-2243 build: read that as "unknown",
+                # never as a value.
+                turn_attempt_id=tc.attempt_id,
             )
         except Exception:
             # Reporting must never affect the turn that just ran.
@@ -3211,6 +3221,12 @@ class ChatSession:
             turn_index = (
                 getattr(_tc, "turn_index", 0) or (self._turn_count + 1)
             )
+            # Read from the SAME books as `turn_index` above, so a tool row and
+            # its parent turn row can never disagree about which attempt they
+            # belong to (ENG-2243). Empty outside a turn — the tool ran with no
+            # books open, which is not an attempt and must not be given an id
+            # that looks like one.
+            turn_attempt_id = str(getattr(_tc, "attempt_id", "") or "")
             send_event(
                 settings,
                 "tool_completed",
@@ -3236,6 +3252,12 @@ class ChatSession:
                 # and on an unmigrated handler; see `_tool_failure_cause`.
                 root_cause_tier=_rc_tier,
                 root_cause_class=_rc_class,
+                # Makes the tool -> turn join exact (ENG-2243). Before this,
+                # `(conversation_id, turn_index)` matched every retry of the
+                # same turn, so 18.5% of these rows joined to more than one
+                # turn row and "which tools ran in the attempt that hit the
+                # spend ceiling" had no answer.
+                turn_attempt_id=turn_attempt_id,
             )
         except Exception:
             # Analytics must never affect the tool call that just ran.
