@@ -175,3 +175,23 @@ async def test_azure_refuses_a_credential_supplier_it_cannot_await():
             api_version="2024-06-01",
             base_url="https://example.openai.azure.com",
         )
+
+
+async def test_azure_refuses_a_callable_passed_as_the_static_api_key():
+    """``api_key`` is annotated ``str``, but nothing enforces that at runtime.
+
+    A supplier handed through ``api_key`` instead of ``api_key_provider`` reaches
+    the same ``AsyncAzureOpenAI`` path and produces the same permanently empty
+    ``api-key`` header, so the refusal keys on the resolved value rather than on
+    which parameter carried it.
+    """
+
+    async def api_key_provider() -> str:  # pragma: no cover - never awaited
+        return "token-a"
+
+    with pytest.raises(EndpointConfigurationError, match="callable api_key"):
+        OpenAIProvider(
+            api_key=api_key_provider,  # type: ignore[arg-type]
+            api_version="2024-06-01",
+            base_url="https://example.openai.azure.com",
+        )
