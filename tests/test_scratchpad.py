@@ -2158,9 +2158,8 @@ class TestConcurrentTurnsOnDivergentVaults:
         return vault
 
     async def test_neither_turn_sees_the_others_credentials(self, tmp_path, monkeypatch):
-        # The shared process env, polluted the way the old code left it: a
-        # credential for a connection one turn has disabled, and a stale value
-        # for a connection whose password differs per turn. Neither may win.
+        # The shared process env, polluted the way the old code left it.
+        # Neither of these may win over a turn's own vault.
         monkeypatch.setenv("DS_POSTGRES_SHARED__PASSWORD", "leaked-from-elsewhere")
         monkeypatch.setenv("DS_POSTGRES_ONLY_IN_A__PASSWORD", "leaked-from-elsewhere")
 

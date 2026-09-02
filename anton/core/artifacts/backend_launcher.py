@@ -67,11 +67,13 @@ def _build_backend_env(
     sees only the datasources it declared.
     """
     env = {**os.environ}
+    # extra_env first, so the DS_* strip below also covers anything a project
+    # .env tried to smuggle in — the same order local.py uses for a pad.
+    env.update(extra_env or {})
     if ds_env is not None:
         for key in [k for k in env if k.startswith("DS_")]:
             del env[key]
         env.update(ds_env)
-    env.update(extra_env or {})
     isolated = _anton_state_pythonpath_dir()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")

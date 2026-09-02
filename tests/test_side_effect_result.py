@@ -295,7 +295,13 @@ def test_launch_backend_passes_only_declared_datasources(tmp_path, monkeypatch):
     from anton.core.datasources.data_vault import LocalDataVault
 
     vault = LocalDataVault(vault_dir=tmp_path / "vault")
-    vault.save("postgres", "declared", {"password": "declared-pw"}, secure_keys=["password"])
+    # `_`-prefixed fields are bookkeeping, not credentials, and must not be
+    # handed to a subprocess whose code the model wrote.
+    vault.save(
+        "postgres", "declared",
+        {"password": "declared-pw", "_user_label": "Prod DB"},
+        secure_keys=["password"],
+    )
     vault.save("postgres", "other", {"password": "other-pw"}, secure_keys=["password"])
 
     sess = _Sess(tmp_path)
@@ -331,6 +337,7 @@ def test_launch_backend_passes_only_declared_datasources(tmp_path, monkeypatch):
     ds_env = captured["ds_env"]
     assert ds_env["DS_POSTGRES_DECLARED__PASSWORD"] == "declared-pw"
     assert not any("OTHER" in k for k in ds_env)
+    assert not any("USER_LABEL" in k for k in ds_env)
 
 
 def test_launch_backend_overlay_never_overrides_process_env(tmp_path, monkeypatch):

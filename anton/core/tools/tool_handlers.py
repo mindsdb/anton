@@ -395,24 +395,26 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
         tracked = {}
         session._tracked_backends = tracked
 
-    # The backend is a subprocess, so its credentials go in its own env
-    # rather than this process's. Only the datasources the artifact declared
-    # are resolved, so a disabled or unrelated connection cannot reach it.
-    from anton.publisher import _collect_datasource_secrets
+    # A subprocess, so its credentials go in its own env — and only for the
+    # datasources the artifact declared.
+    vault = session._data_vault
+    ds_env: dict[str, str] = {}
+    for ref in artifact.datasources:
+        if vault is None:
+            _log.warning("Artifact %s declares datasources but the session has no vault", slug)
+            break
+        # Per-ref so one unreadable connection cannot deny the others; env_for
+        # is the pad's resolver and drops `_`-prefixed bookkeeping fields.
+        try:
+            ds_env.update(vault.env_for(ref.engine, ref.name) or {})
+        except Exception:
+            _log.warning(
+                "Could not resolve %s/%s for backend %s", ref.engine, ref.name, slug,
+                exc_info=True,
+            )
 
-    try:
-        ds_env, missing = _collect_datasource_secrets(artifact, session._data_vault)
-    except Exception:
-        _log.warning("Could not resolve datasource env for backend %s", slug, exc_info=True)
-        ds_env, missing = {}, []
-    if missing:
-        _log.warning(
-            "Artifact %s declares datasources missing from the vault: %s",
-            slug, ", ".join(missing),
-        )
-
-    # Same only-if-unset rule the scratchpad uses, so a project .env cannot
-    # override PATH or an API key that is already set for this process.
+    # Only-if-unset, like the scratchpad, so a project .env cannot override
+    # PATH or a key this process already has.
     overlay = getattr(session, "_workspace_env_overlay", None) or {}
     extra_env = {k: v for k, v in overlay.items() if k not in os.environ}
 

@@ -63,3 +63,21 @@ def test_empty_ds_env_still_strips(monkeypatch):
     env = _build_backend_env(None, {})
 
     assert "DS_LEFTOVER__PASSWORD" not in env
+
+
+def test_a_project_dotenv_cannot_override_a_vault_credential(monkeypatch):
+    """extra_env is applied before the DS_* strip, so a project .env cannot
+    replace or smuggle in a credential — same order a scratchpad uses."""
+    env = _build_backend_env(
+        {"DS_POSTGRES_PROD__PASSWORD": "from-dotenv", "OTHER": "kept"},
+        {"DS_POSTGRES_PROD__PASSWORD": "from-vault"},
+    )
+
+    assert env["DS_POSTGRES_PROD__PASSWORD"] == "from-vault"
+    assert env["OTHER"] == "kept"
+
+
+def test_a_project_dotenv_cannot_add_an_undeclared_ds_var():
+    env = _build_backend_env({"DS_SNEAKY__TOKEN": "from-dotenv"}, {})
+
+    assert "DS_SNEAKY__TOKEN" not in env

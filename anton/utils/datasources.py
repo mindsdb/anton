@@ -108,9 +108,8 @@ class _ContextScopedEnvValues:
         return overrides.get(key, default)
 
     def items(self):
-        # os.environ stays in the union here on purpose: it preserves the
-        # coarse unknown-DS_* net for a var set outside the vault. Over-redacting
-        # another turn's value is harmless; emitting one is what get() prevents.
+        # os.environ stays in the union on purpose, for the coarse unknown-DS_*
+        # net. Over-redacting is harmless; emitting a value is what get() stops.
         merged = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
         merged.update(self._cv.get() or {})
         return merged.items()
@@ -532,9 +531,8 @@ def restore_namespaced_env(vault: DataVault) -> None:
         try:
             env_values.update(vault.env_for(conn["engine"], conn["name"]) or {})
         except Exception:
-            # One bad connection's value lookup must not block the rest, but it
-            # leaves that connection's secrets unscrubbable for this turn, so
-            # say so. Names only, never a value.
+            # Must not block the rest, but it leaves that connection
+            # unscrubbable for this turn, so say so. Names only, never a value.
             logger.warning(
                 "Could not resolve values for %s/%s; its credentials will not be "
                 "scrubbed from this turn's output",

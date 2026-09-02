@@ -2514,11 +2514,11 @@ class TestEnvActivationCollisionFree:
         conns = vault.list_connections()
         assert len(conns) == 1
         prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
-        # The stale var is left in this process — connect no longer edits it —
-        # but a pad's DS_* come from the vault, so it cannot be seen there.
-        pad_env = _derived_pad_env(vault)
-        assert "DS_ACCESS_TOKEN" not in pad_env
-        assert pad_env[f"{prefix}__HOST"] == "db.example.com"
+        # The stale var is left in this process — connect no longer edits it.
+        assert os.environ.get("DS_ACCESS_TOKEN") == "old-token"
+        # The stale flat var not reaching the child process is the strip's
+        # job, covered by TestConcurrentTurnsOnDivergentVaults.
+        assert _derived_pad_env(vault)[f"{prefix}__HOST"] == "db.example.com"
 
     @pytest.mark.asyncio
     async def test_two_same_type_connections_no_collision(
@@ -2566,8 +2566,6 @@ class TestEnvActivationCollisionFree:
         pad_env = _derived_pad_env(vault)
         assert pad_env["DS_POSTGRESQL_DB1__HOST"] == "host1.example.com"
         assert pad_env["DS_POSTGRESQL_DB2__HOST"] == "host2.example.com"
-        assert "DS_HOST" not in pad_env
-        assert "DS_DATABASE" not in pad_env
 
 
 class TestDatasourceSlashCommandBehavior:
@@ -2738,7 +2736,6 @@ class TestTemporaryFlatExecution:
             restore_namespaced_env(vault)
 
         pad_env = _derived_pad_env(vault)
-        assert "DS_HOST" not in pad_env
         assert pad_env["DS_POSTGRES_PROD_DB__HOST"] == "prod.example.com"
         assert pad_env["DS_HUBSPOT_MAIN__ACCESS_TOKEN"] == "pat-abc"
 
@@ -2788,7 +2785,6 @@ class TestTemporaryFlatExecution:
 
         # Afterwards every connection is available again, namespaced, from the vault.
         pad_env = _derived_pad_env(vault)
-        assert "DS_HOST" not in pad_env
         assert pad_env["DS_POSTGRESQL_PROD_DB__HOST"] == "pg.example.com"
         assert pad_env["DS_HUBSPOT_MAIN__ACCESS_TOKEN"] == "pat-abc"
 

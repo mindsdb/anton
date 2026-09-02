@@ -608,10 +608,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
-        # Only-if-unset, matching what Workspace.apply_env_to_process did when
-        # this went through os.environ: a project .env must not silently
-        # replace PATH or a key the parent already has. Applied before the
-        # DS_* strip so the file cannot smuggle a credential in either.
+        # Only-if-unset, as apply_env_to_process was, and before the DS_* strip
+        # so a project .env can neither replace PATH nor smuggle a credential.
         for key, value in (self._workspace_env_overlay or {}).items():
             env.setdefault(key, value)
         if self._scratchpad_ds_env is not None:
