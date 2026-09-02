@@ -57,9 +57,21 @@ def _anton_state_pythonpath_dir() -> str:
     return str(root)
 
 
-def _build_backend_env(extra_env: dict[str, str] | None) -> dict[str, str]:
-    """Subprocess env: inherited environ + extra_env, with anton_state on PYTHONPATH."""
-    env = {**os.environ, **(extra_env or {})}
+def _build_backend_env(
+    extra_env: dict[str, str] | None,
+    ds_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Subprocess env: inherited environ + extra_env, with anton_state on PYTHONPATH.
+
+    A non-None `ds_env` replaces the inherited DS_* entirely, so the backend
+    sees only the datasources it declared.
+    """
+    env = {**os.environ}
+    if ds_env is not None:
+        for key in [k for k in env if k.startswith("DS_")]:
+            del env[key]
+        env.update(ds_env)
+    env.update(extra_env or {})
     isolated = _anton_state_pythonpath_dir()
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")
@@ -90,6 +102,7 @@ async def launch_artifact_backend(
     path: str = "backend.py",
     extra_args: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
+    ds_env: dict[str, str] | None = None,
     health_path: str = "/",
     health_timeout: float = 10.0,
 ) -> dict | str:
@@ -109,6 +122,11 @@ async def launch_artifact_backend(
     `extra_env` is merged over the inherited `os.environ` for the spawned
     process only (e.g. datasource `DS_*` secrets) — it never mutates the
     parent's environment, keeping secrets scoped to the backend subprocess.
+
+    `ds_env`, when given, is the backend's complete `DS_*` set: the inherited
+    ones are dropped first, so a connection the artifact did not declare (or
+    one a concurrent turn injected) cannot reach it. Callers that still route
+    `DS_*` through `extra_env` keep the old merge-only behaviour.
     """
     extra_args = list(extra_args or [])
     folder = artifact_folder
@@ -221,7 +239,7 @@ async def launch_artifact_backend(
             stderr=log_fd,
             stdin=asyncio.subprocess.DEVNULL,
             preexec_fn=preexec_fn,
-            env=_build_backend_env(extra_env),
+            env=_build_backend_env(extra_env, ds_env),
         )
     except OSError as exc:
         log_fd.close()

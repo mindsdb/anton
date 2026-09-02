@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -394,6 +395,27 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
         tracked = {}
         session._tracked_backends = tracked
 
+    # The backend is a subprocess, so its credentials go in its own env
+    # rather than this process's. Only the datasources the artifact declared
+    # are resolved, so a disabled or unrelated connection cannot reach it.
+    from anton.publisher import _collect_datasource_secrets
+
+    try:
+        ds_env, missing = _collect_datasource_secrets(artifact, session._data_vault)
+    except Exception:
+        _log.warning("Could not resolve datasource env for backend %s", slug, exc_info=True)
+        ds_env, missing = {}, []
+    if missing:
+        _log.warning(
+            "Artifact %s declares datasources missing from the vault: %s",
+            slug, ", ".join(missing),
+        )
+
+    # Same only-if-unset rule the scratchpad uses, so a project .env cannot
+    # override PATH or an API key that is already set for this process.
+    overlay = getattr(session, "_workspace_env_overlay", None) or {}
+    extra_env = {k: v for k, v in overlay.items() if k not in os.environ}
+
     result = await launch_artifact_backend(
         slug=slug,
         artifact_folder=store.folder_for(slug),
@@ -401,6 +423,8 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
         tracked_backends=tracked,
         path=rel_path,
         extra_args=extra_args,
+        extra_env=extra_env,
+        ds_env=ds_env,
         health_path=health_path,
         health_timeout=health_timeout,
     )

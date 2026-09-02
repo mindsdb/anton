@@ -33,3 +33,33 @@ def test_build_env_merges_extra_env():
     env = _build_backend_env({"DS_X__Y": "z"})
     assert env["DS_X__Y"] == "z"
     assert env["PATH"] == os.environ["PATH"]  # inherits parent env
+
+
+def test_ds_env_replaces_inherited_ds_vars(monkeypatch):
+    """A backend must see only the datasources its artifact declared, not
+    whatever DS_* happen to be in the parent process."""
+    monkeypatch.setenv("DS_LEFTOVER__PASSWORD", "from-another-turn")
+
+    env = _build_backend_env(None, {"DS_DECLARED__PASSWORD": "mine"})
+
+    assert env["DS_DECLARED__PASSWORD"] == "mine"
+    assert "DS_LEFTOVER__PASSWORD" not in env
+    assert env["PATH"] == os.environ["PATH"]  # non-DS_ vars still inherited
+
+
+def test_ds_env_none_keeps_inherited_ds_vars(monkeypatch):
+    """Callers that route DS_* through extra_env keep the old behaviour."""
+    monkeypatch.setenv("DS_LEFTOVER__PASSWORD", "inherited")
+
+    env = _build_backend_env(None)
+
+    assert env["DS_LEFTOVER__PASSWORD"] == "inherited"
+
+
+def test_empty_ds_env_still_strips(monkeypatch):
+    """An artifact declaring no datasources gets no DS_* at all."""
+    monkeypatch.setenv("DS_LEFTOVER__PASSWORD", "inherited")
+
+    env = _build_backend_env(None, {})
+
+    assert "DS_LEFTOVER__PASSWORD" not in env

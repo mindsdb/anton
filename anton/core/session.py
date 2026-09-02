@@ -1178,6 +1178,9 @@ class ChatSession:
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
+        # Kept so an artifact backend can be given the same project .env the
+        # scratchpad gets; it is never applied to this process.
+        self._workspace_env_overlay = config.workspace_env_overlay or {}
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to

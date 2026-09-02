@@ -285,3 +285,84 @@ def test_launch_backend_launcher_error_is_failure(tmp_path, monkeypatch):
     assert outcome.reason == "launch_failed"
     # The launcher rolls back on failure, so nothing committed.
     assert json.loads(outcome.content)["committed_at"] is None
+
+
+def test_launch_backend_passes_only_declared_datasources(tmp_path, monkeypatch):
+    """The backend's DS_* come from the artifact's declared datasources,
+    resolved through the session vault — not from this process's environ."""
+    from anton.core.artifacts import ArtifactStore
+    from anton.core.artifacts.models import DatasourceRef
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    vault.save("postgres", "declared", {"password": "declared-pw"}, secure_keys=["password"])
+    vault.save("postgres", "other", {"password": "other-pw"}, secure_keys=["password"])
+
+    sess = _Sess(tmp_path)
+    sess._data_vault = vault
+    sess._scratchpads = None
+    created = json.loads(
+        asyncio.run(
+            handle_create_artifact(
+                sess,
+                {"name": "DsApp", "description": "y", "type": "fullstack-stateless-app"},
+            )
+        ).content
+    )
+    slug = created["resource_id"]
+    ArtifactStore(sess._workspace.artifacts_dir).update(
+        slug, datasources=[DatasourceRef(engine="postgres", name="declared")]
+    )
+
+    # A stale credential in this process must not reach the backend.
+    monkeypatch.setenv("DS_POSTGRES_OTHER__PASSWORD", "other-pw")
+
+    captured: dict = {}
+
+    async def _fake_launch(**kwargs):
+        captured.update(kwargs)
+        return {"slug": slug, "port": 1, "pid": 2, "url": "u", "log_path": "l", "proc": object()}
+
+    monkeypatch.setattr(
+        "anton.core.artifacts.backend_launcher.launch_artifact_backend", _fake_launch
+    )
+    assert asyncio.run(handle_launch_backend(sess, {"slug": slug})).ok is True
+
+    ds_env = captured["ds_env"]
+    assert ds_env["DS_POSTGRES_DECLARED__PASSWORD"] == "declared-pw"
+    assert not any("OTHER" in k for k in ds_env)
+
+
+def test_launch_backend_overlay_never_overrides_process_env(tmp_path, monkeypatch):
+    """The project .env reaches the backend, but cannot clobber a var this
+    process already has (PATH, an API key) — same rule the scratchpad uses."""
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    sess = _Sess(tmp_path)
+    sess._data_vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    sess._scratchpads = None
+    sess._workspace_env_overlay = {"PATH": "/hijacked", "PROJECT_ONLY": "yes"}
+    created = json.loads(
+        asyncio.run(
+            handle_create_artifact(
+                sess,
+                {"name": "OvApp", "description": "y", "type": "fullstack-stateless-app"},
+            )
+        ).content
+    )
+    slug = created["resource_id"]
+
+    captured: dict = {}
+
+    async def _fake_launch(**kwargs):
+        captured.update(kwargs)
+        return {"slug": slug, "port": 1, "pid": 2, "url": "u", "log_path": "l", "proc": object()}
+
+    monkeypatch.setattr(
+        "anton.core.artifacts.backend_launcher.launch_artifact_backend", _fake_launch
+    )
+    assert asyncio.run(handle_launch_backend(sess, {"slug": slug})).ok is True
+
+    extra_env = captured["extra_env"]
+    assert extra_env["PROJECT_ONLY"] == "yes"
+    assert "PATH" not in extra_env
