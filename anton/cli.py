@@ -21,7 +21,7 @@ from rich.table import Table
 from rich.text import Text
 
 from anton import __version__
-from anton.core.llm.provider import close_live_providers
+from anton.core.llm.provider import close_live_providers, install_asyncgen_noise_filter
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
@@ -44,6 +44,7 @@ from anton.minds_client import minds_v1_base, resolve_and_probe, test_llm
 def _run_and_close(coro):
     """Run a coroutine, then release provider HTTP pools before the loop dies."""
     async def _wrapped():
+        install_asyncgen_noise_filter()
         try:
             return await coro
         finally:
@@ -143,8 +144,9 @@ def _reexec() -> None:
 
 # Core dependencies from pyproject.toml that anton needs at runtime
 _REQUIRED_PACKAGES: dict[str, str] = {
-    "anthropic": "anthropic>=0.42.0",
-    "openai": "openai>=1.0",
+    "anthropic": "anthropic>=1.0",
+    "openai": "openai>=3.0",
+    "httpx2": "httpx2>=2.7,<3",
     "pydantic": "pydantic>=2.0",
     "pydantic_settings": "pydantic-settings>=2.0",
     "prompt_toolkit": "prompt-toolkit>=3.0",

@@ -110,7 +110,7 @@ async def restore_session(
         await session._scratchpads.close_all()
 
     # Build new session with restored history
-    new_session = rebuild_session(
+    new_session = await rebuild_session(
         settings=settings,
         state=state,
         self_awareness=self_awareness,

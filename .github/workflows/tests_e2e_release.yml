@@ -97,7 +97,7 @@ jobs:
 
       - name: Run E2E scenarios against the installed wheel (live)
         env:
-          ANTON_E2E_WHEEL_PYTHON: /tmp/wheelenv/bin/python
+          ANTON_E2E_WHEEL_PYTHON: ${{ env.WHEEL_VENV }}/bin/python
           ANTON_OPENAI_API_KEY: ${{ secrets.ANTON_OPENAI_API_KEY }}
           ANTON_PLANNING_PROVIDER: openai
           ANTON_CODING_PROVIDER: openai
@@ -113,4 +113,8 @@ jobs:
           name: verified-dist
           path: dist/
           if-no-files-found: error
-          retention-days: 1
+          # Long enough that a delayed or re-run publish (environment approval,
+          # transient PyPI failure retried the next day) still finds the bytes.
+          # If it has expired anyway, re-run this whole workflow for the tag —
+          # never rebuild in the publish job, that skips verification.
+          retention-days: 14
