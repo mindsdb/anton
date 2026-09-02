@@ -316,6 +316,24 @@ def scrub_credentials(text: str) -> str:
     return text
 
 
+def unscrub_marker(vault: "DataVault", marker: str) -> str | None:
+    """Reverse of `scrub_credentials` for a single `[DS_...]` marker.
+
+    Scoped to `vault`'s own saved connections, not the global
+    `_DS_SECRET_VARS`/`os.environ` — those can hold another session's
+    in-flight test credentials or flat leftovers. Returns None if `marker`
+    isn't `[...]`-bracketed or matches no field in `vault`.
+    """
+    if not (marker.startswith("[") and marker.endswith("]")):
+        return None
+    key = marker[1:-1]
+    for conn in vault.list_connections():
+        env = vault.env_for(conn["engine"], conn["name"])
+        if env and key in env:
+            return env[key]
+    return None
+
+
 def _parse_picked_files(raw: str | None) -> list[dict]:
     """Parse a `_picked_files` JSON field, dropping malformed entries so they
     can't crash a later f.get(...) call or embed "None" as a fileId."""
