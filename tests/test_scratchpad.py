@@ -802,6 +802,40 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
+    async def test_workspace_env_overlay_never_overrides_inherited(self, monkeypatch):
+        """The project .env is only-if-unset, as it was when it went through
+        os.environ — it must not be able to replace PATH or an existing key."""
+        monkeypatch.setenv("ALREADY_SET_VAR", "parent-value")
+        pad = make_scratchpad(
+            name="workspace-env-no-override",
+            workspace_env_overlay={"ALREADY_SET_VAR": "project-value"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('ALREADY_SET_VAR', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "parent-value"
+        finally:
+            await pad.close()
+
+    async def test_workspace_env_overlay_cannot_smuggle_ds_vars(self):
+        """A project .env must not be able to define a DS_* the vault did not
+        — the overlay lands before the DS_* strip."""
+        pad = make_scratchpad(
+            name="workspace-env-no-ds",
+            scratchpad_ds_env={},
+            workspace_env_overlay={"DS_FAKE__PASSWORD": "from-dotenv"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_FAKE__PASSWORD', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
     async def test_workspace_env_overlay_none_leaves_env_unchanged(self, monkeypatch):
         """workspace_env_overlay=None (default) does not touch an unrelated
         inherited var — no stripping happens for this overlay, unlike DS_*."""
