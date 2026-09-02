@@ -22,7 +22,7 @@ hand-built fixtures cannot.
 """
 
 import anthropic
-import httpx
+import httpx2 as httpx
 import openai
 import pytest
 
@@ -749,7 +749,7 @@ def test_anthropic_mapper_does_not_wait_on_an_unconfirmed_429():
 
 def _byok_error(host, reason=None, json_body=None, status=402, headers_extra=None):
     """A real SDK error from an arbitrary OPENAI_COMPATIBLE endpoint."""
-    import httpx
+    import httpx2 as httpx
 
     def handler(request):
         headers = {"X-MindsHub-Reason": reason} if reason else {}

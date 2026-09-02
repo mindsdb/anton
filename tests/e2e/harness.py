@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,7 @@ class RunResult:
     duration: float
     timed_out: bool = False
     cmd: list[str] = field(default_factory=list)
+    upstream_asyncgen_noise: bool = False
 
     def __str__(self) -> str:
         status = "TIMEOUT" if self.timed_out else f"exit {self.returncode}"
@@ -106,6 +108,35 @@ class E2EConfig:
 
 
 
+# httpcore2 raises "generator didn't stop after athrow()" while finalizing a
+# response stream at interpreter exit (upstream, pydantic/httpx2). It is not
+# anton output, so strip it before assertions rather than weakening them.
+_UPSTREAM_ASYNCGEN_NOISE_START = "an error occurred during closing of asynchronous generator"
+_UPSTREAM_ASYNCGEN_NOISE_END = "generator didn't stop after athrow()"
+
+
+def _strip_upstream_asyncgen_noise(text: str) -> tuple[str, bool]:
+    """Return (text without the upstream block, whether one was removed)."""
+    if _UPSTREAM_ASYNCGEN_NOISE_START not in text:
+        return text, False
+    kept, skipping, found = [], False, False
+    for line in text.splitlines(keepends=True):
+        if _UPSTREAM_ASYNCGEN_NOISE_START in line:
+            skipping, found = True, True
+            continue
+        if skipping:
+            if _UPSTREAM_ASYNCGEN_NOISE_END in line:
+                skipping = False
+            continue
+        kept.append(line)
+    return "".join(kept), found
+
+
+def wheel_python() -> str | None:
+    """Interpreter for an installed-wheel run, or None to use the source tree."""
+    return os.environ.get("ANTON_E2E_WHEEL_PYTHON") or None
+
+
 def run_anton(
     cmd_args: list[str],
     input_lines: list[str],
@@ -115,7 +146,17 @@ def run_anton(
     timeout: float = 30.0,
 ) -> RunResult:
     """Run the Anton CLI as a subprocess and capture all output."""
-    cmd = [sys.executable, "-m", "anton"] + cmd_args
+    target = wheel_python()
+    cmd = [target or sys.executable, "-m", "anton"] + cmd_args
+    # `-m` puts cwd on sys.path; the repo root there would shadow the wheel.
+    if target:
+        repo = Path(__file__).parents[2].resolve()
+        if cwd is None:
+            cwd = tempfile.gettempdir()
+        elif Path(cwd).resolve() == repo or repo in Path(cwd).resolve().parents:
+            raise ValueError(
+                f"wheel run would import anton from the checkout via cwd={cwd}"
+            )
     stdin_bytes = "\n".join(input_lines).encode() + b"\n"
 
     t0 = time.monotonic()
@@ -138,6 +179,8 @@ def run_anton(
         stdout = (exc.stdout or b"").decode(errors="replace")
         stderr = (exc.stderr or b"").decode(errors="replace")
 
+    stderr, upstream_noise = _strip_upstream_asyncgen_noise(stderr)
+
     return RunResult(
         returncode=returncode,
         stdout=stdout,
@@ -145,6 +188,7 @@ def run_anton(
         duration=time.monotonic() - t0,
         timed_out=timed_out,
         cmd=cmd,
+        upstream_asyncgen_noise=upstream_noise,
     )
 
 
@@ -169,12 +213,16 @@ def base_env(
         "ANTON_EPISODIC_MEMORY": "true" if memory_enabled else "false",
         "NO_COLOR": "1",
         "TERM": "dumb",
-        "PYTHONPATH": str(Path(__file__).parents[2]),
     }
+    # Source runs need the repo importable; a wheel run must not see it.
+    if not wheel_python():
+        common["PYTHONPATH"] = str(Path(__file__).parents[2])
 
     if isinstance(provider, LiveProvider):
         env = dict(os.environ)
         env.update(common)
+        if wheel_python():
+            env.pop("PYTHONPATH", None)
         return env
 
     return {
