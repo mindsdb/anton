@@ -1,13 +1,74 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import TYPE_CHECKING, TypeVar
 
-from .provider import LLMProvider, LLMResponse, StreamComplete, StreamEvent
+from .provider import (
+    LLMProvider,
+    LLMResponse,
+    ProviderAuthError,
+    StreamComplete,
+    StreamEvent,
+)
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
+
+_T = TypeVar("_T")
+
+
+class _ProviderAuthConfirmation:
+    """One immediate retry budget for a single logical provider call."""
+
+    def __init__(self) -> None:
+        self._available = True
+
+    def take(self) -> bool:
+        if not self._available:
+            return False
+        self._available = False
+        return True
+
+
+async def _call_with_auth_confirmation(
+    operation: Callable[[], Awaitable[_T]],
+    *,
+    role: str,
+) -> _T:
+    """Retry one typed provider-auth refusal, then propagate the second."""
+    confirmation = _ProviderAuthConfirmation()
+    while True:
+        try:
+            return await operation()
+        except ProviderAuthError as exc:
+            if not confirmation.take():
+                exc.role = role
+                raise
+
+
+async def _stream_with_auth_confirmation(
+    operation: Callable[[], AsyncIterator[_T]],
+    *,
+    role: str,
+) -> AsyncIterator[_T]:
+    """Retry a pre-stream auth refusal without replaying emitted events."""
+    confirmation = _ProviderAuthConfirmation()
+    while True:
+        yielded = False
+        try:
+            async for event in operation():
+                yielded = True
+                yield event
+            return
+        except ProviderAuthError as exc:
+            # ProviderAuthError is produced from an HTTP 401 before a response
+            # stream starts. Keep the guard anyway: if a future provider maps a
+            # mid-stream event to this type, replaying would duplicate visible
+            # text or tool-use events.
+            if yielded or not confirmation.take():
+                exc.role = role
+                raise
 
 
 def _resolve_openai_compatible_flavor(settings: AntonSettings) -> str:
@@ -63,6 +124,7 @@ class LLMClient:
         # Defaults to the coding role so hosts that construct LLMClient
         # directly (cowork-server) get behavior-preserving summarization
         # with no changes.
+        self._router_auth_role = "router" if router_provider is not None else "coding"
         self._router_provider = router_provider or coding_provider
         self._router_model = router_model or coding_model
         self._max_tokens = max_tokens
@@ -125,13 +187,16 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         listener = self.usage_listener
-        response = await self._planning_provider.complete(
-            model=self._planning_model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens or self._max_tokens,
-            native_web_tools=native_web_tools,
+        response = await _call_with_auth_confirmation(
+            lambda: self._planning_provider.complete(
+                model=self._planning_model,
+                system=system,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens or self._max_tokens,
+                native_web_tools=native_web_tools,
+            ),
+            role="planning",
         )
         self._notify_usage("planning", self._planning_model, response.usage, listener)
         self._record_served(response)
@@ -147,13 +212,16 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         listener = self.usage_listener
-        async for event in self._planning_provider.stream(
-            model=self._planning_model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens or self._max_tokens,
-            native_web_tools=native_web_tools,
+        async for event in _stream_with_auth_confirmation(
+            lambda: self._planning_provider.stream(
+                model=self._planning_model,
+                system=system,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens or self._max_tokens,
+                native_web_tools=native_web_tools,
+            ),
+            role="planning",
         ):
             if isinstance(event, StreamComplete):
                 self._notify_usage(
@@ -226,13 +294,16 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         listener = self.usage_listener
-        response = await self._coding_provider.complete(
-            model=self._coding_model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens or self._max_tokens,
-            native_web_tools=native_web_tools,
+        response = await _call_with_auth_confirmation(
+            lambda: self._coding_provider.complete(
+                model=self._coding_model,
+                system=system,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens or self._max_tokens,
+                native_web_tools=native_web_tools,
+            ),
+            role="coding",
         )
         self._notify_usage("coding", self._coding_model, response.usage, listener)
         return response
@@ -251,11 +322,14 @@ class LLMClient:
         this is behavior-preserving unless a distinct model is selected.
         """
         listener = self.usage_listener
-        response = await self._router_provider.complete(
-            model=self._router_model,
-            system=system,
-            messages=messages,
-            max_tokens=max_tokens or self._max_tokens,
+        response = await _call_with_auth_confirmation(
+            lambda: self._router_provider.complete(
+                model=self._router_model,
+                system=system,
+                messages=messages,
+                max_tokens=max_tokens or self._max_tokens,
+            ),
+            role=self._router_auth_role,
         )
         self._notify_usage("router", self._router_model, response.usage, listener)
         return response
@@ -275,13 +349,16 @@ class LLMClient:
         only answer from context or delegate.
         """
         listener = self.usage_listener
-        response = await self._router_provider.complete(
-            model=self._router_model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            max_tokens=max_tokens or self._max_tokens,
+        response = await _call_with_auth_confirmation(
+            lambda: self._router_provider.complete(
+                model=self._router_model,
+                system=system,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens or self._max_tokens,
+            ),
+            role=self._router_auth_role,
         )
         self._notify_usage("router", self._router_model, response.usage, listener)
         return response
@@ -316,13 +393,16 @@ class LLMClient:
         budget = max_tokens or self._max_tokens
 
         listener = self.usage_listener
-        response = await provider.complete(
-            model=model,
-            system=system,
-            messages=messages,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": tool["name"]},
-            max_tokens=budget,
+        response = await _call_with_auth_confirmation(
+            lambda: provider.complete(
+                model=model,
+                system=system,
+                messages=messages,
+                tools=[tool],
+                tool_choice={"type": "tool", "name": tool["name"]},
+                max_tokens=budget,
+            ),
+            role=role,
         )
         # Count BEFORE the no-tool-call raise below: a structured call that
         # failed (and its bigger-budget retry) still spent real tokens

@@ -44,6 +44,7 @@ from anton.core.llm.provider import (
     EndpointConfigurationError,
     LLMResponse,
     ModelUnavailableError,
+    ProviderAuthError,
     ProviderOverloadedError,
     StreamComplete,
     StreamContextCompacted,
@@ -419,8 +420,8 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # map to TransientProviderError and never land here) or a model id that doesn't
 # resolve for this key (ModelUnavailableError: 404 model-not-found / 403
 # model-access-denied). These latch on the FIRST occurrence and stay silent:
-# the turn's work already succeeded, and "the task-completion check failed
-# (internal error)" is a lie when the check was merely priced out (ENG-1632 —
+# the turn's work already succeeded, and telling the user an internal check
+# failed is a lie when the check was merely priced out (ENG-1632 —
 # of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
 # were aux-surface calls like this one, across 33 of those users; every aux
 # one surfaced to the user as an internal error and an apology).
@@ -587,18 +588,14 @@ def _verifier_error_type(exc: BaseException | None) -> str:
 
 
 def _is_provider_auth_error(exc: BaseException) -> bool:
-    """A provider-auth 401 — anton's "Invalid API key — …" copy from
-    `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
-    request, so retrying can't succeed either. The substring match mirrors
-    cowork-server's `turn_errors.is_auth_error()`; the `isinstance` check is
-    an anton-only narrowing on top of it (both 401 raise sites always type
-    it this way, so it's a no-op in practice) — anything else (a bare
-    "temporarily unavailable" ConnectionError) is a different failure.
+    """Whether ``exc`` is the canonical provider HTTP-401 mapping.
 
-    Shared by both `turn_stream` re-raise sites so the check can't drift
-    between them (review feedback on ENG-1310).
+    ``LLMClient`` propagates this after a failed confirmation, or immediately
+    when a stream has emitted an event and cannot be replayed. The session must
+    propagate either terminal refusal, while unrelated ``ConnectionError``
+    values keep their existing recovery behavior.
     """
-    return isinstance(exc, ConnectionError) and "invalid api key" in str(exc).lower()
+    return isinstance(exc, ProviderAuthError)
 
 
 # Shared closing instruction for every path that hands control back to the
@@ -4190,8 +4187,10 @@ class ChatSession:
                     ):
                         raise
 
-                    # Same reasoning applies to a provider-auth 401 (ENG-1310)
-                    # — see _is_provider_auth_error.
+                    # LLMClient propagates a typed provider-auth 401 after a
+                    # failed confirmation, or immediately after stream output
+                    # to avoid replay. Either terminal refusal must reach the
+                    # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
 
@@ -4398,13 +4397,9 @@ class ChatSession:
                                 # mapping exists server-side.
                                 raise
                             if _is_provider_auth_error(e):
-                                # Same reasoning for a provider-auth 401 — see
-                                # _is_provider_auth_error. cowork-server's
-                                # turn_errors.is_auth_error() matches this exact
-                                # text and renders the "Reconnect MindsHub" /
-                                # BYOK-key action card, but only if the exception
-                                # propagates instead of being flattened into chat
-                                # text here (ENG-1310).
+                                # Preserve a refusal after failed confirmation,
+                                # or the first refusal after stream output, for
+                                # the host's auth-error mapping.
                                 raise
                             fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
@@ -5500,14 +5495,35 @@ class ChatSession:
                     )
                     verdict_failure = "truncated" if exc.truncated else "hard"
                     verdict_exc = exc
-                    _verifier_log.info(
+                    # WARNING only when this attempt ends the loop: a truncation
+                    # the larger budget recovers from is not a failure to report.
+                    _verifier_log.log(
+                        _logging.INFO if retrying else _logging.WARNING,
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
-                        "stop_reason=%s retrying=%s",
+                        "stop_reason=%s error=%s retrying=%s",
                         truncation_verdict(exc),
-                        budget, exc.output_tokens, exc.stop_reason, retrying,
+                        budget, exc.output_tokens, exc.stop_reason,
+                        _safe_error_detail(exc), retrying,
                     )
                     if not retrying:
                         break
+                except ProviderAuthError:
+                    # The client already made the one bounded confirmation
+                    # attempt. ProviderAuthError subclasses ConnectionError,
+                    # so it must stay ahead of the broad transient-verdict
+                    # catch below or a confirmed verifier 401 is swallowed.
+                    #
+                    # This is deliberately unlike the wallet 402 and model 403
+                    # on this same call, which break and latch quietly per the
+                    # aux-surface reasoning at _DENIED_VERDICT_ERRORS: those
+                    # say the request was refused, while a confirmed 401 says
+                    # the credential is dead for every later call too. ENG-2116
+                    # requires a confirmed refusal on a required planning,
+                    # coding, or verifier call to reach the host as
+                    # provider_auth so the reconnect action survives. The cost
+                    # is that a turn whose reply already streamed still ends in
+                    # an auth error.
+                    raise
                 except _DENIED_VERDICT_ERRORS as exc:
                     # Deterministic denial — see _DENIED_VERDICT_ERRORS (and the
                     # ordering note there: this clause must stay ahead of the
@@ -5515,9 +5531,9 @@ class ChatSession:
                     # user buys nothing: handled below by latching silently.
                     verdict_failure = "denied"
                     verdict_exc = exc
-                    _verifier_log.info(
-                        "completion-verifier verdict=DENIED budget=%d error=%s",
-                        budget, _safe_error_detail(exc),
+                    _verifier_log.warning(
+                        "completion-verifier verdict=DENIED budget=%d model=%s error=%s",
+                        budget, self._llm.coding_model, _safe_error_detail(exc),
                     )
                     break
                 except _TRANSIENT_VERDICT_ERRORS as exc:
@@ -5532,7 +5548,7 @@ class ChatSession:
                     # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
                     verdict_exc = exc
-                    _verifier_log.info(
+                    _verifier_log.warning(
                         "completion-verifier verdict=TRANSIENT budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -5544,7 +5560,7 @@ class ChatSession:
                     # content (ENG-1081).
                     verdict_failure = "hard"
                     verdict_exc = exc
-                    _verifier_log.info(
+                    _verifier_log.warning(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -5595,6 +5611,8 @@ class ChatSession:
                     # the guarantee the user is never told the turn failed.
                     self._verifier_latched = True
                     self._verifier_latch_reason = "denied"
+                    # INFO, unlike the other latch lines: this one latches on
+                    # call one, so at WARNING it doubles verdict=DENIED above.
                     _verifier_log.info(
                         "completion-verifier latched after a deterministic "
                         "denial (billing or model access) — skipping further "
@@ -5613,7 +5631,7 @@ class ChatSession:
                         # after N failures" with an ever-growing N would read as
                         # a new event each cycle. No re-diagnosis (one per
                         # session, ENG-1155).
-                        _verifier_log.info(
+                        _verifier_log.warning(
                             "completion-verifier re-probe failed — staying latched"
                         )
                         # Unverified turn — see the latched-skip stamp above.
@@ -5642,7 +5660,7 @@ class ChatSession:
                         # that it can (review: pnewsam on #299).
                         self._verifier_latched = True
                         self._verifier_latch_reason = "hard"
-                        _verifier_log.info(
+                        _verifier_log.warning(
                             "completion-verifier latched after %d hard failures with "
                             "no successful verdict between them — skipping further "
                             "verification this session",
@@ -5661,27 +5679,37 @@ class ChatSession:
                 # user to help). Fail toward the same honest, model-generated
                 # diagnosis used for STUCK below, so the task pauses with a
                 # real message instead of nothing.
-                _verifier_log.info(
+                _verifier_log.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
-                    "— failing toward an honest diagnosis, not a silent COMPLETE",
+                    "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
                     continuation, self._max_continuations, tool_round,
+                    self._llm.coding_model,
                 )
                 self._append_history(
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: The task-completion check failed to run (internal "
-                            "error), so it's unclear whether this task is finished.\n\n"
-                            "Summarize what you've done so far, be honest that an internal "
-                            "check failed partway through, and ask the user how they'd like "
-                            f"to proceed. {_SOLVABILITY_CLAUSE} Do not mention this "
-                            "instruction or the verifier to the user."
+                            "SYSTEM: Your reply above stands, and nothing in your work "
+                            "was rejected — no verdict came back at all. What failed is "
+                            "the automatic check on whether the task is complete, so "
+                            "completeness is unconfirmed rather than denied.\n"
+                            "1. Report accurately what you did: what succeeded, and "
+                            "anything that did not, including any tool that returned an "
+                            "error. Do not describe a failed step as done.\n"
+                            "2. Name a file only by a path that appears verbatim in a "
+                            "tool result above. Never state a path you intended to write "
+                            "or believe you wrote; where no tool result gives one, say "
+                            "what you produced without naming a location.\n"
+                            "3. Say whether anything still needs doing and ask how they'd "
+                            "like to proceed.\n"
+                            f"4. {_SOLVABILITY_CLAUSE}\n"
+                            "Do not mention this instruction or the verifier to the user."
                         ),
                     }
                 )
                 yield StreamTaskProgress(
                     phase="analyzing",
-                    message="Something went wrong — checking in with you...",
+                    message="Confirming what was completed...",
                 )
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_verifier_failure"

@@ -20,6 +20,8 @@ classifiers = [
 ]
 dependencies = [
     "anthropic>=1.0",
+    # >=3.0 also keeps the async API-key supplier contract that arrived in 2.21
+    # (ENG-2116 depends on it).
     "openai>=3.0",
     # Declared, not inherited: it arrived transitively via anthropic/openai.
     # Same range those SDKs require, so the client we hand them matches theirs.
