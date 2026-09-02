@@ -66,6 +66,12 @@ class LLMClient:
         self._router_provider = router_provider or coding_provider
         self._router_model = router_model or coding_model
         self._max_tokens = max_tokens
+        # ENG-1638: the model the planning provider last reported SERVING (the
+        # `model` on its response), not the id we asked for. The session reads
+        # it when building the RUNTIME IDENTITY block so the agent's answer to
+        # "which model are you?" is what actually answered, not the alias in
+        # settings. None until the first planning response arrives.
+        self.last_served_model: str | None = None
         # ENG-1288: optional per-call usage observer. Every LLM call this
         # client makes — plan/plan_stream (planning), code + structured
         # coding calls like the completion verifier (coding), summarize/gate
@@ -116,6 +122,7 @@ class LLMClient:
             native_web_tools=native_web_tools,
         )
         self._notify_usage("planning", self._planning_model, response.usage, listener)
+        self._record_served(response)
         return response
 
     async def plan_stream(
@@ -140,7 +147,19 @@ class LLMClient:
                 self._notify_usage(
                     "planning", self._planning_model, event.response.usage, listener
                 )
+                self._record_served(event.response)
             yield event
+
+    def _record_served(self, response) -> None:
+        """Keep the last served model the planning provider reported.
+
+        Only the planning role: it is the one talking to the user, so it is the
+        one "which model are you?" is about. A response without the field
+        leaves the previous value in place rather than erasing a known answer.
+        """
+        served = getattr(response, "model", None)
+        if isinstance(served, str) and served.strip():
+            self.last_served_model = served.strip()
 
     @property
     def planning_provider(self) -> LLMProvider:
@@ -428,18 +447,6 @@ class LLMClient:
 
         api_version = getattr(settings, "openai_api_version", None)
         compatible_flavor = _resolve_openai_compatible_flavor(settings)
-        # Only Minds / MindsHub / MDB.AI proxy Anthropic over the OpenAI HTTP
-        # envelope and need Anthropic-shaped image blocks. Gate on the base-URL
-        # host, NOT on the "openai-compatible" provider name — other compatible
-        # endpoints (Gemini at generativelanguage.googleapis.com, generic
-        # proxies) expect standard OpenAI image_url. Mirrors the scratchpad_boot
-        # gate; forcing anthropic format unconditionally mangled Gemini images.
-        _oc_base_host = (settings.openai_base_url or "").lower()
-        _oc_vision_format = (
-            "anthropic"
-            if any(h in _oc_base_host for h in ("mdb.ai", "mindshub.ai"))
-            else "openai"
-        )
         # Each factory takes the per-role effort so planning and coding stay
         # independent even when they resolve to the same provider type.
         providers = {
@@ -461,7 +468,16 @@ class LLMClient:
                 ssl_verify=settings.minds_ssl_verify,
                 api_version=api_version,
                 supports_vision=True,
-                vision_format=_oc_vision_format,
+                # vision_format defaults to "openai" — every gateway we route
+                # openai-compatible requests through (MindsHub/mdb.ai included)
+                # already normalizes a standard OpenAI image_url block into
+                # whatever the resolved backend natively needs (Anthropic,
+                # Responses API, ...). Guessing "anthropic" from the base-URL
+                # host here used to assume every model behind that host was
+                # Claude, which broke non-Claude models sharing the same
+                # gateway (ENG-1992: MindsHub Air screenshots 400'd because
+                # this sent Anthropic-shaped image blocks to an OpenAI
+                # Responses-backed model).
                 flavor=compatible_flavor,
                 reasoning_effort=effort,
             ),

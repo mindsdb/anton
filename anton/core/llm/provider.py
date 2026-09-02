@@ -71,6 +71,12 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str | None = None
+    #: The model the provider reported SERVING this response (`model` on the
+    #: SDK response / stream), not the id anton requested. MindsHub resolves
+    #: aliases server-side (`mindshub_air` → `gpt-5.6-luna`) and echoes the
+    #: resolved id here; local servers echo their own name. None when the
+    #: provider omitted it. Feeds the RUNTIME IDENTITY prompt block (ENG-1638).
+    model: str | None = None
 
 
 @dataclass
@@ -495,6 +501,12 @@ class StructuredOutputError(ValueError):
       arguments. A bigger budget only helps until the payload grows again; the
       cure is a smaller response (ENG-1523).
 
+    The flag is meaningful on NON-truncated errors too — it is computed from
+    whether the response carried any tool call, independent of truncation. There
+    it separates a model that answered in prose instead of calling the tool
+    (``False``) from one whose call the schema rejected (``True``); the verifier
+    reports that split as ``:no_call`` / ``:unusable_call`` (ENG-1858).
+
     Subclasses ``ValueError`` so call sites catching the documented ``ValueError``
     from ``generate_object``/``generate_object_code`` keep working.
     """
@@ -916,6 +928,31 @@ class ModelUnavailableError(ConnectionError):
         super().__init__(message)
         self.code = code
         self.model = model
+
+
+class ContentValidationError(ConnectionError):
+    """Raised when the provider permanently rejects a request over content
+    already in conversation history — a schema/shape mismatch (e.g. an image
+    block built for the wrong provider), not a provider-availability issue.
+
+    Distinct from every other permanent-failure type here in one way that
+    matters: retrying the IDENTICAL request fails identically every time,
+    because the translation that produced the bad block runs fresh from
+    valid stored history on every call — the request never changes between
+    attempts, so "try again" (the generic ConnectionError copy) is actively
+    wrong (ENG-1992). cowork-server's turn-error mapping detects this type
+    (or its scrubbed class name, on the remote/pod path — see
+    ``cloud_turn._scrub``) and both surfaces honest copy AND repairs the
+    offending content in the conversation's stored history, so the next turn
+    doesn't resend the same poison.
+
+    Subclasses ConnectionError so call sites that only know the legacy
+    ConnectionError mapping keep working unchanged.
+    """
+
+    def __init__(self, message: str, *, code: str = "content_validation") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def classify_404(

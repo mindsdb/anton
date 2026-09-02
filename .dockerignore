@@ -1,4 +1,5 @@
-# Version is pinned via SETUPTOOLS_SCM_PRETEND_VERSION in the Dockerfile, so .git is not needed.
+# .git is excluded to keep the build context lean, so hatch-vcs cannot derive a version here.
+# The workflow resolves it from tags and passes --build-arg ANTON_VERSION instead (ENG-1796).
 .git
 .venv
 **/__pycache__

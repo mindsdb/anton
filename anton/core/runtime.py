@@ -150,6 +150,12 @@ async def build_chat_session(
     data_vault = LocalDataVault() if LocalDataVault is not None else None
     if data_vault is not None:
         try:
+            # A prior build in this same long-lived process may have left
+            # DS_* vars for a connection that's since been deleted/renamed.
+            data_vault.clear_ds_env()
+        except Exception:
+            logger.debug("Could not clear Anton data vault env", exc_info=True)
+        try:
             connections = data_vault.list_connections()
         except Exception:
             logger.debug("Could not list Anton data vault connections", exc_info=True)

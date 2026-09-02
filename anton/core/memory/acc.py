@@ -141,7 +141,7 @@ EVENT_KINDS = frozenset({
     "tool_result",              # detail: {name, success, error}
     # Session-level
     "history_repair",           # detail: {reason} — tool_use/result mismatch repair fired
-    "cap_exhausted",            # detail: {} — terminal: hit max_rounds
+    "cap_exhausted",            # detail: {cap, configured_cap} — terminal: hit max_rounds
 })
 
 

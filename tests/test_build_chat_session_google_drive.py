@@ -1,5 +1,5 @@
-"""End-to-end: build_chat_session() -> ChatSession._build_system_prompt() actually
-surfaces Google Drive Picker guidance in the real assembled system prompt.
+"""End-to-end: build_chat_session() -> ChatSession._build_system_prompt() and what
+Google Drive guidance really reaches the assembled system prompt.
 
 ENG-687 review (PR #241): the picked-files/OAuth guidance moved out of
 build_chat_session (anton/core/runtime.py) into build_datasource_context
@@ -13,6 +13,7 @@ given, and ChatSystemPromptBuilder.build() calls suffix.strip() unconditionally.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -37,7 +38,7 @@ def workspace_path(tmp_path):
     return p
 
 
-async def test_picked_files_reach_the_real_system_prompt(workspace_path):
+async def test_drive_availability_reaches_prompt_without_naming_picked_files(workspace_path):
     from anton.core.datasources.data_vault import LocalDataVault
     from anton.core.runtime import build_chat_session
 
@@ -52,8 +53,12 @@ async def test_picked_files_reach_the_real_system_prompt(workspace_path):
     prompt = await session._build_system_prompt()
 
     assert "Connected Google Drive accounts are available" in prompt
-    assert "IMPORTANT — additional Drive files" in prompt
-    assert "Roadmap.gdoc" in prompt
+    # ENG-2071: the availability paragraph reaches the real prompt, but the
+    # Picker-granted files themselves must not — this function has no project
+    # to scope them by, so it named files from every project. cowork-server
+    # renders the scoped list instead (ConnectionsService.picked_files_by_project).
+    assert "IMPORTANT — additional Drive files" not in prompt
+    assert "Roadmap.gdoc" not in prompt
 
 
 async def test_no_connections_and_no_suffix_does_not_crash(workspace_path):
@@ -69,6 +74,27 @@ async def test_no_connections_and_no_suffix_does_not_crash(workspace_path):
     prompt = await session._build_system_prompt()  # must not raise
 
     assert "Google Drive" not in prompt
+
+
+async def test_deleted_connection_env_does_not_survive_into_a_later_build(workspace_path):
+    """Regression: build_chat_session() never cleared DS_* env before
+    injecting connections, so a connection deleted between two builds in
+    the same process left its DS_* var behind for a later build to inherit."""
+    from anton.core.datasources.data_vault import LocalDataVault
+    from anton.core.runtime import build_chat_session
+
+    vault = LocalDataVault()
+    vault.save("postgres", "leftover", {"host": "leftover.example.com"})
+    try:
+        await build_chat_session(session_id="test-leak-1", workspace_path=str(workspace_path))
+        assert os.environ.get("DS_POSTGRES_LEFTOVER__HOST") == "leftover.example.com"
+
+        vault.delete("postgres", "leftover")
+
+        await build_chat_session(session_id="test-leak-2", workspace_path=str(workspace_path))
+        assert "DS_POSTGRES_LEFTOVER__HOST" not in os.environ
+    finally:
+        os.environ.pop("DS_POSTGRES_LEFTOVER__HOST", None)
 
 
 async def test_explicit_system_prompt_suffix_still_appended(workspace_path):
