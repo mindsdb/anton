@@ -1088,6 +1088,14 @@ async def test_the_skipped_turn_is_booked_as_unverified(workspace):
         assert k["verifier_failure"] == "skipped_incapable_model"
         assert k["verifier_error_type"] == "", "no call was made, so no exception"
         assert k["ended_by"] == "completed"
+        # The skip breaks BEFORE the verification block appends the reply, so
+        # the post-loop fallback owns it. Appending in both places is what put
+        # the reply in history twice on every hand-back turn (ENG-1155).
+        replies = [
+            m for m in session.history
+            if m.get("role") == "assistant" and m.get("content") == "REPLY"
+        ]
+        assert len(replies) == 1, f"reply must land in history exactly once: {replies}"
     finally:
         await session.close()
 
