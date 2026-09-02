@@ -68,6 +68,13 @@ class _ContextScopedSet:
         """
         self._cv.set(set(self._cv.get() or ()))
 
+    def replace(self, items: set[str]) -> None:
+        """Swap the contents in place, keeping the container this turn holds."""
+        self.clear()
+        current = self._cv.get()
+        if current is not None:
+            current.update(items)
+
     def reset(self) -> None:
         """Drop the scope entirely. For teardown, not for a mid-turn rebuild."""
         self._cv.set(None)
@@ -120,6 +127,11 @@ class _ContextScopedEnvValues:
         if current is None:
             current = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
         self._cv.set(dict(current))
+
+    def snapshot(self) -> dict[str, str] | None:
+        """A copy of the open map, or None when no scope is open."""
+        current = self._cv.get()
+        return dict(current) if current is not None else None
 
     def reset(self) -> None:
         """Back to "never opened", so get() reads os.environ again."""
@@ -569,8 +581,22 @@ def restore_namespaced_env(vault: DataVault) -> None:
     at once without seeing each other's credentials, and a connection this
     turn has disabled cannot be reinstated by another turn.
     """
-    # Empty in place rather than _reset_registered_ds_vars(), which drops the
-    # scope: dropping it here would hide a mid-turn rebuild from its own turn.
+    # Kept so a failed rebuild restores what the turn had rather than leaving
+    # it with nothing, which would silently turn scrubbing off for the turn.
+    previous = (set(_DS_SECRET_VARS), set(_DS_KNOWN_VARS), _ds_env_values.snapshot())
+    try:
+        _rebuild_ds_registries(vault)
+    except Exception:
+        _DS_SECRET_VARS.replace(previous[0])
+        _DS_KNOWN_VARS.replace(previous[1])
+        if previous[2] is not None:
+            _ds_env_values.set(previous[2])
+        raise
+
+
+def _rebuild_ds_registries(vault: DataVault) -> None:
+    # Emptied in place rather than via _reset_registered_ds_vars(), which drops
+    # the scope: that would hide a mid-turn rebuild from its own turn.
     _DS_SECRET_VARS.clear()
     _DS_KNOWN_VARS.clear()
     dreg = DatasourceRegistry()

@@ -473,3 +473,29 @@ class TestTheTurnRebuildsFromItsOwnVault:
 
         session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
         session._open_ds_turn_scope()  # must not raise
+
+
+class TestAFailedRebuildKeepsTheOldState:
+    """Emptying the registries before rebuilding means a raise mid-rebuild
+    would leave the turn scrubbing against nothing, which reads as success."""
+
+    def test_a_raise_mid_rebuild_restores_the_previous_state(self, tmp_path, monkeypatch):
+        from anton.core.datasources.data_vault import LocalDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save("postgres", "prod", {"password": "known-secret"}, secure_keys=["password"])
+        restore_namespaced_env(vault)
+        assert "known-secret" not in scrub_credentials("pw known-secret")
+
+        # A user-written datasources.md that cannot be parsed, say.
+        monkeypatch.setattr(
+            "anton.utils.datasources.DatasourceRegistry",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable")),
+        )
+        with pytest.raises(OSError):
+            restore_namespaced_env(vault)
+
+        # The turn keeps what it had rather than silently scrubbing nothing.
+        assert "known-secret" not in scrub_credentials("pw known-secret")
+        assert "[DS_POSTGRES_PROD__PASSWORD]" in scrub_credentials("pw known-secret")
