@@ -34,6 +34,7 @@ from anton.core.llm.structured import (
 )
 from anton.core.memory.base import HippocampusProtocol
 from anton.core.memory.base import Engram
+from anton.core.memory.safety import assess_automatic_memory, is_safe_for_prompt
 from anton.core.memory.hippocampus import Hippocampus
 
 if TYPE_CHECKING:
@@ -256,7 +257,10 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # drops scratchpad-related "when" rules — those are already injected
         # into the scratchpad tool description by get_scratchpad_context(),
         # and showing them here too would double their token cost.
-        global_engrams = self.global_hc.get_rules(exclude_scratchpad_when=True)
+        global_engrams = [
+            engram for engram in self.global_hc.get_rules(exclude_scratchpad_when=True)
+            if is_safe_for_prompt(engram)
+        ]
         if global_engrams:
             global_engrams = await self._retrieve_relevant_rules(global_engrams, user_message)
             if global_engrams:
@@ -265,7 +269,10 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 )
 
         # 3. Project rules (with smart retrieval) — same scratchpad exclusion.
-        project_engrams = self.project_hc.get_rules(exclude_scratchpad_when=True)
+        project_engrams = [
+            engram for engram in self.project_hc.get_rules(exclude_scratchpad_when=True)
+            if is_safe_for_prompt(engram)
+        ]
         if project_engrams:
             project_engrams = await self._retrieve_relevant_rules(project_engrams, user_message)
             if project_engrams:
@@ -277,16 +284,24 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         # 4. Global lessons. recall_lessons() excludes scratchpad-related
         # entries internally — same reasoning as the rules exclusion above.
-        global_lessons = self.global_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
-        if global_lessons:
+        global_lesson_engrams = [
+            engram for engram in self.global_hc.get_lessons(token_budget=1000, exclude_scratchpad=True)
+            if is_safe_for_prompt(engram)
+        ]
+        if global_lesson_engrams:
+            global_lessons = "\n".join(f"- {engram.text}" for engram in global_lesson_engrams)
             sections.append(f"## Your Memory — Global Lessons\n{global_lessons}")
 
         # 5. Project lessons — same scratchpad exclusion.
-        project_lessons = self.project_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
-        if project_lessons:
+        project_lesson_engrams = [
+            engram for engram in self.project_hc.get_lessons(token_budget=1000, exclude_scratchpad=True)
+            if is_safe_for_prompt(engram)
+        ]
+        if project_lesson_engrams:
+            project_lessons = "\n".join(f"- {engram.text}" for engram in project_lesson_engrams)
             sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
             if self._episodic is not None:
-                for engram in self.project_hc.get_lessons(token_budget=1000, exclude_scratchpad=True):
+                for engram in project_lesson_engrams:
                     self._log_read_engram(engram)
 
         # 6. Minds datasource context (auto-loaded if present)
@@ -453,6 +468,13 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         actions: list[str] = []
         for engram in engrams:
+            decision = assess_automatic_memory(engram)
+            if not decision.allowed:
+                # Candidate text may contain tool output or a credential. Keep it
+                # out of files, event logs, and user-facing action messages.
+                actions.append(f"Rejected unsafe automatic memory ({decision.reason}).")
+                continue
+
             if engram.kind == "profile":
                 hc = self.global_hc
             else:
