@@ -1,5 +1,9 @@
 name: Release e2e scenarios
 
+# Verifies the artifact, not the checkout: builds the wheel for the tagged
+# commit, installs it into a clean venv, and runs the live E2E scenarios
+# through that install. Publishing is irreversible, so this must gate it.
+
 permissions:
   contents: read
 
@@ -7,15 +11,24 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: "Release tag the caller just created (e.g. v2.0.5)"
+        description: "Release tag to verify (e.g. v2.0.5)"
+        required: true
+        type: string
+      version:
+        description: "Version the release job minted (e.g. 2.0.5)"
         required: true
         type: string
 
 jobs:
-  e2e-live:
+  verify-wheel:
     runs-on: ubuntu-latest
+    env:
+      WHEEL_VENV: /tmp/wheelenv
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0  # hatch-vcs needs tags to derive version
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -23,11 +36,81 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Run E2E tests (live)
+      - name: Build the distributions
         env:
+          # Match the publish job: build exactly the version that was minted.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
+        run: uv build
+
+      - name: Install the wheel into a clean venv
+        run: |
+          uv venv --python 3.12 "$WHEEL_VENV"
+          uv pip install --python "$WHEEL_VENV/bin/python" dist/*.whl
+
+      - name: Wheel must not resolve to the source tree
+        # A green run that imported anton/ from the repo would prove nothing.
+        run: |
+          loc=$(cd /tmp && "$WHEEL_VENV/bin/python" -c \
+            "import anton, pathlib; print(pathlib.Path(anton.__file__).resolve())")
+          echo "anton imported from: $loc"
+          case "$loc" in
+            "$WHEEL_VENV"/*) ;;
+            *) echo "::error::anton resolved outside the wheel venv: $loc"; exit 1 ;;
+          esac
+
+      - name: Installed version matches the release
+        env:
+          EXPECTED: ${{ inputs.version }}
+        # Compare as PEP 440 versions: packaging strips leading zeros, so the
+        # CalVer tag 2026.08.31.4 installs as 2026.8.31.4.
+        run: |
+          cd /tmp && "$WHEEL_VENV/bin/python" - <<'PY'
+          import os, sys
+          from packaging.version import Version
+          import anton
+          got, expected = anton.__version__, os.environ["EXPECTED"]
+          print(f"installed={got} expected={expected}")
+          if Version(got) != Version(expected):
+              sys.exit(f"::error::wheel reports {got}, release minted {expected}")
+          PY
+
+      - name: Console script entry point works
+        # `anton` is what users type; the E2E harness uses `python -m anton`.
+        run: cd /tmp && "$WHEEL_VENV/bin/anton" --help > /dev/null
+
+      - name: Sdist builds, installs and runs
+        # uv build produces a wheel and an sdist, and both get published, so
+        # both must be verified.
+        run: |
+          uv venv --python 3.12 /tmp/sdistenv
+          uv pip install --no-cache --python /tmp/sdistenv/bin/python dist/*.tar.gz
+          cd /tmp && /tmp/sdistenv/bin/anton --help > /dev/null
+
+      - name: Installer path resolves and runs on a cold cache
+        # install.sh installs from the git tag, not the wheel, and a warm local
+        # env can hide a dependency that is no longer pulled in transitively.
+        run: |
+          uv venv --python 3.12 /tmp/gitenv
+          uv pip install --no-cache --python /tmp/gitenv/bin/python \
+            "git+https://github.com/${{ github.repository }}.git@${{ inputs.tag }}"
+          cd /tmp && /tmp/gitenv/bin/anton --help > /dev/null
+
+      - name: Run E2E scenarios against the installed wheel (live)
+        env:
+          ANTON_E2E_WHEEL_PYTHON: /tmp/wheelenv/bin/python
           ANTON_OPENAI_API_KEY: ${{ secrets.ANTON_OPENAI_API_KEY }}
           ANTON_PLANNING_PROVIDER: openai
           ANTON_CODING_PROVIDER: openai
           ANTON_PLANNING_MODEL: gpt-4.1-mini
           ANTON_CODING_MODEL: gpt-4.1-mini
         run: uv run --group dev pytest tests/e2e/ --live -v
+
+      # Hand the publish job these exact bytes. Last step, so a failed
+      # verification never leaves a publishable artifact behind.
+      - name: Upload the verified distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
