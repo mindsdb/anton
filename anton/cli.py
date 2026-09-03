@@ -22,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from anton import __version__
+from anton.core.llm.provider import close_live_providers, install_asyncgen_noise_filter
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
@@ -45,6 +46,17 @@ from anton.minds_client import minds_v1_base, resolve_and_probe, test_llm
 # middle of the rich Live render. Propagation is untouched, so a host that does
 # configure logging (the cowork sidecar, the cloud pod) still emits them.
 logging.getLogger("anton").addHandler(logging.NullHandler())
+
+
+def _run_and_close(coro):
+    """Run a coroutine, then release provider HTTP pools before the loop dies."""
+    async def _wrapped():
+        install_asyncgen_noise_filter()
+        try:
+            return await coro
+        finally:
+            await close_live_providers()
+    return asyncio.run(_wrapped())
 
 
 def _build_scratchpad_manager(
@@ -139,8 +151,9 @@ def _reexec() -> None:
 
 # Core dependencies from pyproject.toml that anton needs at runtime
 _REQUIRED_PACKAGES: dict[str, str] = {
-    "anthropic": "anthropic>=0.42.0",
-    "openai": "openai>=2.21.0",
+    "anthropic": "anthropic>=1.0",
+    "openai": "openai>=3.0",
+    "httpx2": "httpx2>=2.7,<3",
     "pydantic": "pydantic>=2.0",
     "pydantic_settings": "pydantic-settings>=2.0",
     "prompt_toolkit": "prompt-toolkit>=3.0",
@@ -517,7 +530,7 @@ def _onboard(settings) -> None:
     ]
 
     if sys.stdout.isatty():
-        asyncio.run(
+        _run_and_close(
             _animate_onboard(
                 console, __version__, _INTRO_LINES, settings=settings, ws=ws
             )
@@ -1378,7 +1391,7 @@ def _setup_exa(settings, ws) -> None:
 
         def _test():
             # Sync httpx call — _validate_with_spinner runs us inside a Live.
-            import httpx as _httpx
+            import httpx2 as _httpx
 
             resp = _httpx.post(
                 "https://api.exa.ai/search",
@@ -1431,7 +1444,7 @@ def _setup_brave(settings, ws) -> None:
     try:
 
         def _test():
-            import httpx as _httpx
+            import httpx2 as _httpx
 
             resp = _httpx.get(
                 "https://api.search.brave.com/res/v1/web/search",
@@ -1659,7 +1672,7 @@ def connect_data_source(
         )
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())
 
 
 @app.command("list")
@@ -1694,7 +1707,7 @@ def edit_data_source(
         )
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())
 
 
 @app.command("remove")
@@ -1706,7 +1719,7 @@ def remove_data_source(
 ) -> None:
     """Remove a saved connection from the Local Vault."""
 
-    asyncio.run(handle_remove_data_source(console, name))
+    _run_and_close(handle_remove_data_source(console, name))
 
 
 @app.command("test")
@@ -1727,4 +1740,4 @@ def test_data_source(
         await _handle_test_datasource(console, scratchpads, name)
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())

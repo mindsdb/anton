@@ -531,7 +531,7 @@ class TestExaLive:
         contract against the live API — if Exa changes their endpoint or
         auth shape, both setup AND runtime would break, and this would
         catch it on the next live run."""
-        import httpx as _httpx
+        import httpx2 as _httpx
 
         # Exact same shape ``cli._setup_exa._test`` uses internally.
         resp = await _httpx.AsyncClient(timeout=15.0).post(
@@ -582,7 +582,7 @@ class TestBraveLive:
     async def test_setup_probe_endpoint_contract(self):
         """Mirror of the Exa probe-contract test for Brave (matches
         ``cli._setup_brave._test``)."""
-        import httpx as _httpx
+        import httpx2 as _httpx
 
         resp = await _httpx.AsyncClient(timeout=15.0).get(
             "https://api.search.brave.com/res/v1/web/search",
