@@ -626,7 +626,23 @@ async def test_the_nonstreaming_turn_path_stamps_the_cause_too(workspace):
     Raises `ValueError` rather than the sibling test's `RuntimeError` on
     purpose: on this path `reason` is `type(exc).__name__`, and `ValueError` is
     in `_SELF_INFLICTED` so it classifies distinctly, where `RuntimeError`
-    falls through to `unclassified` — too close to "absent" to prove anything.
+    falls through to `unclassified`.
+
+    COMPLEMENTARY to that test, not stronger — an earlier commit message here
+    claimed a hierarchy and was wrong. Neither subsumes the other, verified by
+    mutation:
+
+    | mutation | `..._also_emits` | this test |
+    | -- | -- | -- |
+    | `_tool_failure_cause` stubbed to the residual constant | passes | FAILS |
+    | `root_cause_class=_tool_error_type` (wrong source) | FAILS | passes |
+
+    The second is the non-obvious one: on the raise path `reason` IS
+    `type(exc).__name__`, so `error_type == root_cause_class == "ValueError"`
+    here and a class copied from `error_type` is invisible to this test — only
+    its tier assertion resists, and only the RuntimeError/`unclassified` pair
+    distinguishes the two sources. Deleting either test as redundant reopens a
+    mutation the other does not cover, with CI green.
     """
     session = _session(workspace, ValueError("bad argument"))
     with patch("anton.analytics.send_event") as sent:
