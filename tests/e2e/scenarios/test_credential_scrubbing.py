@@ -29,13 +29,23 @@ def _all_message_text(requests: list[dict]) -> str:
 
 @pytest.mark.stub_only
 def test_ds_secret_scrubbed_before_reaching_llm(tmp_path):
+    """The secret arrives through the vault, the only supported channel: a pad's
+    DS_* is derived from the vault, not inherited from the parent's environ."""
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    home = tmp_path / "home"
+    (home / ".anton").mkdir(parents=True)
+    LocalDataVault(vault_dir=home / ".anton" / "data_vault").save(
+        "postgres", "prod", {"password": _SECRET_VALUE}, secure_keys=["password"]
+    )
+
     code = f"import os\nprint(os.environ['{_SECRET_KEY}'])\n"
     with StubServer() as stub:
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": "cred_test", "code": code})
         stub.queue_text("The credential was redacted. SCRUBBED")
         stub.queue_verification_ok()
         env = base_env(stub)
-        env[_SECRET_KEY] = _SECRET_VALUE
+        env["HOME"] = str(home)
         result = run_anton(["--folder", str(tmp_path)], ["print the db password", "exit"],
                            env=env, timeout=20)
 

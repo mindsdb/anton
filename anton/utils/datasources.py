@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import yaml
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,12 +22,164 @@ from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML
 if TYPE_CHECKING:
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
 
+logger = logging.getLogger(__name__)
+
+
+class _ContextScopedSet:
+    """A set[str] scoped to the turn that opened it.
+
+    The ContextVar holds a MUTABLE set, opened once per turn and mutated in
+    place after that. Mutating in place is what makes a tool handler's
+    registration visible to the turn that dispatched it: every tool call runs
+    in its own task, and `asyncio.create_task` copies the context, so a child
+    task's `ContextVar.set()` is discarded when it finishes — but a change to
+    the set the parent already holds is not.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._cv: ContextVar[set[str] | None] = ContextVar(name, default=None)
+
+    def add(self, item: str) -> None:
+        current = self._cv.get()
+        if current is None:
+            current = set()
+            self._cv.set(current)
+        current.add(item)
+
+    def discard(self, item: str) -> None:
+        current = self._cv.get()
+        if current is not None:
+            current.discard(item)
+
+    def clear(self) -> None:
+        # Open a scope only when this context has none; otherwise empty the one
+        # already open, so a mid-turn rebuild stays visible to its own turn.
+        current = self._cv.get()
+        if current is None:
+            self._cv.set(set())
+        else:
+            current.clear()
+
+    def begin_scope(self) -> None:
+        """Open this turn's own container, carrying over what is visible now.
+
+        Opened in the turn's context, so a tool task's in-place write reaches a
+        container the turn still holds instead of a copy that is discarded.
+        """
+        self._cv.set(set(self._cv.get() or ()))
+
+    def replace(self, items: set[str]) -> None:
+        """Swap the contents in place, keeping the container this turn holds."""
+        self.clear()
+        current = self._cv.get()
+        if current is not None:
+            current.update(items)
+
+    def reset(self) -> None:
+        """Drop the scope entirely. For teardown, not for a mid-turn rebuild."""
+        self._cv.set(None)
+
+    def __contains__(self, item: object) -> bool:
+        return item in (self._cv.get() or ())
+
+    def __iter__(self):
+        # A snapshot: scrub_credentials iterates while a concurrent tool task
+        # may still be registering into the same set.
+        return iter(tuple(self._cv.get() or ()))
+
+    def __len__(self) -> int:
+        return len(self._cv.get() or ())
+
+
+class _ContextScopedEnvValues:
+    """Per-turn DS_* name -> value map, used to scrub credential values.
+
+    A turn that has called set() is authoritative: a key missing from its map
+    has no known value for this turn, and os.environ is NOT consulted, because
+    another turn may hold a different value under the same name and redacting
+    with it would both miss this turn's secret and disclose the other's.
+    Callers that never call set() (the CLI, tests writing os.environ directly)
+    keep reading os.environ exactly as before.
+    """
+
+    def __init__(self, name: str) -> None:
+        # None means "this context never opened a map", which separates a turn
+        # with no connections (an empty map) from a plain os.environ user.
+        self._cv: ContextVar[dict[str, str] | None] = ContextVar(name, default=None)
+
+    def set(self, values: dict[str, str]) -> None:
+        # In place when a map is already open, for the same reason
+        # _ContextScopedSet mutates in place: a tool call runs in its own task.
+        current = self._cv.get()
+        if current is None:
+            self._cv.set(dict(values))
+        else:
+            current.clear()
+            current.update(values)
+
+    def begin_scope(self) -> None:
+        """Open this turn's own map, seeded from the ambient DS_*.
+
+        Re-seeded every turn rather than only the first: without a vault
+        nothing else refreshes the map, so a credential the host rotated
+        between turns would be scrubbed against the previous value. Called
+        once per turn, so no mid-turn registration is lost.
+        """
+        self._cv.set({k: v for k, v in os.environ.items() if k.startswith("DS_")})
+
+    def snapshot(self) -> dict[str, str] | None:
+        """A copy of the open map, or None when no scope is open."""
+        current = self._cv.get()
+        return dict(current) if current is not None else None
+
+    def reset(self) -> None:
+        """Back to "never opened", so get() reads os.environ again."""
+        self._cv.set(None)
+
+    def get(self, key: str, default: str = "") -> str:
+        overrides = self._cv.get()
+        if overrides is None:
+            return os.environ.get(key, default)
+        return overrides.get(key, default)
+
+    def items(self):
+        # os.environ stays in the union on purpose, for the coarse unknown-DS_*
+        # net. Over-redacting is harmless; emitting a value is what get() stops.
+        merged = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+        merged.update(self._cv.get() or {})
+        return merged.items()
+
+
 # DS_* var names whose values are known to be secret (passwords, tokens, keys).
 # Populated at startup and after each successful connect.
-_DS_SECRET_VARS: set[str] = set()
+_DS_SECRET_VARS = _ContextScopedSet("ds_secret_vars")
 
 # DS_* var names for **ALL** fields of registered engines.
-_DS_KNOWN_VARS: set[str] = set()
+_DS_KNOWN_VARS = _ContextScopedSet("ds_known_vars")
+
+# DS_* name -> value overrides for the current turn (see _ContextScopedEnvValues).
+_ds_env_values = _ContextScopedEnvValues("ds_env_values")
+
+
+def begin_ds_turn_scope() -> None:
+    """Open the per-turn DS_* scope. Call once at the start of a turn.
+
+    Without it a host that never opened one loses any registration a tool
+    handler makes, because tool calls are dispatched in their own task.
+    """
+    _DS_SECRET_VARS.begin_scope()
+    _DS_KNOWN_VARS.begin_scope()
+    _ds_env_values.begin_scope()
+
+
+def set_ds_env_values(values: dict[str, str]) -> None:
+    """Record this turn's DS_* name -> value map, used to scrub credentials.
+
+    Scoped to the calling context, so a concurrently running turn's map is
+    untouched.
+    """
+    _ds_env_values.set(values)
+
 
 # Provider credential env vars injected into the scratchpad execution env for
 # the code to USE. Their values must never reach the LLM (ENG-463): a model can
@@ -54,9 +208,10 @@ _SECRET_KEY_PATTERN = re.compile(
 
 
 def _reset_registered_ds_vars() -> None:
-    """Clear the DS_* var registries so they can be rebuilt from current vault state."""
-    _DS_SECRET_VARS.clear()
-    _DS_KNOWN_VARS.clear()
+    """Drop all DS_* scope, so nothing survives into a turn with no vault."""
+    _DS_SECRET_VARS.reset()
+    _DS_KNOWN_VARS.reset()
+    _ds_env_values.reset()
 
 
 def parse_connection_slug(
@@ -152,12 +307,12 @@ def scrub_credentials(text: str) -> str:
         result, traceback, or settings echo.
     """
     for key in _DS_SECRET_VARS:
-        value = os.environ.get(key, "")
+        value = _ds_env_values.get(key)
         if not value:
             continue
         text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
-    for key, value in os.environ.items():
-        if not key.startswith("DS_") or key in _DS_KNOWN_VARS:
+    for key, value in _ds_env_values.items():
+        if key in _DS_KNOWN_VARS:
             continue
         # Length guard only for unknown DS_* vars (not registered secrets).
         # Unknown vars are matched heuristically — a short value like "on"
@@ -417,21 +572,70 @@ def clear_ds_env() -> None:
 
 
 def restore_namespaced_env(vault: DataVault) -> None:
-    """Clear all DS_* vars, then reinject every saved connection as namespaced.
+    """Rebuild this turn's DS_* var registries and value map from the vault.
 
-    Clears via `vault.clear_ds_env()` rather than the module-level
-    `clear_ds_env()` so a vault implementation's own override runs.
+    Touches no process state: the values are recorded for the calling context
+    only, and reach a subprocess through its own env (the scratchpad manager
+    derives them from the same vault). Two turns on different vaults can run
+    at once without seeing each other's credentials, and a connection this
+    turn has disabled cannot be reinstated by another turn.
     """
-    _reset_registered_ds_vars()
-    vault.clear_ds_env()
+    # Kept so a failed rebuild restores what the turn had rather than leaving
+    # it with nothing, which would silently turn scrubbing off for the turn.
+    previous = (set(_DS_SECRET_VARS), set(_DS_KNOWN_VARS), _ds_env_values.snapshot())
+    try:
+        _rebuild_ds_registries(vault)
+    except Exception:
+        _DS_SECRET_VARS.replace(previous[0])
+        _DS_KNOWN_VARS.replace(previous[1])
+        if previous[2] is not None:
+            _ds_env_values.set(previous[2])
+        raise
+
+
+def _rebuild_ds_registries(vault: DataVault) -> None:
+    # Emptied in place rather than via _reset_registered_ds_vars(), which drops
+    # the scope: that would hide a mid-turn rebuild from its own turn.
+    _DS_SECRET_VARS.clear()
+    _DS_KNOWN_VARS.clear()
     dreg = DatasourceRegistry()
+    env_values: dict[str, str] = {}
     for conn in vault.list_connections():
-        vault.inject_env(conn["engine"], conn["name"])  # flat=False by default
-        edef = dreg.get(conn["engine"])
-        if edef is not None and not _is_oauth_connection(vault, conn["engine"], conn["name"]):
-            register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
-        else:
-            _register_unregistered_connection_vars(vault, conn["engine"], conn["name"])
+        engine, name = conn.get("engine"), conn.get("name")
+        if not (engine and name):
+            continue
+        # Per connection, because a pad's env is built that way too: a record
+        # that aborted the whole rebuild would still be injected there.
+        try:
+            edef = dreg.get(engine)
+            oauth = _is_oauth_connection(vault, engine, name)
+        except Exception:
+            # Unclassifiable, so take the unknown-field path: its coarse net
+            # over-redacts, which is the safe direction.
+            edef, oauth = None, False
+            logger.warning("Could not classify %s/%s", engine, name, exc_info=True)
+        try:
+            if edef is not None and not oauth:
+                register_secret_vars(edef, engine=engine, name=name)
+            else:
+                _register_unregistered_connection_vars(vault, engine, name)
+        except Exception:
+            logger.warning(
+                "Could not register vars for %s/%s; its credentials will not be "
+                "scrubbed from this turn's output",
+                engine, name, exc_info=True,
+            )
+        try:
+            env_values.update(vault.env_for(engine, name) or {})
+        except Exception:
+            # Must not block the rest, but it leaves that connection
+            # unscrubbable for this turn, so say so. Names only, never a value.
+            logger.warning(
+                "Could not resolve values for %s/%s; its credentials will not be "
+                "scrubbed from this turn's output",
+                engine, name, exc_info=True,
+            )
+    _ds_env_values.set(env_values)
 
 
 def find_matching_connection(

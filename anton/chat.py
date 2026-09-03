@@ -1361,7 +1361,7 @@ async def _chat_loop(
         edef = dreg.get(conn["engine"])
         if edef is not None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
-    del dv, dreg
+    del dreg
 
     global_memory_dir = Path.home() / ".anton" / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
@@ -1419,6 +1419,9 @@ async def _chat_loop(
             runtime_context=runtime_context,
         ),
         workspace=workspace,
+        # The manager derives each pad's DS_* from this vault; without it a
+        # pad inherits the whole process env instead.
+        data_vault=dv,
         console=console,
         history_store=history_store,
         session_id=current_session_id,

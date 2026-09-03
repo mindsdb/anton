@@ -32,6 +32,7 @@ from anton.chat_session import get_runtime_factory
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.client import LLMClient
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.datasources.data_vault import LocalDataVault
 
 from anton.commands.datasource import (
     handle_remove_data_source,
@@ -72,6 +73,9 @@ def _build_scratchpad_manager(
         coding_api_key=coding_conn.api_key or "",
         coding_base_url=coding_conn.base_url or "",
         workspace_path=settings.workspace_path,
+        # Without a vault the manager cannot derive a pad's DS_* and the pad
+        # falls back to inheriting the whole process env.
+        data_vault=LocalDataVault(),
     )
 
 
@@ -365,9 +369,9 @@ def _ensure_terms_consent(console: Console, settings) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Append if file exists, otherwise create
-    existing = env_path.read_text() if env_path.is_file() else ""
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
     if "ANTON_TERMS_CONSENT" not in existing:
-        with env_path.open("a") as f:
+        with env_path.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write("ANTON_TERMS_CONSENT=true\n")

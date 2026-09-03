@@ -269,4 +269,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # Explicit DS_* env values for this pad, when the host has a data vault
         # to scope them from. Optional for hosts/test doubles that predate it.
         scratchpad_ds_env: dict[str, str] | None = None,
+        # Explicit workspace .env values for this pad. Optional for hosts
+        # and test doubles that predate it.
+        workspace_env_overlay: dict[str, str] | None = None,
     ) -> ScratchpadRuntime: ...

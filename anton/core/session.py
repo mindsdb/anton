@@ -103,7 +103,9 @@ from anton.core.utils.scratchpad import (
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
 from anton.utils.datasources import (
+    begin_ds_turn_scope,
     build_datasource_context,
+    restore_namespaced_env,
     scrub_credentials,
 )
 from anton.core.settings import CoreSettings
@@ -1102,6 +1104,7 @@ class ChatSessionConfig:
     system_prompt_context: SystemPromptContext = field(default_factory=SystemPromptContext)
     workspace: Workspace | None = None
     data_vault: DataVault | None = None
+    workspace_env_overlay: dict[str, str] | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1292,6 +1295,9 @@ class ChatSession:
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
+        # Kept so an artifact backend can be given the same project .env the
+        # scratchpad gets; it is never applied to this process.
+        self._workspace_env_overlay = config.workspace_env_overlay or {}
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to
@@ -1374,6 +1380,7 @@ class ChatSession:
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
             data_vault=config.data_vault,
+            workspace_env_overlay=config.workspace_env_overlay,
         )
 
         self.tool_registry = ToolRegistry()
@@ -3766,7 +3773,25 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": tool_uses})
             self._append_history({"role": "user", "content": results})
 
+    def _open_ds_turn_scope(self) -> None:
+        """Open this turn's DS_* scope and rebuild it from the session's vault.
+
+        Rebuilt here rather than trusted from the host: the pod builds its
+        session in a `run_in_executor` worker, whose ContextVar writes never
+        reach this task, which would leave the turn scrubbing against nothing.
+        """
+        begin_ds_turn_scope()
+        if self._data_vault is None:
+            return
+        try:
+            restore_namespaced_env(self._data_vault)
+        except Exception:
+            logger.warning(
+                "Could not rebuild this turn's DS_* scrub state", exc_info=True
+            )
+
     async def turn(self, user_input: str | list[dict]) -> str:
+        self._open_ds_turn_scope()
         user_input = _scrub_user_input(user_input)
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
@@ -4159,6 +4184,9 @@ class ChatSession:
         is what makes questions unavailable on the non-streaming `turn()`
         path: nothing there would render them.
         """
+        # Before any tool task is spawned, so a connect made mid-turn registers
+        # into a container this turn still holds.
+        self._open_ds_turn_scope()
         self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0

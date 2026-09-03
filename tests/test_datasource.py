@@ -26,6 +26,7 @@ from anton.commands.datasource import (
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
+    _reset_registered_ds_vars,
     build_datasource_context,
     register_secret_vars,
     restore_namespaced_env,
@@ -230,8 +231,7 @@ def clean_ds_state():
     """Clear _DS_SECRET_VARS, _DS_KNOWN_VARS, and all DS_* env vars around each test."""
 
     def _clean():
-        _DS_SECRET_VARS.clear()
-        _DS_KNOWN_VARS.clear()
+        _reset_registered_ds_vars()
         for k in list(os.environ):
             if k.startswith("DS_"):
                 del os.environ[k]
@@ -239,6 +239,25 @@ def clean_ds_state():
     _clean()
     yield
     _clean()
+
+
+def _derived_pad_env(vault) -> dict[str, str]:
+    """The DS_* a scratchpad would actually receive for this vault.
+
+    Credentials reach a pad through its own env, derived from the vault, so
+    this is where a connection's availability is asserted now — not os.environ.
+    """
+    from anton.core.backends.manager import ScratchpadManager
+
+    mgr = ScratchpadManager(
+        runtime_factory=MagicMock(),
+        coding_provider="",
+        coding_model="",
+        coding_api_key="",
+        coding_base_url="",
+        data_vault=vault,
+    )
+    return mgr._derive_ds_env() or {}
 
 
 class TestDataVaultSaveLoad:
@@ -1088,7 +1107,8 @@ class TestHandleConnectDatasource:
         conns = vault.list_connections()
         assert len(conns) == 1
         prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
-        assert os.environ.get(f"{prefix}__HOST") == "db.example.com"
+        assert _derived_pad_env(vault)[f"{prefix}__HOST"] == "db.example.com"
+        assert f"{prefix}__HOST" not in os.environ
 
     @pytest.mark.asyncio
     async def test_auth_method_choice_selects_fields(
@@ -2460,7 +2480,7 @@ class TestEnvActivationCollisionFree:
     async def test_connect_clears_previous_ds_vars(
         self, registry, vault_dir, make_session, make_cell, monkeypatch, make_pad
     ):
-        """After a successful new connect, stale DS_* vars are cleared."""
+        """A stale flat DS_* var cannot reach a pad after a new connect."""
         monkeypatch.setenv("DS_ACCESS_TOKEN", "old-token")
         vault = LocalDataVault(vault_dir=vault_dir)
         session = make_session()
@@ -2491,11 +2511,14 @@ class TestEnvActivationCollisionFree:
         ):
             await handle_connect_datasource(console, session._scratchpads, session)
 
-        assert "DS_ACCESS_TOKEN" not in os.environ
         conns = vault.list_connections()
         assert len(conns) == 1
         prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
-        assert os.environ.get(f"{prefix}__HOST") == "db.example.com"
+        # The stale var is left in this process — connect no longer edits it.
+        assert os.environ.get("DS_ACCESS_TOKEN") == "old-token"
+        # The stale flat var not reaching the child process is the strip's
+        # job, covered by TestConcurrentTurnsOnDivergentVaults.
+        assert _derived_pad_env(vault)[f"{prefix}__HOST"] == "db.example.com"
 
     @pytest.mark.asyncio
     async def test_two_same_type_connections_no_collision(
@@ -2540,10 +2563,9 @@ class TestEnvActivationCollisionFree:
                 prefill="postgresql-db2",
             )
 
-        assert os.environ.get("DS_POSTGRESQL_DB1__HOST") == "host1.example.com"
-        assert os.environ.get("DS_POSTGRESQL_DB2__HOST") == "host2.example.com"
-        assert "DS_HOST" not in os.environ
-        assert "DS_DATABASE" not in os.environ
+        pad_env = _derived_pad_env(vault)
+        assert pad_env["DS_POSTGRESQL_DB1__HOST"] == "host1.example.com"
+        assert pad_env["DS_POSTGRESQL_DB2__HOST"] == "host2.example.com"
 
 
 class TestDatasourceSlashCommandBehavior:
@@ -2671,25 +2693,24 @@ class TestSlugEnvPrefix:
 class TestTemporaryFlatExecution:
     """Tests that flat vars are used only during test_snippet, then restored."""
 
-    def test_restore_namespaced_env_clears_flat_and_reinjects(self, vault_dir):
-        """_restore_namespaced_env replaces flat vars with namespaced vars."""
+    def test_restore_namespaced_env_leaves_the_process_env_alone(self, vault_dir):
+        """It records this turn's values instead of editing os.environ, so a
+        concurrent turn's DS_* are neither read nor destroyed."""
         vault = LocalDataVault(vault_dir=vault_dir)
         vault.save("postgres", "analytics", {"host": "analytics.example.com"})
-
-        vault.inject_env("postgres", "analytics", flat=True)
-        assert os.environ.get("DS_HOST") == "analytics.example.com"
-        assert "DS_POSTGRES_ANALYTICS__HOST" not in os.environ
+        os.environ["DS_HOST"] = "left-by-another-caller"
 
         with patch("anton.utils.datasources.DataVault", return_value=vault):
             restore_namespaced_env(vault)
 
-        assert "DS_HOST" not in os.environ
-        assert os.environ.get("DS_POSTGRES_ANALYTICS__HOST") == "analytics.example.com"
+        assert os.environ.get("DS_HOST") == "left-by-another-caller"
+        assert "DS_POSTGRES_ANALYTICS__HOST" not in os.environ
+        # The value still reaches a pad, derived from the vault.
+        assert _derived_pad_env(vault)["DS_POSTGRES_ANALYTICS__HOST"] == "analytics.example.com"
 
-    def test_restore_namespaced_env_calls_the_vaults_own_clear_ds_env(self):
-        """restore_namespaced_env must dispatch through vault.clear_ds_env()
-        (not the module-level clear_ds_env()) so a vault-specific override
-        (e.g. cache invalidation) still runs."""
+    def test_restore_namespaced_env_never_clears_the_process_env(self):
+        """It must not call clear_ds_env(): wiping every DS_* in the process is
+        exactly how one turn used to drop a concurrent turn's credentials."""
         calls = []
 
         class FakeVault:
@@ -2700,10 +2721,11 @@ class TestTemporaryFlatExecution:
                 return []
 
         restore_namespaced_env(FakeVault())
-        assert calls == ["cleared"]
+        assert calls == []
 
-    def test_restore_namespaced_env_reinjects_all_connections(self, vault_dir):
-        """_restore_namespaced_env restores ALL saved connections, not just one."""
+    def test_every_saved_connection_reaches_the_pad_env(self, vault_dir):
+        """ALL saved connections are available to a pad, not just one, and a
+        stale flat var is not among them."""
         vault = LocalDataVault(vault_dir=vault_dir)
         vault.save("postgres", "prod_db", {"host": "prod.example.com"})
         vault.save("hubspot", "main", {"access_token": "pat-abc"})
@@ -2713,15 +2735,17 @@ class TestTemporaryFlatExecution:
         with patch("anton.utils.datasources.DataVault", return_value=vault):
             restore_namespaced_env(vault)
 
-        assert "DS_HOST" not in os.environ
-        assert os.environ.get("DS_POSTGRES_PROD_DB__HOST") == "prod.example.com"
-        assert os.environ.get("DS_HUBSPOT_MAIN__ACCESS_TOKEN") == "pat-abc"
+        pad_env = _derived_pad_env(vault)
+        assert pad_env["DS_POSTGRES_PROD_DB__HOST"] == "prod.example.com"
+        assert pad_env["DS_HUBSPOT_MAIN__ACCESS_TOKEN"] == "pat-abc"
 
     @pytest.mark.asyncio
     async def test_test_datasource_injects_flat_then_restores_namespaced(
         self, vault_dir, registry, make_pad
     ):
-        """handle_test_datasource uses flat vars during snippet, then restores namespaced."""
+        """handle_test_datasource hands the pad the flat vars for the snippet,
+        then leaves the turn's namespaced values in place — all through the
+        pad's own env, never this process's."""
         vault = LocalDataVault(vault_dir=vault_dir)
         vault.save(
             "postgresql",
@@ -2738,13 +2762,7 @@ class TestTemporaryFlatExecution:
         vault.inject_env("postgresql", "prod_db")
         vault.inject_env("hubspot", "main")
 
-        env_during_test: dict = {}
-
         async def capture_execute(snippet):
-            env_during_test["DS_HOST"] = os.environ.get("DS_HOST")
-            env_during_test["DS_POSTGRESQL_PROD_DB__HOST"] = os.environ.get(
-                "DS_POSTGRESQL_PROD_DB__HOST"
-            )
             return MagicMock(stdout="ok", stderr="", error=None)
 
         pad = make_pad()
@@ -2758,14 +2776,17 @@ class TestTemporaryFlatExecution:
                 MagicMock(), scratchpads, "postgresql-prod_db", vault=vault
             )
 
-        # During execution: flat var was set, namespaced was absent
-        assert env_during_test["DS_HOST"] == "pg.example.com"
-        assert env_during_test["DS_POSTGRESQL_PROD_DB__HOST"] is None
+        # The snippet's pad is given the flat vars explicitly, and only those:
+        # the namespaced ones would make the single-connection snippet ambiguous.
+        _, kwargs = scratchpads.get_or_create.call_args
+        override = kwargs["ds_env_override"]
+        assert override["DS_HOST"] == "pg.example.com"
+        assert not any(k.startswith("DS_POSTGRESQL_") for k in override)
 
-        # After execution: flat vars gone, namespaced restored
-        assert "DS_HOST" not in os.environ
-        assert os.environ.get("DS_POSTGRESQL_PROD_DB__HOST") == "pg.example.com"
-        assert os.environ.get("DS_HUBSPOT_MAIN__ACCESS_TOKEN") == "pat-abc"
+        # Afterwards every connection is available again, namespaced, from the vault.
+        pad_env = _derived_pad_env(vault)
+        assert pad_env["DS_POSTGRESQL_PROD_DB__HOST"] == "pg.example.com"
+        assert pad_env["DS_HUBSPOT_MAIN__ACCESS_TOKEN"] == "pat-abc"
 
 
 class TestStaleDsRegistrationState:
@@ -2848,7 +2869,7 @@ class TestStaleDsRegistrationState:
 
         assert secret_key in _DS_SECRET_VARS
         assert len(_DS_SECRET_VARS) == count_before
-        assert os.environ.get(secret_key) == "new-pass"
+        assert _derived_pad_env(vault)[secret_key] == "new-pass"
 
     def test_reconnect_no_duplicate_secret_vars(self, vault_dir, registry):
         """Calling _restore_namespaced_env multiple times does not grow _DS_SECRET_VARS."""
@@ -3972,14 +3993,20 @@ class TestCustomDatasourceConnectFlow:
 
         async def _exec(_code):
             attempt["n"] += 1
-            seen_hosts.append(os.environ.get("DS_HOST", ""))
             if attempt["n"] == 1:
                 return make_cell(stdout="", stderr="invalid host")
             return make_cell(stdout="ok")
 
         pad = make_pad()
         pad.execute = AsyncMock(side_effect=_exec)
-        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        # The attempt's credentials reach the pad through its own env, so read
+        # what each attempt handed the pad rather than this process's environ.
+        async def _get_or_create(_name, *, ds_env_override=None):
+            seen_hosts.append((ds_env_override or {}).get("DS_HOST", ""))
+            return pad
+
+        session._scratchpads.get_or_create = AsyncMock(side_effect=_get_or_create)
         session._llm = self._make_llm(
             self._make_spec(
                 [

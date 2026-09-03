@@ -62,6 +62,7 @@ async def rebuild_session(
     from anton.core.llm.client import LLMClient
     from anton.chat import ChatSession
     from anton.core.llm.tracing import HARNESS_ANTON, SURFACE_CLI
+    from anton.core.datasources.data_vault import LocalDataVault
     from anton.core.session import ChatSessionConfig
     from anton.tools import DEFAULT_SESSION_TOOLS
 
@@ -92,6 +93,9 @@ async def rebuild_session(
             runtime_context=runtime_context,
         ),
         workspace=workspace,
+        # Rebuilding drops the old session's manager, so the new one needs the
+        # vault too or its pads fall back to inheriting the process env.
+        data_vault=LocalDataVault(),
         console=console,
         history_store=history_store,
         session_id=session_id,
