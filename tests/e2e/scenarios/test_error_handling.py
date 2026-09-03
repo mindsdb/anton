@@ -10,6 +10,27 @@ from tests.e2e.harness import (
     assert_exit_fail, assert_exit_ok, assert_not_output, assert_output,
     base_env, run_anton,
 )
+
+# ENG-1361 note for both provider-failure scenarios below.
+#
+# A provider failure that outlasts the retry budget now FAILS the turn instead
+# of being wrapped into assistant prose, so the host can offer recovery — the
+# `provider_overloaded` card on cowork-server, and the setup/retry prompt here.
+# Previously the count-based path had no such terminal at all: it asked the
+# model to explain the outage (a call needing the very provider that was
+# failing) and, when that failed too, emitted "An unexpected error occurred:
+# <message>. Please try again or rephrase your request." Rephrasing cannot
+# reach an unreachable provider.
+#
+# Consequence for a SCRIPTED run: the CLI now asks a question, and `["hello",
+# "exit"]` cannot answer it — "exit" is consumed as an invalid choice, stdin
+# runs out, and click aborts with a non-zero exit. That is NOT new behaviour
+# introduced here: every provider error that raises into the recovery prompt
+# already did this (verified against a 401 on pristine staging, same abort).
+# These two scenarios simply joined that class, which is the point of the fix.
+# So the assertions below check what "gracefully" actually means — an honest
+# diagnosis, an actionable choice, no traceback, and no bogus rephrase advice —
+# rather than an exit code that only reflects the scripted stdin.
 from tests.e2e.stub_server import StubServer
 
 
@@ -45,12 +66,18 @@ def test_http_500_handled_gracefully(cfg, tmp_path):
     finally:
         httpd.shutdown()
 
-    assert_exit_ok(result)
+    assert_exit_fail(result)   # scripted stdin cannot answer the prompt — see note above
     assert_not_output(result, "Traceback (most recent call last)")
-    # ENG-673: a request-time 5xx is now classified as a transient provider error
-    # and (since the SDK already retried it) fails fast with the honest typed
-    # message rather than the old "Server returned 500" phrasing.
+    # ENG-673: a request-time 5xx is classified as a transient provider error and
+    # (since the SDK already retried it) fails fast with the honest typed message
+    # rather than the old "Server returned 500" phrasing. ENG-1361 keeps that
+    # message when converting to the terminal error — the diagnosis is the part
+    # a user or a support thread needs, and only the attempt count is added.
     assert_output(result, "returned 500")
+    assert_output(result, "did not recover after 3 attempts")
+    # The turn offers a real remedy instead of blaming the user's wording.
+    assert_output(result, "setup/retry")
+    assert_not_output(result, "rephrase")
 
 
 @pytest.mark.stub_only
@@ -76,8 +103,13 @@ def test_malformed_json_handled_gracefully(cfg, tmp_path):
     finally:
         httpd.shutdown()
 
-    assert_exit_ok(result)
+    assert_exit_fail(result)   # scripted stdin cannot answer the prompt — see note above
     assert_not_output(result, "Traceback (most recent call last)")
+    # Same ENG-1361 terminal as the 5xx case: an unusable response body is a
+    # provider failure, so it earns a diagnosis and a choice, not prose telling
+    # the user to reword a request that was never the problem.
+    assert_output(result, "setup/retry")
+    assert_not_output(result, "rephrase")
 
 
 @pytest.mark.stub_only
