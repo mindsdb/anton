@@ -482,3 +482,57 @@ def test_every_pinned_alias_is_one_the_matrix_actually_runs():
         "_EXPECTED_SERVED pins an alias the matrix does not run: "
         f"{sorted(set(ev._EXPECTED_SERVED) - set(ev._MODELS))}"
     )
+
+
+def test_the_matrix_slots_resolve_to_different_models():
+    """The pin catches the repoint; this catches the state the repoint CAUSED.
+
+    ENG-1687 is not "an alias moved" — it is "both slots ended up holding one
+    model and the gate stayed green". `_EXPECTED_SERVED` reds on the move, but
+    the obvious way to clear that red is to update the map to the new id, and if
+    the new id is the other slot's model the eval goes back to running one model
+    twice with a perfectly green pin. Distinctness is what the ticket is about,
+    so assert it rather than leaving it to hold by accident.
+
+    Two ways to arrive at one model in two slots, both covered:
+      - identical aliases (someone set both `VERIFIER_EVAL_*_MODEL` the same)
+      - distinct aliases pinned to the same served id
+    """
+    assert len(set(ev._MODELS)) == len(ev._MODELS), (
+        f"the matrix runs the same alias twice: {ev._MODELS}. Unset one of the "
+        "VERIFIER_EVAL_*_MODEL overrides."
+    )
+    pinned = [ev._EXPECTED_SERVED[a] for a in ev._MODELS if a in ev._EXPECTED_SERVED]
+    assert len(set(pinned)) == len(pinned), (
+        f"the matrix's slots are pinned to the same model: {pinned}. That is "
+        "ENG-1687's end state, not its fix — re-pick a slot instead of pointing "
+        "both at one model."
+    )
+
+
+@pytest.mark.parametrize("alias", ["gpt-terra", "mindshub_air"])
+def test_a_served_id_cannot_inject_lines_into_the_report(alias):
+    """`response.model` is remote text, and it lands in two reports.
+
+    Unsanitized it reaches an exception message and `GITHUB_STEP_SUMMARY`, so a
+    value carrying a newline writes extra markdown lines into a CI artifact —
+    e.g. a bogus "✅" row for an alias that was never checked. anton already
+    sanitizes this exact field before it reaches a prompt
+    (`identity.sanitize_model_name`); this asserts the eval reuses it rather than
+    hand-rolling the check.
+
+    Both branches are covered because they format the value in different places:
+    an unpinned alias only records it, a pinned one also interpolates it into the
+    raise.
+    """
+    poisoned = "evil-model\n- `haiku` -> `totally-fine` OK"
+
+    try:
+        ev._check_served_model(alias, poisoned)
+    except ev.AliasRepointed as exc:
+        assert "\n" not in str(exc), "the raise carries a raw newline"
+
+    recorded = ev._SERVED.get(alias)
+    assert recorded is not None, "a poisoned id must still be recorded, not dropped"
+    assert "\n" not in recorded, f"newline survived sanitisation: {recorded!r}"
+    assert len(recorded) <= 80, "the sanitiser's length cap did not apply"

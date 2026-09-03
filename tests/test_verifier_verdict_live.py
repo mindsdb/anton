@@ -80,6 +80,7 @@ except Exception:
 
 from anton.config.settings import AntonSettings
 from anton.core.llm.client import LLMClient
+from anton.core.llm.identity import sanitize_model_name
 from anton.core.llm.provider import StructuredOutputError, TokenLimitExceeded
 from anton.core.session import (
     _VERIFIER_TOKEN_BUDGETS,
@@ -286,6 +287,15 @@ def _check_served_model(alias: str, served: object) -> None:
     Pure so the gate suite can test it without a key or a network
     (`tests/test_verifier_eval_gate.py`).
 
+    The id is put through `identity.sanitize_model_name` first — the same
+    treatment anton already gives this same field before it reaches a prompt
+    (`identity.py`: "untrusted text ... cap it and keep it on one line"). Here it
+    lands in an exception message and in `GITHUB_STEP_SUMMARY`, so a value
+    carrying newlines would inject lines into a CI artifact. It also folds in the
+    non-string and empty checks. Known cost: an id longer than the sanitizer's
+    80-char cap would be truncated and then mismatch its pin — the longest id
+    this catalog serves is 46 (`accounts/fireworks/models/deepseek-v4-pro-0813`).
+
     Silent on two cases, both on purpose:
 
     - **An alias not in the pin map.** The `VERIFIER_EVAL_*_MODEL` env vars exist
@@ -295,7 +305,8 @@ def _check_served_model(alias: str, served: object) -> None:
       property of the provider, not evidence about the model. Refusing to run
       would turn a missing echo into a fake repoint.
     """
-    if not isinstance(served, str) or not served:
+    served = sanitize_model_name(served)
+    if served is None:
         return
     _SERVED[alias] = served
     expected = _EXPECTED_SERVED.get(alias)
@@ -342,21 +353,32 @@ def _client(model: str) -> LLMClient:
 def _pinned(llm: LLMClient, alias: str) -> LLMClient:
     """Check `_EXPECTED_SERVED` on every response this client returns.
 
-    Wraps the coding provider because `generate_object_code` — the verdict call
-    — routes through it, and returns the parsed schema object, so the served id
-    is not reachable from the caller. One shim here covers every call the eval
-    makes at no extra cost; a separate probe call per alias would both cost more
-    and check less (it would leave the matrix's own calls unverified).
+    `generate_object_code` — the verdict call — returns the parsed schema object,
+    so the served id is not reachable from the caller; the shim is how it is
+    read. One shim covers every call the eval makes at no extra cost, whereas a
+    separate probe call per alias would cost more and check less, leaving the
+    matrix's own calls unverified.
+
+    BOTH providers are wrapped, deduplicated by identity. `from_settings` builds
+    the planning and coding providers as separate objects even when both roles
+    name the same alias, so wrapping only the coding one leaves any future
+    `generate_object` or `chat` call in this file silently unpinned — the same
+    quiet-gap class this pin exists to close (self-review of #434).
     """
-    provider = llm._coding_provider
-    inner = provider.complete
+    providers = {
+        id(provider): provider
+        for provider in (llm._coding_provider, llm._planning_provider)
+        if provider is not None
+    }
+    for provider in providers.values():
+        inner = provider.complete
 
-    async def complete(**kwargs):
-        response = await inner(**kwargs)
-        _check_served_model(alias, getattr(response, "model", None))
-        return response
+        async def complete(_inner=inner, **kwargs):
+            response = await _inner(**kwargs)
+            _check_served_model(alias, getattr(response, "model", None))
+            return response
 
-    provider.complete = complete
+        provider.complete = complete
     return llm
 
 
