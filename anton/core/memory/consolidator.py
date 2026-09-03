@@ -173,8 +173,10 @@ class Consolidator:
 
         try:
             # Consolidation feeds in a whole scratchpad session, and narration
-            # scales with input — observed filling 2,048 exactly in prod on
-            # `mindshub_air` (ENG-1084). The ladder's 4,096 retry covers it.
+            # scales with input — observed filling 2,048 exactly in prod in
+            # 2026-07, on `mindshub_air` while it still served Kimi K2.6
+            # (ENG-1084; that alias is a GPT model now, ENG-1687). The ladder's
+            # 4,096 retry covers it, and still has to for BYOK models.
             result: _ConsolidatedLessons = await generate_with_truncation_retry(
                 llm_client.generate_object_code,
                 _ConsolidatedLessons,

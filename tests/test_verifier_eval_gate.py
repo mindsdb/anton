@@ -15,10 +15,16 @@ Three things are pinned here, each of which has already been wrong once:
    own failure mode, rebuilt by its escape hatch (caught reviewing #328).
 3. The marker string matches the one the workflow greps for. Two files, one
    string, previously held together by "keep in sync" comments.
+4. A repointed alias is rejected rather than silently measured. The eval picks
+   its models by alias NAME, and an alias is a catalog pointer that moves
+   without a PR here — `mindshub_air` moved off Kimi and the eval reported
+   green for a week while covering one population twice (ENG-1687). Tested here
+   because the check must hold with no key and no network.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -380,4 +386,99 @@ def test_the_marker_matches_the_one_the_workflow_greps_for():
     assert found.group(1) == ev._GATEWAY_UNAVAILABLE, (
         f"marker drift: workflow greps for {found.group(1)!r} but the eval emits "
         f"{ev._GATEWAY_UNAVAILABLE!r}, so starved runs would stop being recognised"
+    )
+
+
+# --- The served-model pin (ENG-1687) -------------------------------------
+#
+# Unit-level on purpose. The live eval exercises this on every call, but only
+# when a key is present — and the whole point of the pin is to be the thing that
+# still works when nobody is watching. These run in the default unit suite.
+
+
+@pytest.fixture(autouse=True)
+def _clean_served_map():
+    """`_SERVED` is module state on the eval, shared across this file's tests."""
+    ev._SERVED.clear()
+    yield
+    ev._SERVED.clear()
+
+
+def test_the_pinned_model_is_recorded_and_accepted():
+    ev._check_served_model("haiku", ev._EXPECTED_SERVED["haiku"])
+
+    assert ev._SERVED == {"haiku": ev._EXPECTED_SERVED["haiku"]}
+
+
+def test_a_repointed_alias_fails_naming_both_models():
+    """The failure has to be readable by someone who has never seen this file.
+
+    "assert x == y" over two model ids does not tell them a catalog repoint is a
+    normal event, that no verdict in the run is evidence any more, or that the
+    fix is to re-read the slot's rationale rather than to bump the constant.
+    """
+    with pytest.raises(ev.AliasRepointed) as caught:
+        ev._check_served_model("mindshub_air", "kimi-k2p6")
+
+    message = str(caught.value)
+    assert "mindshub_air" in message
+    assert "kimi-k2p6" in message, "must name what is served now"
+    assert ev._EXPECTED_SERVED["mindshub_air"] in message, "must name the pin"
+    assert "ENG-1687" in message
+    # Recorded before raising: the report at session end is most wanted on the
+    # run that failed, and a raise that skipped the record would hide it.
+    assert ev._SERVED == {"mindshub_air": "kimi-k2p6"}
+
+
+def test_a_repoint_is_not_swallowed_by_the_verdict_retry_paths():
+    """`_verdict` absorbs truncation and throttling. It must not absorb this.
+
+    A repoint typed as `StructuredOutputError` would be retried at a bigger
+    budget; typed as `TokenLimitExceeded` it would become a marked skip, and a
+    fully-skipped matrix reports GREEN by design (ENG-1334's out-of-money
+    branch). Either one restores the silent pass this check exists to break.
+    """
+    from anton.core.llm.provider import StructuredOutputError
+
+    assert not issubclass(ev.AliasRepointed, (StructuredOutputError, TokenLimitExceeded))
+    assert not issubclass(ev.AliasRepointed, pytest.skip.Exception)
+
+
+def test_an_alias_outside_the_pin_map_is_recorded_but_not_asserted():
+    """`VERIFIER_EVAL_*_MODEL` exists for one-off runs against another alias.
+
+    Failing those would make the escape hatch unusable, so an unpinned alias is
+    reported and never asserted.
+    """
+    ev._check_served_model("gpt-terra", "gpt-5.6-terra")
+
+    assert ev._SERVED == {"gpt-terra": "gpt-5.6-terra"}
+
+
+@pytest.mark.parametrize("served", [None, "", 0, object()])
+def test_a_missing_served_id_is_not_treated_as_a_repoint(served):
+    """A provider that omits `model` says nothing about which model ran.
+
+    Reading that as a repoint would fail the eval on a provider property. It
+    also must not be RECORDED, or the session report would claim an alias
+    resolved to nothing.
+    """
+    ev._check_served_model("haiku", served)
+
+    assert ev._SERVED == {}
+
+
+@pytest.mark.skipif(
+    bool(
+        os.environ.get("VERIFIER_EVAL_FIRST_PARTY_MODEL")
+        or os.environ.get("VERIFIER_EVAL_NARRATING_MODEL")
+    ),
+    reason="an env override deliberately runs an unpinned alias",
+)
+def test_every_pinned_alias_is_one_the_matrix_actually_runs():
+    """A pin on an alias no longer in the matrix checks nothing and reads as
+    coverage. Only fires if someone edits the matrix and forgets the map."""
+    assert set(ev._EXPECTED_SERVED) <= set(ev._MODELS), (
+        "_EXPECTED_SERVED pins an alias the matrix does not run: "
+        f"{sorted(set(ev._EXPECTED_SERVED) - set(ev._MODELS))}"
     )

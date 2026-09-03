@@ -511,9 +511,11 @@ class StructuredOutputError(ValueError):
     otherwise look identical in a log and pull in opposite directions:
 
     - ``False`` — the model narrated in plain ``content`` and never got to the
-      call (the narrating aliases — ``mindshub_air``/``kimi``, ``deepseek``,
-      ``qwen`` — do this deterministically under a tight budget, ENG-1081).
-      The cure is a bigger budget.
+      call. Measured on the MindsHub aliases in 2026-07, when ``mindshub_air``
+      served Kimi K2.6: they did this deterministically under a tight budget
+      (ENG-1081). Those aliases have since been repointed and none of them
+      narrates now (ENG-1687), so treat this branch as covering BYOK and local
+      models rather than any particular alias. The cure is a bigger budget.
     - ``True`` — the call started and the budget ran out inside its JSON
       arguments. A bigger budget only helps until the payload grows again; the
       cure is a smaller response (ENG-1523).

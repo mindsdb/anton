@@ -376,11 +376,21 @@ class _VerifierVerdict(BaseModel):
 # Output budgets for the verdict call: first attempt, then the retry used when
 # it comes back truncated (ENG-1081).
 #
-# Models that narrate before acting (`mindshub_air`/`kimi`, `deepseek`, `qwen`)
-# spend the budget on prose and never reach the forced tool call. The original
-# 256 truncated them on essentially every call — 98.6% of `mindshub_air` verdicts
-# in prod returned no tool call, which the fail-safe below turned into a silent
+# HISTORY, and read the tense — it is why the numbers are what they are, not a
+# claim about today's catalog. In 2026-07 the aliases that narrated before acting
+# (`mindshub_air` — then Kimi K2.6 — `kimi`, `deepseek`, `qwen`) spent the budget
+# on prose and never reached the forced tool call. The original 256 truncated
+# them on essentially every call: 98.6% of `mindshub_air` verdicts in prod
+# returned no tool call, which the fail-safe below turned into a silent
 # "task complete".
+#
+# `mindshub_air` has since been repointed to a GPT model, and re-measured
+# 2026-09-03 no MindsHub alias narrates on this call shape at all — 0 narration
+# characters on eight of them, with and without `_VERIFIER_NO_PREAMBLE`
+# (ENG-1687). Prod agrees: `verifier_failure = 'truncated'` is 0 over 30 days.
+# The budget stays anyway. It was sized from a distribution, anton runs on
+# arbitrary BYOK and local models nobody has measured, and per the note below
+# a model that answers in 43-115 tokens never pays for headroom it doesn't use.
 #
 # 2048 is sized from a measured distribution, not one sample: 16 identical calls
 # spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is why
