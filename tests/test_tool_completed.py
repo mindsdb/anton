@@ -544,18 +544,23 @@ async def test_no_prose_from_the_reason_reaches_the_payload(workspace):
 
 
 def _closed_vocabulary() -> set:
-    """Every class `classify` can return, derived from the module, not copied.
+    """THE authoritative class set — `root_cause.ALL_CLASSES`, not a rebuild.
 
-    Derived so that EXTENDING the vocabulary keeps the guard passing, while a
-    value from outside the tables — the unbounded-cardinality failure — fails it.
+    An earlier version reassembled this from the five tables, and that was
+    wrong: `classify()` returns four classes as bare LITERALS, and `timeout`
+    is in no table. It is reachable on every scratchpad cell timeout
+    (`backends/local.py` -> "Cell timed out after {N}s total" -> `reason`), so
+    the guard reported a legitimate enumerated value as a novel class — and
+    the natural reaction to that failure is to loosen the set, the one move
+    this guard exists to prevent. `permission_denied` and `connection_refused`
+    passed only by coincidence, being `_WALL_TYPES` values too.
+
+    Reading the module's own export keeps the derivation honest: a new class
+    must be added there, and this follows automatically.
     """
-    import anton.core.root_cause as R
+    from anton.core.root_cause import ALL_CLASSES
 
-    closed = set(R._SELF_INFLICTED) | set(R._TRANSIENT) | set(R._WALL_TYPES.values())
-    closed |= {cls for _, cls in R._SENTINEL_REASONS.values()}
-    closed |= set(R._STATUS_WALLS.values())
-    closed |= {f"http_{code}" for code in R._STATUS_TRANSIENT}
-    return closed | {"unclassified"}
+    return set(ALL_CLASSES)
 
 
 def test_the_emitted_class_is_always_from_the_closed_vocabulary():
@@ -569,8 +574,10 @@ def test_the_emitted_class_is_always_from_the_closed_vocabulary():
     """
     from anton.core.session import _tool_failure_cause
 
+    from anton.core.root_cause import ALL_TIERS
+
     closed = _closed_vocabulary()
-    tiers = {"self_inflicted", "transient", "external_wall", "unclassified"}
+    tiers = set(ALL_TIERS)
     reasons = [
         "NameError: x", "ModuleNotFoundError: No module named 'z'",
         "TimeoutError: slow", "PermissionError: nope", "scratchpad_empty_code",
@@ -579,6 +586,13 @@ def test_the_emitted_class_is_always_from_the_closed_vocabulary():
         "HTTPError: 503 upstream", "KeyError: 404",
         "Error: {'sql': 'DROP TABLE users'} failed",
         "x" * 4000,
+        # The four classes `classify` returns as literals rather than through a
+        # table. `timeout` is the live one — every scratchpad cell timeout —
+        # and it was uncovered until ENG-2247's review.
+        "Cell timed out after 300s total without producing any output",
+        "Cell exceeded inactivity limit",
+        "OSError: permission denied opening the workspace",
+        "OSError: connection refused by the backend",
     ]
     for reason in reasons:
         tier, cls = _tool_failure_cause(False, reason)
@@ -653,3 +667,41 @@ async def test_the_nonstreaming_turn_path_stamps_the_cause_too(workspace):
     assert events[0]["error_type"] == "ValueError"      # the raise path
     assert events[0]["root_cause_tier"] == "self_inflicted"
     assert events[0]["root_cause_class"] == "ValueError"
+
+
+async def test_a_caller_that_omits_reason_degrades_to_unclassified(workspace):
+    """The reason the derivation lives inside the emit (ENG-2247 review).
+
+    Three shapes were on the table for "a new dispatch path forgets the cause":
+
+    | shape | forgetting yields | turn-safe |
+    | -- | -- | -- |
+    | cause kwargs, defaulted `""` | **"did not fail"** — wrong | yes |
+    | cause kwargs, required | `TypeError` at the CALL, outside this
+      method's guard — **kills the turn over telemetry** | NO |
+    | derive here from `reason` (chosen) | `unclassified` — honest | yes |
+
+    A field whose whole purpose is measuring failures must not fail toward
+    "success", and must not be able to break a turn. This pins the third.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nNameError: name 'wb' is not defined",
+        ok=False, reason="NameError: name 'wb' is not defined",
+    )])
+    with patch("anton.analytics.send_event") as sent:
+        # Exactly what a forgetful new call site looks like: `reason` omitted.
+        session._emit_tool_completed(
+            name="scratchpad", ok=False, duration_ms=1.0, error_type="",
+        )
+    ev = sent.call_args.kwargs
+    assert ev["ok"] == "false"
+    assert ev["root_cause_tier"] == "unclassified", (
+        "a forgotten reason must read as 'we do not know why', never as empty "
+        "— empty is a legal value meaning the call did not fail"
+    )
+    assert ev["root_cause_class"] == "unclassified"
+    # And the keys are still exactly the nine: omitting an input must not
+    # change the payload SHAPE, only the honesty of one value.
+    assert set(ev) == {"name", "ok", "duration_ms", "error_type", "surface",
+                       "conversation_id", "turn_index",
+                       "root_cause_tier", "root_cause_class"}

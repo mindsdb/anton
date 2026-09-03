@@ -599,7 +599,7 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
-def _tool_failure_cause(ok: "bool | None", reason: str) -> "tuple[str, str]":
+def _tool_failure_cause(ok: bool | None, reason: str) -> tuple[str, str]:
     """`(tier, class)` for one failed tool call, or `("", "")` (ENG-2247).
 
     Reuses `root_cause.classify` — the SAME vocabulary the turn-level
@@ -3121,10 +3121,28 @@ class ChatSession:
         ok: bool | None,
         duration_ms: float,
         error_type: str,
-        root_cause_tier: str = "",
-        root_cause_class: str = "",
+        reason: str = "",
     ) -> None:
         """Per-tool-call analytics event (ENG-1486).
+
+        ``reason`` is the handler's own ``ToolOutcome.reason``, taken so the
+        root-cause class can be derived HERE rather than at each call site
+        (ENG-2247 review). Deriving it here is what makes it impossible to
+        forget: there is no cause argument a new dispatch path can omit, and a
+        caller that passes no ``reason`` at all degrades to ``unclassified``
+        — "we do not know why" — instead of to the empty string, which reads
+        as "this call did not fail". Defaulting the CAUSE was the earlier
+        shape and it failed in the wrong direction; making it required instead
+        was worse still, since a missing argument raises ``TypeError`` at the
+        CALL, outside this method's guard, and kills the turn over telemetry.
+
+        **``reason`` is prose and must never be emitted.** It is a traceback
+        line or a handler message and carries file paths and user input; that
+        is the whole reason ``error_type`` was narrowed to a class name. It is
+        consumed by ``_tool_failure_cause`` two lines down and never touched
+        again — do not add it, ``rc.identifier`` or ``rc.key`` to the payload.
+        ``test_no_prose_from_the_reason_reaches_the_payload`` and the
+        exact-keys assertion both fail if you do.
 
         The verdict the dispatch loop already computes for the UI's
         ``tool_done`` marker, sent where it can be aggregated: without this,
@@ -3169,6 +3187,9 @@ class ChatSession:
             # the live TurnCost carries the authoritative index (an explicit
             # turn_id on the cloud path, the local counter otherwise), so the
             # values here and on the turn's own row can never disagree.
+            # Derived here, not handed in — see the docstring. `reason` is
+            # consumed and dropped; only the two closed-vocabulary tokens go on.
+            _rc_tier, _rc_class = _tool_failure_cause(ok, reason)
             _tc = getattr(self, "_turn_cost", None)
             turn_index = (
                 getattr(_tc, "turn_index", 0) or (self._turn_count + 1)
@@ -3196,8 +3217,8 @@ class ChatSession:
                 # failing — returns a verdict instead, so 83% of failures
                 # reached analytics with no cause at all. Both empty on success
                 # and on an unmigrated handler; see `_tool_failure_cause`.
-                root_cause_tier=root_cause_tier,
-                root_cause_class=root_cause_class,
+                root_cause_tier=_rc_tier,
+                root_cause_class=_rc_class,
             )
         except Exception:
             # Analytics must never affect the tool call that just ran.
@@ -3939,16 +3960,12 @@ class ChatSession:
                 # elicitation is structurally unavailable on this path (no
                 # emitter to render a question), so there is no wait to
                 # subtract.
-                _rc_tier, _rc_class = _tool_failure_cause(
-                    outcome.ok, outcome.reason
-                )
                 self._emit_tool_completed(
                     name=tc.name,
                     ok=outcome.ok,
                     duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
                     error_type=_tool_error_type,
-                    root_cause_tier=_rc_tier,
-                    root_cause_class=_rc_class,
+                    reason=outcome.reason,
                 )
                 result = outcome.content
 
@@ -5319,9 +5336,6 @@ class ChatSession:
                     # tool performance. Fixing it needs a session-scoped
                     # accumulator behind `prompt_or_cancel`, which is a change
                     # to the CLI prompt path rather than to this event.
-                    _rc_tier, _rc_class = _tool_failure_cause(
-                        tool_ok, tool_reason
-                    )
                     self._emit_tool_completed(
                         name=tc.name,
                         ok=tool_ok,
@@ -5331,8 +5345,7 @@ class ChatSession:
                             0.0,
                         ) * 1000.0,
                         error_type=_tool_error_type,
-                        root_cause_tier=_rc_tier,
-                        root_cause_class=_rc_class,
+                        reason=tool_reason,
                     )
 
                     if isinstance(result_text, list):
