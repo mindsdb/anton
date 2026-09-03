@@ -384,7 +384,14 @@ def classify(reason: str, result_text: str = "") -> RootCause:
 #: Every value `classify` can put in `RootCause.cls`, and every tier. THE
 #: authoritative enumeration — a consumer must read these rather than
 #: reassembling the tables, which is how `timeout` went missing (ENG-2247).
-#: Adding a class means adding it here, and the guard follows automatically.
+#:
+#: Adding a class means adding it here. That keeps the SET honest; it does not
+#: by itself keep a closed-set guard honest, because such a guard only catches
+#: an unregistered value if some input actually reaches the branch returning
+#: it. Two of ENG-2247's own adversarial inputs missed their branches (an
+#: `OSError: ` prefix sent them down `_WALL_TYPES` instead) and the guard
+#: still passed. So a new literal needs BOTH an entry here and an input that
+#: reaches it.
 ALL_CLASSES: frozenset[str] = frozenset(
     set(_SELF_INFLICTED)
     | set(_TRANSIENT)

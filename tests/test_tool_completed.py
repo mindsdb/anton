@@ -586,13 +586,21 @@ def test_the_emitted_class_is_always_from_the_closed_vocabulary():
         "HTTPError: 503 upstream", "KeyError: 404",
         "Error: {'sql': 'DROP TABLE users'} failed",
         "x" * 4000,
-        # The four classes `classify` returns as literals rather than through a
-        # table. `timeout` is the live one — every scratchpad cell timeout —
-        # and it was uncovered until ENG-2247's review.
+        # The four classes `classify` returns as literals rather than through
+        # a table, each reaching its own branch. `timeout` is the live one —
+        # every scratchpad cell timeout — and it was uncovered until review.
+        #
+        # NO `OSError: ` PREFIX on the last two, deliberately: `_WALL_TYPES`
+        # is consulted before the lowercase-phrase branches, and its OSError
+        # entry falls through to `unclassified` unless the text says "No space
+        # / Disk quota / Too many open files / Cannot allocate". A first draft
+        # prefixed both and they silently classified as `unclassified`, so the
+        # two branches they exist to cover stayed unexercised while the test
+        # still passed (both classes being in `ALL_CLASSES` either way).
         "Cell timed out after 300s total without producing any output",
         "Cell exceeded inactivity limit",
-        "OSError: permission denied opening the workspace",
-        "OSError: connection refused by the backend",
+        "permission denied on /etc/shadow",
+        "connection refused by db.internal:5432",
     ]
     for reason in reasons:
         tier, cls = _tool_failure_cause(False, reason)
