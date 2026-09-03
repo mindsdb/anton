@@ -163,8 +163,8 @@ async def test_tool_row_and_turn_row_agree_on_the_attempt_id(workspace):
 
     How each side gets there differs, and the earlier version of this docstring
     had it backwards (#431 review). `_emit_tool_completed` DOES read live
-    session state — `_tc = getattr(self, "_turn_cost", None)` at
-    `session.py:3229`. It is safe because a tool row is always emitted
+    session state — `_tc = getattr(self, "_turn_cost", None)`, near the top of
+    its `try`. It is safe because a tool row is always emitted
     synchronously inside its own live turn and the owning turn nulls the books
     at close, so the read is never late; not because it reads stamped books.
 
@@ -273,12 +273,14 @@ def test_the_id_is_stamped_at_books_open_not_read_at_emit():
 def test_a_late_finalizer_reports_its_own_attempt_not_the_live_turns():
     """The invariant the stamped-at-open design exists for, at the emit.
 
-    `session.py:4643` calls `_emit_turn_cost(expected=_turn_cost_books, ...)`
-    on the abandoned-generator path — a fresh task, long after the fact, by
+    `_turn_stream_inner`'s `finally` calls
+    `_emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)` on the
+    abandoned-generator path — a fresh task, long after the fact, by
     which point a NEWER turn may own the shared slot. That is the case where
     `tc is not self._turn_cost`, and `_emit_turn_cost` reads the books it was
-    handed (`session.py:2856`) rather than live session state precisely so the
-    abandoned turn's row carries its own id.
+    handed (`tc = expected if expected is not None else self._turn_cost`)
+    rather than live session state, precisely so the abandoned turn's row
+    carries its own id.
 
     Nothing covered this. `test_the_id_is_stamped_at_books_open_not_read_at_emit`
     above never invokes `_emit_turn_cost` — it mutates a `TurnCost` and asserts
@@ -358,7 +360,7 @@ def test_the_structured_log_line_carries_the_attempt_too(caplog):
 
 
 async def test_the_non_streaming_turn_path_stamps_an_id_too(workspace):
-    """`turn()` opens its OWN books (`session.py:3632`) and emits separately.
+    """`turn()` opens its OWN books and emits separately.
 
     The `default_factory` makes this true by construction, but the path is real
     — the CLI's non-streaming API uses it — and "covered by construction" is

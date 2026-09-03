@@ -188,9 +188,11 @@ class TurnCost:
     # which is 60 bits, not 64: hex position 12 is uuid4's version nibble, so
     # it is the literal `4` in every id ever generated (measured 2000/2000).
     # The width claim was wrong and so was the comparison to the `aid` install
-    # fingerprint — `aid`'s primary path is `sha256(...).hexdigest()[:16]`
-    # (`analytics.py:205`), genuinely 64 bits; its uuid4 form is only the
-    # fallback when no stable node id is available.
+    # fingerprint: `get_installation_id()` in `anton/analytics.py` takes the
+    # `sha256(str(node)).hexdigest()[:16]` branch whenever the machine has a
+    # real MAC, which is genuinely 64 bits; its `uuid4().hex[:16]` branch is
+    # the fallback for a host with no MAC to read (Docker with stripped
+    # networking), and carries the same 60-bit shortfall described above.
     #
     # A `default_factory` rather than a value passed in at each construction
     # site: there are two today (the streaming and non-streaming turns in

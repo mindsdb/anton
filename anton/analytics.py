@@ -342,8 +342,17 @@ def get_installation_id() -> str:
     usable as a join key.
 
     Returns:
-        A 16-character hex string (64 bits of entropy), or ``"unknown"`` when
-        the machine cannot be fingerprinted at all.
+        A 16-character hex string, or ``"unknown"`` when the machine cannot be
+        fingerprinted at all.
+
+        64 bits on the real-MAC path (a sha256 prefix). The no-MAC fallback
+        persists ``uuid4().hex[:16]``, which is 60: hex position 12 is uuid4's
+        version nibble, so it is the literal ``4`` in every id that branch ever
+        writes. Left as-is deliberately — changing the derivation would give
+        every already-fingerprinted Docker install a NEW ``aid`` and break the
+        continuity of that identity — but do not repeat the 64-bit claim for
+        it. Noted while correcting the same error in
+        ``TurnCost.attempt_id`` (#431 review).
     """
     global _cached_aid
     if _cached_aid is not None:
