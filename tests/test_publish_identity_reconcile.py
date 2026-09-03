@@ -213,3 +213,69 @@ def test_a_home_workspace_is_never_reconciled_against_itself(home):
 
     assert _reconcile_publish_identity(_settings(home)) is False
     assert Workspace(home).get_secret("ANTON_MINDS_API_KEY") == "HOME_KEY"
+
+
+def test_the_session_can_use_the_key_reconciliation_just_moved(tmp_path, home, monkeypatch):
+    """Review finding: the migrated key was unusable for the whole session.
+
+    The `.env` chain is built ONCE at import from the files that existed then
+    (`config/settings.py`). Creating `~/.anton/.env` during reconciliation does
+    not add it, and `remove_secret` pops the project copy out of `os.environ`,
+    so the caller's re-resolve came back with NO key — immediately after the
+    console said the key had been moved there. Self-healed only on next boot.
+    """
+    from anton.config.settings import AntonSettings
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJECT_KEY")
+    # `set_secret` also writes os.environ. At a real boot the project vault is
+    # only on DISK at this point — `_ensure_workspace` has not promoted it yet —
+    # and leaving the variable set masks this bug entirely, because os.environ
+    # outranks every env_file and would satisfy the assertion on its own.
+    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
+    assert not (home / ".anton" / ".env").exists()  # precondition: not in the chain
+
+    assert _reconcile_publish_identity(_settings(project)) is True
+
+    assert AntonSettings().minds_api_key == "PROJECT_KEY"
+
+
+def test_reconciliation_leaves_an_exported_key_alone(tmp_path, home, monkeypatch):
+    """Review finding: `ANTON_MINDS_API_KEY=X anton` had X silently deleted.
+
+    Reconciliation is a DISK migration, but `set_secret`/`remove_secret` both
+    write `os.environ` as a side effect — and pydantic ranks `os.environ` above
+    every env_file, so X is precisely the key that session was resolving.
+    """
+    from anton.config.settings import AntonSettings
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "Y_PROJECT")
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "Z_GLOBAL")
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "X_EXPORTED")
+
+    _reconcile_publish_identity(_settings(project))
+
+    assert os.environ.get("ANTON_MINDS_API_KEY") == "X_EXPORTED"
+    assert AntonSettings().minds_api_key == "X_EXPORTED"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_a_symlinked_home_is_still_recognised_as_home(tmp_path, monkeypatch):
+    """Review finding: a lexical Path comparison deleted the only key.
+
+    `workspace_path` is canonical (`Path.cwd()` / `Path(folder).resolve()`)
+    while `Path.home()` is `$HOME` verbatim, so on `/home -> /export/home` the
+    guard missed. The same file was then addressed as two vaults, compared
+    equal to itself, and took the "duplicate — drop it" branch.
+    """
+    real = tmp_path / "export" / "home" / "user"
+    real.mkdir(parents=True)
+    (tmp_path / "home").symlink_to("export/home")
+    monkeypatch.setenv("HOME", str(tmp_path / "home" / "user"))
+    Workspace(real).set_secret("ANTON_MINDS_API_KEY", "THE_ONLY_KEY")
+
+    assert _reconcile_publish_identity(_settings(real)) is False
+    assert Workspace(real).get_secret("ANTON_MINDS_API_KEY") == "THE_ONLY_KEY"

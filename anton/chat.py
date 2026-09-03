@@ -777,12 +777,34 @@ async def _handle_publish(
         except Exception as e:
             import urllib.error
             if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+                rejected = settings.minds_api_key
                 settings.minds_api_key = None
-                # Clear it where it is WRITTEN. Clearing the project vault while
-                # the key lived in the global one is precisely how a rejected
-                # key survived to lock the next session out (ENG-1424).
-                _persist_key_best_effort(console, "", what="clear the rejected key")
-                console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+                # Clear it where it is WRITTEN — but only if the global vault is
+                # actually what supplied the rejected key. The chain has four
+                # files and ~/.cowork/.env outranks ~/.anton/.env, so a session
+                # can be running a key this vault does not hold: blanking it
+                # unconditionally destroys an unrelated working key AND leaves
+                # the one that really 401'd in place, making the lock-out
+                # permanent instead of fixing it (ENG-1424).
+                if key_entered_this_session:
+                    # Typed at the prompt above and never persisted (that is the
+                    # STRC-987 fix), so there is nothing on disk to clear. The
+                    # in-memory reset alone re-prompts on the next /publish.
+                    console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+                elif _global_vault().get_secret("ANTON_MINDS_API_KEY") == rejected:
+                    _persist_key_best_effort(console, "", what="clear the rejected key")
+                    console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+                else:
+                    # It came from a file we do not own. Say where to look rather
+                    # than deleting a key we cannot prove is the bad one.
+                    console.print(
+                        "  [anton.error]The API key this session is using was rejected.[/]"
+                    )
+                    console.print(
+                        "  [anton.muted]It did not come from ~/.anton/.env, so /publish "
+                        "cannot clear it — check ~/.cowork/.env, a .env in this folder, "
+                        "or an exported ANTON_MINDS_API_KEY.[/]"
+                    )
             else:
                 console.print(f"  [anton.error]Publish failed: {e}[/]")
             console.print()

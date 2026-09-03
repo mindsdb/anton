@@ -214,16 +214,19 @@ async def test_401_clears_a_key_that_is_already_on_disk(tmp_path, home):
     html = _make_html_file(tmp_path)
     settings = _make_settings(tmp_path, api_key="stale-bad-key")
 
+    console = _make_console()
     with (
         # /publish now asks for an access mode before publishing; the key is
         # already set so no key prompts fire — just answer the Access prompt.
         patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
         patch("anton.publisher.publish", side_effect=_http_401()),
     ):
-        await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(console, settings, _make_workspace(), file_arg=str(html))
 
     assert settings.minds_api_key is None
     assert "stale-bad-key" not in _global_vault_text(home)
+    printed = " ".join(str(c) for c in console.print.call_args_list)
+    assert "Invalid API key" in printed
 
 
 @pytest.mark.asyncio
@@ -294,3 +297,33 @@ async def test_publish_never_writes_the_real_home(tmp_path, home):
     assert after == before, f"the real {real_vault} was modified by the test suite"
     # ...and the write did land, in the isolated home.
     assert "ANTON_MINDS_API_KEY=goodkey" in _global_vault_text(home)
+
+
+@pytest.mark.asyncio
+async def test_401_does_not_clear_a_key_the_global_vault_did_not_supply(tmp_path, home):
+    """Review finding: the 401 handler destroyed an unrelated working key.
+
+    The chain has four files and ``~/.cowork/.env`` outranks ``~/.anton/.env``,
+    so a session can be running a key the global vault does not hold. Blanking
+    it unconditionally deleted a good key AND left the one that really 401'd in
+    place — making the lock-out permanent instead of fixing it.
+    """
+    from anton.chat import _handle_publish
+    from anton.workspace import Workspace
+
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GOOD_A")
+
+    html = _make_html_file(tmp_path)
+    settings = _make_settings(tmp_path, api_key="EXPIRED_B")  # came from elsewhere
+    console = _make_console()
+
+    with (
+        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
+        patch("anton.publisher.publish", side_effect=_http_401()),
+    ):
+        await _handle_publish(console, settings, _make_workspace(), file_arg=str(html))
+
+    assert Workspace(home).get_secret("ANTON_MINDS_API_KEY") == "GOOD_A"
+    # ...and the user is told where to look instead of being told it was cleared.
+    printed = " ".join(str(c) for c in console.print.call_args_list)
+    assert "cowork" in printed

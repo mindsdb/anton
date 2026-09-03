@@ -450,7 +450,12 @@ def _reconcile_publish_identity(settings) -> bool:
     from anton.workspace import Workspace, _write_private
 
     project_path = Path(settings.workspace_path)
-    if project_path == Path.home():
+    # resolve() both sides: `workspace_path` is already canonical (Path.cwd() /
+    # Path(folder).resolve()) while Path.home() is $HOME verbatim, so on a
+    # symlinked home (/home -> /export/home) a lexical == misses. It then treats
+    # ONE file as two vaults, finds them trivially "identical", and deletes the
+    # user's only key down the duplicate branch.
+    if project_path.resolve() == Path.home().resolve():
         return False  # same file — nothing to reconcile
 
     project_ws = Workspace(project_path, settings=settings)
@@ -460,6 +465,14 @@ def _reconcile_publish_identity(settings) -> bool:
 
     global_ws = Workspace(Path.home(), settings=settings)
     global_key = global_ws.get_secret("ANTON_MINDS_API_KEY")
+
+    # This is a DISK migration; the process environment is not ours to edit.
+    # `set_secret`/`remove_secret` both write os.environ as a side effect
+    # (workspace.py), so an operator running `ANTON_MINDS_API_KEY=X anton` would
+    # have X silently popped here — and pydantic ranks os.environ above every
+    # env_file, so X is exactly the key that session was resolving. Snapshot and
+    # restore around the whole migration.
+    exported = os.environ.get("ANTON_MINDS_API_KEY")
 
     if not global_key:
         global_ws.set_secret("ANTON_MINDS_API_KEY", project_key)
@@ -482,6 +495,22 @@ def _reconcile_publish_identity(settings) -> bool:
             "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
             f"  {archive} in case it was the one you wanted."
         )
+
+    if exported is None:
+        os.environ.pop("ANTON_MINDS_API_KEY", None)
+    else:
+        os.environ["ANTON_MINDS_API_KEY"] = exported
+
+    # The .env chain is built ONCE at import from the files that existed then
+    # (config/settings.py). Creating ~/.anton/.env a moment ago does not add it,
+    # so the caller's re-resolve would read a chain that no longer describes the
+    # disk and come back with no key at all — right after we told the user we
+    # had moved theirs there. Refresh in place: AntonSettings.model_config holds
+    # a reference to this list object, so rebinding the module global would not
+    # reach it.
+    from anton.config.settings import _ENV_FILES, _build_env_files
+
+    _ENV_FILES[:] = _build_env_files()
 
     # Say so. This can change which account publishes (that is the point of
     # collapsing to one identity), and a silent identity change is the exact
