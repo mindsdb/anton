@@ -238,8 +238,14 @@ _pending_lock = threading.Lock()
 #                    turn_attempt_id also mirrors it, and is the key the join
 #                    should actually use: turn_index alone matched every retry
 #                    of the same turn (18.5% of these rows joined to more than
-#                    one turn row before ENG-2243). Empty when the tool ran
-#                    with no turn books open.
+#                    one turn row before ENG-2243).
+#                    Not "empty when no books are open" — both emit sites are
+#                    inside the tool loop, so that state is unreachable. The
+#                    divergence that IS reachable: with books closed,
+#                    turn_index falls back to _turn_count + 1 while this would
+#                    be "", so the two join keys would disagree about whether a
+#                    parent turn row exists. Prefer this key and treat an empty
+#                    value as a pre-ENG-2243 build, never as "no parent".
 #                    (anton/core/session.py::_emit_tool_completed)
 #
 # An event NOT listed here keeps the collector path, so moving one is an
@@ -375,12 +381,19 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
     moment a queued daemon thread got around to sending, and for a cost event
     that difference is the one you would go on to plot.
 
-    Deliberately no ``$insert_id``.  The natural key would be
-    ``(conversation_id, turn_index)``, but an abandoned turn's books and a
-    later retry can legitimately share both, and dropping that row would lose
-    exactly the runaway a cancel was investigating (anton#309 review).
-    ``TurnCost.emitted`` already stops the same books emitting twice, so
-    dedupe here could only add a way to lose real events.
+    Deliberately no ``$insert_id`` — but not for the reason this comment
+    used to give (#431 review). It said the natural key
+    ``(conversation_id, turn_index)`` was unusable because an abandoned turn's
+    books and a later retry can legitimately share both. True, and ENG-2243
+    then created the key that does not: ``turn_attempt_id`` is unique per turn
+    EXECUTION, so ``(conversation_id, turn_attempt_id)`` would be a sound
+    dedupe key.
+
+    The standing reason is the second half: ``TurnCost.emitted`` already stops
+    the same books emitting twice, one layer earlier and for every sink at
+    once. So dedupe here would be redundant on the path that matters and could
+    only add a way to lose real events. Kept out on those grounds, not on the
+    absence of a key.
     """
     properties = {
         k: v for k, v in params.items()

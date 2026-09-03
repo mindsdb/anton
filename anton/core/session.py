@@ -2919,13 +2919,20 @@ class ChatSession:
         except Exception:  # pragma: no cover - defensive
             _root_cause_fields = {}
         logger.info(
-            "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
+            # `attempt` alongside `turn`: `turn_index` is a history position,
+            # so two attempts of one turn used to produce two indistinguishable
+            # log lines (ENG-2243). This line is also the ONLY forensics
+            # surface that survives the collector allowlist (see the note
+            # below) and, per ENG-2193, the only one a desktop customer has —
+            # `cowork-server.log`, not PostHog. Without it the new analytics
+            # property has no fallback at all.
+            "turn_cost session=%s turn=%d attempt=%s ended_by=%s verification_skipped=%s "
             "grace_granted=%s grace_tokens=%d "
             "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
             "by_role=%s %s",
-            self._session_id, turn_index, tc.ended_by,
+            self._session_id, turn_index, tc.attempt_id, tc.ended_by,
             str(tc.verification_skipped).lower(),
             tc.grace_granted or "-", tc.grace_tokens,
             tc.verifier_failure, tc.verifier_error_type, tc.total_tokens,
@@ -3183,17 +3190,27 @@ class ChatSession:
         is reported as ``"unknown"`` rather than coerced either way.
 
         Payload is deliberately name + verdict + duration + exception CLASS
-        + surface (a closed enum, ENG-1945) plus the two join keys, and
-        nothing else. Arguments, result content and ``str(exc)`` routinely
+        + surface (a closed enum, ENG-1945) + the root-cause tier and class
+        (both closed vocabularies, ENG-2247) plus the THREE join keys
+        (``conversation_id``, ``turn_index``, ``turn_attempt_id``), and
+        nothing else — ten keys, and the exact-keys assertion in
+        ``test_tool_completed.py`` is what keeps that number honest. This
+        paragraph is the privacy-audit enumeration, so keep it in step with
+        the payload: arguments, result content and ``str(exc)`` routinely
         carry file paths, user data and credentials-adjacent strings — none
         of them may ever appear here.
 
-        ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
-        values exactly (same names, same derivation), so a tool failure spotted
-        in PostHog joins to its parent turn row there and, via
-        ``conversation_id`` → Langfuse ``sessionId``, to the gateway trace of
-        the turn it happened in. Both already ride ``turn_completed`` through
-        this same sink — no new privacy surface.
+        ``conversation_id`` / ``turn_index`` / ``turn_attempt_id`` mirror
+        ``turn_completed``'s values exactly (same names, same derivation), so a
+        tool failure spotted in PostHog joins to its parent turn row there and,
+        via ``conversation_id`` → Langfuse ``sessionId``, to the gateway trace
+        of the turn it happened in. All three already ride ``turn_completed``
+        through this same sink — no new privacy surface.
+
+        Prefer ``turn_attempt_id`` for that join: ``turn_index`` is a history
+        position and repeats across every retry of the same turn, so
+        ``(conversation_id, turn_index)`` matched more than one turn row for
+        18.5% of these rows before ENG-2243.
         """
         try:
             # Same settings resolution as `_emit_turn_cost` above: the

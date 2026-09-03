@@ -36,8 +36,8 @@ Stated gaps (by design, documented on ENG-1288):
 
 from __future__ import annotations
 
+import secrets
 import time
-import uuid
 from dataclasses import dataclass, field
 
 from anton.core.llm.provider import Usage
@@ -180,9 +180,17 @@ class TurnCost:
     #
     # Random, not a counter, deliberately: ANY session-local counter resets on
     # that same rebuild, so nothing derived from session state can be unique
-    # across attempts. 16 hex chars = 64 bits, the same width and reasoning as
-    # the `aid` install fingerprint (see `anton/analytics.py`) — collision-free
-    # at our volume, short enough to read.
+    # across attempts. `token_hex(8)` is 16 hex chars of 64 real bits —
+    # collision-free at our volume (the birthday bound is ~5e9 attempts), short
+    # enough to read in a log line.
+    #
+    # NOT `uuid.uuid4().hex[:16]`, which this field shipped as in review and
+    # which is 60 bits, not 64: hex position 12 is uuid4's version nibble, so
+    # it is the literal `4` in every id ever generated (measured 2000/2000).
+    # The width claim was wrong and so was the comparison to the `aid` install
+    # fingerprint — `aid`'s primary path is `sha256(...).hexdigest()[:16]`
+    # (`analytics.py:205`), genuinely 64 bits; its uuid4 form is only the
+    # fallback when no stable node id is available.
     #
     # A `default_factory` rather than a value passed in at each construction
     # site: there are two today (the streaming and non-streaming turns in
@@ -190,7 +198,7 @@ class TurnCost:
     # collision this field exists to remove. Also makes it a stamped-at-open
     # fact like `turn_index` above, so a late finalizer reports the id of the
     # turn whose books it holds rather than whichever turn owns the slot now.
-    attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
+    attempt_id: str = field(default_factory=lambda: secrets.token_hex(8))
     # When the turn ended. None until resolved. A late finalizer cannot know the
     # real end, so it falls back to `last_activity_monotonic` (the last LLM
     # call) — understating but bounded, rather than measuring up to whenever

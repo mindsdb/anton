@@ -159,11 +159,23 @@ async def test_the_attempt_id_survives_a_non_completed_terminal(workspace):
 
 
 async def test_tool_row_and_turn_row_agree_on_the_attempt_id(workspace):
-    """Both read the same books, so the join cannot be ambiguous.
+    """Both rows carry the same attempt, so the join cannot be ambiguous.
 
-    Reading live session state in `_emit_tool_completed` instead would let a
-    late finalizer pair a tool row with a different attempt — the same class of
-    bug `turn_index`'s stamped-at-open comment records (#309 review).
+    How each side gets there differs, and the earlier version of this docstring
+    had it backwards (#431 review). `_emit_tool_completed` DOES read live
+    session state — `_tc = getattr(self, "_turn_cost", None)` at
+    `session.py:3229`. It is safe because a tool row is always emitted
+    synchronously inside its own live turn and the owning turn nulls the books
+    at close, so the read is never late; not because it reads stamped books.
+
+    The stamped-at-open guarantee is load-bearing on the TURN side, where the
+    emit genuinely can be late — see
+    `test_a_late_finalizer_reports_its_own_attempt_not_the_live_turns`.
+
+    The distinction matters for whoever changes this next: if the tool emit
+    were ever moved off the synchronous path (queued or batched), this test
+    would still pass while the join silently started pairing tool rows with a
+    neighbouring attempt.
     """
     from unittest.mock import AsyncMock
 
@@ -224,6 +236,27 @@ def test_every_turncost_gets_an_id_without_the_caller_passing_one():
     assert all(len(i) == 16 and all(c in "0123456789abcdef" for c in i) for i in ids)
 
 
+def test_all_sixteen_characters_carry_entropy():
+    """The width claim in `turn_cost.py` has to be true, not just plausible.
+
+    The field first shipped as `uuid.uuid4().hex[:16]`, whose comment claimed
+    64 bits. It is 60: hex position 12 is uuid4's version nibble, so it is the
+    literal `4` in every id ever generated. The test above could not catch that
+    — 200 uuid4-derived ids are all unique and all lowercase hex, and a fixed
+    nibble costs 4 bits without failing either assertion.
+
+    So assert the property the comment claims: every position varies. 200
+    samples over 16 possible values makes a false failure ~(15/16)**200 ≈ 3e-6
+    per position, and a positionally-fixed nibble fails deterministically.
+    """
+    ids = [TurnCost().attempt_id for _ in range(200)]
+    fixed = [pos for pos in range(16) if len({i[pos] for i in ids}) == 1]
+    assert not fixed, (
+        f"hex positions {fixed} are constant across 200 ids — the field is "
+        "narrower than the 64 bits its comment claims"
+    )
+
+
 def test_the_id_is_stamped_at_books_open_not_read_at_emit():
     """Stable for the life of the books, like `turn_index`.
 
@@ -235,6 +268,93 @@ def test_the_id_is_stamped_at_books_open_not_read_at_emit():
     tc.add("planning", "m", _usage())
     tc.ended_by = "completed"
     assert tc.attempt_id == first
+
+
+def test_a_late_finalizer_reports_its_own_attempt_not_the_live_turns():
+    """The invariant the stamped-at-open design exists for, at the emit.
+
+    `session.py:4643` calls `_emit_turn_cost(expected=_turn_cost_books, ...)`
+    on the abandoned-generator path — a fresh task, long after the fact, by
+    which point a NEWER turn may own the shared slot. That is the case where
+    `tc is not self._turn_cost`, and `_emit_turn_cost` reads the books it was
+    handed (`session.py:2856`) rather than live session state precisely so the
+    abandoned turn's row carries its own id.
+
+    Nothing covered this. `test_the_id_is_stamped_at_books_open_not_read_at_emit`
+    above never invokes `_emit_turn_cost` — it mutates a `TurnCost` and asserts
+    the field is stable — so changing that line to `self._turn_cost.attempt_id`
+    passed this whole module while stamping the live turn's id on the abandoned
+    turn's row, reintroducing the #309 mis-attribution one layer down.
+    `turn_index` has a guard for that class in `test_turn_cost_terminals.py`
+    (`test_a_late_finalizer_cannot_close_a_newer_turns_books`); this is the
+    matching one for `attempt_id`.
+    """
+    session = ChatSession.__new__(ChatSession)
+    session._llm = MagicMock()
+    session._llm.planning_model = "p"
+    session._llm.coding_model = "c"
+    session._session_id = "s"
+    session._harness = "cowork"
+    session._turn_count = 1
+    session._cancel_event = MagicMock(is_set=lambda: False)
+    session._settings = None
+
+    abandoned, live = TurnCost(turn_index=4), TurnCost(turn_index=5)
+    abandoned.add("planning", "sonnet", _usage())
+    session._turn_cost = live               # the newer turn owns the slot
+
+    with patch("anton.analytics.send_event") as send:
+        session._emit_turn_cost(expected=abandoned)
+
+        assert send.called, "the abandoned turn must still be counted (#309)"
+        emitted = send.call_args.kwargs["turn_attempt_id"]
+        assert emitted == abandoned.attempt_id, (
+            "the late finalizer stamped the LIVE turn's attempt id on the "
+            "abandoned turn's row"
+        )
+        assert emitted != live.attempt_id
+        assert session._turn_cost is live, "only the owner clears the slot"
+
+
+def test_the_structured_log_line_carries_the_attempt_too(caplog):
+    """The only forensics surface that does not depend on the collector.
+
+    `_emit_turn_cost`'s own comment says the `turn_cost` log line is what
+    survives the allowlist that silently dropped `turn_completed`'s properties
+    for weeks (ENG-1355), and per ENG-2193 it is the only channel a desktop
+    customer has — `cowork-server.log`, not PostHog. Without the attempt id
+    there, the analytics property this PR adds has no fallback, and two
+    attempts of one turn still produce two indistinguishable log lines: the
+    exact ambiguity ENG-2243 exists to remove.
+
+    Asserted on the ABANDONED books so this also pins the source, not just the
+    presence of the key.
+    """
+    import logging
+
+    session = ChatSession.__new__(ChatSession)
+    session._llm = MagicMock()
+    session._llm.planning_model = "p"
+    session._llm.coding_model = "c"
+    session._session_id = "s"
+    session._harness = "cowork"
+    session._turn_count = 1
+    session._cancel_event = MagicMock(is_set=lambda: False)
+    session._settings = None
+
+    abandoned, live = TurnCost(turn_index=4), TurnCost(turn_index=5)
+    abandoned.add("planning", "sonnet", _usage())
+    session._turn_cost = live
+
+    with caplog.at_level(logging.INFO, logger="anton.core.session"):
+        with patch("anton.analytics.send_event"):
+            session._emit_turn_cost(expected=abandoned)
+
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("turn_cost session=")]
+    assert len(lines) == 1, lines
+    assert f"attempt={abandoned.attempt_id}" in lines[0], lines[0]
+    assert live.attempt_id not in lines[0]
 
 
 async def test_the_non_streaming_turn_path_stamps_an_id_too(workspace):
