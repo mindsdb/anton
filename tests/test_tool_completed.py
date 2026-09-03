@@ -12,8 +12,12 @@ harness shape as ``test_root_cause_wiring.py``) and assert on what
   unconditional success);
 - ``error_type`` is the exception CLASS name and never the message —
   ``str(exc)`` routinely embeds file paths and user input;
-- the payload is exactly {name, ok, duration_ms, error_type, conversation_id,
-  turn_index}, all strings — no tool arguments, no result content;
+- the payload is exactly {name, ok, duration_ms, error_type, surface,
+  conversation_id, turn_index, root_cause_tier, root_cause_class}, all strings
+  — no tool arguments, no result content. ``surface`` joined in ENG-1945 and the
+  two ``root_cause_*`` keys in ENG-2247; the exact-keys assertion is widened
+  deliberately each time rather than loosened, because "no surprise keys" is the
+  property that keeps arguments and result prose out;
 - human wait (``answer_wait_s``, accumulated by ``elicit()``) is subtracted
   from the duration — which covers ``ask_user`` and ``select_path``, the only
   tools that elicit. It does NOT cover the interactive branch, whose tools
@@ -163,14 +167,15 @@ async def test_unmigrated_handler_verdict_is_unknown_not_a_guess(workspace):
 # ── Payload contract ─────────────────────────────────────────────────
 
 
-async def test_payload_is_exactly_the_seven_keys_all_strings(workspace):
+async def test_payload_is_exactly_the_nine_keys_all_strings(workspace):
     """No arguments, no result content, no surprise keys — and str values only,
     because send_event's extras are wire parameters (tests/test_ask_user.py:496).
     """
     session = _session(workspace, [ToolOutcome(content="secret result body", ok=True)])
     events = await _tool_completed_calls(session)
     assert set(events[0]) == {"name", "ok", "duration_ms", "error_type",
-                              "surface", "conversation_id", "turn_index"}
+                              "surface", "conversation_id", "turn_index",
+                              "root_cause_tier", "root_cause_class"}
     assert all(isinstance(v, str) for v in events[0].values())
     assert "secret result body" not in json.dumps(events[0])
     int(events[0]["duration_ms"])  # numeric string, parseable
@@ -345,6 +350,16 @@ async def test_nonstreaming_turn_path_also_emits(workspace):
     assert events[0]["ok"] == "false"
     assert events[0]["error_type"] == "RuntimeError"
     assert events[0]["name"] == "scratchpad"
+    # The cause too, not just the pre-ENG-2247 fields. `_emit_tool_completed`
+    # DEFAULTS both to "", so dropping them from this call site changes no
+    # payload key and would otherwise trip nothing — verified: the whole suite
+    # passed with them removed here, while the same removal at the streaming
+    # emit failed 5 tests. A seam guard that covers two of four fields is how
+    # the next host on this path silently undercounts again.
+    # `RuntimeError` is in none of _SELF_INFLICTED/_TRANSIENT/_WALL_TYPES, so
+    # it lands in classify()'s residual branch — the 31% `unclassified` bucket.
+    assert events[0]["root_cause_tier"] == "unclassified"
+    assert events[0]["root_cause_class"] == "unclassified"
 
 
 async def test_model_generated_tool_name_is_bounded(workspace):
@@ -417,3 +432,284 @@ def test_tool_completed_goes_to_posthog_not_the_collector(monkeypatch):
     assert body["event"] == "tool_completed"
     assert body["properties"]["name"] == "scratchpad"
     assert body["properties"]["ok"] == "false"
+
+
+# ── Why it failed (ENG-2247) ─────────────────────────────────────────
+
+
+async def test_a_returned_verdict_failure_carries_its_cause(workspace):
+    """The whole point: `scratchpad`'s failure shape gets a groupable cause.
+
+    A cell that errors is a normal outcome, not a raise, so `error_type` is
+    empty here BY DESIGN — that is the 83% of failures that reached analytics
+    with nothing to group on before this.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nNameError: name 'wb' is not defined",
+        ok=False, reason="NameError: name 'wb' is not defined",
+    )])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["ok"] == "false"
+    assert ev["error_type"] == ""          # no raise -> no exception class
+    assert ev["root_cause_tier"] == "self_inflicted"
+    assert ev["root_cause_class"] == "NameError"
+
+
+async def test_an_environment_wall_is_distinguishable_from_an_agent_bug(workspace):
+    """The tier is the actionable half: whose fault is it.
+
+    `NameError` and `ModuleNotFoundError` are both `ok=false` with an empty
+    `error_type`; without the tier they are the same row.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nModuleNotFoundError: No module named 'pyodbc'",
+        ok=False, reason="ModuleNotFoundError: No module named 'pyodbc'",
+    )])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["root_cause_tier"] == "external_wall"
+    assert ev["root_cause_class"] == "missing_dependency"
+
+
+async def test_success_carries_no_cause(workspace):
+    """Empty, not a placeholder — a cause on a successful call is a lie."""
+    session = _session(workspace, [ToolOutcome(content="fine", ok=True)])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["root_cause_tier"] == ""
+    assert ev["root_cause_class"] == ""
+
+
+async def test_an_unmigrated_handler_gets_no_cause(workspace):
+    """`ok=None` means the handler declared nothing (ENG-2248's population).
+
+    The event already reports `ok="unknown"`; attaching a cause would invent a
+    verdict from prose the model can influence — the ENG-1276 defect one level
+    up, and the reason `_record_root_cause` keeps that population
+    non-trip-eligible. Text that LOOKS like a failure must not change this.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error] Task failed: something broke", ok=None)])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["ok"] == "unknown"
+    assert ev["root_cause_tier"] == ""
+    assert ev["root_cause_class"] == ""
+
+
+async def test_the_cause_is_the_shared_classifier_verbatim(workspace):
+    """Pins the two views together so they cannot drift.
+
+    The turn-level `root_cause_*` tally and this per-call field must come from
+    ONE vocabulary; a second taxonomy would put two spellings of the same
+    failure in two fields. Asserted against `classify` itself rather than
+    against hardcoded strings, so extending the vocabulary cannot silently
+    desync the event.
+
+    KNOWN LIMIT, stated so nobody reads more into a green run than is there:
+    this evaluates the same expression the implementation does, so it pins the
+    values but NOT the choice of inputs — were the correct call
+    `classify(reason, result_text)`, this would pass anyway. That gap is a
+    proven no-op rather than a risk: measured across 12 reasons x 7 result
+    texts, `(tier, cls)` is identical with and without `result_text` in all 84
+    combinations, because the only branch that reads it returns the constant
+    `"unclassified"` class. That equivalence is what lets the cause be derived
+    at the emit site, before the result is assigned.
+    """
+    from anton.core.root_cause import classify
+
+    for reason in ("NameError: x", "ModuleNotFoundError: No module named 'z'",
+                   "TimeoutError: slow", "scratchpad_empty_code",
+                   "RuntimeError: boom"):
+        session = _session(workspace, [ToolOutcome(
+            content="[error]", ok=False, reason=reason)])
+        ev = (await _tool_completed_calls(session))[0]
+        expected = classify(reason, "")
+        assert ev["root_cause_tier"] == expected.tier, reason
+        assert ev["root_cause_class"] == expected.cls, reason
+
+
+async def test_no_prose_from_the_reason_reaches_the_payload(workspace):
+    """`reason` is prose — traceback lines, handler messages — and carries file
+    paths and user input. Only the closed-vocabulary class may be emitted.
+    """
+    secret = "/Users/someone/.aws/credentials could not be opened"
+    session = _session(workspace, [ToolOutcome(
+        content=f"[error]\nPermissionError: {secret}",
+        ok=False, reason=f"PermissionError: {secret}",
+    )])
+    ev = (await _tool_completed_calls(session))[0]
+    assert ev["root_cause_class"] == "permission_denied"
+    blob = json.dumps(ev)
+    assert secret not in blob
+    assert ".aws" not in blob
+    assert "someone" not in blob
+
+
+def _closed_vocabulary() -> set:
+    """THE authoritative class set — `root_cause.ALL_CLASSES`, not a rebuild.
+
+    An earlier version reassembled this from the five tables, and that was
+    wrong: `classify()` returns four classes as bare LITERALS, and `timeout`
+    is in no table. It is reachable on every scratchpad cell timeout
+    (`backends/local.py` -> "Cell timed out after {N}s total" -> `reason`), so
+    the guard reported a legitimate enumerated value as a novel class — and
+    the natural reaction to that failure is to loosen the set, the one move
+    this guard exists to prevent. `permission_denied` and `connection_refused`
+    passed only by coincidence, being `_WALL_TYPES` values too.
+
+    Reading the module's own export keeps the derivation honest: a new class
+    must be added there, and this follows automatically.
+    """
+    from anton.core.root_cause import ALL_CLASSES
+
+    return set(ALL_CLASSES)
+
+
+def test_the_emitted_class_is_always_from_the_closed_vocabulary():
+    """Bounded cardinality is a property of the FIELD, not of today's inputs.
+
+    A PostHog property with unbounded values is expensive and useless as a
+    breakdown. `reason` is attacker-and-model-influenced prose, so the guard
+    that matters is that nothing derived from it can widen the value space.
+    Adversarial reasons included: a novel exception type, a bare sentence, an
+    injected-looking string, and text carrying a status code.
+    """
+    from anton.core.session import _tool_failure_cause
+
+    from anton.core.root_cause import ALL_TIERS
+
+    closed = _closed_vocabulary()
+    tiers = set(ALL_TIERS)
+    reasons = [
+        "NameError: x", "ModuleNotFoundError: No module named 'z'",
+        "TimeoutError: slow", "PermissionError: nope", "scratchpad_empty_code",
+        "RuntimeError: boom", "SomeVendorSpecificError: novel type",
+        "just a sentence with no exception in it", "",
+        "HTTPError: 503 upstream", "KeyError: 404",
+        "Error: {'sql': 'DROP TABLE users'} failed",
+        "x" * 4000,
+        # The four classes `classify` returns as literals rather than through
+        # a table, each reaching its own branch. `timeout` is the live one —
+        # every scratchpad cell timeout — and it was uncovered until review.
+        #
+        # NO `OSError: ` PREFIX on the last two, deliberately: `_WALL_TYPES`
+        # is consulted before the lowercase-phrase branches, and its OSError
+        # entry falls through to `unclassified` unless the text says "No space
+        # / Disk quota / Too many open files / Cannot allocate". A first draft
+        # prefixed both and they silently classified as `unclassified`, so the
+        # two branches they exist to cover stayed unexercised while the test
+        # still passed (both classes being in `ALL_CLASSES` either way).
+        "Cell timed out after 300s total without producing any output",
+        "Cell exceeded inactivity limit",
+        "permission denied on /etc/shadow",
+        "connection refused by db.internal:5432",
+    ]
+    for reason in reasons:
+        tier, cls = _tool_failure_cause(False, reason)
+        assert cls in closed, f"{reason[:40]!r} minted a novel class {cls!r}"
+        assert tier in tiers, f"{reason[:40]!r} minted a novel tier {tier!r}"
+
+
+async def test_the_tool_row_and_the_turn_tally_agree_on_the_tier(workspace):
+    """The per-call field and the per-turn counter must describe one reality.
+
+    They come from the same classifier but by different routes — this one reads
+    it directly, the tally goes through `RootCauseLedger`. A divergence would
+    mean two published numbers disagreeing about the same failure.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nNameError: name 'wb' is not defined",
+        ok=False, reason="NameError: name 'wb' is not defined",
+    )])
+    with patch("anton.analytics.send_event") as sent:
+        async for _ in session.turn_stream("go"):
+            pass
+    tool = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
+    turn = [c.kwargs for c in sent.call_args_list if c.args[1] == "turn_completed"]
+    assert len(tool) == 1 and len(turn) == 1
+
+    assert tool[0]["root_cause_tier"] == "self_inflicted"
+    # The turn tally counted the SAME failure into the SAME tier.
+    assert str(turn[0]["root_cause_self_inflicted"]) == "1"
+    assert str(turn[0]["root_cause_failures"]) == "1"
+    # And it stayed out of the trip-eligible rungs — the safety contract this
+    # change must not disturb (ENG-1531 / ENG-836).
+    assert str(turn[0]["root_cause_wall"]) == "0"
+    assert turn[0]["root_cause_top_class"] == ""
+
+
+async def test_the_nonstreaming_turn_path_stamps_the_cause_too(workspace):
+    """`turn()` has its OWN dispatch loop, its own emit, and its own cause call.
+
+    Every other test here drives `turn_stream`. Found by mutation: removing
+    both kwargs from the non-streaming emit alone left the entire suite green
+    (2,927 passed), so nothing guarded that call site — the same gap the
+    streaming tail had before `test_nonstreaming_turn_path_also_emits` was
+    written, one field later.
+
+    Raises `ValueError` rather than the sibling test's `RuntimeError` on
+    purpose: on this path `reason` is `type(exc).__name__`, and `ValueError` is
+    in `_SELF_INFLICTED` so it classifies distinctly, where `RuntimeError`
+    falls through to `unclassified`.
+
+    COMPLEMENTARY to that test, not stronger — an earlier commit message here
+    claimed a hierarchy and was wrong. Neither subsumes the other, verified by
+    mutation:
+
+    | mutation | `..._also_emits` | this test |
+    | -- | -- | -- |
+    | `_tool_failure_cause` stubbed to the residual constant | passes | FAILS |
+    | `root_cause_class=_tool_error_type` (wrong source) | FAILS | passes |
+
+    The second is the non-obvious one: on the raise path `reason` IS
+    `type(exc).__name__`, so `error_type == root_cause_class == "ValueError"`
+    here and a class copied from `error_type` is invisible to this test — only
+    its tier assertion resists, and only the RuntimeError/`unclassified` pair
+    distinguishes the two sources. Deleting either test as redundant reopens a
+    mutation the other does not cover, with CI green.
+    """
+    session = _session(workspace, ValueError("bad argument"))
+    with patch("anton.analytics.send_event") as sent:
+        await session.turn("go")
+    events = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
+    assert len(events) == 1
+    assert events[0]["ok"] == "false"
+    assert events[0]["error_type"] == "ValueError"      # the raise path
+    assert events[0]["root_cause_tier"] == "self_inflicted"
+    assert events[0]["root_cause_class"] == "ValueError"
+
+
+async def test_a_caller_that_omits_reason_degrades_to_unclassified(workspace):
+    """The reason the derivation lives inside the emit (ENG-2247 review).
+
+    Three shapes were on the table for "a new dispatch path forgets the cause":
+
+    | shape | forgetting yields | turn-safe |
+    | -- | -- | -- |
+    | cause kwargs, defaulted `""` | **"did not fail"** — wrong | yes |
+    | cause kwargs, required | `TypeError` at the CALL, outside this
+      method's guard — **kills the turn over telemetry** | NO |
+    | derive here from `reason` (chosen) | `unclassified` — honest | yes |
+
+    A field whose whole purpose is measuring failures must not fail toward
+    "success", and must not be able to break a turn. This pins the third.
+    """
+    session = _session(workspace, [ToolOutcome(
+        content="[error]\nNameError: name 'wb' is not defined",
+        ok=False, reason="NameError: name 'wb' is not defined",
+    )])
+    with patch("anton.analytics.send_event") as sent:
+        # Exactly what a forgetful new call site looks like: `reason` omitted.
+        session._emit_tool_completed(
+            name="scratchpad", ok=False, duration_ms=1.0, error_type="",
+        )
+    ev = sent.call_args.kwargs
+    assert ev["ok"] == "false"
+    assert ev["root_cause_tier"] == "unclassified", (
+        "a forgotten reason must read as 'we do not know why', never as empty "
+        "— empty is a legal value meaning the call did not fail"
+    )
+    assert ev["root_cause_class"] == "unclassified"
+    # And the keys are still exactly the nine: omitting an input must not
+    # change the payload SHAPE, only the honesty of one value.
+    assert set(ev) == {"name", "ok", "duration_ms", "error_type", "surface",
+                       "conversation_id", "turn_index",
+                       "root_cause_tier", "root_cause_class"}

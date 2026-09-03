@@ -192,6 +192,39 @@ _pending_lock = threading.Lock()
 #                    One event per executed tool call; tool arguments and
 #                    result content are deliberately absent (ENG-1486).
 #                    surface mirrors turn_completed's (ENG-1945).
+#                    root_cause_tier + root_cause_class (WHY it failed, in
+#                    `anton/core/root_cause.py`'s vocabulary — `self_inflicted`
+#                    / `transient` / `external_wall` / `unclassified`, and the
+#                    class within it, which is USUALLY the exception name but
+#                    is a sentinel class where the handler declared the failure
+#                    itself: `empty_code`, `missing_argument`,
+#                    `invalid_argument`, `unknown_resource`, `missing_name`.
+#                    Do NOT join this against Python exception names — nine
+#                    `_SENTINEL_REASONS` map to `self_inflicted` with non-
+#                    exception classes, and `scratchpad_empty_code` is one of
+#                    scratchpad's own, so that join silently drops every
+#                    argument-validation failure. `timeout` is likewise a
+#                    literal, not a type name. `error_type` above only fills in on a
+#                    RAISE; the dominant tool returns a verdict instead, so 83%
+#                    of failures had no cause before ENG-2247. Both are "" on
+#                    success and on an unmigrated handler (`ok="unknown"`).
+#                    Read them as a PAIR with `ok` — a cause only exists where
+#                    the handler said `ok=false`. Same vocabulary as
+#                    turn_completed's `root_cause_*` tally, so where both
+#                    populate they agree; unlike that tally, these are per CALL
+#                    and carry no cumulative-ledger caveat.
+#                    They do NOT reconcile row-for-row, and the gap is
+#                    systematic rather than rare. An `ok="unknown"` call (any
+#                    handler returning a plain string — most of them, see
+#                    ENG-2248) is COUNTED by the turn tally as `unclassified`
+#                    and left BLANK here, because inventing a verdict from
+#                    prose the model can influence is the ENG-1276 defect one
+#                    level up. So `sum(tool rows by tier)` runs systematically
+#                    short of `turn_completed.root_cause_failures`; that is the
+#                    design, not drift. (The inverse also exists but is
+#                    unreachable today: a multimodal `ok=false` result would
+#                    populate here and not in the tally — see
+#                    `_tool_failure_cause`.)
 #                    conversation_id + turn_index mirror turn_completed's
 #                    values, so a tool row joins to its parent turn row and,
 #                    via Langfuse sessionId, to the gateway trace.

@@ -599,6 +599,64 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+def _tool_failure_cause(ok: bool | None, reason: str) -> tuple[str, str]:
+    """`(tier, class)` for one failed tool call, or `("", "")` (ENG-2247).
+
+    Reuses `root_cause.classify` — the SAME vocabulary the turn-level
+    `root_cause_*` tally is built from — so for a string tool result the row
+    and its turn cannot disagree about what a failure was. A parallel taxonomy
+    here would put two spellings of one failure in two fields.
+
+    **Scoped to string results deliberately, and it is not a full agreement
+    guarantee.** This runs unconditionally at the emit, but
+    `_record_root_cause` is reached only from the string branch — the
+    multimodal arms `continue` past it. So a handler returning
+    `content=[...]` with `ok=False` puts a cause on the tool row that the turn
+    tally never counts (measured: row `self_inflicted`/`NameError`, tally
+    `root_cause_failures=0`). Unreachable today — no handler returns
+    multimodal content at all — but `ToolOutcome.content` permits it, so
+    whoever migrates the first one must add `_record_root_cause` to both list
+    arms, alongside the nudge the #308-review NOTE already asks for there.
+
+    **Deliberately does NOT touch `RootCauseLedger`.** That ledger drops every
+    non-trip-eligible class one line into `add()` (`if not rc.trip_eligible:
+    return`), and that early return is how "structurally cannot trip" is
+    implemented for ENG-1531's breaker — widening it to keep `self_inflicted`
+    names would arm the breaker on the agent's own `NameError`s, the exact
+    ENG-836 ping-pong the tier exists to exclude. Reading the classifier
+    directly bypasses the ledger, so nothing a trip rung reads can change.
+
+    `result_text` is deliberately not taken. `classify` consults it only to
+    build the `identifier` of a reason-less failure; the CLASS in that branch is
+    the constant `"unclassified"` either way. So the class is identical with or
+    without it — which is what lets this run at the emit site, where the result
+    has not been assigned yet, instead of reordering the dispatch loop.
+
+    Only a handler's explicit `ok is False` produces a cause. `ok is None` is an
+    unmigrated handler (ENG-2248): the event already reports `ok="unknown"`, and
+    attaching a cause to a call we cannot say failed would invent a verdict.
+
+    **Emit `tier` and `cls` only — never `identifier`, and never `key`.**
+    `key` is `class:identifier` and is the tempting "more useful" field, but the
+    identifier is extracted from the reason and carries absolute paths and
+    internal hostnames verbatim: `permission_denied:/root/.ssh/id_rsa`,
+    `connection_refused:db.internal.corp:5432`. It is the nearer trap than
+    `reason`, because it sits on the object this function already destructures.
+    `test_no_prose_from_the_reason_reaches_the_payload` fails if either is
+    forwarded — verified by mutation, not by hope.
+
+    Never raises: it runs on the reporting path, where an escape would turn a
+    handled tool failure into a dead turn.
+    """
+    if ok is not False:
+        return "", ""
+    try:
+        rc = classify_root_cause(reason or "", "")
+        return rc.tier, rc.cls
+    except Exception:  # pragma: no cover - defensive; classify is total
+        return "", ""
+
+
 def _safe_error_type(exc: BaseException) -> str:
     """The exception's class name, and nothing else, for analytics.
 
@@ -3063,8 +3121,28 @@ class ChatSession:
         ok: bool | None,
         duration_ms: float,
         error_type: str,
+        reason: str = "",
     ) -> None:
         """Per-tool-call analytics event (ENG-1486).
+
+        ``reason`` is the handler's own ``ToolOutcome.reason``, taken so the
+        root-cause class can be derived HERE rather than at each call site
+        (ENG-2247 review). Deriving it here is what makes it impossible to
+        forget: there is no cause argument a new dispatch path can omit, and a
+        caller that passes no ``reason`` at all degrades to ``unclassified``
+        — "we do not know why" — instead of to the empty string, which reads
+        as "this call did not fail". Defaulting the CAUSE was the earlier
+        shape and it failed in the wrong direction; making it required instead
+        was worse still, since a missing argument raises ``TypeError`` at the
+        CALL, outside this method's guard, and kills the turn over telemetry.
+
+        **``reason`` is prose and must never be emitted.** It is a traceback
+        line or a handler message and carries file paths and user input; that
+        is the whole reason ``error_type`` was narrowed to a class name. It is
+        consumed by ``_tool_failure_cause`` two lines down and never touched
+        again — do not add it, ``rc.identifier`` or ``rc.key`` to the payload.
+        ``test_no_prose_from_the_reason_reaches_the_payload`` and the
+        exact-keys assertion both fail if you do.
 
         The verdict the dispatch loop already computes for the UI's
         ``tool_done`` marker, sent where it can be aggregated: without this,
@@ -3102,6 +3180,10 @@ class ChatSession:
                 settings = AntonSettings()
             from anton.analytics import send_event
 
+            # Derived here, not handed in — see the docstring. `reason` is
+            # consumed and dropped; only the two closed-vocabulary tokens go on.
+            _rc_tier, _rc_class = _tool_failure_cause(ok, reason)
+
             # send_event takes STRING values only — every extra is a wire
             # parameter (tests/test_ask_user.py:496 exists because a first
             # draft assumed a (name, props) shape).
@@ -3130,6 +3212,14 @@ class ChatSession:
                 surface=str(getattr(self, "_surface", None) or ""),
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
+                # WHY the call failed, in `root_cause.py`'s vocabulary
+                # (ENG-2247). `error_type` above only fills in when the failure
+                # was a RAISE; `scratchpad` — 79% of tool volume, 9.35% of it
+                # failing — returns a verdict instead, so 83% of failures
+                # reached analytics with no cause at all. Both empty on success
+                # and on an unmigrated handler; see `_tool_failure_cause`.
+                root_cause_tier=_rc_tier,
+                root_cause_class=_rc_class,
             )
         except Exception:
             # Analytics must never affect the tool call that just ran.
@@ -3876,6 +3966,7 @@ class ChatSession:
                     ok=outcome.ok,
                     duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
                     error_type=_tool_error_type,
+                    reason=outcome.reason,
                 )
                 result = outcome.content
 
@@ -5255,6 +5346,7 @@ class ChatSession:
                             0.0,
                         ) * 1000.0,
                         error_type=_tool_error_type,
+                        reason=tool_reason,
                     )
 
                     if isinstance(result_text, list):
