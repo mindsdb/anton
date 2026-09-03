@@ -437,6 +437,25 @@ async def _handle_remote(
     console.print()
 
 
+def _global_vault():
+    """The global workspace vault (``~/.anton/.env``) — the CLI's identity file.
+
+    Every other ``ANTON_MINDS_API_KEY`` writer targets this file: ``cli.py``'s
+    ``_setup_minds`` / ``_setup_other_provider`` (via ``_onboard``),
+    ``_handle_connect``, ``_handle_remote``, and ``commands/setup.py`` (``/llm``).
+    ``/publish`` was the only writer using the PROJECT vault, and
+    ``_ensure_workspace`` promotes the project vault into ``os.environ`` *before*
+    the global one — so under ``apply_env_to_process``'s only-if-unset rule the
+    minority file became the publish identity while everything else kept using
+    the global one (ENG-1424).
+    """
+    from pathlib import Path as _P
+
+    from anton.workspace import Workspace as _W
+
+    return _W(_P.home())
+
+
 async def _handle_publish(
     console: Console,
     settings,
@@ -484,11 +503,12 @@ async def _handle_publish(
             return
         api_key = api_key.strip()
         settings.minds_api_key = api_key
-        # Key is not persisted yet — wait until publish succeeds to avoid
-        # locking the user out with a bad key on every subsequent /publish call.
-        from pathlib import Path as _P
-        from anton.workspace import Workspace as _W
-        _W(_P.home()).set_secret("ANTON_MINDS_API_KEY", api_key)
+        # Held in memory only until the publish call below returns. Persisting
+        # here wrote a key that had never been near an auth round-trip, so a
+        # typo landed in ~/.anton/.env — and since the 401 handler cleared the
+        # PROJECT vault rather than this one, it was never cleaned up: every
+        # later run found a key present, skipped this prompt, and 401'd
+        # forever. That is STRC-987, re-broken by the eager write removed here.
         console.print()
 
     # 2. Find the HTML file or fullstack artifact to publish
@@ -729,17 +749,21 @@ async def _handle_publish(
             import urllib.error
             if isinstance(e, urllib.error.HTTPError) and e.code == 401:
                 settings.minds_api_key = None
-                if workspace:
-                    workspace.set_secret("ANTON_MINDS_API_KEY", "")
+                # Clear it where it is WRITTEN. Clearing the project vault while
+                # the key lived in the global one is precisely how a rejected
+                # key survived to lock the next session out (ENG-1424).
+                _global_vault().set_secret("ANTON_MINDS_API_KEY", "")
                 console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
             else:
                 console.print(f"  [anton.error]Publish failed: {e}[/]")
             console.print()
             return
 
-    # Persist the key now that we know it works
-    if workspace:
-        workspace.set_secret("ANTON_MINDS_API_KEY", settings.minds_api_key)
+    # Persist the key now that we know it works — to the GLOBAL vault, so the
+    # CLI keeps one identity file instead of a frozen per-project snapshot that
+    # goes stale on the next key rotation and then outranks the current key for
+    # publishing alone (ENG-1424).
+    _global_vault().set_secret("ANTON_MINDS_API_KEY", settings.minds_api_key)
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")

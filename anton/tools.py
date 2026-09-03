@@ -537,7 +537,21 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     title = tc_input.get("title", "Dashboard")
     action = tc_input.get("action", "ask")
 
-    settings = AntonSettings()
+    # Use the SESSION's settings, never a fresh resolve (ENG-1424). Building a
+    # new AntonSettings() here re-reads config after `apply_env_to_process`
+    # (cli.py, `_ensure_workspace`) has copied the project `.anton/.env` into
+    # os.environ — and pydantic-settings ranks os.environ above every
+    # `env_file`. So a second object resolves a DIFFERENT key than the one the
+    # LLM client, /publish and /unpublish were built with, and the session
+    # publishes as one account while `/unpublish` lists another's reports.
+    #
+    # Same getattr+capability shape as `core/session.py` (`_emit_turn_cost`):
+    # `ChatSessionConfig.settings` is typed `CoreSettings | None`, and
+    # `CoreSettings` carries none of the publish fields, so a host that passed
+    # a bare CoreSettings (or no settings) must still fall back.
+    settings = getattr(session, "_settings", None)
+    if settings is None or not hasattr(settings, "minds_api_key"):
+        settings = AntonSettings()
     artifacts_root = Path(settings.artifacts_dir)
 
     # Accept the artifact folder (preferred) or any file inside it. Resolve a

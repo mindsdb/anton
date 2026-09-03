@@ -217,6 +217,68 @@ def _no_browser_windows(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory, monkeypatch):
+    """No test may write to the developer's real home directory.
+
+    Same intent as the analytics kill and ``_no_browser_windows`` above — the
+    suite does not touch the world outside the process — for the last write
+    path that still did. anton addresses its global config vault as
+    ``Workspace(Path.home())`` (``~/.anton/.env``), and several tests reach a
+    writer: ``_handle_publish`` persists the API key there after a successful
+    publish, and onboarding writes ``ANTON_FIRST_RUN_DONE``. Measured on
+    ``origin/staging`` before this fixture, a full run left this in the real
+    ``~/.anton/.env``::
+
+        ANTON_FIRST_RUN_DONE=true
+        ANTON_MINDS_API_KEY=goodkey
+
+    The suite passed while doing it, which is what made it survive: the tests
+    mock the *project* workspace and assert on that mock, so nothing ever
+    looked at the global vault. ``goodkey`` is a 7-character all-letters string
+    — indistinguishable from a user typo once it starts returning 401, and
+    ENG-1424's evidence table recorded exactly such a value on a developer
+    machine as an unexplained invalid key.
+
+    Scope, deliberately narrow, and the two limits are different in kind.
+
+    This patches ``Path.home()`` — how anton addresses the global vault — and
+    does NOT set ``$HOME``, because ``$HOME`` is inherited by the scratchpad
+    subprocesses and by uv/pip, whose caches tests legitimately share. So an
+    in-process write is covered and a write from a CHILD process is not. One
+    such leak survives and is deliberately left for its own change:
+    ``tests/e2e/scenarios/test_boot_config.py`` boots anton through
+    ``tests/e2e/harness.py`` and the child writes ``ANTON_FIRST_RUN_DONE=true``
+    to the real ``~/.anton/.env`` (measured: run that file alone with $HOME
+    pointed at an empty dir and it appears). Fixing it means giving the e2e
+    harness its own HOME, which is a separate call — those children use the
+    real uv cache. This fixture also cannot cover ``expanduser()`` in
+    ``config/settings.py`` — that runs at import time, before any fixture.
+
+    A test that isolated ``$HOME`` for itself wins over this fixture. Several
+    already do (``test_chat_context.py::TestMindsSetupRecovery``) and then
+    assert on files under *their* home; redirecting ``Path.home()`` somewhere
+    else unconditionally broke them. Deferring is also the more honest rule —
+    a test that named its own home meant it.
+
+    Deleting this fixture is caught by tests/test_suite_guards.py.
+    """
+    from pathlib import Path
+
+    ambient = os.environ.get("HOME")
+    fallback = tmp_path_factory.mktemp("home")
+
+    def _home(cls):
+        current = os.environ.get("HOME")
+        if current and current != ambient:
+            # This test set $HOME deliberately — honour it.
+            return Path(current)
+        return fallback
+
+    monkeypatch.setattr(Path, "home", classmethod(_home))
+    return fallback
+
+
+@pytest.fixture(autouse=True)
 def _no_builtin_skills(tmp_path_factory, monkeypatch):
     """Point the built-in skills root at an empty dir for all tests.
 

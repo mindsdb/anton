@@ -8,6 +8,7 @@ local run while CI stays green, because no assertion anywhere depends on it
 """
 from __future__ import annotations
 
+import os
 import webbrowser
 
 import pytest
@@ -34,3 +35,24 @@ def test_browser_guard_is_installed(name):
 # after opening a window. Mutation-verified: with the guard neutered that
 # assertion passes *and* opens a browser, making it both a blind test and an
 # instance of the very problem this file exists to catch.
+
+
+def test_home_guard_is_installed():
+    """`_isolated_home` must have redirected `Path.home()` away from the real one.
+
+    Same rot pattern as the browser guard, and it had already happened: on
+    `origin/staging` a full run wrote `ANTON_MINDS_API_KEY=goodkey` and
+    `ANTON_FIRST_RUN_DONE=true` into the developer's real `~/.anton/.env` and
+    still reported all green, because the publish tests assert on a mocked
+    *project* workspace and nothing ever looked at the global vault (ENG-1424).
+
+    Asserted by provenance, not by writing a file: the failure mode is the
+    write itself, so this has to hold before anything touches disk.
+    """
+    from pathlib import Path
+
+    real_home = os.path.expanduser("~")
+    assert str(Path.home()) != real_home, (
+        "the _isolated_home guard in tests/conftest.py is not armed — "
+        "tests that persist credentials will write to the real ~/.anton/.env"
+    )
