@@ -4695,23 +4695,23 @@ class ChatSession:
                             _model = (getattr(_agent_exc, "model", "") or "") or getattr(
                                 self._llm, "planning_model", ""
                             ) or ""
-                            if _agent_exc.code == "rate_limited":
-                                # An UNCONFIRMED velocity 429 reaches the count
-                                # path (session_backoff=False). It must keep the
-                                # rate-limit code and copy: telling a
-                                # rate-limited user the provider is "having an
-                                # incident" is the mis-report ENG-1537 fixed,
-                                # and buying credits cannot lift a per-minute
-                                # ceiling.
-                                raise ProviderOverloadedError(
-                                    "Too many requests too quickly — this didn't clear after "
-                                    f"{_retry_count} attempts. Waiting a moment and continuing "
-                                    "should work; this isn't a credits problem.",
-                                    provider=getattr(_agent_exc, "provider", "") or "",
-                                    model=_model,
-                                    code="rate_limited",
-                                    retry_after=getattr(_agent_exc, "retry_after", None),
-                                ) from _agent_exc
+                            # NO rate-limit special case here, deliberately.
+                            # A 429 reaching the COUNT path is by definition one
+                            # `classify_transient` could NOT confirm was a
+                            # velocity limit (`session_backoff=velocity_confirmed`),
+                            # and its docstring names that exact population: a
+                            # daily quota in a dialect the string-exact billing
+                            # guards miss (Gemini's RESOURCE_EXHAUSTED) "would
+                            # otherwise spend the whole budget waiting out a
+                            # daily quota that resets at midnight — then be told
+                            # it is not a credits problem." Promising "waiting
+                            # should work" and denying a credits problem is
+                            # precisely that mis-report, on precisely that
+                            # population. It also buys nothing: an unconfirmed
+                            # 429 carries `retry_after=None` (same line), so the
+                            # rate_limited card has no interval to time-gate its
+                            # Retry with. The generic branch below is honest —
+                            # anton's own typed message, no claim either way.
                             # KEEP anton's own classification in the copy. The
                             # typed message already says what happened ("The
                             # model provider returned 500.") and ENG-673 put it
@@ -4760,16 +4760,25 @@ class ChatSession:
                                     "error above. Do NOT suggest rephrasing or simplifying the "
                                     "request unless the error was actually about what was asked; "
                                     "for an infrastructure or provider failure, say plainly that "
-                                    "retrying later is the remedy (ENG-1361).\n"
+                                    "retrying later is the remedy.\n"
                                     "Be concise and helpful."
                                 ),
                             }
                         )
                         try:
                             self._validate_history_for_provider(self._history)
-                            async for event in self._llm.plan_stream(
+                            # ...with_recovery, not the raw call: a history too
+                            # long to SUMMARIZE is the one overflow where
+                            # shrinking it is exactly the remedy, and this is
+                            # the only plan_stream site that lacked it. Without
+                            # it a ContextOverflowError here propagates to a
+                            # card-less generic "An unexpected error occurred."
+                            # — strictly less than the prose it replaced, and on
+                            # the one failure whose fix anton can perform
+                            # itself. A fourth consecutive overflow still
+                            # propagates (ENG-1361 review).
+                            async for event in self.plan_stream_with_recovery(
                                 system=await self._build_system_prompt(user_msg_str),
-                                messages=self._history,
                             ):
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
@@ -4783,22 +4792,30 @@ class ChatSession:
                                 # how "Server returned 403" ended up mid-chat with
                                 # "please rephrase your request" advice.
                                 #
-                                # ENG-1361 inverted this from an allowlist spelled
-                                # out HERE to membership of the set declared beside
-                                # the exception classes themselves. The allowlist
-                                # shape meant every new type was exposed by default
-                                # and someone had to remember; it was missed three
-                                # times, each found by a user in production rather
-                                # than by the suite. Forgetting now means an
-                                # exception PROPAGATES (a generic card — safe)
-                                # rather than becoming prose that tells the user to
-                                # rephrase (harmful).
+                                # ENG-1361 moved the membership list from HERE to
+                                # `provider.py`, beside the classes themselves, so
+                                # a new type is triaged where it is born.
                                 #
-                                # NOTE: not every member has a dedicated card yet —
-                                # EndpointConfigurationError has none server-side,
-                                # so it renders the generic message. Re-raising
-                                # still stops the misleading advice; it just doesn't
-                                # get a *better* card until that mapping exists.
+                                # Be precise about what that does and does NOT buy
+                                # (review of #433): this is STILL an allowlist at
+                                # runtime — an unlisted type still becomes prose.
+                                # The default-safe property comes only from
+                                # `test_every_exception_defined_in_a_provider_module_is_triaged`,
+                                # which is why that test's module list must cover
+                                # every module that defines one of these.
+                                #
+                                # And propagating is not automatically better.
+                                # Four members currently have NO card on either
+                                # transport (ContextOverflowError,
+                                # StructuredOutputError, TransientProviderError,
+                                # EndpointConfigurationError): cowork-server
+                                # replaces the message with a flat "An unexpected
+                                # error occurred." and the client renders a
+                                # BUTTONLESS alert, so for those the turn trades
+                                # anton's own diagnosis for less text. It is still
+                                # the right trade — the prose asserted a remedy
+                                # that could not work — but it is a trade, not a
+                                # free win, and the cards are the follow-up.
                                 raise
                             if _is_provider_auth_error(e):
                                 # Preserve a refusal after failed confirmation,

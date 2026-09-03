@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -33,6 +33,7 @@ from anton.core.llm.provider import (
     StructuredOutputError,
     TokenLimitExceeded,
     TransientProviderError,
+    classify_transient,
     provider_failure_kind,
 )
 from anton.core.session import ChatSessionConfig
@@ -58,9 +59,10 @@ def _unreachable(**kw):
     """The failure from the ENG-1361 incident: request-time, SDK already retried."""
     kw.setdefault("code", "connection_error")
     kw.setdefault("provider", "The model provider")
+    kw.setdefault("model", "latest:sonnet")
     return TransientProviderError(
         "Could not reach the model provider — check your connection or try again in a moment.",
-        session_backoff=False, model="latest:sonnet", **kw,
+        session_backoff=False, **kw,
     )
 
 
@@ -94,8 +96,24 @@ async def test_count_exhausted_transient_raises_the_card_not_prose():
         _ = [e async for e in s.turn_stream("research local AI coding models")]
 
     assert ei.value.code == "provider_overloaded"
-    assert ei.value.model == "latest:sonnet"          # the card names the real model
     assert "rephrase" not in str(ei.value).lower()
+
+
+async def test_the_card_names_the_failing_model_not_the_planning_one():
+    """cowork-server maps this model back to its provider to decide
+    `reconnectable` (responses.py), so mis-attribution suppresses the BYOK
+    failover nudge. The two candidate sources must differ or the assertion is
+    vacuous — which it was until the #433 review."""
+    s = _session()                      # planning_model = latest:sonnet
+    s._stream_and_handle_tools = _always_raise(
+        lambda: _unreachable(model="latest:haiku")   # the CODING model failed
+    )
+    s._llm.plan_stream = _summarize_raises(_unreachable)
+
+    with pytest.raises(ProviderOverloadedError) as ei:
+        _ = [e async for e in s.turn_stream("do it")]
+
+    assert ei.value.model == "latest:haiku"   # not the session's planning model
 
 
 async def test_the_card_terminal_does_not_need_the_summarize_call_to_fail():
@@ -114,22 +132,28 @@ async def test_the_card_terminal_does_not_need_the_summarize_call_to_fail():
         _ = [e async for e in s.turn_stream("do it")]
 
 
-async def test_an_unconfirmed_429_keeps_the_rate_limit_code_and_copy():
-    """A velocity 429 the gateway didn't confirm reaches the COUNT path. Carding
-    it as an "incident" is the ENG-1537 mis-report; it must keep rate_limited."""
+async def test_an_unconfirmed_429_makes_no_claim_about_credits_or_waiting():
+    """A 429 on the COUNT path is one `classify_transient` could NOT confirm was
+    a velocity limit — the population its docstring warns about, where a daily
+    quota in an unrecognised dialect "would otherwise spend the whole budget
+    waiting out a daily quota that resets at midnight — then be told it is not a
+    credits problem." So this branch must promise nothing about waiting and deny
+    nothing about credits. Guards against reintroducing that copy (#433 review)."""
     s = _session()
     s._stream_and_handle_tools = _always_raise(
-        lambda: _unreachable(code="rate_limited", retry_after=None)
+        lambda: _unreachable(code="rate_limited", status_code=429)
     )
     s._llm.plan_stream = _summarize_raises(lambda: _unreachable(code="rate_limited"))
 
     with pytest.raises(ProviderOverloadedError) as ei:
         _ = [e async for e in s.turn_stream("do it")]
 
-    assert ei.value.code == "rate_limited"
     body = str(ei.value).lower()
-    assert "incident" not in body          # nothing is broken
-    assert "credits" in body               # ...and it is explicitly not a credits problem
+    assert "credits" not in body      # we do not know that it isn't one
+    assert "should work" not in body  # nor that waiting will help
+    assert "incident" not in body     # nor that anything is broken
+    # Falls to the generic branch, so the card is the plain overloaded one.
+    assert ei.value.code == "provider_overloaded"
 
 
 async def test_the_card_keeps_antons_own_classification():
@@ -272,24 +296,31 @@ async def test_an_uncurated_error_still_becomes_prose_without_rephrase_advice():
 _DELIBERATELY_UNCURATED: frozenset[str] = frozenset()
 
 
-def test_every_exception_defined_in_provider_is_triaged():
+def test_every_exception_defined_in_a_provider_module_is_triaged():
     """Fails on the NEXT exception class, at authoring time.
 
-    Scoped to classes DEFINED in `provider.py` (`__module__` check) — imported
-    exceptions belong to their own modules' hierarchies and are not this set's
-    to police.
+    Covers EVERY module that defines a provider-facing exception, not just
+    `provider.py` — scoping it to one file was the gap found reviewing #433:
+    adding `class ProviderRegionBlockedError(ConnectionError)` to `openai.py`
+    left the whole suite green and the type uncurated, which is exactly the
+    drift this test exists to stop. The `__module__` check keeps each module
+    responsible only for what it defines, so an import doesn't double-count.
     """
+    from anton.core.llm import anthropic as anthropic_mod
+    from anton.core.llm import openai as openai_mod
+
     defined = {
         name
-        for name, obj in vars(provider_mod).items()
+        for mod in (provider_mod, openai_mod, anthropic_mod)
+        for name, obj in vars(mod).items()
         if inspect.isclass(obj)
         and issubclass(obj, BaseException)
-        and obj.__module__ == provider_mod.__name__
+        and obj.__module__ == mod.__name__
     }
     curated = {t.__name__ for t in CURATED_PROVIDER_ERRORS}
     assert defined == curated | _DELIBERATELY_UNCURATED, (
-        "New exception class in provider.py — add it to CURATED_PROVIDER_ERRORS, "
-        "or to _DELIBERATELY_UNCURATED with a reason."
+        "New exception class in a provider module — add it to "
+        "CURATED_PROVIDER_ERRORS, or to _DELIBERATELY_UNCURATED with a reason."
     )
 
 
@@ -299,6 +330,29 @@ def test_builtin_connectionerror_is_not_curated():
     catch-all is ENG-1283."""
     assert ConnectionError not in CURATED_PROVIDER_ERRORS
     assert not isinstance(ConnectionError("boom"), CURATED_PROVIDER_ERRORS)
+
+
+# --------------------------------------------------------------------------- #
+# classify_transient must PLUMB the status, not just accept one
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    "status,body,expected",
+    [
+        (503, {}, 503),                                              # 5xx branch
+        (503, {"error": {"type": "service_unavailable"}}, 503),       # body-type branch
+        (429, {}, 429),                                              # rate-limit branch
+        (200, {"error": {"type": "overloaded_error"}}, 200),          # mid-stream
+    ],
+)
+def test_classify_transient_carries_the_status_it_classified_from(status, body, expected):
+    """`provider_failure_kind`/`provider_http_status` have exactly one production
+    writer — this function. Every field test above hand-builds the exception, so
+    a mutant deleting the plumbing survived the whole suite until the #433
+    review, and `test_status_error_mapper.py` never asserts `.status_code`."""
+    exc = classify_transient(status, body, provider="p", model="m")
+    assert exc is not None
+    assert exc.status_code == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -484,6 +538,53 @@ async def test_a_stop_after_a_retry_terminal_books_no_terminal_reason():
     assert k["retry_terminal_reason"] == ""
     assert k["provider_failure_kind"] == ""
     assert "provider_http_status" not in k
+
+
+async def test_the_summarize_prompt_does_not_teach_the_model_to_say_rephrase():
+    """Half of fix 3, and the half that governs the path SURVIVING this change:
+    a non-transient failure still summarizes, and the model writes that reply.
+    If the SYSTEM prompt asks for "rephrase / simplify", the advice comes back
+    out of the model's mouth instead of the template's. Untested until the #433
+    review."""
+    s = _session()
+
+    class _Boom(Exception):
+        pass
+
+    s._stream_and_handle_tools = _always_raise(lambda: _Boom("nope"))
+
+    async def _summarize_succeeds(*a, **kw):
+        yield StreamTextDelta(text="ok")
+
+    s._llm.plan_stream = _summarize_succeeds
+    _ = [e async for e in s.turn_stream("do it")]
+
+    prompt = json.dumps(s._history).lower()
+    assert "the task has failed" in prompt          # we did reach the wrap-up
+    assert "rephrase" not in prompt
+    assert "simplify the request" not in prompt
+
+
+async def test_the_rate_limit_wait_budget_terminal_is_labelled():
+    """The one row of the five-terminal table with no telemetry test."""
+    s = _session()
+    s._rate_limit_budget_s = 0.05
+    s._stream_and_handle_tools = _always_raise(
+        lambda: TransientProviderError(
+            "rate-limiting requests", provider="MindsHub", code="rate_limited",
+            session_backoff=True, model="latest:sonnet", status_code=429,
+        )
+    )
+    s._backoff_sleep = AsyncMock(return_value=False)
+
+    with patch("anton.analytics.send_event") as send:
+        with pytest.raises(ProviderOverloadedError):
+            _ = [e async for e in s.turn_stream("do it")]
+
+    k = _fields(send)
+    assert k["retry_terminal_reason"] == "rate_limit_wait_limit"
+    assert k["provider_failure_kind"] == "rate_limit"
+    assert k["provider_http_status"] == "429"
 
 
 async def test_a_turn_that_never_retried_leaves_the_fields_empty():
