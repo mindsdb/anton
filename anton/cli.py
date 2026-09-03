@@ -407,6 +407,62 @@ def _get_settings(ctx: typer.Context):
     return ctx.obj["settings"]
 
 
+def _reconcile_publish_identity(settings) -> bool:
+    """Collapse a legacy project-vault MindsHub key into the global vault.
+
+    The CLI has ONE publish identity, in ``~/.anton/.env`` (ENG-1424). Before
+    that decision, ``/publish`` persisted the key into ``<project>/.anton/.env``
+    on every success, so machines in the wild carry a copy in every project
+    folder ever published from. Those copies matter even though nothing writes
+    them any more, because ``_ensure_workspace`` below promotes the project
+    vault into ``os.environ`` — above every config file — where the stale key
+    still reaches the scratchpad subprocess (``core/backends/scratchpad_boot``),
+    the ``ANTON_MINDS_API_KEY`` → ``OPENAI_API_KEY`` fallback in
+    ``core/backends/local``, and any mid-turn settings rebuild. Simply removing
+    the writer left them promoted forever, where the old code at least
+    rewrote them with the live key on each publish.
+
+    So reconcile once, at boot, before any promotion:
+
+    * global vault empty → move the project key up into it. This is also what
+      makes ``anton --folder <dir>`` work: ``_build_env_files`` is evaluated at
+      import time against ``Path.cwd()``, so a ``-f`` target's vault is not in
+      the settings chain at all and its key would otherwise be invisible.
+    * global vault already set → the project copy is redundant; drop it.
+
+    Returns True when the on-disk state changed, so the caller re-resolves
+    settings (the migrated key only enters the chain via ``~/.anton/.env``).
+    """
+    from anton.workspace import Workspace
+
+    project_path = Path(settings.workspace_path)
+    if project_path == Path.home():
+        return False  # same file — nothing to reconcile
+
+    project_ws = Workspace(project_path, settings=settings)
+    project_key = project_ws.get_secret("ANTON_MINDS_API_KEY")
+    if not project_key:
+        return False
+
+    global_ws = Workspace(Path.home(), settings=settings)
+    had_global = bool(global_ws.get_secret("ANTON_MINDS_API_KEY"))
+
+    project_ws.remove_secret("ANTON_MINDS_API_KEY")
+    if not had_global:
+        global_ws.set_secret("ANTON_MINDS_API_KEY", project_key)
+
+    # Say so. This can change which account publishes (that is the point of
+    # collapsing to one identity), and a silent identity change is the exact
+    # failure ENG-1424 is about.
+    console.print(
+        "[anton.muted]  Moved this project's saved publish key to ~/.anton/.env[/]"
+        if not had_global
+        else "[anton.muted]  Removed a stale publish key from this project; "
+        "using the one in ~/.anton/.env[/]"
+    )
+    return True
+
+
 def _ensure_workspace(settings) -> None:
     """Check workspace state and initialize if needed.
 
@@ -453,6 +509,12 @@ def main(
 
     settings = AntonSettings()
     settings.resolve_workspace(folder)
+
+    # Must run before anything reads a key off `settings`, and before
+    # `_ensure_workspace` promotes the project vault into os.environ.
+    if _reconcile_publish_identity(settings):
+        settings = AntonSettings()
+        settings.resolve_workspace(folder)
 
     if not settings.terms_consent:
         _ensure_terms_consent(console, settings)

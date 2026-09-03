@@ -125,6 +125,12 @@ os.environ["ANTON_ANALYTICS_ENABLED"] = "false"
 os.environ["ANTON_ANALYTICS_URL"] = ""
 os.environ["ANTON_POSTHOG_KEY"] = ""
 
+#: The developer's real home, captured at import — before `_no_real_home` below
+#: redirects both `Path.home()` and `$HOME`. Tests that must prove the suite did
+#: not touch the real machine compare against this; after the fixture is armed
+#: there is no other way to name it.
+REAL_HOME = os.path.expanduser("~")
+
 
 def make_mock_llm() -> AsyncMock:
     """Return an AsyncMock LLM client with coding_provider configured for sync use.
@@ -216,8 +222,21 @@ def _no_browser_windows(monkeypatch):
         monkeypatch.setattr(webbrowser, name, lambda *a, **kw: True)
 
 
+@pytest.fixture(scope="session")
+def _suite_home(tmp_path_factory):
+    """One isolated home for the whole run.
+
+    Session-scoped on purpose. A fresh directory per test gave every e2e
+    subprocess a virgin home to first-run into and took the suite from 193s to
+    425s; the e2e scenarios are the entire cost. Sharing one home is also no
+    more coupled than what the suite did before, which was to share the
+    developer's real home — it is the same sharing, minus the real credentials.
+    """
+    return tmp_path_factory.mktemp("suite-home")
+
+
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path_factory, monkeypatch):
+def _no_real_home(_suite_home, monkeypatch):
     """No test may write to the developer's real home directory.
 
     Same intent as the analytics kill and ``_no_browser_windows`` above — the
@@ -239,33 +258,42 @@ def _isolated_home(tmp_path_factory, monkeypatch):
     ENG-1424's evidence table recorded exactly such a value on a developer
     machine as an unexplained invalid key.
 
-    Scope, deliberately narrow, and the two limits are different in kind.
+    Covers both idioms and both process boundaries. `Path.home()` is patched
+    for anton's `Workspace(Path.home())` form, and `$HOME` is redirected for
+    the `Path("~/...").expanduser()` form — which is the more common one in
+    this codebase (20+ call sites) and the one a `Path.home()`-only guard
+    silently missed. Redirecting `$HOME` also reaches CHILD processes, which is
+    what closes the last leak: `tests/e2e/scenarios/test_boot_config.py` boots
+    anton through `tests/e2e/harness.py`, and that child was writing
+    `ANTON_FIRST_RUN_DONE=true` to the real `~/.anton/.env`.
 
-    This patches ``Path.home()`` — how anton addresses the global vault — and
-    does NOT set ``$HOME``, because ``$HOME`` is inherited by the scratchpad
-    subprocesses and by uv/pip, whose caches tests legitimately share. So an
-    in-process write is covered and a write from a CHILD process is not. One
-    such leak survives and is deliberately left for its own change:
-    ``tests/e2e/scenarios/test_boot_config.py`` boots anton through
-    ``tests/e2e/harness.py`` and the child writes ``ANTON_FIRST_RUN_DONE=true``
-    to the real ``~/.anton/.env`` (measured: run that file alone with $HOME
-    pointed at an empty dir and it appears). Fixing it means giving the e2e
-    harness its own HOME, which is a separate call — those children use the
-    real uv cache. This fixture also cannot cover ``expanduser()`` in
-    ``config/settings.py`` — that runs at import time, before any fixture.
+    `UV_CACHE_DIR` / `PIP_CACHE_DIR` / `XDG_CACHE_HOME` are pointed back at the
+    real home so package caches survive the redirect. Not cosmetic: without the
+    session-scoped home below the suite went 193s -> 425s, and the whole cost
+    was e2e subprocesses first-running into a virgin home.
 
-    A test that isolated ``$HOME`` for itself wins over this fixture. Several
-    already do (``test_chat_context.py::TestMindsSetupRecovery``) and then
-    assert on files under *their* home; redirecting ``Path.home()`` somewhere
-    else unconditionally broke them. Deferring is also the more honest rule —
-    a test that named its own home meant it.
+    It cannot cover `expanduser()` inside `config/settings.py::_build_env_files`,
+    which is evaluated at import time, before any fixture exists.
+
+    A test that isolated `$HOME` for itself still wins over this fixture.
+    Several do (`test_chat_context.py::TestMindsSetupRecovery`) and then assert
+    on files under *their* home; redirecting `Path.home()` somewhere else
+    unconditionally broke them. Deferring is also the more honest rule — a test
+    that named its own home meant it.
+
+    Named `_no_real_home`, not `_isolated_home`: tests/test_build_chat_session_google_drive.py
+    already defines a module-level autouse fixture with the latter name, and a
+    module-level fixture SHADOWS a conftest one of the same name — this guard
+    would have been silently switched off for that whole module, with
+    test_suite_guards.py unable to see it (it asserts inside its own module,
+    where no shadow exists).
 
     Deleting this fixture is caught by tests/test_suite_guards.py.
     """
     from pathlib import Path
 
     ambient = os.environ.get("HOME")
-    fallback = tmp_path_factory.mktemp("home")
+    fallback = _suite_home
 
     def _home(cls):
         current = os.environ.get("HOME")
@@ -275,6 +303,19 @@ def _isolated_home(tmp_path_factory, monkeypatch):
         return fallback
 
     monkeypatch.setattr(Path, "home", classmethod(_home))
+    monkeypatch.setenv("HOME", str(fallback))
+
+    # Keep the package caches on the real home. Redirecting $HOME alone moved
+    # uv and pip onto a cold cache for every scratchpad/venv subprocess test
+    # and took the suite from 193s to 425s; these three put the caches back
+    # without putting the credential files back. Only set when the developer
+    # has not already chosen a location.
+    for var, rel in (("UV_CACHE_DIR", ".cache/uv"),
+                     ("PIP_CACHE_DIR", ".cache/pip"),
+                     ("XDG_CACHE_HOME", ".cache")):
+        if not os.environ.get(var) and ambient:
+            monkeypatch.setenv(var, str(Path(ambient) / rel))
+
     return fallback
 
 

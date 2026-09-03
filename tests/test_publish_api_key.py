@@ -21,9 +21,9 @@ import pytest
 
 
 @pytest.fixture
-def home(_isolated_home):
+def home(_no_real_home):
     """The isolated home from conftest, named for readability in the asserts."""
-    return _isolated_home
+    return _no_real_home
 
 
 def _global_vault_text(home: Path) -> str:
@@ -195,14 +195,24 @@ async def test_successful_publish_persists_key_to_global_vault(tmp_path, home):
 
 
 @pytest.mark.asyncio
-async def test_401_with_existing_key_clears_it(tmp_path, home):
-    """If a bad key was already saved (e.g. from a previous failed attempt),
-    a new 401 clears it so /publish re-prompts next time."""
+async def test_401_clears_a_key_that_is_already_on_disk(tmp_path, home):
+    """A rejected key must be REMOVED from the global vault, not just from memory.
+
+    This is the test that pins the 401-clear. The other 401 tests cannot: with
+    the eager pre-validation write gone, nothing has written the key by the
+    time they assert, so "the key is absent" holds even if the clear is deleted
+    outright — verified by mutation (delete the clear, whole suite still green).
+    Pre-seeding the vault is what makes the assertion load-bearing: it is on
+    disk before the call, so only the clear can remove it.
+    """
     from anton.chat import _handle_publish
+    from anton.workspace import Workspace
+
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "stale-bad-key")
+    assert "stale-bad-key" in _global_vault_text(home)  # precondition
 
     html = _make_html_file(tmp_path)
     settings = _make_settings(tmp_path, api_key="stale-bad-key")
-    console = _make_console()
 
     with (
         # /publish now asks for an access mode before publishing; the key is
@@ -210,22 +220,63 @@ async def test_401_with_existing_key_clears_it(tmp_path, home):
         patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
         patch("anton.publisher.publish", side_effect=_http_401()),
     ):
-        await _handle_publish(console, settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
 
     assert settings.minds_api_key is None
     assert "stale-bad-key" not in _global_vault_text(home)
 
 
 @pytest.mark.asyncio
-async def test_publish_never_writes_outside_the_isolated_home(tmp_path, home):
-    """The suite itself must not touch the developer's real ~/.anton/.env.
+async def test_a_key_from_config_is_not_copied_into_the_global_vault(tmp_path, home):
+    """Only a key typed at this prompt is ours to persist.
 
-    This ran for months: the tests mocked the project workspace but not
-    Path.home(), so the eager write persisted a 7-character all-letters key
-    ("goodkey") into the real global vault on every run — indistinguishable
-    from a user typo when it later 401'd.
+    A key that arrived from an existing config file (``~/.cowork/.env``, written
+    by the desktop app) already has an owner. Copying it into ``~/.anton/.env``
+    creates a second, unmanaged copy that no sign-out path in any repo scrubs —
+    cowork's Sign out clears ``~/.cowork/.env`` only — so signing out of the
+    desktop would leave a live credential behind and the CLI would keep
+    publishing as the account the user just left.
     """
     from anton.chat import _handle_publish
+
+    html = _make_html_file(tmp_path)
+    settings = _make_settings(tmp_path, api_key="key-owned-by-the-desktop-app")
+
+    with (
+        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
+        patch("anton.publisher.publish", return_value={
+            "view_url": "u", "report_id": "r", "md5": "m", "version": 1, "unchanged": False,
+        }),
+        patch("webbrowser.open"),
+    ):
+        await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
+
+    assert "key-owned-by-the-desktop-app" not in _global_vault_text(home)
+
+
+@pytest.mark.asyncio
+async def test_publish_never_writes_the_real_home(tmp_path, home):
+    """The suite itself must not touch the developer's real ~/.anton/.env.
+
+    This ran for months: the tests mocked the project workspace but not the
+    home directory, so the eager write persisted a 7-character all-letters key
+    ("goodkey") into the real global vault on every run — indistinguishable
+    from a user typo when it later 401'd.
+
+    Asserts ABSENCE at the developer's real path, not presence at the fake one.
+    An earlier version checked ``home in (home / ".anton" / ".env").parents``,
+    which is true for every possible value of ``home`` and so tested nothing.
+
+    ``REAL_HOME`` is captured at conftest import, before the fixture redirects
+    ``$HOME`` — once it is armed there is no other way to name the real home,
+    and ``expanduser("~")`` here would resolve to the isolated one and make the
+    assertion vacuous a second time.
+    """
+    from anton.chat import _handle_publish
+    from tests.conftest import REAL_HOME
+
+    real_vault = Path(REAL_HOME) / ".anton" / ".env"
+    before = real_vault.read_bytes() if real_vault.is_file() else None
 
     html = _make_html_file(tmp_path)
     settings = _make_settings(tmp_path, api_key=None)
@@ -239,6 +290,7 @@ async def test_publish_never_writes_outside_the_isolated_home(tmp_path, home):
     ):
         await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
 
-    # Everything written must live under the isolated home, never the real one.
-    assert (home / ".anton" / ".env").is_file()
-    assert home in (home / ".anton" / ".env").parents
+    after = real_vault.read_bytes() if real_vault.is_file() else None
+    assert after == before, f"the real {real_vault} was modified by the test suite"
+    # ...and the write did land, in the isolated home.
+    assert "ANTON_MINDS_API_KEY=goodkey" in _global_vault_text(home)

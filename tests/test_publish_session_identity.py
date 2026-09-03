@@ -144,29 +144,45 @@ async def test_bare_core_settings_falls_back_too(tmp_path, monkeypatch):
     assert fake_publish.call_args.kwargs["api_key"] == "KEY_FROM_FALLBACK"
 
 
-def test_cli_is_the_only_surface_using_antons_publish_handler():
-    """Containment guard for the ENG-1424 fix.
+def test_antons_own_publish_tool_still_routes_to_the_session_aware_handler():
+    """Half of the containment story — the half a test in THIS repo can hold.
 
-    The fix changes `handle_publish_or_preview` only. That is safe because the
-    CLI is the sole surface that registers it:
+    `DEFAULT_SESSION_TOOLS` is what the CLI registers, so this pins that the
+    CLI's `publish_or_preview` really is the handler the ENG-1424 fix changed
+    (and not, say, a wrapper that re-resolves settings on the way in).
 
-      * desktop  — cowork-server's harness rebinds PUBLISH_TOOL to
-        `build_cowork_publish_tool()`, whose handler reads the settings DB;
-      * web/pod  — `cloud_turn/session.py` builds the session with `tools=[]`
-        plus CLOUD_TOOL_ALLOWLIST, so no host publish tool exists.
-
-    If anton's own handler is ever wired into another surface, that is a
-    deliberate decision about which identity publishes there — this test should
-    fail and force it to be made explicitly.
+    What it deliberately does NOT prove — the earlier docstring claimed it did:
+    that no OTHER surface registers anton's handler. Both other surfaces build
+    their tool list in a different repo or a different module, so a foreign
+    registrant is structurally invisible from here. That containment is
+    asserted where it actually lives:
+      * desktop — cowork-server's `harnesses/anton_harness/harness.py` rebinds
+        PUBLISH_TOOL to `build_cowork_publish_tool()`; its guard belongs in
+        cowork-server's suite, not this one;
+      * web/pod — covered by the allowlist test below, which CAN see it because
+        the pod's tool policy lives in this repo.
     """
     publish_tools = [t for t in tools.DEFAULT_SESSION_TOOLS if t.name == "publish_or_preview"]
     assert len(publish_tools) == 1
     assert publish_tools[0].handler is tools.handle_publish_or_preview
 
 
-def test_cloud_turn_registers_no_publish_tool():
-    """The hosted pod must not expose a host publish tool (ENG-1424 containment)."""
-    src = Path(tools.__file__).with_name("cloud_turn") / "session.py"
-    text = src.read_text()
-    assert "tools=[]" in text, "cloud turn no longer builds with an empty host tool list"
-    assert "publish_or_preview" not in text
+def test_cloud_turn_allowlist_excludes_the_publish_tool():
+    """The hosted pod must not expose a host publish tool (ENG-1424 containment).
+
+    Asserted against the real allowlist object, not the source text. An earlier
+    version grepped session.py for the literal `tools=[]`, which failed both
+    ways: it would false-alarm on a behaviour-preserving refactor (`tools=list()`,
+    or the list moved to a constant), and it would pass while the pod actually
+    registered the tool, because the string it required is unrelated to the tool
+    policy it claimed to check.
+
+    `CLOUD_TOOL_ALLOWLIST` is the real gate — `cloud_turn/session.py` passes it
+    as `tool_allowlist=`, and core drops every tool whose name is absent from it.
+    """
+    from anton.cloud_turn.session import CLOUD_TOOL_ALLOWLIST
+
+    assert "publish_or_preview" not in CLOUD_TOOL_ALLOWLIST
+    # The allowlist is only a containment guarantee if it is actually a closed
+    # set — an empty or absent one would let everything through.
+    assert CLOUD_TOOL_ALLOWLIST, "the cloud allowlist is empty — nothing is contained"

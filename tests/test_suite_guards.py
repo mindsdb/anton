@@ -38,7 +38,7 @@ def test_browser_guard_is_installed(name):
 
 
 def test_home_guard_is_installed():
-    """`_isolated_home` must have redirected `Path.home()` away from the real one.
+    """`_no_real_home` must have redirected `Path.home()` away from the real one.
 
     Same rot pattern as the browser guard, and it had already happened: on
     `origin/staging` a full run wrote `ANTON_MINDS_API_KEY=goodkey` and
@@ -51,8 +51,13 @@ def test_home_guard_is_installed():
     """
     from pathlib import Path
 
-    real_home = os.path.expanduser("~")
-    assert str(Path.home()) != real_home, (
-        "the _isolated_home guard in tests/conftest.py is not armed — "
+    from tests.conftest import REAL_HOME
+
+    assert str(Path.home()) != REAL_HOME, (
+        "the _no_real_home guard in tests/conftest.py is not armed — "
         "tests that persist credentials will write to the real ~/.anton/.env"
+    )
+    assert os.environ.get("HOME") != REAL_HOME, (
+        "the _no_real_home guard redirects Path.home() but not $HOME — every "
+        "expanduser('~') writer, and every child process, still hits the real home"
     )

@@ -229,7 +229,17 @@ class Workspace:
 
         The value is written directly to the .env file, and the
         environment variable is set in the current process.
+
+        The value must be single-line. Every caller writes user-supplied input
+        straight through — a pasted "API key" containing a newline would append
+        arbitrary further ``ANTON_*`` settings to the file, which is a config
+        injection with no legitimate use (no key, URL or model name contains a
+        newline). Rejected rather than escaped, so the caller reports it to the
+        user instead of silently persisting half a credential.
         """
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"{key} must not contain a newline")
+
         self._anton_dir.mkdir(parents=True, exist_ok=True)
 
         # Read existing lines

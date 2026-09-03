@@ -456,6 +456,26 @@ def _global_vault():
     return _W(_P.home())
 
 
+def _persist_key_best_effort(console, value: str, *, what: str) -> None:
+    """Write the publish key to the global vault, never at the cost of the turn.
+
+    Persistence is bookkeeping; the publish already succeeded (or already
+    failed). An unwritable ``$HOME`` — a container run as a uid with no home,
+    a read-only mount — used to be impossible to hit here because the write
+    went to ``<cwd>/.anton``, which the CLI had just created itself. Against
+    ``~/.anton`` it is reachable, and an escaping OSError would take out the
+    whole turn: nothing between here and ``_chat_loop``'s ``except
+    KeyboardInterrupt`` catches it, so the user would lose the success message
+    AND the view URL, and ``.published.json`` further down would never record
+    the report id — making the next /publish create a duplicate report instead
+    of updating this one.
+    """
+    try:
+        _global_vault().set_secret("ANTON_MINDS_API_KEY", value)
+    except (OSError, ValueError) as exc:
+        console.print(f"  [anton.warning]Could not {what} in ~/.anton/.env: {exc}[/]")
+
+
 async def _handle_publish(
     console: Console,
     settings,
@@ -475,6 +495,8 @@ async def _handle_publish(
     from anton.publisher import publish
 
     console.print()
+
+    key_entered_this_session = False
 
     # 1. Ensure Minds API key is available
     if not settings.minds_api_key:
@@ -503,6 +525,13 @@ async def _handle_publish(
             return
         api_key = api_key.strip()
         settings.minds_api_key = api_key
+        # Only a key the user typed here is ours to persist. One that arrived
+        # from an existing config file already has an owner — copying it into
+        # ~/.anton/.env creates a second, unmanaged copy that no sign-out path
+        # in any repo scrubs (cowork's Sign out clears ~/.cowork/.env only), so
+        # the desktop user who signs out would leave a live credential behind
+        # and the CLI would keep publishing as the account they just left.
+        key_entered_this_session = True
         # Held in memory only until the publish call below returns. Persisting
         # here wrote a key that had never been near an auth round-trip, so a
         # typo landed in ~/.anton/.env — and since the 401 handler cleared the
@@ -752,7 +781,7 @@ async def _handle_publish(
                 # Clear it where it is WRITTEN. Clearing the project vault while
                 # the key lived in the global one is precisely how a rejected
                 # key survived to lock the next session out (ENG-1424).
-                _global_vault().set_secret("ANTON_MINDS_API_KEY", "")
+                _persist_key_best_effort(console, "", what="clear the rejected key")
                 console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
             else:
                 console.print(f"  [anton.error]Publish failed: {e}[/]")
@@ -762,8 +791,12 @@ async def _handle_publish(
     # Persist the key now that we know it works — to the GLOBAL vault, so the
     # CLI keeps one identity file instead of a frozen per-project snapshot that
     # goes stale on the next key rotation and then outranks the current key for
-    # publishing alone (ENG-1424).
-    _global_vault().set_secret("ANTON_MINDS_API_KEY", settings.minds_api_key)
+    # publishing alone (ENG-1424). Only if the user typed it here: see the note
+    # at the prompt above.
+    if key_entered_this_session:
+        _persist_key_best_effort(
+            console, settings.minds_api_key, what="save your API key"
+        )
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")
