@@ -142,17 +142,33 @@ _SENTINEL_REASONS = {
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own
     # bad argument, not an environment wall (ENG-1635).
     "package_install_rejected": (TIER_SELF, "invalid_argument"),
+    # `read_image`, ENG-2248: both are the agent's own file choice, and both
+    # messages tell it what to do instead (use a real image / resize).
+    "not_an_image": (TIER_SELF, "invalid_argument"),
+    "image_too_large": (TIER_SELF, "invalid_argument"),
     # The agent named something that does not exist. Ambiguous — it could be a
     # genuinely absent resource — but the agent chose the identifier and can
     # list the real ones, so it resolves to the non-tripping side.
     "artifact_not_found": (TIER_SELF, "unknown_resource"),
     "unknown_datasource": (TIER_SELF, "unknown_resource"),
+    # Same shape for a path: `read_image` reports the file the agent named as
+    # absent. Genuinely absent files exist, but the agent supplied the path and
+    # can list the directory, so it resolves to the non-tripping side.
+    "missing_file": (TIER_SELF, "unknown_resource"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
     "store_unavailable": (TIER_WALL, "service_unavailable"),
     # Could be environment or config and the sentinel does not say which, so it
     # stays out of every trip rung until something distinguishes them.
     "launch_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `read_image`'s catch-all read failure wraps a bare `except Exception`, so
+    # one sentinel covers a permissions wall, a corrupt file the agent itself
+    # wrote, and a decode bug. Nothing here distinguishes them, so it stays out
+    # of every trip rung (ENG-2248).
+    "read_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
+    # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
+    "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
 }
 
 # Identifier extraction, per class. Kept narrow on purpose: a wrong identifier
