@@ -1741,7 +1741,7 @@ def test_data_source(
     scratchpads = _build_scratchpad_manager(settings)
 
     async def _run() -> None:
-        await _handle_test_datasource(console, scratchpads, name)
+        await handle_test_datasource(console, scratchpads, name)
         await scratchpads.close_all()
 
     _run_and_close(_run())
