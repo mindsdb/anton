@@ -40,6 +40,7 @@ from anton.core.llm.prompts import (
     SCRATCHPAD_TIMEOUT_NUDGE,
 )
 from anton.core.llm.provider import (
+    CURATED_PROVIDER_ERRORS,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
@@ -59,6 +60,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.thalamus import (
@@ -707,6 +709,33 @@ def _verifier_error_type(exc: BaseException | None) -> str:
     if isinstance(exc, StructuredOutputError):
         return name + (":unusable_call" if exc.reached_tool_call else ":no_call")
     return name
+
+
+def _stamp_retry_terminal(
+    tc: "TurnCost | None", exc: BaseException, reason: str
+) -> None:
+    """Record WHY the retry flow terminated, plus the provider failure behind it.
+
+    Called immediately before each terminal raise so the books carry the split
+    that `ended_by` and `error_type` cannot express: after ENG-1361 the
+    request-time and mid-stream terminals raise the SAME
+    ``ProviderOverloadedError``, and the ``code`` that separates the rate-limit
+    case is a card contract that never reaches analytics.
+
+    Reads the ORIGINATING exception, not the one about to be raised — the
+    conversion to ``ProviderOverloadedError`` is exactly where the cause would
+    otherwise be lost. Never raises: it runs on the failure path, where an
+    escape would turn a handled failure into a dead turn.
+    """
+    if tc is None:
+        return
+    try:
+        tc.retry_terminal_reason = reason
+        tc.provider_failure_kind = provider_failure_kind(getattr(exc, "code", None))
+        status = getattr(exc, "status_code", None)
+        tc.provider_http_status = status if isinstance(status, int) else None
+    except Exception:  # pragma: no cover - defensive
+        pass
 
 
 def _is_provider_auth_error(exc: BaseException) -> bool:
@@ -2912,6 +2941,12 @@ class ChatSession:
             # not exotic. Leaving the stale value would let plain Stops appear
             # in an error-cause breakdown, which is the opposite of the point.
             tc.error_type = ""
+            # Same reasoning for ENG-1361's fields, and the same site stamps
+            # them: a Stop during the summarize call would otherwise book a
+            # retry terminal that the turn never actually reached.
+            tc.retry_terminal_reason = ""
+            tc.provider_failure_kind = ""
+            tc.provider_http_status = None
         elif exc is not None:
             tc.ended_by = "error"
             # The exception was in scope here and thrown away until ENG-1689,
@@ -3070,6 +3105,26 @@ class ChatSession:
                 # `TurnCost.verifier_failure`.
                 verifier_failure=tc.verifier_failure,
                 verifier_error_type=tc.verifier_error_type,
+                # WHY the retry flow terminated + WHAT failed underneath
+                # (ENG-1361). `ended_by`/`error_type` cannot express either:
+                # the request-time and mid-stream terminals now raise the same
+                # ProviderOverloadedError, and the `code` that splits the
+                # rate-limit case is a card contract, not analytics. Empty
+                # strings for turns that did not retry, consistent with every
+                # other unset string property here.
+                retry_terminal_reason=tc.retry_terminal_reason,
+                provider_failure_kind=tc.provider_failure_kind,
+                # `provider_http_status` is OMITTED rather than sent blank when
+                # there was no status (a mid-stream failure carried a 200; a
+                # connection error had no response at all). The transport is
+                # string-typed, so a placeholder would have to be "" — which
+                # sorts and groups alongside real statuses and makes the column
+                # unusable. Absent is the honest encoding of absent.
+                **(
+                    {"provider_http_status": str(tc.provider_http_status)}
+                    if tc.provider_http_status is not None
+                    else {}
+                ),
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -4473,6 +4528,9 @@ class ChatSession:
                         # decide it for them by stalling the turn.
                         _hint = getattr(_agent_exc, "retry_after", None)
                         if _rate_limited and _hint is not None and _hint > max_delay:
+                            _stamp_retry_terminal(
+                                self._turn_cost, _agent_exc, "rate_limit_wait_too_long"
+                            )
                             raise ProviderOverloadedError(
                                 "Too many requests too quickly — the limit clears in about "
                                 f"{int(_hint)}s. This isn't a credits problem.",
@@ -4531,6 +4589,9 @@ class ChatSession:
                             # one. Never say "incident": nothing is broken, and
                             # never imply credits — buying more cannot raise a
                             # per-minute ceiling (ENG-1537).
+                            _stamp_retry_terminal(
+                                self._turn_cost, _agent_exc, "rate_limit_wait_limit"
+                            )
                             raise ProviderOverloadedError(
                                 "Too many requests too quickly — the rate limit didn't "
                                 "clear in time. Waiting a moment and continuing should work; "
@@ -4540,6 +4601,9 @@ class ChatSession:
                                 code="rate_limited",
                                 retry_after=getattr(_agent_exc, "retry_after", None),
                             ) from _agent_exc
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "provider_recovery_timeout"
+                        )
                         raise ProviderOverloadedError(
                             f"{_agent_exc.provider or 'The model provider'} is experiencing an "
                             "incident and didn't recover in time.",
@@ -4585,12 +4649,83 @@ class ChatSession:
                         # again with the error context now in history
                         continue
                     else:
+                        # A transient that outlasted the COUNT budget is the
+                        # same product event as one that outlasted the TIME
+                        # budget on the backoff path above: the provider is
+                        # unreachable and the user needs the provider_overloaded
+                        # card — with Retry, and the MindsHub failover nudge for
+                        # BYOK — not prose (ENG-1361).
+                        #
+                        # Before this, the count path had NO exit that produced
+                        # a card: it asked the model to explain the outage, a
+                        # call that needs the very provider that is failing, and
+                        # when that call failed too the turn ended as "An
+                        # unexpected error occurred: <our own message>. Please
+                        # try again or rephrase your request." Rephrasing cannot
+                        # reach an unreachable provider, and users followed the
+                        # advice — the incident this ticket came from shows the
+                        # user retyping the same request, then leaving.
+                        #
+                        # Raised BEFORE the SYSTEM message is appended below:
+                        # appending first would leave "The task has failed N
+                        # times" dangling in a history the next turn replays.
+                        if isinstance(_agent_exc, TransientProviderError):
+                            _stamp_retry_terminal(
+                                self._turn_cost, _agent_exc, "request_attempt_limit"
+                            )
+                            # Name the model that actually failed (planning OR
+                            # coding) so the card's provider lookup — and so the
+                            # BYOK-vs-managed nudge it picks — is right.
+                            _model = (getattr(_agent_exc, "model", "") or "") or getattr(
+                                self._llm, "planning_model", ""
+                            ) or ""
+                            if _agent_exc.code == "rate_limited":
+                                # An UNCONFIRMED velocity 429 reaches the count
+                                # path (session_backoff=False). It must keep the
+                                # rate-limit code and copy: telling a
+                                # rate-limited user the provider is "having an
+                                # incident" is the mis-report ENG-1537 fixed,
+                                # and buying credits cannot lift a per-minute
+                                # ceiling.
+                                raise ProviderOverloadedError(
+                                    "Too many requests too quickly — this didn't clear after "
+                                    f"{_retry_count} attempts. Waiting a moment and continuing "
+                                    "should work; this isn't a credits problem.",
+                                    provider=getattr(_agent_exc, "provider", "") or "",
+                                    model=_model,
+                                    code="rate_limited",
+                                    retry_after=getattr(_agent_exc, "retry_after", None),
+                                ) from _agent_exc
+                            # KEEP anton's own classification in the copy. The
+                            # typed message already says what happened ("The
+                            # model provider returned 500.") and ENG-673 put it
+                            # there deliberately; replacing it with a generic
+                            # "could not be reached" would throw away the one
+                            # detail that tells a user — or a support thread —
+                            # which failure this was. Only the attempt count is
+                            # new information.
+                            _detail = str(_agent_exc).rstrip()
+                            if _detail and _detail[-1] not in ".!?":
+                                _detail += "."
+                            raise ProviderOverloadedError(
+                                f"{_detail} Retried {_retry_count} times without success.",
+                                provider=getattr(_agent_exc, "provider", "") or "",
+                                model=_model,
+                            ) from _agent_exc
                         # Exhausted retries — stop and summarize for the user.
                         # Mark the terminal: the apology below is yielded as
                         # ordinary text and nothing is in flight when the
                         # finally runs, so without this the turn reported
                         # "completed" — undercounting the most common failure
                         # mode in any error-rate query (#309 review).
+                        #
+                        # Still reached by NON-transient failures (a 400, a tool
+                        # crash), which keep the summarize-and-explain behaviour:
+                        # for those the model genuinely can say something useful,
+                        # and there is no card to route them to.
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_attempt_limit"
+                        )
                         if self._turn_cost is not None:
                             self._turn_cost.ended_by = "retry_exhausted"
                             # Same exception the SYSTEM message below shows the
@@ -4605,8 +4740,11 @@ class ChatSession:
                                     "Stop retrying. Please:\n"
                                     "1. Summarize what you accomplished so far.\n"
                                     "2. Explain what went wrong in plain language.\n"
-                                    "3. Suggest next steps — what the user can try (e.g. rephrase, "
-                                    "simplify the request, or ask you to continue from where you left off).\n"
+                                    "3. Suggest next steps — but only ones that follow from the "
+                                    "error above. Do NOT suggest rephrasing or simplifying the "
+                                    "request unless the error was actually about what was asked; "
+                                    "for an infrastructure or provider failure, say plainly that "
+                                    "retrying later is the remedy (ENG-1361).\n"
                                     "Be concise and helpful."
                                 ),
                             }
@@ -4621,31 +4759,44 @@ class ChatSession:
                                     assistant_text_parts.append(event.text)
                                 yield event
                         except Exception as e:
-                            if isinstance(e, (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError)):
+                            if isinstance(e, CURATED_PROVIDER_ERRORS):
                                 # Curated provider failures must FAIL the turn, not
                                 # get wrapped into assistant prose: the server maps
-                                # token_limit/model_unavailable to actionable cards,
-                                # which can only fire when the exception propagates.
-                                # Wrapping them as text is how "Server returned 403"
-                                # ended up mid-chat with "please rephrase your
-                                # request" advice. EndpointConfigurationError added
-                                # here to match the immediate re-raise site above —
-                                # this wrap-up call had been the one place it still
-                                # fell through (review feedback on ENG-1310). NOTE:
-                                # cowork-server has no dedicated card for
-                                # EndpointConfigurationError yet (grepped — zero
-                                # hits, friendly_turn_error falls through to the
-                                # generic message for it); re-raising it here still
-                                # stops the misleading "adjust your approach" prose,
-                                # it just doesn't get a *better* card until that
-                                # mapping exists server-side.
+                                # them to actionable cards, which can only fire when
+                                # the exception propagates. Wrapping them as text is
+                                # how "Server returned 403" ended up mid-chat with
+                                # "please rephrase your request" advice.
+                                #
+                                # ENG-1361 inverted this from an allowlist spelled
+                                # out HERE to membership of the set declared beside
+                                # the exception classes themselves. The allowlist
+                                # shape meant every new type was exposed by default
+                                # and someone had to remember; it was missed three
+                                # times, each found by a user in production rather
+                                # than by the suite. Forgetting now means an
+                                # exception PROPAGATES (a generic card — safe)
+                                # rather than becoming prose that tells the user to
+                                # rephrase (harmful).
+                                #
+                                # NOTE: not every member has a dedicated card yet —
+                                # EndpointConfigurationError has none server-side,
+                                # so it renders the generic message. Re-raising
+                                # still stops the misleading advice; it just doesn't
+                                # get a *better* card until that mapping exists.
                                 raise
                             if _is_provider_auth_error(e):
                                 # Preserve a refusal after failed confirmation,
                                 # or the first refusal after stream output, for
                                 # the host's auth-error mapping.
                                 raise
-                            fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
+                            # No "rephrase your request": everything reaching
+                            # this line is an UNEXPECTED failure, and we have no
+                            # basis to claim the user's wording caused it. The
+                            # curated failures — where we DO know the cause, and
+                            # where rephrasing provably cannot help — are re-
+                            # raised above (ENG-1361). Say what happened and stop
+                            # inventing a remedy.
+                            fallback = f"An unexpected error occurred: {e}"
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break

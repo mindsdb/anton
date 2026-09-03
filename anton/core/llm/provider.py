@@ -638,12 +638,20 @@ class TransientProviderError(ConnectionError):
     def __init__(
         self, message: str, *, provider: str = "", code: str | None = None,
         retry_after: float | None = None, session_backoff: bool = True,
-        model: str = "",
+        model: str = "", status_code: int | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.code = code
         self.retry_after = retry_after
+        # The HTTP status this was classified FROM, when there was one
+        # (ENG-1361). `code` cannot carry it: a downstream conversion to
+        # ProviderOverloadedError needs `code` for the card vocabulary, so the
+        # originating status would otherwise be lost before it reaches
+        # telemetry. None for a mid-stream failure (the status was 200) and for
+        # a connection error (no response at all) — those are genuinely absent,
+        # not unknown.
+        self.status_code = status_code
         # The model that was in flight when this failed — so a downstream
         # ProviderOverloadedError names the ACTUAL model (planning OR coding),
         # not whatever the session defaults to (ENG-673).
@@ -928,11 +936,13 @@ def classify_transient(
         return TransientProviderError(
             f"{provider or 'The model provider'} is momentarily overloaded.",
             provider=provider, code=etype, session_backoff=session_backoff, model=model,
+            status_code=status_code,
         )
     if isinstance(status_code, int) and 500 <= status_code < 600:
         return TransientProviderError(
             f"{provider or 'The model provider'} returned {status_code}.",
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
+            status_code=status_code,
         )
     if status_code == 429 and not b.get("detail"):
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
@@ -968,7 +978,7 @@ def classify_transient(
             provider=provider, code="rate_limited",
             session_backoff=velocity_confirmed,
             retry_after=retry_after if velocity_confirmed else None,
-            model=model,
+            model=model, status_code=status_code,
         )
     return None
 
@@ -1123,6 +1133,100 @@ class EndpointConfigurationError(ConnectionError):
     the interactive CLI reads the type to default such a failure to ``setup``
     rather than ``retry`` (ENG-1145 review).
     """
+
+
+# --------------------------------------------------------------------------- #
+# Curated failures + the analytics vocabulary for them (ENG-1361)
+# --------------------------------------------------------------------------- #
+
+# Every CURATED failure: a typed exception carrying user-ready copy that a host
+# maps to an actionable card. These must FAIL a turn, never be wrapped into
+# assistant prose — the card can only fire when the exception propagates, and
+# the generic "please try again or rephrase your request" fallback is actively
+# wrong for all of them (rephrasing cannot fix an outage, a dead credential, or
+# an empty wallet).
+#
+# Listed HERE, beside the class definitions, rather than at the consumer in
+# `session.py`: the previous allowlist lived next to the `except` that used it,
+# and drifted three times — each omission found by a user hitting it in
+# production rather than by the suite (ENG-1361, ENG-1310). Adding a class now
+# means ignoring the comment directly above it, and `test_curated_errors.py`
+# fails on any exception class defined in this module that is neither listed
+# here nor deliberately excluded.
+#
+# NOT a marker base class on purpose: a mixin would change the MRO of every one
+# of these across a version-skew boundary that cowork-server already handles
+# defensively (it imports each type lazily precisely because anton's version
+# floats underneath it). High risk, and the module-walk test gives the same
+# guarantee without touching the hierarchy.
+#
+# Builtin `ConnectionError` is deliberately ABSENT even though the status
+# mapper's terminal catch-all raises one: it is the base class of half this
+# tuple and of unrelated socket failures, so listing it would silently curate
+# everything. Giving that catch-all its own type is ENG-1283.
+CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
+    ContextOverflowError,
+    TokenLimitExceeded,
+    ProviderAuthError,
+    StructuredOutputError,
+    TransientProviderError,
+    ProviderOverloadedError,
+    ModelUnavailableError,
+    ContentValidationError,
+    EndpointConfigurationError,
+)
+
+
+# The analytics vocabulary for WHY the provider failed, kept deliberately small
+# and closed (ENG-1361). `code` on the exception cannot serve this purpose: it
+# selects the client's error card (`provider_overloaded` / `rate_limited` are
+# matched literally in ChatView.jsx), so it is a wire contract with the
+# renderer, not a free label. And the raw codes mix cardinalities — `http_503`
+# next to `connection_error` — which would spread one failure mode across many
+# analytics rows. The HTTP status, when there is one, rides in its own field.
+PROVIDER_FAILURE_KINDS: frozenset[str] = frozenset({
+    "overload_signal",     # the provider SAID it was overloaded / erroring
+    "rate_limit",          # velocity 429 — waiting is the remedy
+    "http_5xx",            # request-time 5xx status
+    "connection_failure",  # never reached it, or the connection dropped
+    "bad_response",        # a 200 whose body was unusable
+})
+
+# Codes that mean "we got a 200 and the body was unusable": an unclassifiable
+# mid-stream error event, a stream that stopped early, or one that never
+# started. Distinct from `overload_signal` because the provider told us
+# nothing about why — claiming overload here would over-report incidents.
+_BAD_RESPONSE_CODES = frozenset({"stream_error", "truncated_stream", "empty_response"})
+
+
+def provider_failure_kind(code: str | None) -> str:
+    """Map a `TransientProviderError.code` to `PROVIDER_FAILURE_KINDS`.
+
+    Returns "" for anything unrecognised rather than guessing — an empty value
+    in analytics is a prompt to extend the vocabulary, whereas a wrong one is
+    invisible. Every code anton currently mints is covered; the exhaustiveness
+    check lives in `test_curated_errors.py`.
+    """
+    if not code:
+        return ""
+    if code in _TRANSIENT_ERROR_TYPES:
+        return "overload_signal"
+    if code in _BAD_RESPONSE_CODES:
+        return "bad_response"
+    if code == "rate_limited":
+        return "rate_limit"
+    if code == "connection_error":
+        return "connection_failure"
+    if code.startswith("http_"):
+        # Only 5xx is minted with this prefix (`classify_transient`), but parse
+        # rather than trust it: a future 4xx would otherwise be mislabelled as a
+        # server fault, which is the one direction that misleads an operator.
+        try:
+            status = int(code[len("http_"):])
+        except ValueError:
+            return ""
+        return "http_5xx" if 500 <= status < 600 else ""
+    return ""
 
 
 @dataclass

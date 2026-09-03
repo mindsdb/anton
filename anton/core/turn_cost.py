@@ -158,6 +158,38 @@ class TurnCost:
     # needs. Empty when no exception ended the verdict (verdict produced, or
     # latched skip with no call made).
     verifier_error_type: str = ""
+    # WHY the retry flow terminated, when a turn ended after retrying (ENG-1361).
+    # Named for TERMINATION, not exhaustion: `rate_limit_wait_too_long` is a
+    # terminal where nothing ran out — the server named an interval past our cap
+    # and we declined to wait — so an "exhaustion" name would be a lie on a
+    # quarter of its own values.
+    #
+    # It exists because ENG-1361 makes the request-time and mid-stream terminals
+    # raise the SAME ProviderOverloadedError, and `code` (which splits the
+    # rate-limit case) is a card contract that never reaches analytics. Without
+    # this, three distinct outcomes become one indistinguishable bucket. Note
+    # the retry count itself is a local in `turn_stream` and reaches nothing —
+    # there is no other telemetry saying a turn retried at all.
+    #   "request_attempt_limit"     — the count-based attempt budget ran out
+    #   "provider_recovery_timeout" — the mid-stream incident budget ran out
+    #   "rate_limit_wait_limit"     — the rate-limit wait allowance ran out
+    #   "rate_limit_wait_too_long"  — Retry-After exceeded our cap; we carded
+    #                                 immediately rather than stalling the turn
+    # Empty for every terminal that did not retry.
+    retry_terminal_reason: str = ""
+    # WHAT kind of provider failure ended the turn — a closed vocabulary
+    # (`PROVIDER_FAILURE_KINDS`), NOT the raw exception `code` (ENG-1361).
+    # `code` selects the client's card and mixes cardinalities (`http_503`
+    # beside `connection_error`), so it is unfit for a groupable analytics
+    # dimension. Empty when the failure was not a provider failure.
+    provider_failure_kind: str = ""
+    # The HTTP status the failure was classified from, when there was one.
+    # `int | None`, never "" — a mid-stream failure (status 200) and a
+    # connection error (no response) are genuinely ABSENT, and an empty string
+    # beside integers is the shape that makes an analytics column unqueryable.
+    # Omitted from the event entirely when None, rather than sent as a
+    # placeholder.
+    provider_http_status: int | None = None
     started_monotonic: float = field(default_factory=time.monotonic)
     # Set when these books have been reported. Replaces "the shared slot is
     # None" as the double-emit guard, because a late finalizer now emits the
