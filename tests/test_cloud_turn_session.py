@@ -481,7 +481,9 @@ async def test_memorize_registers_its_write_for_settling(tmp_path, monkeypatch, 
     result = await handle_memorize(session, {"entries": [
         {"text": "Answer in Spanish", "kind": "always", "scope": "global"},
     ]})
-    assert "Memory updated" in result
+    # ENG-2248 tier 1: a stored entry is an explicit success.
+    assert result.ok is True
+    assert "Memory updated" in result.content
     assert len(session._memory_writes) == 1        # registered, not yet awaited
 
     await session.settle_memory_writes()
@@ -610,9 +612,11 @@ def test_a_skill_the_agent_builds_comes_back_out(tmp_path, monkeypatch, skills_t
     from anton.core.tools.skill_draft import handle_create_skill_draft
 
     session = _real_cloud_session(tmp_path, monkeypatch)
-    claimed = json.loads(asyncio.run(
+    claimed = asyncio.run(
         handle_create_skill_draft(session, {"name": "Competitive Analysis"})
-    ))
+    )
+    assert claimed.ok is True          # ENG-2248: a claimed folder is a success
+    claimed = json.loads(claimed.content)
     Path(claimed["skill_file"]).write_text("---\nname: competitive-analysis\n---\nsteps")
 
     entries = drain_pending_skills(session)
@@ -631,7 +635,8 @@ async def test_recall_skill_returns_the_staged_procedure(tmp_path, monkeypatch, 
 
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     out = await handle_recall_skill(session, {"label": "csv-summary"})
-    assert "Describe the columns" in out
+    assert out.ok is True
+    assert "Describe the columns" in out.content
 
 
 async def test_recall_stats_stay_in_the_staging_dir(tmp_path, monkeypatch, skills_tmp):
