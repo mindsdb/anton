@@ -320,6 +320,23 @@ def _no_real_home(_suite_home, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_leaked_credentials(monkeypatch):
+    """No test may leave a credential in `os.environ` for the next one.
+
+    `Workspace.set_secret` writes `os.environ` as a side effect, and
+    `monkeypatch.delenv(..., raising=False)` records nothing when the variable
+    is absent — so a value a test body sets through `set_secret` survives for
+    the rest of the session. `os.environ` outranks every `env_file`, so a later
+    test building `AntonSettings()` resolves the leaked key and the suite
+    becomes order-dependent. Touching the name first puts it on monkeypatch's
+    undo list, whatever the test does with it afterwards.
+    """
+    for name in ("ANTON_MINDS_API_KEY", "ANTON_OPENAI_API_KEY", "ANTON_ANTHROPIC_API_KEY"):
+        monkeypatch.setenv(name, "__sentinel__")
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_builtin_skills(tmp_path_factory, monkeypatch):
     """Point the built-in skills root at an empty dir for all tests.
 

@@ -234,8 +234,16 @@ class Workspace:
         straight through — a pasted "API key" containing a newline would append
         arbitrary further ``ANTON_*`` settings to the file, which is a config
         injection with no legitimate use (no key, URL or model name contains a
-        newline). Rejected rather than escaped, so the caller reports it to the
-        user instead of silently persisting half a credential.
+        newline). Rejected rather than escaped: silently persisting half a
+        credential, or the injected lines, is worse than failing.
+
+        Raises rather than returning a flag because most callers write literals
+        (provider names, model ids, booleans) that cannot contain one, so this
+        is unreachable for them. The callers that DO pass pasted input are the
+        provider-setup prompts in ``cli.py`` and ``chat.py``; of those only
+        ``_persist_key_best_effort`` currently catches it, so a newline pasted
+        at first-run onboarding still surfaces as a traceback. Handling it at
+        each prompt is worth doing and is not part of this change.
         """
         if "\n" in value or "\r" in value:
             raise ValueError(f"{key} must not contain a newline")

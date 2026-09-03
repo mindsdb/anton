@@ -552,6 +552,15 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     settings = getattr(session, "_settings", None)
     if settings is None or not hasattr(settings, "minds_api_key"):
         settings = AntonSettings()
+        # A bare AntonSettings() leaves `artifacts_dir` at its RELATIVE default,
+        # so `Path(settings.artifacts_dir)` below would resolve against cwd
+        # while the session's resolves to <workspace>/.anton/artifacts. That
+        # feeds `resolve_publish_target` the wrong roots, so `published_key`
+        # differs from what /publish and cowork-server compute and the next
+        # publish creates a duplicate report instead of updating this one.
+        # Anchor it on the session's own workspace when the host gave us one.
+        base = getattr(session, "_workspace", None)
+        settings.resolve_workspace(str(base.base) if base is not None else None)
     artifacts_root = Path(settings.artifacts_dir)
 
     # Accept the artifact folder (preferred) or any file inside it. Resolve a

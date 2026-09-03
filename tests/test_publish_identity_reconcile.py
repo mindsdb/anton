@@ -32,6 +32,16 @@ def _settings(workspace_path: Path):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
+    """Start clean AND guarantee restoration.
+
+    `Workspace.set_secret` writes `os.environ` as a side effect, and
+    `monkeypatch.delenv(..., raising=False)` records nothing when the variable
+    is absent — so it has nothing to undo, and a value the test body sets that
+    way leaks for the rest of the session. Since `os.environ` outranks every
+    `env_file`, a later test building `AntonSettings()` would resolve the leaked
+    key. Touch the name first so monkeypatch has it on the undo list.
+    """
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "__sentinel__")
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
 
 
@@ -189,16 +199,22 @@ def test_reconciliation_is_actually_wired_into_boot():
         n for n in ast.walk(tree)
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "main"
     )
-    called = [
-        n.func.id for n in ast.walk(main_fn)
+    # Keyed on lineno, NOT on position in the walk: ast.walk is breadth-first,
+    # so list order is depth order. A version that left _ensure_workspace nested
+    # inside `if ctx.invoked_subcommand is None:` and moved the reconcile call
+    # after it at statement level would be yielded reconcile-first and pass,
+    # while the stale key had already been promoted.
+    called = {
+        n.func.id: n.lineno
+        for n in ast.walk(main_fn)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-    ]
+    }
     assert "_reconcile_publish_identity" in called, (
         "cli.main no longer reconciles the publish identity at boot — legacy "
         "project-vault keys will be promoted into os.environ again"
     )
     assert "_ensure_workspace" in called
-    assert called.index("_reconcile_publish_identity") < called.index("_ensure_workspace"), (
+    assert called["_reconcile_publish_identity"] < called["_ensure_workspace"], (
         "reconciliation must run BEFORE _ensure_workspace promotes the project vault"
     )
 

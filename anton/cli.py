@@ -483,6 +483,16 @@ def _reconcile_publish_identity(settings) -> bool:
         message = "  Removed a duplicate publish key from this project (same key as ~/.anton/.env)"
     else:
         archive = project_ws.env_path.with_name(".env.superseded")
+        # `.env.superseded` is matched by neither a `.env` nor a `*.env` ignore
+        # rule, and anton writes no .gitignore of its own, so a live credential
+        # would be staged by `git add -A`. Ignore the whole vault directory
+        # from inside it — self-contained, and it covers `.env` too.
+        gitignore = project_ws.env_path.with_name(".gitignore")
+        if not gitignore.exists():
+            try:
+                gitignore.write_text("*\n", encoding="utf-8")
+            except OSError:
+                pass
         previous = archive.read_text(encoding="utf-8") if archive.is_file() else ""
         _write_private(
             archive,
@@ -493,7 +503,7 @@ def _reconcile_publish_identity(settings) -> bool:
         message = (
             "  This project had a different publish key than ~/.anton/.env.\n"
             "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
-            f"  {archive} in case it was the one you wanted."
+            f"  {escape(str(archive))} in case it was the one you wanted."
         )
 
     if exported is None:
@@ -569,7 +579,18 @@ def main(
 
     # Must run before anything reads a key off `settings`, and before
     # `_ensure_workspace` promotes the project vault into os.environ.
-    if _reconcile_publish_identity(settings):
+    #
+    # Never fatal. This is `@app.callback(invoke_without_command=True)`, so an
+    # OSError escaping here would kill EVERY `anton` invocation — subcommands
+    # included, before terms consent — on a container with no writable home or
+    # a read-only checkout. Migrating is a convenience; not migrating just
+    # leaves the machine as it was.
+    try:
+        migrated = _reconcile_publish_identity(settings)
+    except OSError as exc:
+        console.print(f"[anton.muted]  Could not tidy saved publish keys: {escape(str(exc))}[/]")
+        migrated = False
+    if migrated:
         settings = AntonSettings()
         settings.resolve_workspace(folder)
 

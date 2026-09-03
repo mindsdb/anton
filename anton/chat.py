@@ -121,9 +121,7 @@ async def _handle_connect(
     episodic: EpisodicMemory | None = None,
 ) -> ChatSession:
     """Connect to a Minds server: select a Mind, then optionally a datasource."""
-    from anton.workspace import Workspace as _Workspace
-
-    global_ws = _Workspace(Path.home())
+    global_ws = _global_vault()
 
     console.print()
 
@@ -387,9 +385,7 @@ async def _handle_remote(
     """Handle /remote command — provision or check status of remote scratchpad."""
     console.print()
 
-    from pathlib import Path as _P
-    from anton.workspace import Workspace as _W
-    _global_ws = _W(_P.home())
+    _global_ws = _global_vault()
 
     # Ensure minds API key — same flow as /publish
     if not settings.minds_api_key:
@@ -449,11 +445,9 @@ def _global_vault():
     minority file became the publish identity while everything else kept using
     the global one (ENG-1424).
     """
-    from pathlib import Path as _P
-
     from anton.workspace import Workspace as _W
 
-    return _W(_P.home())
+    return _W(Path.home())
 
 
 def _persist_key_best_effort(console, value: str, *, what: str) -> None:
@@ -471,15 +465,25 @@ def _persist_key_best_effort(console, value: str, *, what: str) -> None:
     of updating this one.
     """
     try:
-        _global_vault().set_secret("ANTON_MINDS_API_KEY", value)
+        if value:
+            _global_vault().set_secret("ANTON_MINDS_API_KEY", value)
+        else:
+            # REMOVE the entry rather than writing `ANTON_MINDS_API_KEY=`. An
+            # empty value is still a value: it outranks a real key in a
+            # lower-precedence file, and `core/backends/local.py` tests
+            # membership rather than truthiness when deriving the scratchpad's
+            # OPENAI_API_KEY, so a child would get an empty credential and an
+            # auth error instead of falling through.
+            _global_vault().remove_secret("ANTON_MINDS_API_KEY")
     except (OSError, ValueError) as exc:
-        console.print(f"  [anton.warning]Could not {what} in ~/.anton/.env: {exc}[/]")
+        console.print(
+            f"  [anton.warning]Could not {what} in ~/.anton/.env: {escape(str(exc))}[/]"
+        )
 
 
 async def _handle_publish(
     console: Console,
     settings,
-    workspace,
     file_arg: str = "",
 ) -> None:
     """Handle /publish command — publish an HTML report to the web."""
@@ -1937,7 +1941,7 @@ async def _chat_loop(
                     continue
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""
-                    await _handle_publish(console, settings, workspace, arg)
+                    await _handle_publish(console, settings, arg)
                     continue
                 elif cmd == "/unpublish":
                     await _handle_unpublish(console, settings, workspace)

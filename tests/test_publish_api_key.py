@@ -13,6 +13,7 @@ real ``~/.anton/.env`` on every run — and passed while doing it.
 """
 from __future__ import annotations
 
+import os
 import urllib.error
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,9 +22,22 @@ import pytest
 
 
 @pytest.fixture
-def home(_no_real_home):
-    """The isolated home from conftest, named for readability in the asserts."""
-    return _no_real_home
+def home(tmp_path, monkeypatch):
+    """A PRISTINE home per test, overriding conftest's session-wide one.
+
+    conftest's `_no_real_home` shares one isolated home for the whole session,
+    for speed (a fresh one per test cost 230s of e2e subprocess first-runs).
+    That sharing is fine for "did anything touch the real home", but not for
+    asserting on the vault's CONTENTS: `test_publish_never_writes_the_real_home`
+    would otherwise pass on the residue
+    `test_successful_publish_persists_key_to_global_vault` left behind — delete
+    the persist call and it still goes green. Setting $HOME is enough;
+    conftest's patched `Path.home()` defers to any test that names its own.
+    """
+    h = tmp_path / "home"
+    h.mkdir()
+    monkeypatch.setenv("HOME", str(h))
+    return h
 
 
 def _global_vault_text(home: Path) -> str:
@@ -39,12 +53,6 @@ def _make_settings(tmp_path: Path, api_key: str | None = None) -> MagicMock:
     settings.publish_url = "https://4nton.ai"
     settings.minds_ssl_verify = True
     return settings
-
-
-def _make_workspace() -> MagicMock:
-    ws = MagicMock()
-    ws.set_secret = MagicMock()
-    return ws
 
 
 def _make_console() -> MagicMock:
@@ -74,14 +82,13 @@ async def test_401_clears_api_key(tmp_path, home):
 
     html = _make_html_file(tmp_path)
     settings = _make_settings(tmp_path, api_key=None)
-    workspace = _make_workspace()
     console = _make_console()
 
     with (
         patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["y", "wrongkey", "public"])),
         patch("anton.publisher.publish", side_effect=_http_401()),
     ):
-        await _handle_publish(console, settings, workspace, file_arg=str(html))
+        await _handle_publish(console, settings, file_arg=str(html))
 
     # Key must be cleared after 401
     assert settings.minds_api_key is None
@@ -119,7 +126,7 @@ async def test_key_is_not_on_disk_when_publish_is_called(tmp_path, home):
         patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["y", "typo-key", "public"])),
         patch("anton.publisher.publish", side_effect=_capture_then_401),
     ):
-        await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(_make_console(), settings, file_arg=str(html))
 
     assert seen_at_call_time, "publish was never reached — the test proves nothing"
     assert "typo-key" not in seen_at_call_time[0]
@@ -149,7 +156,7 @@ async def test_bad_key_survives_nothing_when_publish_fails_non_401(tmp_path, hom
         patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["y", "typo-key", "public"])),
         patch("anton.publisher.publish", side_effect=http_500),
     ):
-        await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(_make_console(), settings, file_arg=str(html))
 
     assert "typo-key" not in _global_vault_text(home)
 
@@ -167,7 +174,6 @@ async def test_successful_publish_persists_key_to_global_vault(tmp_path, home):
 
     html = _make_html_file(tmp_path)
     settings = _make_settings(tmp_path, api_key=None)
-    workspace = _make_workspace()
     console = _make_console()
 
     publish_result = {
@@ -183,15 +189,12 @@ async def test_successful_publish_persists_key_to_global_vault(tmp_path, home):
         patch("anton.publisher.publish", return_value=publish_result),
         patch("webbrowser.open"),
     ):
-        await _handle_publish(console, settings, workspace, file_arg=str(html))
+        await _handle_publish(console, settings, file_arg=str(html))
 
     assert "ANTON_MINDS_API_KEY=goodkey" in _global_vault_text(home)
-    # The project vault must NOT be written — that is the divergence itself.
-    project_writes = [
-        c for c in workspace.set_secret.call_args_list
-        if c.args and c.args[0] == "ANTON_MINDS_API_KEY"
-    ]
-    assert project_writes == []
+    # The project vault cannot be written: `_handle_publish` no longer takes a
+    # workspace at all, which is the divergence removed structurally rather
+    # than asserted against a mock.
 
 
 @pytest.mark.asyncio
@@ -221,10 +224,18 @@ async def test_401_clears_a_key_that_is_already_on_disk(tmp_path, home):
         patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
         patch("anton.publisher.publish", side_effect=_http_401()),
     ):
-        await _handle_publish(console, settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(console, settings, file_arg=str(html))
 
     assert settings.minds_api_key is None
     assert "stale-bad-key" not in _global_vault_text(home)
+    # REMOVED, not blanked. `ANTON_MINDS_API_KEY=` is still a value: it outranks
+    # a real key in a lower-precedence file, and the scratchpad launcher tests
+    # membership rather than truthiness when deriving OPENAI_API_KEY, so a child
+    # would get an empty credential instead of falling through.
+    from anton.workspace import Workspace as _W
+
+    assert _W(home).get_secret("ANTON_MINDS_API_KEY") is None
+    assert os.environ.get("ANTON_MINDS_API_KEY") is None
     printed = " ".join(str(c) for c in console.print.call_args_list)
     assert "Invalid API key" in printed
 
@@ -252,7 +263,7 @@ async def test_a_key_from_config_is_not_copied_into_the_global_vault(tmp_path, h
         }),
         patch("webbrowser.open"),
     ):
-        await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(_make_console(), settings, file_arg=str(html))
 
     assert "key-owned-by-the-desktop-app" not in _global_vault_text(home)
 
@@ -291,7 +302,7 @@ async def test_publish_never_writes_the_real_home(tmp_path, home):
         }),
         patch("webbrowser.open"),
     ):
-        await _handle_publish(_make_console(), settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(_make_console(), settings, file_arg=str(html))
 
     after = real_vault.read_bytes() if real_vault.is_file() else None
     assert after == before, f"the real {real_vault} was modified by the test suite"
@@ -321,7 +332,7 @@ async def test_401_does_not_clear_a_key_the_global_vault_did_not_supply(tmp_path
         patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
         patch("anton.publisher.publish", side_effect=_http_401()),
     ):
-        await _handle_publish(console, settings, _make_workspace(), file_arg=str(html))
+        await _handle_publish(console, settings, file_arg=str(html))
 
     assert Workspace(home).get_secret("ANTON_MINDS_API_KEY") == "GOOD_A"
     # ...and the user is told where to look instead of being told it was cleared.
