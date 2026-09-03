@@ -4669,6 +4669,22 @@ class ChatSession:
                         # Raised BEFORE the SYSTEM message is appended below:
                         # appending first would leave "The task has failed N
                         # times" dangling in a history the next turn replays.
+                        #
+                        # KNOWINGLY DEFERRED: this is scoped on the exception
+                        # TYPE, so it also sweeps in the `bad_response` codes
+                        # (`empty_response`, `truncated_stream`) — which anton
+                        # classifies as "a weak incident signal and a STRONG
+                        # broken/misconfigured-endpoint signal", and which
+                        # therefore inherit a card whose primary action is
+                        # Retry (and, in the CLI, a prompt defaulting to
+                        # `retry` rather than `setup`). For a wrong base URL
+                        # that is the wrong steer. It is not a regression — the
+                        # prose this replaces also said "try again in a moment"
+                        # — and the signal is genuinely ambiguous by the
+                        # classifier's own wording, so it is left alone rather
+                        # than guessed at. `provider_failure_kind=bad_response`
+                        # (added by this change) is what will size the
+                        # population; routing it is ENG-2264.
                         if isinstance(_agent_exc, TransientProviderError):
                             _stamp_retry_terminal(
                                 self._turn_cost, _agent_exc, "request_attempt_limit"
@@ -4708,7 +4724,7 @@ class ChatSession:
                             if _detail and _detail[-1] not in ".!?":
                                 _detail += "."
                             raise ProviderOverloadedError(
-                                f"{_detail} Retried {_retry_count} times without success.",
+                                f"{_detail} It did not recover after {_retry_count} attempts.",
                                 provider=getattr(_agent_exc, "provider", "") or "",
                                 model=_model,
                             ) from _agent_exc

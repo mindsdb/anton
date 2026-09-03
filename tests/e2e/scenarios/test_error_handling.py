@@ -74,7 +74,7 @@ def test_http_500_handled_gracefully(cfg, tmp_path):
     # message when converting to the terminal error — the diagnosis is the part
     # a user or a support thread needs, and only the attempt count is added.
     assert_output(result, "returned 500")
-    assert_output(result, "Retried 3 times without success")
+    assert_output(result, "did not recover after 3 attempts")
     # The turn offers a real remedy instead of blaming the user's wording.
     assert_output(result, "setup/retry")
     assert_not_output(result, "rephrase")

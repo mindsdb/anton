@@ -11,6 +11,7 @@ Three guarantees:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from unittest.mock import patch
@@ -149,7 +150,7 @@ async def test_the_card_keeps_antons_own_classification():
         _ = [e async for e in s.turn_stream("do it")]
 
     assert "returned 500" in str(ei.value)
-    assert "3 times" in str(ei.value)
+    assert "after 3 attempts" in str(ei.value)
 
 
 async def test_the_card_copy_never_doubles_a_period():
@@ -410,6 +411,79 @@ async def test_a_long_retry_after_records_the_decline_not_an_exhaustion():
     assert k["retry_terminal_reason"] == "rate_limit_wait_too_long"
     assert k["provider_failure_kind"] == "rate_limit"
     assert k["provider_http_status"] == "429"
+
+
+async def test_a_non_transient_terminal_still_books_its_http_status():
+    """`provider_http_status` is INDEPENDENT of `provider_failure_kind`: the kind
+    classifies provider failures and is empty here, but the status is a plain
+    fact about the exception and is the only signal these turns carry. Pins the
+    asymmetry so nobody "tidies" it away — self-review finding 1."""
+    import httpx
+    import openai
+
+    s = _session()
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    resp = httpx.Response(400, request=req, json={"error": {"code": "invalid_request_error"}})
+
+    s._stream_and_handle_tools = _always_raise(
+        lambda: openai.BadRequestError("bad tool schema", response=resp, body=None)
+    )
+
+    async def _summarize_succeeds(*a, **kw):
+        yield StreamTextDelta(text="explaining the 400")
+
+    s._llm.plan_stream = _summarize_succeeds
+
+    with patch("anton.analytics.send_event") as send:
+        _ = [e async for e in s.turn_stream("do it")]
+
+    k = _fields(send)
+    assert k["ended_by"] == "retry_exhausted"
+    assert k["retry_terminal_reason"] == "request_attempt_limit"
+    assert k["provider_failure_kind"] == ""     # not a classified PROVIDER failure
+    assert k["provider_http_status"] == "400"   # ...but the status is still real
+
+
+async def test_a_stop_after_a_retry_terminal_books_no_terminal_reason():
+    """A user who has sat through failed retries is exactly the user who presses
+    Stop. Without the clearing, a plain cancel would appear in an error-cause
+    breakdown carrying a terminal it never reached — self-review finding 3."""
+    s = _session()
+
+    async def _fail_then_hang(user_msg):
+        raise _unreachable()
+        yield  # pragma: no cover
+
+    s._stream_and_handle_tools = _fail_then_hang
+
+    async def _summarize_hangs(*a, **kw):
+        await asyncio.sleep(30)   # cancelled here, after the terminal was stamped
+        yield StreamTextDelta(text="never reached")  # pragma: no cover
+
+    # A NON-transient first failure would reach summarize; use one so the stamp
+    # happens and the cancel lands after it.
+    class _Boom(Exception):
+        pass
+
+    s._stream_and_handle_tools = _always_raise(lambda: _Boom("first"))
+    s._llm.plan_stream = _summarize_hangs
+
+    with patch("anton.analytics.send_event") as send:
+        async def _consume():
+            async for _ in s.turn_stream("do it"):
+                pass
+
+        task = asyncio.create_task(_consume())
+        await asyncio.sleep(0.2)   # let it reach the hanging summarize call
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    k = _fields(send)
+    assert k["ended_by"] == "cancelled"
+    assert k["retry_terminal_reason"] == ""
+    assert k["provider_failure_kind"] == ""
+    assert "provider_http_status" not in k
 
 
 async def test_a_turn_that_never_retried_leaves_the_fields_empty():

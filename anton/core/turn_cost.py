@@ -183,12 +183,20 @@ class TurnCost:
     # beside `connection_error`), so it is unfit for a groupable analytics
     # dimension. Empty when the failure was not a provider failure.
     provider_failure_kind: str = ""
-    # The HTTP status the failure was classified from, when there was one.
-    # `int | None`, never "" — a mid-stream failure (status 200) and a
+    # The HTTP status of the failure that ended the turn, whenever it carried
+    # one. `int | None`, never "" — a mid-stream failure (status 200) and a
     # connection error (no response) are genuinely ABSENT, and an empty string
     # beside integers is the shape that makes an analytics column unqueryable.
     # Omitted from the event entirely when None, rather than sent as a
     # placeholder.
+    #
+    # INDEPENDENT of `provider_failure_kind`, deliberately. The kind classifies
+    # PROVIDER failures and is empty for anything else; the status is a plain
+    # fact about the exception. So a non-transient terminal (an SDK
+    # `BadRequestError` exhausting the attempt budget) books
+    # kind="" with status=400 — not a hole, just the two fields answering two
+    # different questions. Suppressing a real status to keep the pair
+    # symmetrical would discard the only signal those turns carry.
     provider_http_status: int | None = None
     started_monotonic: float = field(default_factory=time.monotonic)
     # Set when these books have been reported. Replaces "the shared slot is
