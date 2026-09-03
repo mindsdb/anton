@@ -3180,6 +3180,10 @@ class ChatSession:
                 settings = AntonSettings()
             from anton.analytics import send_event
 
+            # Derived here, not handed in — see the docstring. `reason` is
+            # consumed and dropped; only the two closed-vocabulary tokens go on.
+            _rc_tier, _rc_class = _tool_failure_cause(ok, reason)
+
             # send_event takes STRING values only — every extra is a wire
             # parameter (tests/test_ask_user.py:496 exists because a first
             # draft assumed a (name, props) shape).
@@ -3187,9 +3191,6 @@ class ChatSession:
             # the live TurnCost carries the authoritative index (an explicit
             # turn_id on the cloud path, the local counter otherwise), so the
             # values here and on the turn's own row can never disagree.
-            # Derived here, not handed in — see the docstring. `reason` is
-            # consumed and dropped; only the two closed-vocabulary tokens go on.
-            _rc_tier, _rc_class = _tool_failure_cause(ok, reason)
             _tc = getattr(self, "_turn_cost", None)
             turn_index = (
                 getattr(_tc, "turn_index", 0) or (self._turn_count + 1)
