@@ -25,6 +25,23 @@ Created: {date}
 """
 
 
+_SECRET_FILE_MODE = 0o600
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` to `path`, readable and writable only by its owner.
+
+    The file holds secrets, so it is created 0600 rather than under the
+    process umask. An existing file is tightened before the write, so a
+    mode an earlier version left behind does not outlive the next secret.
+    """
+    if path.exists():
+        os.chmod(path, _SECRET_FILE_MODE)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+
+
 class Workspace:
     """Manages the .anton/ workspace directory and its files."""
 
@@ -126,7 +143,7 @@ class Workspace:
 
         # Create .env if it doesn't exist
         if not self._env_file.is_file():
-            self._env_file.write_text("# Anton environment variables\n")
+            _write_private(self._env_file, "# Anton environment variables\n")
             actions.append(f"Created {self._env_file}")
 
         # Visible artifacts directory at the workspace root. Replaces
@@ -230,7 +247,7 @@ class Workspace:
         if not replaced:
             lines.append(f"{key}={value}")
 
-        self._env_file.write_text("\n".join(lines) + "\n")
+        _write_private(self._env_file, "\n".join(lines) + "\n")
 
         # Also set in current process environment
         os.environ[key] = value
@@ -255,7 +272,7 @@ class Workspace:
             lines.append(line)
 
         if found:
-            self._env_file.write_text("\n".join(lines) + "\n")
+            _write_private(self._env_file, "\n".join(lines) + "\n")
             os.environ.pop(key, None)
 
         return found

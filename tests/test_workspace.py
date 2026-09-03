@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -247,3 +249,35 @@ class TestSecretVault:
         assert os.environ.get("ANTON_TEST_REMOVE_XYZ") == "val"
         ws.remove_secret("ANTON_TEST_REMOVE_XYZ")
         assert os.environ.get("ANTON_TEST_REMOVE_XYZ") is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+class TestSecretVaultFilePermissions:
+    """The .env holds secrets, so other users must not be able to read it."""
+
+    def _mode(self, tmp_path):
+        return stat.S_IMODE((tmp_path / ".anton" / ".env").stat().st_mode)
+
+    def test_initialize_creates_owner_only_env_file(self, ws, tmp_path):
+        ws.initialize()
+        assert self._mode(tmp_path) == 0o600
+
+    def test_set_secret_creates_owner_only_env_file(self, ws, tmp_path):
+        ws.set_secret("KEY", "value")
+        assert self._mode(tmp_path) == 0o600
+
+    def test_set_secret_tightens_a_world_readable_env_file(self, ws, tmp_path):
+        ws.initialize()
+        os.chmod(tmp_path / ".anton" / ".env", 0o644)
+        ws.set_secret("KEY", "value")
+        assert self._mode(tmp_path) == 0o600
+        assert ws.get_secret("KEY") == "value"
+
+    def test_remove_secret_tightens_a_world_readable_env_file(self, ws, tmp_path):
+        ws.initialize()
+        ws.set_secret("KEEP", "yes")
+        ws.set_secret("DROP", "no")
+        os.chmod(tmp_path / ".anton" / ".env", 0o644)
+        ws.remove_secret("DROP")
+        assert self._mode(tmp_path) == 0o600
+        assert ws.get_secret("KEEP") == "yes"
