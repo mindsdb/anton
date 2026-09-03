@@ -872,7 +872,7 @@ async def handle_read_image(
         # path IS thrash and belongs in the streak.
         return ToolOutcome(
             content=f"Error: file not found: {path}",
-            ok=False, reason="missing_file",
+            ok=False, reason="path_not_found",
         )
 
     if not is_image_path(path.name):

@@ -154,7 +154,15 @@ _SENTINEL_REASONS = {
     # Same shape for a path: `read_image` reports the file the agent named as
     # absent. Genuinely absent files exist, but the agent supplied the path and
     # can list the directory, so it resolves to the non-tripping side.
-    "missing_file": (TIER_SELF, "unknown_resource"),
+    #
+    # NOT named `missing_file`, though that is what it describes (#435 review).
+    # `missing_file` is already a CLASS in this module, reached by a different
+    # path — `_WALL_TYPES` maps FileNotFoundError to it, `_STATUS_WALLS` maps
+    # 404 to it, it is the sole member of `_EXACT_ONLY_CLASSES`, and it gets
+    # path-identifier extraction below. A sentinel KEY of the same name that
+    # resolves to a DIFFERENT class is the kind of collision a future editor
+    # reads straight past.
+    "path_not_found": (TIER_SELF, "unknown_resource"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
     "store_unavailable": (TIER_WALL, "service_unavailable"),

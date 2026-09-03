@@ -191,6 +191,82 @@ async def test_the_no_match_family_is_still_unverdicted_on_purpose():
     assert "NO MATCH" in result
 
 
+async def test_every_no_match_branch_is_unverdicted_not_just_the_empty_store():
+    """The test above pins ONE input; `recall_skill` has three NO MATCH exits.
+
+    Found by mutation (#435 review): inserting a verdict at the *third* branch
+    survived the whole suite, because the test above only ever reaches the
+    first. A verdict added to a sibling — the fuzzy-match path especially —
+    would have shipped unnoticed on a tool called ~1,150 times a month.
+
+    The three exits, and what reaches each:
+
+      1. empty store            -> "…the procedural memory is empty."
+      2. populated, no near-miss -> "…Available skills: …"
+      3. near-miss found, load   -> "…the closest candidate '…' could not be
+         returns None               loaded."   (a race or filesystem flake)
+    """
+    import tempfile
+    from pathlib import Path
+
+    from anton.core.memory.skills import Skill, SkillStore
+    from anton.core.tools.recall_skill import handle_recall_skill
+
+    def _skill(label):
+        return Skill(
+            label=label,
+            name=label.replace("-", " ").title(),
+            description="fixture",
+            declarative_md="1. do it",
+            created_at="2026-01-01T00:00:00+00:00",
+            provenance="manual",
+        )
+
+    results = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "skills"
+
+        # 1 — nothing stored at all.
+        empty = SkillStore(root=root)
+        results["empty_store"] = await handle_recall_skill(
+            SimpleNamespace(_skill_store=empty), {"label": "does_not_exist"}
+        )
+
+        # 2 — something stored, but nothing close enough to suggest.
+        populated = SkillStore(root=root)
+        populated.save(_skill("csv-summary"))
+        results["no_near_miss"] = await handle_recall_skill(
+            SimpleNamespace(_skill_store=populated),
+            {"label": "zzzzzzzzzzzzzzz"},
+        )
+        assert populated.closest_match("zzzzzzzzzzzzzzz") is None, (
+            "fixture drift: this label must be too far to suggest, or the test "
+            "silently exercises the fuzzy-match path instead"
+        )
+
+        # 3 — a near-miss IS found, but loading it fails underneath us.
+        flaky = SkillStore(root=root)
+        flaky.save(_skill("csv-summary"))
+        assert flaky.closest_match("csv-summry") == "csv-summary", (
+            "fixture drift: this label must be close enough to suggest"
+        )
+        flaky.load = lambda *_a, **_k: None          # the race, forced
+        results["load_race"] = await handle_recall_skill(
+            SimpleNamespace(_skill_store=flaky), {"label": "csv-summry"}
+        )
+
+    for case, result in results.items():
+        assert not isinstance(result, ToolOutcome), (
+            f"the '{case}' NO MATCH branch gained a verdict — see the tier-3 "
+            "comment in recall_skill.py; a verdict on any of these pushes "
+            "normal skill exploration into the error streak"
+        )
+        assert "NO MATCH" in result, (case, result)
+
+    # …and they really are three DIFFERENT exits, not one branch reached thrice.
+    assert len(set(results.values())) == 3, results
+
+
 # ── The migrated handlers themselves, end to end ─────────────────────
 #
 # The tests above pin the MECHANISM (`_apply_error_tracking`). These pin the
@@ -340,3 +416,116 @@ def test_create_skill_draft_with_no_store_is_an_accepted_wall(tmp_path):
     assert outcome.ok is False
     assert "unavailable" in outcome.content
     assert classify(outcome.reason).trip_eligible
+
+
+# ── The seam guard: the nineteenth handler must arrive LOUDLY ────────
+
+
+#: EVERY module-level handler under `anton/core/tools/`, as of ENG-2248.
+#: Pinning only the verdict-declaring set is not enough: a new handler with no
+#: verdicts at all is absent from that set, so it slips through silently —
+#: which is the precise failure this guard exists to prevent. Mutation-checked
+#: both ways (a new handler; a migrated one regressing to bare returns).
+_ALL_HANDLERS = frozenset({
+    "handle_ask_user",
+    "handle_create_artifact",
+    "handle_create_skill_draft",
+    "handle_launch_backend",
+    "handle_list_artifacts",
+    "handle_memorize",
+    "handle_open_artifact",
+    "handle_read_image",
+    "handle_recall",
+    "handle_recall_skill",
+    "handle_scratchpad",
+    "handle_select_path",
+    "handle_update_artifact_metadata",
+    "handle_web_fetch_fallback",
+    "handle_web_search_fallback",
+})
+
+#: The subset of the above that declares at least one explicit `ToolOutcome`
+#: verdict. Not a wish list — a lock.
+_VERDICT_DECLARING_HANDLERS = frozenset({
+    "handle_create_skill_draft",
+    "handle_list_artifacts",
+    "handle_memorize",
+    "handle_open_artifact",
+    "handle_read_image",
+    "handle_recall_skill",
+    "handle_scratchpad",          # partially migrated before this ticket
+})
+
+
+def test_the_set_of_verdict_declaring_handlers_is_pinned():
+    """ENG-2248's durable half: a new handler cannot arrive silently unverdicted.
+
+    The ticket asked for "an AST seam guard [that] fails when a handler returns
+    a bare value where a `ToolOutcome` is expected". Taken literally that guard
+    cannot exist while this migration is deliberately partial — 11 handlers are
+    still unmigrated on purpose, and three MIGRATED ones keep bare tier-3
+    returns by design (`recall_skill`'s NO MATCH family, `open_artifact`'s "no
+    artifact found", `memorize`'s "encoding is disabled"). A guard that failed
+    on a bare return would fail on all of those on day one.
+
+    So it is inverted into an inventory lock, which gets the property the
+    ticket actually wanted — the nineteenth handler arrives LOUDLY — without
+    requiring the migration to be finished first. It fails when:
+
+      * a NEW handler is added without a verdict (not in the set),
+      * a migrated handler REGRESSES to all-bare returns,
+      * a handler is migrated without saying so here (a one-line, deliberate
+        update, and the moment to check the tier table on the ticket).
+
+    Scoped to `anton/core/tools/` — the package the tool registry dispatches
+    into. Module-level functions only, so `HTMLParser.handle_data` and friends
+    in the web-fetch parser are not mistaken for tool handlers.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "anton" / "core" / "tools"
+    declaring: set[str] = set()
+    seen: set[str] = set()
+
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in tree.body:                     # module level only
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name.startswith("handle_")):
+                continue
+            seen.add(node.name)
+            for ret in ast.walk(node):
+                if (isinstance(ret, ast.Return)
+                        and isinstance(ret.value, ast.Call)
+                        and getattr(ret.value.func, "id", "") == "ToolOutcome"):
+                    declaring.add(node.name)
+                    break
+
+    assert seen, "the AST scan found no handlers at all — the guard is vacuous"
+
+    # 1. The census. This is the half that catches the nineteenth handler:
+    #    one with NO verdicts is absent from `declaring`, so checking only the
+    #    declaring set lets it through (measured — the first version of this
+    #    guard did exactly that).
+    added = seen - _ALL_HANDLERS
+    removed = _ALL_HANDLERS - seen
+    assert not (added or removed), (
+        f"the handler census moved. Added: {sorted(added)}. "
+        f"Removed: {sorted(removed)}. A NEW handler must make a deliberate "
+        "tier decision before it ships — tier 1 verified success, tier 2 "
+        "indisputable failure, tier 3 ambiguous and left `ok=None` WITH a "
+        "comment saying why. Then add it to `_ALL_HANDLERS`, and to "
+        "`_VERDICT_DECLARING_HANDLERS` if it declares one."
+    )
+
+    # 2. The verdict subset, so a migrated handler cannot quietly regress.
+    gained = declaring - _VERDICT_DECLARING_HANDLERS
+    lost = _VERDICT_DECLARING_HANDLERS - declaring
+    assert not (gained or lost), (
+        f"the verdict inventory moved. Newly declaring: {sorted(gained)}. "
+        f"No longer declaring: {sorted(lost)}. If you migrated a handler, add "
+        "it here and record its tier decisions on ENG-2248. If a handler "
+        "STOPPED declaring, that is a regression — an unverdicted result is "
+        "classified by the ENG-1276 substring fallback, not by the handler."
+    )
