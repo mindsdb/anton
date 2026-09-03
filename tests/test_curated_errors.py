@@ -55,6 +55,18 @@ def _fields(send_event_mock) -> dict:
     return send_event_mock.call_args.kwargs
 
 
+class _FakeStatusError(Exception):
+    """Minimal stand-in for an SDK ``APIStatusError`` — mirrors the one in
+    `test_transient_retry.py`. `_stamp_retry_terminal` only reads `.status_code`
+    via getattr, so a real SDK exception buys nothing and costs an import that
+    is not order-stable under CI's random test ordering (#433)."""
+
+    def __init__(self, status_code, body=None):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+        self.body = body
+
+
 def _unreachable(**kw):
     """The failure from the ENG-1361 incident: request-time, SDK already retried."""
     kw.setdefault("code", "connection_error")
@@ -472,15 +484,9 @@ async def test_a_non_transient_terminal_still_books_its_http_status():
     classifies provider failures and is empty here, but the status is a plain
     fact about the exception and is the only signal these turns carry. Pins the
     asymmetry so nobody "tidies" it away — self-review finding 1."""
-    import httpx
-    import openai
-
     s = _session()
-    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
-    resp = httpx.Response(400, request=req, json={"error": {"code": "invalid_request_error"}})
-
     s._stream_and_handle_tools = _always_raise(
-        lambda: openai.BadRequestError("bad tool schema", response=resp, body=None)
+        lambda: _FakeStatusError(400, {"error": {"code": "invalid_request_error"}})
     )
 
     async def _summarize_succeeds(*a, **kw):
