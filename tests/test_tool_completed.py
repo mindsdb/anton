@@ -13,9 +13,10 @@ harness shape as ``test_root_cause_wiring.py``) and assert on what
 - ``error_type`` is the exception CLASS name and never the message —
   ``str(exc)`` routinely embeds file paths and user input;
 - the payload is exactly {name, ok, duration_ms, error_type, surface,
-  conversation_id, turn_index, root_cause_tier, root_cause_class}, all strings
-  — no tool arguments, no result content. ``surface`` joined in ENG-1945 and the
-  two ``root_cause_*`` keys in ENG-2247; the exact-keys assertion is widened
+  conversation_id, turn_index, turn_attempt_id, root_cause_tier,
+  root_cause_class}, all strings — no tool arguments, no result content.
+  ``surface`` joined in ENG-1945, the two ``root_cause_*`` keys in ENG-2247 and
+  ``turn_attempt_id`` in ENG-2243; the exact-keys assertion is widened
   deliberately each time rather than loosened, because "no surprise keys" is the
   property that keeps arguments and result prose out;
 - human wait (``answer_wait_s``, accumulated by ``elicit()``) is subtracted
@@ -167,7 +168,7 @@ async def test_unmigrated_handler_verdict_is_unknown_not_a_guess(workspace):
 # ── Payload contract ─────────────────────────────────────────────────
 
 
-async def test_payload_is_exactly_the_nine_keys_all_strings(workspace):
+async def test_payload_is_exactly_the_ten_keys_all_strings(workspace):
     """No arguments, no result content, no surprise keys — and str values only,
     because send_event's extras are wire parameters (tests/test_ask_user.py:496).
     """
@@ -175,6 +176,7 @@ async def test_payload_is_exactly_the_nine_keys_all_strings(workspace):
     events = await _tool_completed_calls(session)
     assert set(events[0]) == {"name", "ok", "duration_ms", "error_type",
                               "surface", "conversation_id", "turn_index",
+                              "turn_attempt_id",
                               "root_cause_tier", "root_cause_class"}
     assert all(isinstance(v, str) for v in events[0].values())
     assert "secret result body" not in json.dumps(events[0])
@@ -708,8 +710,14 @@ async def test_a_caller_that_omits_reason_degrades_to_unclassified(workspace):
         "— empty is a legal value meaning the call did not fail"
     )
     assert ev["root_cause_class"] == "unclassified"
-    # And the keys are still exactly the nine: omitting an input must not
+    # And the keys are still exactly the ten: omitting an input must not
     # change the payload SHAPE, only the honesty of one value.
+    #
+    # NOTE for the next person widening this event: git did NOT flag this as a
+    # conflict when ENG-2243 rebased onto ENG-2247, because only one side ever
+    # touched this test. A key-set assertion in a test the OTHER branch added
+    # is invisible to `git merge-tree`, so measuring conflict regions
+    # understates the work. Grep the key set, do not trust the conflict count.
     assert set(ev) == {"name", "ok", "duration_ms", "error_type", "surface",
-                       "conversation_id", "turn_index",
+                       "conversation_id", "turn_index", "turn_attempt_id",
                        "root_cause_tier", "root_cause_class"}

@@ -177,7 +177,14 @@ _pending_lock = threading.Lock()
 #                    content-free exception type; "" on verified turns; ENG-1858),
 #                    harness, surface (desktop / web / cli — WHERE
 #                    the user was, "" when the host did not say; ENG-1945),
-#                    anton_version, conversation_id, turn_index
+#                    anton_version, conversation_id, turn_index,
+#                    turn_attempt_id (unique per turn EXECUTION — `turn_index`
+#                    is only a position in the history and REPEATS across a
+#                    retried or cancelled attempt, so the pair
+#                    (conversation_id, turn_index) is NOT a unique key;
+#                    ENG-2243). Count attempts with turn_attempt_id, turns with
+#                    (conversation_id, turn_index). Absent on pre-ENG-2243
+#                    builds — read as unknown, never as a value.
 #
 #   rule_retrieval   outcome, when_rules, kept_rules, rules_chars,
 #                    stop_reason, input_tokens, output_tokens, duration_ms
@@ -228,6 +235,17 @@ _pending_lock = threading.Lock()
 #                    conversation_id + turn_index mirror turn_completed's
 #                    values, so a tool row joins to its parent turn row and,
 #                    via Langfuse sessionId, to the gateway trace.
+#                    turn_attempt_id also mirrors it, and is the key the join
+#                    should actually use: turn_index alone matched every retry
+#                    of the same turn (18.5% of these rows joined to more than
+#                    one turn row before ENG-2243).
+#                    Not "empty when no books are open" — both emit sites are
+#                    inside the tool loop, so that state is unreachable. The
+#                    divergence that IS reachable: with books closed,
+#                    turn_index falls back to _turn_count + 1 while this would
+#                    be "", so the two join keys would disagree about whether a
+#                    parent turn row exists. Prefer this key and treat an empty
+#                    value as a pre-ENG-2243 build, never as "no parent".
 #                    (anton/core/session.py::_emit_tool_completed)
 #
 # An event NOT listed here keeps the collector path, so moving one is an
@@ -324,8 +342,17 @@ def get_installation_id() -> str:
     usable as a join key.
 
     Returns:
-        A 16-character hex string (64 bits of entropy), or ``"unknown"`` when
-        the machine cannot be fingerprinted at all.
+        A 16-character hex string, or ``"unknown"`` when the machine cannot be
+        fingerprinted at all.
+
+        64 bits on the real-MAC path (a sha256 prefix). The no-MAC fallback
+        persists ``uuid4().hex[:16]``, which is 60: hex position 12 is uuid4's
+        version nibble, so it is the literal ``4`` in every id that branch ever
+        writes. Left as-is deliberately — changing the derivation would give
+        every already-fingerprinted Docker install a NEW ``aid`` and break the
+        continuity of that identity — but do not repeat the 64-bit claim for
+        it. Noted while correcting the same error in
+        ``TurnCost.attempt_id`` (#431 review).
     """
     global _cached_aid
     if _cached_aid is not None:
@@ -363,12 +390,19 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
     moment a queued daemon thread got around to sending, and for a cost event
     that difference is the one you would go on to plot.
 
-    Deliberately no ``$insert_id``.  The natural key would be
-    ``(conversation_id, turn_index)``, but an abandoned turn's books and a
-    later retry can legitimately share both, and dropping that row would lose
-    exactly the runaway a cancel was investigating (anton#309 review).
-    ``TurnCost.emitted`` already stops the same books emitting twice, so
-    dedupe here could only add a way to lose real events.
+    Deliberately no ``$insert_id`` — but not for the reason this comment
+    used to give (#431 review). It said the natural key
+    ``(conversation_id, turn_index)`` was unusable because an abandoned turn's
+    books and a later retry can legitimately share both. True, and ENG-2243
+    then created the key that does not: ``turn_attempt_id`` is unique per turn
+    EXECUTION, so ``(conversation_id, turn_attempt_id)`` would be a sound
+    dedupe key.
+
+    The standing reason is the second half: ``TurnCost.emitted`` already stops
+    the same books emitting twice, one layer earlier and for every sink at
+    once. So dedupe here would be redundant on the path that matters and could
+    only add a way to lose real events. Kept out on those grounds, not on the
+    absence of a key.
     """
     properties = {
         k: v for k, v in params.items()

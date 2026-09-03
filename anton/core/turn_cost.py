@@ -36,6 +36,7 @@ Stated gaps (by design, documented on ENG-1288):
 
 from __future__ import annotations
 
+import secrets
 import time
 from dataclasses import dataclass, field
 
@@ -168,6 +169,38 @@ class TurnCost:
     # there gave the abandoned turn a LATER, unrelated turn's index — the
     # cost→Langfuse hop then pointed at the wrong turn (#309 review follow-up).
     turn_index: int = 0
+    # Unique per turn EXECUTION. `turn_index` is only a POSITION in the history
+    # — `_turn_count` is seeded by counting the user messages the session was
+    # handed — and cowork-server rebuilds the session every turn, so a retried
+    # or cancelled attempt arrives with the same history and stamps the same
+    # `turn_index` (ENG-2243). Measured on prod 2026-08-28..09-01: that collided
+    # on 14.5% of desktop turn keys (worst: 16 rows on one key, spanning 34
+    # hours) and left 18.5% of `tool_completed` rows joining to more than one
+    # `turn_completed` row — the join ENG-1486 stamped the pair to enable.
+    #
+    # Random, not a counter, deliberately: ANY session-local counter resets on
+    # that same rebuild, so nothing derived from session state can be unique
+    # across attempts. `token_hex(8)` is 16 hex chars of 64 real bits —
+    # collision-free at our volume (the birthday bound is ~5e9 attempts), short
+    # enough to read in a log line.
+    #
+    # NOT `uuid.uuid4().hex[:16]`, which this field shipped as in review and
+    # which is 60 bits, not 64: hex position 12 is uuid4's version nibble, so
+    # it is the literal `4` in every id ever generated (measured 2000/2000).
+    # The width claim was wrong and so was the comparison to the `aid` install
+    # fingerprint: `get_installation_id()` in `anton/analytics.py` takes the
+    # `sha256(str(node)).hexdigest()[:16]` branch whenever the machine has a
+    # real MAC, which is genuinely 64 bits; its `uuid4().hex[:16]` branch is
+    # the fallback for a host with no MAC to read (Docker with stripped
+    # networking), and carries the same 60-bit shortfall described above.
+    #
+    # A `default_factory` rather than a value passed in at each construction
+    # site: there are two today (the streaming and non-streaming turns in
+    # `session.py`) and a third that forgot would silently reintroduce the
+    # collision this field exists to remove. Also makes it a stamped-at-open
+    # fact like `turn_index` above, so a late finalizer reports the id of the
+    # turn whose books it holds rather than whichever turn owns the slot now.
+    attempt_id: str = field(default_factory=lambda: secrets.token_hex(8))
     # When the turn ended. None until resolved. A late finalizer cannot know the
     # real end, so it falls back to `last_activity_monotonic` (the last LLM
     # call) — understating but bounded, rather than measuring up to whenever
