@@ -604,6 +604,45 @@ test_snippet: |
 BigCommerce API tokens can be created in the BigCommerce control panel under Advanced Settings → API Accounts. Choose "Create API Account", then select "V2/V3 API Token" and grant the necessary permissions (e.g. "Products: Read-Only" to access product data).
 ---
 
+## Airtable
+
+```yaml
+engine: airtable
+display_name: Airtable
+pip: httpx
+popular: true
+name_from: [base_id, table_name]
+fields:
+  - { name: access_token, required: true,  secret: true,  description: "Personal access token or OAuth token with read access to the Airtable base" }
+  - { name: base_id,      required: true,  secret: false, description: "Airtable base ID (starts with app...)" }
+  - { name: table_name,   required: true,  secret: false, description: "Airtable table name or table ID (starts with tbl...)" }
+  - { name: view,         required: false, secret: false, description: "optional view name or view ID to validate against" }
+test_snippet: |
+  import os
+  from urllib.parse import quote
+
+  import httpx
+
+  token = os.environ['DS_ACCESS_TOKEN']
+  base_id = os.environ['DS_BASE_ID']
+  table_name = os.environ['DS_TABLE_NAME']
+  view = os.environ.get('DS_VIEW', '').strip()
+  url = f"https://api.airtable.com/v0/{quote(base_id, safe='')}/{quote(table_name, safe='')}"
+  params = {'pageSize': 1}
+  if view:
+      params['view'] = view
+  headers = {'Authorization': f'Bearer {token}'}
+  r = httpx.get(url, headers=headers, params=params, timeout=10)
+  assert r.status_code < 400, f'HTTP {r.status_code}: {r.text[:200]}'
+  print("ok")
+```
+
+Airtable's Web API uses bearer-token authentication with personal access tokens or OAuth tokens.
+The connection test calls the list-records endpoint with `pageSize=1`, which validates the token,
+base, table, and optional view without fetching a full table.
+
+---
+
 ## WebArm Comarch Optima API
 
 ```yaml
