@@ -502,7 +502,7 @@ class TestCliHostsSupplyTheVault:
 
         assert captured["data_vault"] is not None
 
-    def test_rebuilt_session_is_given_a_vault(self):
+    async def test_rebuilt_session_is_given_a_vault(self):
         from anton.core.datasources.data_vault import LocalDataVault
         import anton.chat_session as chat_session
 
@@ -519,7 +519,7 @@ class TestCliHostsSupplyTheVault:
             patch.object(chat_session, "refresh_knowledge", lambda *a, **k: None),
             patch.object(chat_session, "build_runtime_context", lambda _s: ""),
         ):
-            chat_session.rebuild_session(
+            await chat_session.rebuild_session(
                 settings=MagicMock(),
                 state={},
                 self_awareness=None,
