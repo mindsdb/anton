@@ -710,8 +710,14 @@ async def test_a_caller_that_omits_reason_degrades_to_unclassified(workspace):
         "— empty is a legal value meaning the call did not fail"
     )
     assert ev["root_cause_class"] == "unclassified"
-    # And the keys are still exactly the nine: omitting an input must not
+    # And the keys are still exactly the ten: omitting an input must not
     # change the payload SHAPE, only the honesty of one value.
+    #
+    # NOTE for the next person widening this event: git did NOT flag this as a
+    # conflict when ENG-2243 rebased onto ENG-2247, because only one side ever
+    # touched this test. A key-set assertion in a test the OTHER branch added
+    # is invisible to `git merge-tree`, so measuring conflict regions
+    # understates the work. Grep the key set, do not trust the conflict count.
     assert set(ev) == {"name", "ok", "duration_ms", "error_type", "surface",
-                       "conversation_id", "turn_index",
+                       "conversation_id", "turn_index", "turn_attempt_id",
                        "root_cause_tier", "root_cause_class"}
