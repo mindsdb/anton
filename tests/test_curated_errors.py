@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -342,6 +342,82 @@ def test_builtin_connectionerror_is_not_curated():
     catch-all is ENG-1283."""
     assert ConnectionError not in CURATED_PROVIDER_ERRORS
     assert not isinstance(ConnectionError("boom"), CURATED_PROVIDER_ERRORS)
+
+
+# --------------------------------------------------------------------------- #
+# The wrap-up call takes the COMPACTION, not the capabilities
+# --------------------------------------------------------------------------- #
+
+async def test_the_wrapup_call_does_not_get_the_sessions_web_tools():
+    """Routing the wrap-up through `plan_stream_with_recovery` (review finding 4)
+    silently attached the session's native web tools, which the raw `plan_stream`
+    call did not. That contradicts the prompt — which says "Stop retrying" — and
+    the prompt embeds the raw error, so a provider-side search could carry file
+    paths or user content out of it. Regression guard for #433's review."""
+    s = _session()
+    s._native_web_tools = {"web_search"}          # a session that HAS them
+    seen = {}
+
+    class _Boom(Exception):
+        pass
+
+    s._stream_and_handle_tools = _always_raise(lambda: _Boom("nope"))
+
+    async def _capture(*a, **kw):
+        seen.update(kw)
+        yield StreamTextDelta(text="explaining")
+
+    s._llm.plan_stream = _capture
+    _ = [e async for e in s.turn_stream("do it")]
+
+    assert seen, "the wrap-up call never happened"
+    assert "native_web_tools" not in seen
+
+
+async def test_other_recovery_callers_keep_their_web_tools():
+    """The opt-out must be surgical: default True, so the agent loop — where the
+    tools ARE the point — is untouched."""
+    s = _session()
+    s._native_web_tools = {"web_search"}
+    seen = {}
+
+    async def _capture(*a, **kw):
+        seen.update(kw)
+        yield StreamTextDelta(text="ok")
+
+    s._llm.plan_stream = _capture
+    _ = [e async for e in s.plan_stream_with_recovery(system="sys")]
+
+    assert seen.get("native_web_tools") == {"web_search"}
+
+
+async def test_the_wrapup_still_compacts_on_overflow():
+    """Finding 4's actual benefit must survive the opt-out: a history too long to
+    summarize gets shrunk and retried, rather than dying on a card-less error."""
+    s = _session()
+    s._native_web_tools = {"web_search"}
+    calls = {"n": 0}
+
+    class _Boom(Exception):
+        pass
+
+    s._stream_and_handle_tools = _always_raise(lambda: _Boom("nope"))
+    s._summarize_history = AsyncMock(return_value=True)
+    s._compact_scratchpads = MagicMock()
+
+    async def _overflow_then_ok(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ContextOverflowError("too long")
+        yield StreamTextDelta(text="summarised after compaction")
+
+    s._llm.plan_stream = _overflow_then_ok
+    events = [e async for e in s.turn_stream("do it")]
+
+    text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert "summarised after compaction" in text
+    assert calls["n"] == 2                      # overflowed, compacted, retried
+    s._summarize_history.assert_awaited()
 
 
 # --------------------------------------------------------------------------- #

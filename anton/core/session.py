@@ -3535,6 +3535,7 @@ class ChatSession:
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         messages_factory: Callable[[], list[dict]] | None = None,
+        allow_native_web_tools: bool = True,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming analogue of plan_with_recovery.
 
@@ -3542,6 +3543,16 @@ class ChatSession:
         ContextOverflowError, yields StreamContextCompacted, shrinks
         history (summarize+compact, then hard-truncate on a repeat
         overflow), and restarts the stream. A fourth overflow propagates.
+
+        ``allow_native_web_tools=False`` suppresses the session's native web
+        tools for this call. Default True, so every agent-loop caller is
+        unchanged: there the tools are the point. It exists for the
+        retry-exhausted wrap-up (ENG-1361 review of #433), which asks the model
+        to STOP and explain a failure — handing it a research tool contradicts
+        the instruction, and the prompt embeds the raw error, so a provider-side
+        search could carry file paths or user content from it to a search
+        backend. That call needs this method for the COMPACTION, not for the
+        capabilities that ride along with it.
         """
         factory = messages_factory if messages_factory is not None else (lambda: self._history)
         # Same defensive pre-flight as plan_with_recovery — see the
@@ -3556,7 +3567,7 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
-        if self._native_web_tools:
+        if allow_native_web_tools and self._native_web_tools:
             kwargs["native_web_tools"] = self._native_web_tools
 
         try:
@@ -4779,6 +4790,14 @@ class ChatSession:
                             # propagates (ENG-1361 review).
                             async for event in self.plan_stream_with_recovery(
                                 system=await self._build_system_prompt(user_msg_str),
+                                # This call wants the compaction, NOT the
+                                # session's web tools: the prompt above says
+                                # "Stop retrying" and asks for an explanation,
+                                # and it embeds the raw error text. Leaving them
+                                # on would both contradict the instruction and
+                                # let a provider-side search carry paths or user
+                                # content out of that error (#433 review).
+                                allow_native_web_tools=False,
                             ):
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
