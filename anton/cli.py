@@ -419,21 +419,35 @@ def _reconcile_publish_identity(settings) -> bool:
     still reaches the scratchpad subprocess (``core/backends/scratchpad_boot``),
     the ``ANTON_MINDS_API_KEY`` → ``OPENAI_API_KEY`` fallback in
     ``core/backends/local``, and any mid-turn settings rebuild. Simply removing
-    the writer left them promoted forever, where the old code at least
-    rewrote them with the live key on each publish.
+    the writer left them promoted forever, where the old code at least rewrote
+    them with the live key on each publish.
 
-    So reconcile once, at boot, before any promotion:
+    So reconcile once, at boot, before any promotion — but NEVER destroy a
+    credential to do it. We cannot tell which of two keys authenticates:
+    reading a vault is a presence check, exactly the ``_has_api_key`` weakness
+    this ticket documents elsewhere, and assuming the global one is current
+    gets it backwards on the machine state the ticket actually measured (a
+    valid project key alongside an invalid 7-character global one). Three
+    cases, none lossy:
 
-    * global vault empty → move the project key up into it. This is also what
-      makes ``anton --folder <dir>`` work: ``_build_env_files`` is evaluated at
+    * global vault empty → move the project key up. This is also what makes
+      ``anton --folder <dir>`` work: ``_build_env_files`` is evaluated at
       import time against ``Path.cwd()``, so a ``-f`` target's vault is not in
       the settings chain at all and its key would otherwise be invisible.
-    * global vault already set → the project copy is redundant; drop it.
+    * the two are the same string → the project copy is redundant; drop it.
+    * they differ → keep the global one (one identity is the point), but
+      archive the project's to ``.anton/.env.superseded`` first, so a user
+      whose working key was the project one can get it back with ``cat``.
 
     Returns True when the on-disk state changed, so the caller re-resolves
     settings (the migrated key only enters the chain via ``~/.anton/.env``).
     """
-    from anton.workspace import Workspace
+    from datetime import datetime
+
+    # Reuse the vault's own atomic 0600 writer rather than re-implementing it:
+    # the archive holds the same secret as the file it came from, and a plain
+    # write_text would leave it at umask mode until a chmod landed.
+    from anton.workspace import Workspace, _write_private
 
     project_path = Path(settings.workspace_path)
     if project_path == Path.home():
@@ -445,21 +459,35 @@ def _reconcile_publish_identity(settings) -> bool:
         return False
 
     global_ws = Workspace(Path.home(), settings=settings)
-    had_global = bool(global_ws.get_secret("ANTON_MINDS_API_KEY"))
+    global_key = global_ws.get_secret("ANTON_MINDS_API_KEY")
 
-    project_ws.remove_secret("ANTON_MINDS_API_KEY")
-    if not had_global:
+    if not global_key:
         global_ws.set_secret("ANTON_MINDS_API_KEY", project_key)
+        project_ws.remove_secret("ANTON_MINDS_API_KEY")
+        message = "  Moved this project's saved publish key to ~/.anton/.env"
+    elif global_key == project_key:
+        project_ws.remove_secret("ANTON_MINDS_API_KEY")
+        message = "  Removed a duplicate publish key from this project (same key as ~/.anton/.env)"
+    else:
+        archive = project_ws.env_path.with_name(".env.superseded")
+        previous = archive.read_text(encoding="utf-8") if archive.is_file() else ""
+        _write_private(
+            archive,
+            f"{previous}# superseded {datetime.now():%Y-%m-%d %H:%M}, was in .anton/.env\n"
+            f"ANTON_MINDS_API_KEY={project_key}\n",
+        )
+        project_ws.remove_secret("ANTON_MINDS_API_KEY")
+        message = (
+            "  This project had a different publish key than ~/.anton/.env.\n"
+            "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
+            f"  {archive} in case it was the one you wanted."
+        )
 
     # Say so. This can change which account publishes (that is the point of
     # collapsing to one identity), and a silent identity change is the exact
-    # failure ENG-1424 is about.
-    console.print(
-        "[anton.muted]  Moved this project's saved publish key to ~/.anton/.env[/]"
-        if not had_global
-        else "[anton.muted]  Removed a stale publish key from this project; "
-        "using the one in ~/.anton/.env[/]"
-    )
+    # failure ENG-1424 is about. The wording must not claim the retained key is
+    # the good one — nothing here has authenticated either of them.
+    console.print(f"[anton.muted]{message}[/]")
     return True
 
 
