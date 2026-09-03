@@ -499,3 +499,36 @@ class TestAFailedRebuildKeepsTheOldState:
         # The turn keeps what it had rather than silently scrubbing nothing.
         assert "known-secret" not in scrub_credentials("pw known-secret")
         assert "[DS_POSTGRES_PROD__PASSWORD]" in scrub_credentials("pw known-secret")
+
+
+class TestOneBadConnectionCannotBlindTheWholeTurn:
+    """A pad's env is built per connection and tolerates a bad record, so the
+    registry rebuild has to degrade the same way. All-or-nothing there leaves
+    the pad holding credentials this turn has no way to scrub."""
+
+    def test_a_connection_that_cannot_be_classified_leaves_the_others_scrubbed(
+        self, tmp_path, monkeypatch
+    ):
+        from anton.core.datasources.data_vault import LocalDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        vault = LocalDataVault(vault_dir=tmp_path / "vault")
+        vault.save(
+            "postgres", "broken", {"password": "broken-secret"}, secure_keys=["password"]
+        )
+        vault.save(
+            "mysql", "healthy", {"password": "healthy-secret"}, secure_keys=["password"]
+        )
+
+        real_read_record = vault.read_record
+
+        def flaky_read_record(engine, name, *args, **kwargs):
+            if name == "broken":
+                raise OSError("unreadable record")
+            return real_read_record(engine, name, *args, **kwargs)
+
+        monkeypatch.setattr(vault, "read_record", flaky_read_record)
+
+        restore_namespaced_env(vault)
+
+        assert "healthy-secret" not in scrub_credentials("pw healthy-secret")

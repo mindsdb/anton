@@ -602,20 +602,39 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
     dreg = DatasourceRegistry()
     env_values: dict[str, str] = {}
     for conn in vault.list_connections():
-        edef = dreg.get(conn["engine"])
-        if edef is not None and not _is_oauth_connection(vault, conn["engine"], conn["name"]):
-            register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
-        else:
-            _register_unregistered_connection_vars(vault, conn["engine"], conn["name"])
+        engine, name = conn.get("engine"), conn.get("name")
+        if not (engine and name):
+            continue
+        # Per connection, because a pad's env is built that way too: a record
+        # that aborted the whole rebuild would still be injected there.
         try:
-            env_values.update(vault.env_for(conn["engine"], conn["name"]) or {})
+            edef = dreg.get(engine)
+            oauth = _is_oauth_connection(vault, engine, name)
+        except Exception:
+            # Unclassifiable, so take the unknown-field path: its coarse net
+            # over-redacts, which is the safe direction.
+            edef, oauth = None, False
+            logger.warning("Could not classify %s/%s", engine, name, exc_info=True)
+        try:
+            if edef is not None and not oauth:
+                register_secret_vars(edef, engine=engine, name=name)
+            else:
+                _register_unregistered_connection_vars(vault, engine, name)
+        except Exception:
+            logger.warning(
+                "Could not register vars for %s/%s; its credentials will not be "
+                "scrubbed from this turn's output",
+                engine, name, exc_info=True,
+            )
+        try:
+            env_values.update(vault.env_for(engine, name) or {})
         except Exception:
             # Must not block the rest, but it leaves that connection
             # unscrubbable for this turn, so say so. Names only, never a value.
             logger.warning(
                 "Could not resolve values for %s/%s; its credentials will not be "
                 "scrubbed from this turn's output",
-                conn["engine"], conn["name"], exc_info=True,
+                engine, name, exc_info=True,
             )
     _ds_env_values.set(env_values)
 
