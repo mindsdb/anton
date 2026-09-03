@@ -118,15 +118,14 @@ class _ContextScopedEnvValues:
             current.update(values)
 
     def begin_scope(self) -> None:
-        """Open this turn's own map, seeded so readers see no change.
+        """Open this turn's own map, seeded from the ambient DS_*.
 
-        With nothing open, get() reads os.environ, so an unopened scope seeds
-        from the ambient DS_* rather than from nothing.
+        Re-seeded every turn rather than only the first: without a vault
+        nothing else refreshes the map, so a credential the host rotated
+        between turns would be scrubbed against the previous value. Called
+        once per turn, so no mid-turn registration is lost.
         """
-        current = self._cv.get()
-        if current is None:
-            current = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
-        self._cv.set(dict(current))
+        self._cv.set({k: v for k, v in os.environ.items() if k.startswith("DS_")})
 
     def snapshot(self) -> dict[str, str] | None:
         """A copy of the open map, or None when no scope is open."""

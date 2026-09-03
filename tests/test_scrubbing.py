@@ -532,3 +532,19 @@ class TestOneBadConnectionCannotBlindTheWholeTurn:
         restore_namespaced_env(vault)
 
         assert "healthy-secret" not in scrub_credentials("pw healthy-secret")
+
+
+class TestTheNoVaultScopeFollowsAmbientChanges:
+    """Without a vault nothing rebuilds the map, so the turn boundary is the
+    only chance to notice a credential the host rotated between turns."""
+
+    def test_a_rotated_ambient_credential_is_scrubbed_on_the_next_turn(self, monkeypatch):
+        from anton.utils.datasources import begin_ds_turn_scope
+
+        monkeypatch.setenv("DS_CUSTOM_THING__TOKEN", "old-secret-value")
+        begin_ds_turn_scope()
+        assert "old-secret-value" not in scrub_credentials("tok old-secret-value")
+
+        monkeypatch.setenv("DS_CUSTOM_THING__TOKEN", "new-secret-value")
+        begin_ds_turn_scope()
+        assert "new-secret-value" not in scrub_credentials("tok new-secret-value")
