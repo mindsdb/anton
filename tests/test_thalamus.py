@@ -28,7 +28,7 @@ from anton.core.llm.thalamus import (
     condense_history,
     gate_turn,
 )
-from tests.conftest import make_mock_llm
+from tests.conftest import make_mock_llm, run_turn
 
 
 def _response(
@@ -192,7 +192,7 @@ class TestSessionThalamus:
         llm.plan = AsyncMock(return_value=_response("Hey!"))
         llm.gate = AsyncMock()
         session = ChatSession(ChatSessionConfig(llm_client=llm))
-        reply = await session.turn("hi")
+        reply = await run_turn(session, "hi")
         assert reply == "Hey!"
         llm.gate.assert_not_called()
 
@@ -201,7 +201,7 @@ class TestSessionThalamus:
         llm.plan = AsyncMock()
         llm.gate = AsyncMock(return_value=_response("Four."))
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
-        reply = await session.turn("what is 2+2?")
+        reply = await run_turn(session, "what is 2+2?")
         assert reply == "Four."
         llm.plan.assert_not_called()
         user_msg, assistant_msg = session.history
@@ -241,7 +241,7 @@ class TestSessionThalamus:
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         session._skill_store = _mock_skill_store()
 
-        reply = await session.turn("summarize data.csv")
+        reply = await run_turn(session, "summarize data.csv")
 
         assert reply == "Here's the summary."
         llm.plan.assert_called_once()
@@ -291,10 +291,10 @@ class TestSessionThalamus:
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
         session._skill_store = store
 
-        await session.turn("summarize data.csv")
+        await run_turn(session, "summarize data.csv")
         first_id = session.history[1]["content"][0]["id"]
 
-        await session.turn("now summarize data.json")
+        await run_turn(session, "now summarize data.json")
         second_id = session.history[5]["content"][0]["id"]
 
         assert first_id != second_id
@@ -353,13 +353,20 @@ class TestSessionThalamus:
         llm.gate = AsyncMock(side_effect=RuntimeError("thalamus down"))
         llm.plan = AsyncMock(return_value=_response("Handled anyway."))
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
-        reply = await session.turn("hi")
+        reply = await run_turn(session, "hi")
         assert reply == "Handled anyway."
         llm.plan.assert_called_once()
 
     async def test_confirmed_router_auth_failure_falls_back_to_planning(self):
         planning = AsyncMock(spec=LLMProvider)
-        planning.complete = AsyncMock(return_value=_response("Handled anyway."))
+
+        def _planning_stream(**kw):
+            async def gen():
+                yield StreamTextDelta(text="Handled anyway.")
+                yield StreamComplete(response=_response("Handled anyway."))
+            return gen()
+
+        planning.stream = MagicMock(side_effect=_planning_stream)
         coding = AsyncMock(spec=LLMProvider)
         router = AsyncMock(spec=LLMProvider)
         router.complete = AsyncMock(side_effect=ProviderAuthError("Invalid API key"))
@@ -373,18 +380,18 @@ class TestSessionThalamus:
         )
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
 
-        reply = await session.turn("hi")
+        reply = await run_turn(session, "hi")
 
         assert reply == "Handled anyway."
         assert router.complete.await_count == 2
-        planning.complete.assert_awaited_once()
+        planning.stream.assert_called_once()
 
     async def test_image_turns_skip_thalamus(self):
         llm = make_mock_llm()
         llm.gate = AsyncMock()
         llm.plan = AsyncMock(return_value=_response("Nice chart."))
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
-        reply = await session.turn(
+        reply = await run_turn(session, 
             [
                 {"type": "text", "text": "what's in this image?"},
                 {"type": "image", "source": {"type": "base64", "data": "…"}},
