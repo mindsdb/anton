@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
@@ -42,52 +41,6 @@ MEMORY_COMMANDS = [
     None,
     Command("/memory help", "show this message"),
 ]
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _parse_scope(args: list[str], idx: int = 0) -> str:
-    """Return 'global', 'project', or 'both' (default) from args[idx]."""
-    if idx < len(args) and args[idx] in ("global", "project"):
-        return args[idx]
-    return "both"
-
-
-def _numbered_bullets(text: str) -> list[tuple[int, str, str]]:
-    """
-    Parse a markdown string and return [(n, section_heading, bullet_text), ...].
-    section_heading is the nearest ## / # heading above each bullet.
-    """
-    result: list[tuple[int, str, str]] = []
-    section = ""
-    n = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            section = stripped.lstrip("#").strip()
-        elif stripped.startswith("- "):
-            n += 1
-            result.append((n, section, stripped[2:]))
-    return result
-
-
-
-def _delete_bullet(path: Path, n: int) -> bool:
-    """Remove the n-th bullet entry (1-indexed) from a markdown file."""
-    if not path.exists():
-        return False
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    count = 0
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("- "):
-            count += 1
-            if count == n:
-                lines.pop(i)
-                path.write_text("".join(lines), encoding="utf-8")
-                return True
-    return False
 
 
 # ---------------------------------------------------------------------------
