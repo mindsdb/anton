@@ -6,7 +6,7 @@ import pytest
 
 from anton.chat import ChatSession
 from anton.core.session import ChatSessionConfig
-from tests.conftest import make_mock_llm
+from tests.conftest import make_mock_llm, run_turn
 from anton.core.llm.provider import (
     ContextOverflowError,
     LLMResponse,
@@ -34,10 +34,25 @@ class TestChatSession:
         mock_llm.plan = AsyncMock(return_value=_text_response("Hey! How can I help?"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
+        reply = await run_turn(session, "hi")
+
+        assert reply == "Hey! How can I help?"
+        assert len(session.history) == 2  # user + assistant
+
+    async def test_non_streaming_turn_wraps_turn_stream(self):
+        """`turn()` is a compatibility wrapper for external anton-agent
+        consumers: it must return the final reply and route through the
+        streaming path (there is no parallel non-streaming loop anymore)."""
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(return_value=_text_response("Hey! How can I help?"))
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
         reply = await session.turn("hi")
 
         assert reply == "Hey! How can I help?"
         assert len(session.history) == 2  # user + assistant
+        # Routed through the streaming path, not a separate implementation.
+        assert mock_llm.plan.await_count == 1
 
     async def test_history_grows_across_turns(self):
         """Multiple turns accumulate in history."""
@@ -51,9 +66,9 @@ class TestChatSession:
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
-        await session.turn("hello")
-        await session.turn("can you check something")
-        await session.turn("the anton repo")
+        await run_turn(session, "hello")
+        await run_turn(session, "can you check something")
+        await run_turn(session, "the anton repo")
 
         # 3 user messages + 3 assistant messages
         assert len(session.history) == 6

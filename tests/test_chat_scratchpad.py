@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-from tests.conftest import make_mock_llm
+from tests.conftest import make_mock_llm, run_turn
 
 import pytest
 
@@ -76,7 +76,7 @@ class TestScratchpadToolDefinition:
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
-            await session.turn("hello")
+            await run_turn(session, "hello")
 
             call_kwargs = mock_llm.plan.call_args
             tools = call_kwargs.kwargs.get("tools", [])
@@ -131,7 +131,7 @@ class TestScratchpadExecViaChat:
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
-            reply = await session.turn("what is 7 * 6?")
+            reply = await run_turn(session, "what is 7 * 6?")
 
             tool_result_msgs = [
                 m for m in session.history
@@ -158,7 +158,7 @@ class TestScratchpadViewViaChat:
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
-            await session.turn("run and show")
+            await run_turn(session, "run and show")
 
             # Find the view result (second tool result)
             tool_result_msgs = [
@@ -187,7 +187,7 @@ class TestScratchpadRemoveViaChat:
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
-            await session.turn("create and remove")
+            await run_turn(session, "create and remove")
 
             tool_result_msgs = [
                 m for m in session.history
@@ -216,7 +216,7 @@ class TestScratchpadDumpViaChat:
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
-            await session.turn("show me my work")
+            await run_turn(session, "show me my work")
 
             tool_result_msgs = [
                 m for m in session.history
@@ -357,7 +357,7 @@ class TestScratchpadInstallViaChat:
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
-            reply = await session.turn("install cowsay")
+            reply = await run_turn(session, "install cowsay")
 
             tool_result_msgs = [
                 m for m in session.history
@@ -381,7 +381,7 @@ class TestScratchpadInstallViaChat:
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
-            await session.turn("install nothing")
+            await run_turn(session, "install nothing")
 
             tool_result_msgs = [
                 m for m in session.history
