@@ -62,7 +62,8 @@ async def test_desktop_memorize_writes_straight_to_disk(tmp_path, memory_dirs):
         {"text": "Name: Zoran", "kind": "profile", "scope": "global"},
         {"text": "CoinGecko rate-limits at 50/min", "kind": "lesson", "scope": "global"},
     ]})
-    assert "Memory updated" in result
+    assert result.ok is True
+    assert "Memory updated" in result.content
     await session.settle_memory_writes()
 
     assert "Use httpx instead of requests" in (global_dir / "rules.md").read_text()

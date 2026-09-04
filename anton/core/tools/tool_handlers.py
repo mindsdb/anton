@@ -474,7 +474,9 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     ).to_outcome()
 
 
-async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
+async def handle_list_artifacts(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
     """List every artifact in the workspace, newest first.
 
     Output is a JSON array of summaries — slug, name, type,
@@ -486,7 +488,13 @@ async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
 
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        # Tier 2 (ENG-2248): the tool cannot operate at all, so a retry
+        # cannot help and repetition is thrash. Reuses the existing
+        # `store_unavailable` sentinel key (external_wall/service_unavailable).
+        return ToolOutcome(
+            content="Artifact store unavailable (no workspace bound to this session).",
+            ok=False, reason="store_unavailable",
+        )
 
     artifacts = store.list()
     summaries = [
@@ -500,10 +508,14 @@ async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:
         }
         for a in artifacts
     ]
-    return json.dumps(summaries, indent=2)
+    # Tier 1: a listing was produced. An EMPTY list is still a success —
+    # "there are no artifacts" is the correct answer, not a failure.
+    return ToolOutcome(content=json.dumps(summaries, indent=2), ok=True)
 
 
-async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
+async def handle_open_artifact(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
     """Load an existing artifact's metadata + folder path.
 
     Returns the same shape as `create_artifact` plus the file list
@@ -514,13 +526,29 @@ async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
 
     store = _artifact_store(session)
     if store is None:
-        return "Artifact store unavailable (no workspace bound to this session)."
+        # Tier 2 (ENG-2248): the tool cannot operate at all, so a retry
+        # cannot help and repetition is thrash. Reuses the existing
+        # `store_unavailable` sentinel key (external_wall/service_unavailable).
+        return ToolOutcome(
+            content="Artifact store unavailable (no workspace bound to this session).",
+            ok=False, reason="store_unavailable",
+        )
 
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
-        return "Error: `slug` is required."
+        # Tier 2: a malformed call; retrying it unchanged cannot work.
+        return ToolOutcome(
+            content="Error: `slug` is required.",
+            ok=False, reason="missing_slug",
+        )
     artifact = store.open(slug)
     if artifact is None:
+        # Tier 3 (ENG-2248): deliberately left ok=None. Same shape as
+        # `recall_skill`'s NO MATCH — the store worked and the artifact simply
+        # does not exist. The model can list artifacts and pick a real slug, so
+        # this is arguably its own error; but it is also how a model discovers
+        # what exists, and ok=False would feed that exploration to the breaker.
+        # Needs its own decision, not a side effect of this pass.
         return f"Error: no artifact found for slug `{slug}`."
     folder = store.folder_for(artifact.slug)
     # Opening is how the agent gets an artifact's path in order to write to
@@ -528,7 +556,8 @@ async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
     # rather than at write time because the writes themselves happen in
     # scratchpad cells the tool layer never sees.
     _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
-    return json.dumps({
+    # Tier 1: the artifact was opened and its descriptor returned.
+    return ToolOutcome(content=json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
         "name": artifact.name,
@@ -536,7 +565,7 @@ async def handle_open_artifact(session: "ChatSession", tc_input: dict) -> str:
         "description": artifact.description,
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
-    }, indent=2)
+    }, indent=2), ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
@@ -557,7 +586,9 @@ async def handle_recall(session: ChatSession, tc_input: dict) -> str:
     return session._episodic.recall_formatted(query, **kwargs)
 
 
-async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
+async def handle_memorize(
+    session: ChatSession, tc_input: dict
+) -> "str | ToolOutcome":
     """Process a memorize tool call and return a result string.
 
     Encoding is fire-and-forget so it never blocks scratchpad execution.
@@ -565,16 +596,29 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
     import asyncio
 
     if session._cortex is None:
-        return "Memory system not available."
+        # Tier 2 (ENG-2248): no memory system wired, so no entry can ever be
+        # stored. Retrying cannot help.
+        return ToolOutcome(
+            content="Memory system not available.",
+            ok=False, reason="store_unavailable",
+        )
 
     if session._cortex.mode == "off":
+        # Tier 3 (ENG-2248): deliberately ok=None. This is a CONFIGURED state,
+        # not a failure — the user turned memory off, and the tool reported that
+        # correctly. Marking it ok=False would nudge and then break the tool for
+        # every user who has memory disabled on purpose.
         return "Memory encoding is disabled. Change memory mode via /setup to enable."
 
     from anton.core.memory.base import Engram
 
     raw_entries = tc_input.get("entries", [])
     if not raw_entries:
-        return "No entries provided."
+        # Tier 2: a malformed call.
+        return ToolOutcome(
+            content="No entries provided.",
+            ok=False, reason="missing_name",
+        )
 
     engrams: list[Engram] = []
     for entry in raw_entries:
@@ -602,7 +646,12 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
         )
 
     if not engrams:
-        return "No valid entries provided."
+        # Tier 2: every entry was rejected by the shape checks above, so the
+        # call carried nothing usable.
+        return ToolOutcome(
+            content="No valid entries provided.",
+            ok=False, reason="invalid_type",
+        )
 
     # Always encode immediately via fire-and-forget — the LLM explicitly
     # chose to memorize these, so we never interrupt the user mid-turn
@@ -618,7 +667,10 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
     session._track_memory_write(asyncio.create_task(_encode_bg(session._cortex, engrams)))
 
     descriptions = [f"Encoded {e.kind}: {e.text}" for e in engrams]
-    return "Memory updated: " + "; ".join(descriptions)
+    # Tier 1: at least one entry was stored.
+    return ToolOutcome(
+        content="Memory updated: " + "; ".join(descriptions), ok=True
+    )
 
 
 async def handle_scratchpad(
@@ -769,7 +821,7 @@ async def handle_scratchpad(
 
 async def handle_read_image(
     session: "ChatSession", tc_input: dict
-) -> str | list[dict]:
+) -> "ToolOutcome":
     """Read an image file from disk and return it as an image content block.
 
     Returns a list of content blocks (image + text) on success so the model
@@ -788,7 +840,11 @@ async def handle_read_image(
 
     file_path = (tc_input.get("file_path") or "").strip()
     if not file_path:
-        return "Error: file_path is required."
+        # Tier 2 (ENG-2248): a malformed call; a retry cannot fix it.
+        return ToolOutcome(
+            content="Error: file_path is required.",
+            ok=False, reason="missing_name",
+        )
 
     try:
         path = Path(file_path).expanduser()
@@ -803,21 +859,44 @@ async def handle_read_image(
             root = Path(base) if base else Path.cwd()
             path = (root / path).resolve()
     except OSError as exc:
-        return f"Error: invalid path '{file_path}': {exc}"
+        # Tier 2: the model supplied a path that will not parse.
+        return ToolOutcome(
+            content=f"Error: invalid path '{file_path}': {exc}",
+            ok=False, reason="invalid_type",
+        )
 
     if not path.is_file():
-        return f"Error: file not found: {path}"
+        # Tier 2: the file is genuinely absent. Unlike `recall_skill`'s NO
+        # MATCH, there is no listing the model can consult to self-correct and
+        # nothing here tells it to proceed regardless, so repeating the same
+        # path IS thrash and belongs in the streak.
+        return ToolOutcome(
+            content=f"Error: file not found: {path}",
+            ok=False, reason="path_not_found",
+        )
 
     if not is_image_path(path.name):
-        return (
-            f"Error: '{path.name}' is not a supported image format "
-            "(expected .png/.jpg/.jpeg/.gif/.webp/.bmp)."
+        # Tier 2: the model pointed the image tool at a non-image. Its own
+        # argument, and the message names the accepted extensions.
+        return ToolOutcome(
+            content=(
+                f"Error: '{path.name}' is not a supported image format "
+                "(expected .png/.jpg/.jpeg/.gif/.webp/.bmp)."
+            ),
+            ok=False, reason="not_an_image",
         )
 
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        return f"Error: cannot read '{path}': {exc}"
+        # Tier 2: the read itself failed. `ok=False` is certain — the model got
+        # no image. The CAUSE is not: this wraps a bare `except Exception`, so
+        # `read_failed` is mapped TIER_UNCLASSIFIED rather than guessing at a
+        # permissions wall.
+        return ToolOutcome(
+            content=f"Error: cannot read '{path}': {exc}",
+            ok=False, reason="read_failed",
+        )
 
     suffix = path.suffix.lstrip(".").lower()
     if suffix == "bmp":
@@ -830,13 +909,24 @@ async def handle_read_image(
             raw = buf.getvalue()
             suffix = "png"
         except Exception as exc:
-            return f"Error: failed to convert BMP to PNG: {exc}"
+            # Tier 2 for the verdict, unclassified for the cause: a bare
+            # `except Exception` around a PIL call covers a missing Pillow (a
+            # wall) and a corrupt BMP (self-inflicted) with one sentinel.
+            return ToolOutcome(
+                content=f"Error: failed to convert BMP to PNG: {exc}",
+                ok=False, reason="bmp_convert_failed",
+            )
 
     if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
-        return (
-            f"Error: image is too large ({human_size(len(raw))}); "
-            "the API limit is ~3.7 MB raw / 5 MB base64. "
-            "Resize the image and try again."
+        # Tier 2: over the API's hard limit. The model chose the file and the
+        # message tells it what to do instead.
+        return ToolOutcome(
+            content=(
+                f"Error: image is too large ({human_size(len(raw))}); "
+                "the API limit is ~3.7 MB raw / 5 MB base64. "
+                "Resize the image and try again."
+            ),
+            ok=False, reason="image_too_large",
         )
 
     b64 = base64.standard_b64encode(raw).decode("ascii")
@@ -851,17 +941,32 @@ async def handle_read_image(
     except Exception:
         pass
 
-    return [
-        {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": media_type,
-                "data": b64,
+    # Tier 1, and the ONLY multimodal verdict in the tree. `ok=True` is free
+    # here: the list arms of both tool loops already treat a list result as a
+    # success unless a handler says otherwise, so this changes the emitted
+    # `ok` from "unknown" to `true` and nothing else.
+    #
+    # It must stay `ok=True`. A list carrying `ok=False` would reach two
+    # documented gaps in the list arms — the nudge/breaker text is never
+    # appended there, and `_record_root_cause` is never called — so the model
+    # would be silently retried past the breaker. `_tool_failure_cause`'s
+    # docstring in session.py describes that shape as unreachable; it stays
+    # unreachable because every failure above returns a plain string.
+    # Pinned by `test_read_image_never_pairs_a_list_with_a_failure_verdict`.
+    return ToolOutcome(
+        content=[
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": b64,
+                },
             },
-        },
-        {"type": "text", "text": summary},
-    ]
+            {"type": "text", "text": summary},
+        ],
+        ok=True,
+    )
 
 
 # ---------------------------------------------------------------------------
