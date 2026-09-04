@@ -13,25 +13,6 @@ from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 
 
-MINDS_KEYS = {
-    "ANTON_MINDS_API_KEY",
-    "ANTON_MINDS_URL",
-    "ANTON_MINDS_MIND_NAME",
-    "ANTON_MINDS_DATASOURCE",
-    "ANTON_MINDS_DATASOURCE_ENGINE",
-    "ANTON_MINDS_SSL_VERIFY",
-}
-
-LLM_KEYS = {
-    "ANTON_PLANNING_PROVIDER",
-    "ANTON_CODING_PROVIDER",
-    "ANTON_PLANNING_MODEL",
-    "ANTON_CODING_MODEL",
-    "ANTON_ANTHROPIC_API_KEY",
-    "ANTON_OPENAI_API_KEY",
-    "ANTON_OPENAI_BASE_URL",
-}
-
 SECRET_PATTERNS = ("KEY", "TOKEN", "SECRET", "PAT", "PASSWORD")
 
 
@@ -44,12 +25,6 @@ def mask_secret(value: str, *, keep: int = 4) -> str:
 def is_secret_key(key: str) -> bool:
     upper = key.upper()
     return any(p in upper for p in SECRET_PATTERNS)
-
-
-def display_value(key: str, value: str) -> str:
-    if is_secret_key(key) and value:
-        return mask_secret(value)
-    return value or "[dim]<empty>[/]"
 
 
 def _pin_input_window_height(session: PromptSession) -> None:
