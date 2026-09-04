@@ -81,6 +81,7 @@ from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
+    EDIT_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -1537,6 +1538,17 @@ class ChatSession:
         return self._history
 
     @property
+    def llm_client(self) -> LLMClient:
+        """The session's LLM client, for tool handlers that need one.
+
+        Everything a handler runs should go through the same client the
+        rest of the turn uses — same provider, same coding/planning model
+        split, same tracing. Exposed as a property so a handler does not
+        have to reach into `_llm` to get it.
+        """
+        return self._llm
+
+    @property
     def artifacts_touched(self) -> set[str]:
         """Slugs this turn created or opened for editing.
 
@@ -2289,6 +2301,7 @@ class ChatSession:
             self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(EDIT_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
 
