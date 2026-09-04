@@ -165,8 +165,6 @@ class Lesson:
               * `when`   — conditional rule ("When a tool fails…").
             The detector knows the semantics; routing by string-
             matching the rule at the wiring layer would be brittle.
-        triggers: The event kinds that contributed to firing this
-            lesson. Used for audit + for de-dupe across detectors.
         detector: Name of the detector function that produced it.
             Helps when an unexpected lesson shows up in memory —
             you can find its origin without a full re-derivation.
@@ -174,7 +172,6 @@ class Lesson:
 
     rule: str
     kind: LessonKind
-    triggers: tuple[str, ...]
     detector: str
 
 
@@ -305,7 +302,6 @@ def detect_name_switch(events: Sequence[Event]) -> Lesson | None:
             "and burns rounds on recovery."
         ),
         kind="always",
-        triggers=("scratchpad_call",),
         detector="detect_name_switch",
     )
 
@@ -344,7 +340,6 @@ def detect_oversized_cell(events: Sequence[Event]) -> Lesson | None:
             "parameter on the wire and silently burns a round."
         ),
         kind="always",
-        triggers=tuple({"scratchpad_call", "scratchpad_empty_code"} & {e.kind for e in (*too_big, *empty)}),
         detector="detect_oversized_cell",
     )
 
@@ -389,7 +384,6 @@ def detect_repeated_tool_error(events: Sequence[Event]) -> Lesson | None:
             "user or pick a different tool."
         ),
         kind="when",
-        triggers=("tool_result",),
         detector="detect_repeated_tool_error",
     )
 
@@ -436,7 +430,6 @@ def detect_repeated_error_signature(events: Sequence[Event]) -> Lesson | None:
             "the user. The error signature is the signal; the tool name is not."
         ),
         kind="when",
-        triggers=("tool_result", "scratchpad_result"),
         detector="detect_repeated_error_signature",
     )
 
@@ -466,7 +459,6 @@ def detect_reset_churn(events: Sequence[Event]) -> Lesson | None:
             "is genuinely corrupted, not when one cell raised."
         ),
         kind="never",
-        triggers=("scratchpad_reset",),
         detector="detect_reset_churn",
     )
 
@@ -534,7 +526,6 @@ def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
                 "own timeout."
             ),
             kind="when",
-            triggers=("scratchpad_killed",),
             detector="detect_kill_loop",
         )
     if len(heavy) > len(liveness) and crosses_threshold(heavy):
@@ -547,7 +538,6 @@ def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
                 "is too heavy, not that the same cell needs another try."
             ),
             kind="when",
-            triggers=("scratchpad_killed",),
             detector="detect_kill_loop",
         )
     return None
@@ -591,7 +581,6 @@ def detect_severity_climb(events: Sequence[Event]) -> Lesson | None:
                             "or surface the situation to the user."
                         ),
                         kind="when",
-                        triggers=("scratchpad_result", "tool_result"),
                         detector="detect_severity_climb",
                     )
             else:
@@ -622,7 +611,6 @@ def detect_repair_churn(events: Sequence[Event]) -> Lesson | None:
             "continuing to retry."
         ),
         kind="when",
-        triggers=("history_repair",),
         detector="detect_repair_churn",
     )
 
@@ -644,7 +632,6 @@ def detect_cap_exhausted(events: Sequence[Event]) -> Lesson | None:
             "future turns get a lesson; nothing is lost in the void."
         ),
         kind="when",
-        triggers=("cap_exhausted",),
         detector="detect_cap_exhausted",
     )
 
