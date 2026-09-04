@@ -313,27 +313,6 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
     )
 
 
-async def test_non_streaming_turn_marks_round_cap(workspace):
-    mock_llm = make_mock_llm()
-    mock_llm.plan = AsyncMock(return_value=_tool_call())
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
-    _stub_tools(session)
-    session._max_tool_rounds = 1
-    session._router_enabled = False
-
-    with patch("anton.analytics.send_event") as send:
-        await session.turn("loop forever")
-
-    assert _ended_by(send) == "round_cap"
-
-
-# ---------------------------------------------------------------------------
-# The three hand-back terminals. Every one of these marks survived deletion
-# with the suite green (#309 review mutation run) — and they are precisely the
-# "expensive turn ended badly" values the `group by ended_by` contract needs.
-# ---------------------------------------------------------------------------
-
-
 def _verdict_llm(status: str, *, tool_rounds: int = 1):
     """A mock client whose turn does `tool_rounds` rounds then gets `status`."""
     mock_llm = make_mock_llm()

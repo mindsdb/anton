@@ -255,7 +255,7 @@ class TestTurnResetsBooks:
         # Long-lived session (CLI): turn N+1 must not inherit turn N's totals.
         # Drive the real turn() twice with a text-only response and compare
         # the emitted totals.
-        from tests.conftest import make_mock_llm
+        from tests.conftest import make_mock_llm, run_turn
 
         llm = make_mock_llm()
         llm.plan.return_value = LLMResponse(content="hi", usage=_usage(inp=100))
@@ -269,7 +269,7 @@ class TestTurnResetsBooks:
         totals: list[int] = []
         real_emit = session._emit_turn_cost
 
-        def _spy():
+        def _spy(*args, **kwargs):
             if session._turn_cost is not None:
                 books.append(session._turn_cost)
                 # Simulate this turn having counted something, so cross-turn
@@ -277,11 +277,11 @@ class TestTurnResetsBooks:
                 # (the mocked client never fires the listener itself).
                 session._turn_cost.add("planning", "planner", _usage(inp=100))
                 totals.append(session._turn_cost.total_tokens)
-            real_emit()
+            real_emit(*args, **kwargs)
 
         monkeypatch.setattr(session, "_emit_turn_cost", _spy)
-        await session.turn("one")
-        await session.turn("two")
+        await run_turn(session, "one")
+        await run_turn(session, "two")
 
         assert len(books) == 2
         assert books[0] is not books[1], "turn 2 must open fresh books"
