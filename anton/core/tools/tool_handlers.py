@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from anton.core.backends.base import Cell
 from anton.core.tools.registry import ToolOutcome
@@ -164,6 +164,51 @@ def _snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
         if child.is_dir() and (child / "metadata.json").is_file():
             mtimes[child.name] = _artifact_content_mtime(child)
     return mtimes
+
+
+# Bounded per ENG-1204 Fix 1: never lint a huge file inline on the agent's
+# turn.
+_ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
+
+
+def _artifact_linters() -> dict[str, Callable[[Path], list]]:
+    """suffix -> checker. Add a format by adding one entry here.
+
+    Each checker takes a file path and returns findings with a `.message()`
+    method (see `xlsx_lint.CircularRefFinding`) — same contract regardless
+    of format, so the dispatch loop below never needs to change.
+    """
+    from anton.core.artifacts.xlsx_lint import lint_xlsx
+
+    return {".xlsx": lint_xlsx}
+
+
+def _lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
+    """Run the format-appropriate checker on artifact folders this cell
+    edited (mtime moved since `before`), so findings reach the agent as
+    tool-result text right away, not only via a later open()/list() (ENG-1204).
+    """
+    linters = _artifact_linters()
+    if not linters:
+        return []
+    after = _snapshot_existing_artifact_mtimes(store)
+    messages: list[str] = []
+    for slug, prev_mtime in before.items():
+        current = after.get(slug)
+        if current is None or current <= prev_mtime:
+            continue
+        for path in (store.root / slug).rglob("*"):
+            linter = linters.get(path.suffix.lower())
+            if linter is None or not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
+                    continue
+            except OSError:
+                continue
+            for finding in linter(path):
+                messages.append(f"{slug}/{path.name} — {finding.message()}")
+    return messages
 
 
 def _track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
@@ -658,16 +703,33 @@ async def handle_scratchpad(
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
+            lint_messages: list[str] = []
             if artifact_store is not None:
                 _track_edits_since(session, artifact_store, before_artifact_mtimes)
+                try:
+                    lint_messages = _lint_changed_artifact_files(
+                        artifact_store, before_artifact_mtimes
+                    )
+                except Exception:
+                    # Best-effort (ENG-1204): a lint crash must never fail
+                    # the cell's own result.
+                    _log.warning("artifact lint failed for this cell", exc_info=True)
+        else:
+            lint_messages = []
         # The runtime's verdict: a raised error/timeout/kill is a failure;
         # stderr-only output (warnings) is not, and stdout containing words
         # like "failed" is not either — the streak reads this flag, never the
         # text (ENG-1276). The reason is the traceback's LAST line (the cause),
         # the machine-comparable key ENG-1286's thrash breaker will consume.
         error = (cell.error or "").strip() if cell is not None else ""
+        content = format_cell_result(cell)
+        if lint_messages:
+            # [artifact lint] follows format_cell_result's own [output]/[error]
+            # labeling convention so the agent can tell the finding apart from
+            # its own code's output.
+            content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
-            content=format_cell_result(cell),
+            content=content,
             ok=not error,
             reason=cell_failure_reason(error),
         )
