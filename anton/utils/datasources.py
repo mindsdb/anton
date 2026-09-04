@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import uuid
 import yaml
 from contextvars import ContextVar
 from pathlib import Path
@@ -401,6 +402,20 @@ def ensure_unique_user_label(
     while f"{candidate} {n}" in existing:
         n += 1
     return f"{candidate} {n}"
+
+
+def generate_unique_conn_name(vault: "DataVault", engine: str) -> str:
+    """Return a random 8-hex-char connection name not already used by `engine`.
+
+    Shared by every /connect path that creates a brand-new connection.
+    Previously duplicated inline at three call sites, one of which (the
+    custom-datasource path) had drifted to skip the collision check —
+    consolidating here closes that gap.
+    """
+    name = uuid.uuid4().hex[:8]
+    while vault.load(engine, name) is not None:
+        name = uuid.uuid4().hex[:8]
+    return name
 
 
 def default_user_label(vault: "DataVault", engine: str) -> str:

@@ -126,6 +126,22 @@ os.environ["ANTON_ANALYTICS_URL"] = ""
 os.environ["ANTON_POSTHOG_KEY"] = ""
 
 
+async def run_turn(session, user_input) -> str:
+    """Drive one turn through `turn_stream` and return the reply text.
+
+    The migration shim for tests written against the removed non-streaming
+    `ChatSession.turn()`: drains the stream, concatenates the text deltas —
+    the same text `turn()` used to return.
+    """
+    from anton.core.llm.provider import StreamTextDelta
+
+    parts: list[str] = []
+    async for event in session.turn_stream(user_input):
+        if isinstance(event, StreamTextDelta):
+            parts.append(event.text)
+    return "".join(parts)
+
+
 def make_mock_llm() -> AsyncMock:
     """Return an AsyncMock LLM client with coding_provider configured for sync use.
 
@@ -150,6 +166,40 @@ def make_mock_llm() -> AsyncMock:
     # Default test posture: no native web tools — fallback tools also off
     # unless a specific test configures otherwise via ChatSessionConfig.
     mock.planning_provider.native_web_tools = MagicMock(return_value=set())
+    # Streaming adapter: `turn_stream` calls `plan_stream`, but most session
+    # tests configure `mock.plan` (a return_value or side_effect list). This
+    # default delegates plan_stream -> plan, wrapping the response in the one
+    # StreamComplete the loop needs, so a test's plan mock drives the
+    # streaming path unchanged. Tests that exercise streaming specifics set
+    # their own `plan_stream` and override this. Reads `mock.plan` at call
+    # time, so a test re-assigning `.plan` after construction still routes.
+    def _plan_stream_from_plan(**kw):
+        async def gen():
+            from anton.core.llm.provider import StreamComplete, StreamTextDelta
+
+            resp = await mock.plan(**kw)
+            if not isinstance(resp, LLMResponse):
+                # Unconfigured `plan` (a bare AsyncMock return): normalise to a
+                # clean one-round text turn rather than letting Mock objects
+                # flow into the stream events.
+                resp = LLMResponse(content="ok", stop_reason="end_turn")
+            # Real providers stream the text before the final response event;
+            # mirror that so consumers collecting deltas see the reply.
+            if resp.content:
+                yield StreamTextDelta(text=resp.content)
+            yield StreamComplete(response=resp)
+        return gen()
+
+    mock.plan_stream = _plan_stream_from_plan
+    # Verifier default: a clean COMPLETE, so a tool-loop test that doesn't
+    # care about verification ends after its scripted rounds instead of
+    # falling into the INCOMPLETE-continuation loop on a bare Mock verdict.
+    # Tests that exercise the verifier set their own `generate_object_code`.
+    from anton.core.session import _VerifierVerdict
+
+    mock.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="test default")
+    )
     return mock
 
 

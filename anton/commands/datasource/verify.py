@@ -67,11 +67,7 @@ async def run_connection_test(
             )
             await pad.reset()
             if engine_def.pip:
-                if isinstance(engine_def.pip, list):
-                    pip_pkgs = engine_def.pip
-                else:
-                    pip_pkgs = engine_def.pip.split()
-                install_result = await pad.install_packages(pip_pkgs)
+                install_result = await pad.install_packages(engine_def.pip.split())
                 if "failed" in (install_result or "").lower():
                     console.print()
                     console.print(f"[anton.warning](anton)[/] Package install issue: {install_result[:200]}")
@@ -155,7 +151,14 @@ async def handle_test_datasource(
     slug: str,
     vault: DataVault | None = None,
 ) -> None:
-    """Test an existing Local Vault connection by running its test_snippet."""
+    """Test an existing Local Vault connection by running its test_snippet.
+
+    Delegates the actual test run to `run_connection_test` — the same path
+    `/connect` and `/edit` use — instead of a separate implementation, so
+    this command gets the same timeout bound and ModuleNotFoundError retry
+    for free. Runs with interactive=False: unlike `/connect`/`/edit`, `/test`
+    doesn't prompt to re-enter credentials on failure — it's a one-shot check.
+    """
     if not slug:
         console.print(
             "[anton.warning]Usage: /test <engine-name>[/]"
@@ -173,8 +176,8 @@ async def handle_test_datasource(
         console.print()
         return
     engine, name = parsed
-    fields = vault.load(engine, name)
-    if fields is None:
+    credentials = vault.load(engine, name)
+    if credentials is None:
         console.print(
             f"[anton.warning]No connection '{slug}' found in Local Vault.[/]"
         )
@@ -201,43 +204,11 @@ async def handle_test_datasource(
         f"[anton.cyan](anton)[/] Testing connection [bold]{slug}[/bold]…"
     )
 
-    register_secret_vars(engine_def)  # flat names for scrubbing during test
-    flat_ds_env = vault.env_for(engine, name, flat=True) or {}
-    set_ds_env_values(flat_ds_env)
-
-    cell = None
-    try:
-        pad = await scratchpads.get_or_create(
-            "__datasource_test__", ds_env_override=flat_ds_env
-        )
-        await pad.reset()
-        if engine_def.pip:
-            await pad.install_packages([engine_def.pip])
-        cell = await pad.execute(engine_def.test_snippet)
-    finally:
-        restore_namespaced_env(vault)
-
-    if cell is None or cell.error or (
-        cell.stdout.strip() != "ok" and cell.stderr.strip()
-    ):
-        error_text = ""
-        if cell is not None:
-            error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
-        first_line = (
-            next((ln for ln in error_text.splitlines() if ln.strip()), error_text)
-            if error_text
-            else "unknown error"
-        )
-        console.print()
-        console.print(
-            f"[anton.warning](anton)[/] ✗ Connection test failed for"
-            f" [bold]{slug}[/bold]."
-        )
-        console.print()
-        console.print(f"        Error: {first_line}")
-    else:
-        console.print(
-            f"[anton.success]        ✓ Connection test passed for"
-            f" [bold]{slug}[/bold]![/]"
-        )
-    console.print()
+    # interactive=False: `/test` is a one-shot check, not an edit flow —
+    # fail closed on the first error rather than prompting to re-enter
+    # credentials (that's what `/edit` is for). `retry_fields` is unused
+    # in this mode, so engine_def.fields is just a placeholder.
+    await run_connection_test(
+        console, scratchpads, vault, engine_def, credentials, engine_def.fields,
+        interactive=False,
+    )

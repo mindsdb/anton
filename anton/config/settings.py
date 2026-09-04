@@ -136,8 +136,6 @@ class AntonSettings(CoreSettings):
     # inline instead of stopping to ask. False = cautious ask-first discipline.
     act_first: bool = True
 
-    theme: str = "auto"
-
     disable_autoupdates: bool = False
 
     terms_consent: bool = False
@@ -167,7 +165,6 @@ class AntonSettings(CoreSettings):
     posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
 
     # Minds datasource integration
-    minds_enabled: bool = True  # use Minds server as LLM provider
     minds_api_key: str | None = None
     minds_url: str = "https://mdb.ai"
     minds_mind_name: str | None = None

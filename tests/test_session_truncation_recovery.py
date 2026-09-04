@@ -591,47 +591,6 @@ async def test_a_round_that_lost_text_and_a_tool_call_gets_both_instructions(wor
     ), "the partial answer must stay in history for the continuation"
 
 
-async def test_the_non_streaming_turn_also_refuses_a_cut_open_call(workspace):
-    """`turn()` is the sibling caller, and it dispatches the same tool calls.
-
-    It has no truncation retry of its own, so the refusal *is* the recovery
-    here: the handler must not run, and the model must get an is_error
-    tool_result it can answer by re-emitting the call. Without this the loop
-    reaches `dispatch_tool` with arguments the model never finished, on a path
-    the streaming gates never see.
-    """
-    cut = ToolCall(
-        id="tc_cut",
-        name="scratchpad",
-        input={"action": "exec", "name": "main"},
-        repaired=True,
-    )
-    mock_llm = make_mock_llm()
-    mock_llm.max_tokens = BUDGET
-    mock_llm.plan = AsyncMock(side_effect=[
-        _response(content="", output_tokens=BUDGET, stop_reason="tool_use", tool_calls=[cut]),
-        _response("Re-issued it in smaller parts. Done.", output_tokens=30),
-    ])
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
-    session.tool_registry.dispatch_tool = AsyncMock()
-
-    try:
-        await session.turn("build the forecast workbook")
-    finally:
-        await session.close()
-
-    session.tool_registry.dispatch_tool.assert_not_called()
-    results = [
-        block
-        for message in session.history
-        for block in (message.get("content") if isinstance(message.get("content"), list) else [])
-        if isinstance(block, dict) and block.get("type") == "tool_result"
-    ]
-    assert results, "the cut call must be answered, not executed"
-    assert results[0]["is_error"] is True
-    assert "arrived incomplete" in results[0]["content"]
-
-
 async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
     """Dispatching the intact half of a cut-open round runs part of what the
     model was still in the middle of asking for."""

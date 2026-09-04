@@ -83,7 +83,6 @@ from anton.minds_client import (
     list_minds,
     list_datasources,
     resolve_and_probe,
-    test_llm,
 )
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.utils.datasources import (
@@ -1167,7 +1166,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     _ansi_cyan = f"\033[1;38;2;{_r};{_g};{_b}m"
     _ansi_reset = "\033[0m"
 
-    for li, line in enumerate(_lines):
+    for line in _lines:
         console.file.write("  ")
         for ch in line:
             console.file.write(ch)

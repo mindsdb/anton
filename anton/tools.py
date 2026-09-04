@@ -520,7 +520,6 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     artifact type is read from its ``metadata.json`` via
     ``resolve_publish_target`` — fullstack apps publish the whole folder, static
     reports publish the primary file — so callers never need to know the type."""
-    import os
     import webbrowser
     from pathlib import Path
 

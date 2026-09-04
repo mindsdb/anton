@@ -1011,7 +1011,6 @@ def sample(var, mode="preview", _name=None):
         return
 
     if isinstance(var, (list, tuple)):
-        kind = type(var).__name__
         lines.append(f"Length: {len(var)}")
         if len(var) > 0:
             lines.append(

@@ -40,7 +40,7 @@ from anton.commands.datasource import (
     handle_list_data_sources,
     handle_test_datasource
 )
-from anton.minds_client import minds_v1_base, resolve_and_probe, test_llm
+from anton.minds_client import minds_v1_base, resolve_and_probe
 
 # The CLI configures no logging, so without a handler on the package logger
 # Python's lastResort writes WARNING and above straight to stderr — into the
@@ -591,7 +591,7 @@ async def _animate_onboard(
 
         typed_so_far: list[str] = []
 
-        for line_idx, line in enumerate(intro_lines):
+        for line in intro_lines:
             if line == "":
                 typed_so_far.append("\n")
                 live.update(_build_frame(_MOUTH_SMILE, typed_so_far))

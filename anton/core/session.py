@@ -4,7 +4,6 @@ import asyncio
 import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
-from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
@@ -75,7 +74,6 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
-from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
@@ -1300,7 +1298,6 @@ class ChatSession:
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
-        self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
         # Router (ENG-648): explicit host override wins; otherwise the
         # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
@@ -1312,9 +1309,8 @@ class ChatSession:
         )
         self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
         # Monotonic counter for thalamus-preloaded tool_use ids. Deliberately
-        # separate from `_turn_count`, which only increments in turn_stream()
-        # — using it here would emit the same id on every call made through
-        # the non-streaming turn() API.
+        # separate from `_turn_count`, which only increments at end of turn —
+        # preloads happen before that, so reusing it would repeat ids.
         self._thalamus_recall_counter = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
@@ -1373,10 +1369,6 @@ class ChatSession:
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
         self._turn_cost: TurnCost | None = None
-        # Set per-turn by `turn_stream` so any LLM call made during that
-        # turn can read the current turn identifier (used by telemetry /
-        # langfuse propagation in the provider layer).
-        self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
         self.escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
@@ -1399,8 +1391,7 @@ class ChatSession:
 
             self.elicitor = CLIElicitor(config.console)
         # Out-of-band event path, attached for the duration of a
-        # `turn_stream` turn only. `turn()` leaves it None, which is what
-        # makes questions unavailable on the non-streaming path.
+        # `turn_stream` turn only; None outside one.
         self.emitter = None
         self.question_count = 0
         # Seconds spent waiting on humans during the current tool dispatch,
@@ -1890,8 +1881,7 @@ class ChatSession:
             + self._coerce_to_block_list(content)
         )
         self._history[-1] = {**prev, "role": role, "content": merged_blocks}
-        import logging as _logging
-        _logging.getLogger(__name__).info(
+        logger.info(
             "Merged consecutive %s messages in history (would have violated "
             "Anthropic role alternation). Combined block count: %d.",
             role, len(merged_blocks),
@@ -1913,12 +1903,10 @@ class ChatSession:
         raise — sending the request and letting the provider return
         its own 400 is more useful for debugging than crashing here.
         """
-        import logging as _logging
-        log = _logging.getLogger(__name__)
         if not messages:
             return
         if messages[0].get("role") != "user":
-            log.warning(
+            logger.warning(
                 "History pre-flight: first message has role %r, expected 'user'. "
                 "The provider call is likely to 400.",
                 messages[0].get("role"),
@@ -1927,7 +1915,7 @@ class ChatSession:
             prev_role = messages[i - 1].get("role")
             curr_role = messages[i].get("role")
             if prev_role == curr_role and prev_role in ("user", "assistant"):
-                log.warning(
+                logger.warning(
                     "History pre-flight: consecutive %s messages at indices "
                     "%d and %d. Most providers will reject this; OpenAI may "
                     "accept it but produce worse output. Some append site "
@@ -2317,7 +2305,7 @@ class ChatSession:
         SIGTERM first, then SIGKILL after a short grace period. Errors
         are swallowed — close() must not raise on shutdown.
         """
-        for slug, info in list(self._tracked_backends.items()):
+        for info in list(self._tracked_backends.values()):
             proc = info.get("proc")
             if proc is None or proc.returncode is not None:
                 continue
@@ -2919,8 +2907,8 @@ class ChatSession:
         # whatever the thread is CURRENTLY handling, including an exception the
         # caller had already caught before invoking the turn, and reading it on
         # a clean turn reported `error` for one that succeeded. The lookup
-        # remains only for the legacy non-streaming `turn()`, which has no
-        # wrapping handler to capture from (#309 review).
+        # remains as a fallback for bare-session callers with no wrapping
+        # handler to capture from (#309 review).
         if exc is _EXC_UNSET:
             exc = sys.exc_info()[1]
         cancelled = bool(
@@ -3906,303 +3894,31 @@ class ChatSession:
             )
 
     async def turn(self, user_input: str | list[dict]) -> str:
-        self._open_ds_turn_scope()
-        user_input = _scrub_user_input(user_input)
-        # Stamp the inbound user turn here, not in _append_history: tool_result
-        # and synthetic user-role messages also flow through append and must
-        # NOT be stamped.
-        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
-        self._append_history({"role": "user", "content": stamped_input})
+        """Non-streaming turn: run `turn_stream` to completion, return the reply.
 
-        # Open the turn's cost books (ENG-1288) — same contract as
-        # turn_stream. This non-streaming path has no wrapping finally, so
-        # emission happens at both returns; an exception propagating out of
-        # this method skips emission (stated gap: the CLI path's error exits
-        # go unreported rather than restructuring the method around it).
-        self._turn_cost = TurnCost(turn_index=self._turn_count + 1)
-        self._llm.usage_listener = self._turn_cost.add
+        Compatibility wrapper for external `anton-agent` consumers — every
+        in-repo host consumes `turn_stream` directly. This used to be a
+        ~300-line parallel implementation of the tool loop that had to
+        hand-mirror every feature and still lacked several (no completion
+        verifier, no truncation recovery, no trace context); delegating means
+        non-streaming callers now get the full streaming-path behaviour.
 
-        user_msg_str = (
-            user_input
-            if isinstance(user_input, str)
-            else next((b["text"] for b in user_input if b.get("type") == "text"), "")
-        )
-
-        # Cheap front-model routing (ENG-648). Text-only turns first hit
-        # the thalamus model, which either answers trivial/from-context
-        # requests directly (skipping the full prompt + tools + planning
-        # model entirely) or delegates, optionally preloading skills.
-        # Image turns skip the thalamus — attachments imply real work.
-        if self._router_enabled and isinstance(user_input, str):
-            decision = await self._gate_turn()
-            if decision is not None and decision.action == ACTION_RESPOND:
-                self._append_history(
-                    {"role": "assistant", "content": decision.text}
-                )
-                if self._background_memory_active:
-                    self._cortex.maybe_vacuum()
-                self._schedule_cerebellum_flush()
-                self._schedule_acc_flush()
-                self._emit_turn_cost()
-                return decision.text
-            if decision is not None and decision.skills:
-                self._inject_recalled_skills(decision.skills)
-
-        tools = self._build_tools()
-        system = await self._build_system_prompt(user_msg_str)
-        self._compacted_this_turn = False
-        self._compaction_failed_this_turn = False
-        # Same reset turn_stream does — without it a grace granted in an
-        # earlier turn_stream call leaks into every later turn() call on
-        # this session, permanently widening its round cap / spend ceiling.
-        self._spend_ceiling_grace_used = False
-        self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
-
-        response = await self.plan_with_recovery(system=system, tools=tools)
-
-        # Proactive compaction — attempted at most once per turn, and not
-        # re-attempted after a failure (see `_compaction_failed_this_turn`).
-        if (
-            not self._compacted_this_turn
-            and not self._compaction_failed_this_turn
-            and response.usage.context_pressure > self._context_pressure_threshold
-        ):
-            compacted = await self._summarize_history()
-            self._compact_scratchpads()
-            if compacted:
-                self._compacted_this_turn = True
-            else:
-                self._compaction_failed_this_turn = True
-
-        # Handle tool calls
-        tool_round = 0
-        error_streak: dict[str, int] = {}
-        resilience_nudged: set[str] = set()
-        # Mirrors turn_stream's one-time grants, the same way the round-cap
-        # and spend-ceiling checks below already mirror it. This path has no
-        # continuation loop — unlike `_stream_and_handle_tools`, which needs
-        # its own per-continuation flag — so `_round_cap_grace_used` alone
-        # already tracks whether THIS call earned the wider cap.
-        while response.tool_calls:
-            tool_round += 1
-            # `> 0` excludes a configured 0 (or misconfigured negative) cap:
-            # that means "no tool rounds", not "one round of free grace".
-            if (
-                tool_round > self._max_tool_rounds
-                and not self._round_cap_grace_used
-                and self._max_tool_rounds > 0
-            ):
-                self._round_cap_grace_used = True
-                _record_grace(self._turn_cost, "round")
-            effective_round_cap = self._max_tool_rounds + (
-                _ROUND_CAP_GRACE_ROUNDS if self._round_cap_grace_used else 0
-            )
-            if self._turn_cost is not None and tool_round <= effective_round_cap:
-                self._turn_cost.rounds += 1
-            if tool_round > effective_round_cap:
-                # Mirror turn_stream's cap mark (#309 review) — this path is
-                # public API even without in-repo callers, and the books are
-                # wired here too.
-                if self._turn_cost is not None:
-                    self._turn_cost.ended_by = "round_cap"
-                self._append_history(
-                    {"role": "assistant", "content": response.content or ""}
-                )
-                self._append_history(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
-                            "Pause here. Summarize what you have accomplished so far and what remains. "
-                            "If you believe you are on a good track and can finish the task with more steps, "
-                            "tell the user and ask if they'd like you to continue. "
-                            "Do NOT retry automatically — wait for the user's response."
-                        ),
-                    }
-                )
-                response = await self.plan_with_recovery(system=system)
-                break
-
-            # Spend ceiling (ENG-1286), mirroring turn_stream. Same reasoning as
-            # the cap mark above: public API, and the books are wired here too.
-            # This path runs no completion verifier, so there is no continuation
-            # gate to also check — the per-round check is the whole gate here.
-            #
-            # Uses the same `_spend_ceiling_stops_the_tool_loop` as the streaming
-            # loop, NOT the bare predicate: the "never end a turn that dispatched
-            # no tools" guarantee is stated unconditionally ("at any ceiling"),
-            # and CLI/host callers have no lower bound on `max_turn_tokens` at
-            # all, so this path is exactly where a tiny ceiling would break the
-            # loop on round 1 having run nothing (#344 review).
-            if self._spend_ceiling_stops_the_tool_loop():
-                # One-time, unconditional extension, mirroring turn_stream's
-                # mid-loop grant — no verdict exists on this verifier-less
-                # path either, so the grant is unconditional here too.
-                if not self._spend_ceiling_grace_used:
-                    self._grant_spend_ceiling_grace()
-                if self._spend_ceiling_stops_the_tool_loop():
-                    if self._turn_cost is not None:
-                        self._turn_cost.ended_by = "spend_ceiling"
-                    logger.info(
-                        "spend ceiling reached (turn): tokens=%d ceiling=%d "
-                        "tool_round=%d — pausing to ask the user",
-                        self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, tool_round,
-                    )
-                    self._append_history(
-                        {"role": "assistant", "content": response.content or ""}
-                    )
-                    self._append_history(
-                        {"role": "user", "content": self._spend_ceiling_notice()}
-                    )
-                    response = await self.plan_with_recovery(system=system)
-                    break
-
-            # Build assistant message with content blocks
-            assistant_content: list[dict] = []
-            if response.content:
-                assistant_content.append({"type": "text", "text": response.content})
-            for tc in response.tool_calls:
-                assistant_content.append(
-                    {
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    }
-                )
-            self._append_history({"role": "assistant", "content": assistant_content})
-
-            # Process each tool call via registry
-            tool_results: list[dict] = []
-            for tc in response.tool_calls:
-                # Same refusal as the streaming loop: arguments the model never
-                # finished are answered, not executed. This loop has no
-                # truncation retry of its own, so the tool_result is the whole
-                # recovery here — the model re-emits the call next round, with a
-                # full budget again.
-                damaged = damaged_tool_call_result(tc)
-                if damaged is not None:
-                    tool_results.append(damaged)
-                    continue
-
-                import time as _time  # same local-import idiom as turn_stream
-
-                _tool_t0 = _time.monotonic()
-                _tool_error_type = ""
-                try:
-                    outcome = await self.tool_registry.dispatch_tool(
-                        self, tc.name, tc.input, tool_call_id=tc.id,
-                    )
-                except Exception as exc:
-                    # A raise is a definitive failure verdict — no text
-                    # classification needed (ENG-1276).
-                    outcome = ToolOutcome(
-                        content=f"Tool '{tc.name}' failed: {exc}",
-                        ok=False,
-                        reason=type(exc).__name__,
-                    )
-                    _tool_error_type = _safe_error_type(exc)
-                # Same per-tool-call analytics as the streaming loop's tail
-                # (ENG-1486) — without this, a host on the non-streaming API
-                # silently undercounts. Raw elapsed, no human-wait deduction:
-                # elicitation is structurally unavailable on this path (no
-                # emitter to render a question), so there is no wait to
-                # subtract.
-                self._emit_tool_completed(
-                    name=tc.name,
-                    ok=outcome.ok,
-                    duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
-                    error_type=_tool_error_type,
-                    reason=outcome.reason,
-                )
-                result = outcome.content
-
-                if isinstance(result, list):
-                    # Multimodal tool result — scrub credentials from text
-                    # blocks; image-block payloads are raw bytes and have
-                    # nothing to scrub. A list result signals success unless
-                    # the handler explicitly said otherwise (ENG-1276), so
-                    # mirror the matching branch of `_apply_error_tracking`
-                    # instead of running the full string-only nudge logic.
-                    content: "str | list[dict]" = [
-                        {**b, "text": scrub_credentials(b.get("text", ""))}
-                        if b.get("type") == "text"
-                        else b
-                        for b in result
-                    ]
-                    # NOTE for whoever migrates the first multimodal handler to declare
-                    # ok=False: the streak climbs here, but the resilience-nudge and
-                    # circuit-breaker TEXT are only appended by _apply_error_tracking
-                    # on the string path — this branch skips it, so the model is never
-                    # told to stop retrying. When that handler exists, append the nudge
-                    # as an extra {"type": "text"} block here (#308 review).
-                    if outcome.ok is False:
-                        error_streak[tc.name] = error_streak.get(tc.name, 0) + 1
-                    else:
-                        error_streak[tc.name] = 0
-                        resilience_nudged.discard(tc.name)
-                else:
-                    result = scrub_credentials(result)
-                    self._record_root_cause(outcome.ok, outcome.reason, result)
-                    result = self._apply_error_tracking(
-                        result,
-                        tc.name,
-                        error_streak,
-                        resilience_nudged,
-                        ok=outcome.ok,
-                    )
-                    content = result
-
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": content,
-                    }
-                )
-
-            self._append_history({"role": "user", "content": tool_results})
-
-            # Rebuild: a tool this round (e.g. recall_skill) may have
-            # registered new tools the follow-up must see.
-            tools = self._build_tools()
-
-            # Get follow-up from LLM
-            response = await self.plan_with_recovery(system=system, tools=tools)
-
-            # Proactive compaction during tool loop — at most once per turn,
-            # and not re-attempted after a failure.
-            if (
-                not self._compacted_this_turn
-                and not self._compaction_failed_this_turn
-                and response.usage.context_pressure > self._context_pressure_threshold
-            ):
-                compacted = await self._summarize_history()
-                self._compact_scratchpads()
-                if compacted:
-                    self._compacted_this_turn = True
-                else:
-                    self._compaction_failed_this_turn = True
-
-        # Text-only response
-        reply = response.content or ""
-        self._append_history({"role": "assistant", "content": reply})
-
-        # Periodic memory vacuum (Systems Consolidation)
-        if self._background_memory_active:
-            self._cortex.maybe_vacuum()
-
-        # Cerebellar consolidation — fire-and-forget so the user gets
-        # their reply immediately while supervised error learning runs
-        # in the background. Brain analogue: cerebellar plasticity
-        # operates in parallel with continued action, not blocking it.
-        self._schedule_cerebellum_flush()
-        self._schedule_acc_flush()
-
-        self._emit_turn_cost()
-        return reply
+        Returns the final reply text: the content of the last completed
+        model response that wasn't a tool-call round — the same message a
+        streaming consumer would have read last. Falls back to the
+        accumulated streamed text for terminal paths that emit a plain
+        text delta without a closing response event.
+        """
+        parts: list[str] = []
+        final: str | None = None
+        async for event in self.turn_stream(user_input):
+            if isinstance(event, StreamTextDelta):
+                parts.append(event.text)
+            elif isinstance(event, StreamComplete):
+                response = event.response
+                if (response.content or "").strip() and not response.tool_calls:
+                    final = response.content
+        return final if final is not None else "".join(parts)
 
     async def _dispatch_draining(self, tc):
         """Run one tool while forwarding whatever it emits out of band.
@@ -4295,9 +4011,7 @@ class ChatSession:
     ) -> AsyncIterator[StreamEvent]:
         """Streaming turn. Owns the out-of-band emitter's lifetime.
 
-        The emitter exists only for the duration of one streaming turn, which
-        is what makes questions unavailable on the non-streaming `turn()`
-        path: nothing there would render them.
+        The emitter exists only for the duration of one streaming turn.
         """
         # Before any tool task is spawned, so a connect made mid-turn registers
         # into a container this turn still holds.
@@ -4340,13 +4054,7 @@ class ChatSession:
         trace_tags: list[str] | None = None,
         trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Streaming version of turn(). Yields events as they arrive.
-
-        `turn_id` lets the host (cowork, CLI, …) tag the turn with its
-        own identifier so downstream telemetry can correlate the LLM
-        calls + tool spans made during this turn. Stored on
-        `self._current_turn_id` so the provider layer can read it
-        without threading the arg through every internal call.
+        """The turn implementation. Yields events as they arrive.
 
         `trace_tags` / `trace_metadata` are optional, opaque annotations the
         host can attach to this turn's trace (forwarded to the MindsHub
@@ -4354,7 +4062,6 @@ class ChatSession:
         are deliberately generic: hosts can add arbitrary correlation data
         (e.g. an eval-run id) without any change to Anton.
         """
-        self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
@@ -5112,8 +4819,6 @@ class ChatSession:
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
         _reply_persisted = False
-        import logging as _logging
-        _verifier_log = _logging.getLogger(__name__)
 
         while True:  # Completion verification loop
             # Per-iteration, NOT per-turn: the flag means "the reply currently in
@@ -5873,7 +5578,7 @@ class ChatSession:
                 self._verifier_latch_skips += 1
                 reprobe_turns = _reprobe_turns_for(self._verifier_last_no_verdict)
                 if self._verifier_latch_skips < reprobe_turns:
-                    _verifier_log.info(
+                    logger.info(
                         "completion-verifier skipped — latched (%s) "
                         "(skip %d/%d before re-probe); "
                         "continuation=%d/%d tool_rounds=%d",
@@ -5907,7 +5612,7 @@ class ChatSession:
                             f"latched_{self._verifier_latch_reason}"
                         )
                     break
-                _verifier_log.info(
+                logger.info(
                     "completion-verifier re-probing after %d skipped verifications",
                     self._verifier_latch_skips,
                 )
@@ -5949,8 +5654,8 @@ class ChatSession:
                     verdict_exc = exc
                     # WARNING only when this attempt ends the loop: a truncation
                     # the larger budget recovers from is not a failure to report.
-                    _verifier_log.log(
-                        _logging.INFO if retrying else _logging.WARNING,
+                    logger.log(
+                        logging.INFO if retrying else logging.WARNING,
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s error=%s retrying=%s",
                         truncation_verdict(exc),
@@ -5983,7 +5688,7 @@ class ChatSession:
                     # user buys nothing: handled below by latching silently.
                     verdict_failure = "denied"
                     verdict_exc = exc
-                    _verifier_log.warning(
+                    logger.warning(
                         "completion-verifier verdict=DENIED budget=%d model=%s error=%s",
                         budget, self._llm.coding_model, _safe_error_detail(exc),
                     )
@@ -6000,7 +5705,7 @@ class ChatSession:
                     # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
                     verdict_exc = exc
-                    _verifier_log.warning(
+                    logger.warning(
                         "completion-verifier verdict=TRANSIENT budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -6012,7 +5717,7 @@ class ChatSession:
                     # content (ENG-1081).
                     verdict_failure = "hard"
                     verdict_exc = exc
-                    _verifier_log.warning(
+                    logger.warning(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -6069,7 +5774,7 @@ class ChatSession:
                     self._note_latch_class("denied")
                     # INFO, unlike the other latch lines: this one latches on
                     # call one, so at WARNING it doubles verdict=DENIED above.
-                    _verifier_log.info(
+                    logger.info(
                         "completion-verifier latched after a deterministic "
                         "denial (billing or model access) — skipping "
                         "verification until the next re-probe; turn ends on the "
@@ -6091,7 +5796,7 @@ class ChatSession:
                         # after N failures" with an ever-growing N would read as
                         # a new event each cycle. No re-diagnosis (one per
                         # session, ENG-1155).
-                        _verifier_log.warning(
+                        logger.warning(
                             "completion-verifier re-probe failed — staying latched"
                         )
                         # Unverified turn — see the latched-skip stamp above.
@@ -6119,7 +5824,7 @@ class ChatSession:
                         # latched_hard from latched_truncated rather than
                         # mislabelling one as the other.
                         self._verifier_latched = True
-                        _verifier_log.warning(
+                        logger.warning(
                             "completion-verifier latched after %d verdict calls that "
                             "produced no verdict (%s) with no successful verdict "
                             "between them — skipping verification until the next "
@@ -6141,7 +5846,7 @@ class ChatSession:
                 # user to help). Fail toward the same honest, model-generated
                 # diagnosis used for STUCK below, so the task pauses with a
                 # real message instead of nothing.
-                _verifier_log.warning(
+                logger.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
                     "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
                     continuation, self._max_continuations, tool_round,
@@ -6181,7 +5886,7 @@ class ChatSession:
                     yield event
                 break
 
-            _verifier_log.info(
+            logger.info(
                 # No `reason` — it's the model's free-text justification, derived
                 # from the user's conversation, and this is an ordinary app log.
                 # It stays in the Langfuse trace, where that content belongs.

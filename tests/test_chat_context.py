@@ -5,7 +5,7 @@ import socket
 import urllib.error
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
-from tests.conftest import make_mock_llm
+from tests.conftest import make_mock_llm, run_turn
 
 import pytest
 
@@ -103,7 +103,7 @@ class TestMemorizeTool:
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
-        reply = await session.turn("always use httpx instead of requests")
+        reply = await run_turn(session, "always use httpx instead of requests")
         await asyncio.sleep(0)  # Let fire-and-forget encode task run
 
         assert "noted" in reply.lower() or "reference" in reply.lower()
@@ -129,7 +129,7 @@ class TestMemorizeTool:
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
-        await session.turn("coingecko rate limits at 50 per minute")
+        await run_turn(session, "coingecko rate limits at 50 per minute")
         await asyncio.sleep(0)  # Let fire-and-forget encode task run
 
         global_dir, project_dir = memory_dirs
@@ -150,7 +150,7 @@ class TestMemorizeTool:
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
-        await session.turn("hi")
+        await run_turn(session, "hi")
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
@@ -163,7 +163,7 @@ class TestMemorizeTool:
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, self_awareness=None, cortex=None))
-        await session.turn("hello")
+        await run_turn(session, "hello")
 
         call_kwargs = mock_llm.plan.call_args
         tools = call_kwargs.kwargs.get("tools", [])
@@ -177,7 +177,7 @@ class TestMemorizeTool:
         mock_llm.plan = AsyncMock(return_value=_text_response("Hi!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
-        await session.turn("hello")
+        await run_turn(session, "hello")
 
         call_kwargs = mock_llm.plan.call_args
         tools = call_kwargs.kwargs.get("tools", [])
@@ -199,7 +199,7 @@ class TestMemorizeTool:
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))
-        await session.turn("note this")
+        await run_turn(session, "note this")
 
         tool_result_msgs = [
             m for m in session.history
@@ -223,7 +223,7 @@ class TestAntonMdInjection:
             cortex=cortex,
             workspace=ws,
         ))
-        await session.turn("hi")
+        await run_turn(session, "hi")
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
@@ -242,7 +242,7 @@ class TestAntonMdInjection:
             cortex=cortex,
             workspace=ws,
         ))
-        await session.turn("hi")
+        await run_turn(session, "hi")
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
@@ -259,7 +259,7 @@ class TestRuntimeContext:
             llm_client=mock_llm,
             system_prompt_context=SystemPromptContext(runtime_context="- Provider: anthropic\n- Planning model: claude-sonnet-4-6\n- Coding model: claude-opus-4-6"),
         ))
-        await session.turn("hi")
+        await run_turn(session, "hi")
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
@@ -277,7 +277,7 @@ class TestRuntimeContext:
             llm_client=mock_llm,
             system_prompt_context=SystemPromptContext(runtime_context="- Provider: anthropic"),
         ))
-        await session.turn("hi")
+        await run_turn(session, "hi")
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")
@@ -292,7 +292,7 @@ class TestRuntimeContext:
         mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, system_prompt_context=SystemPromptContext()))
-        await session.turn("hi")
+        await run_turn(session, "hi")
 
         call_kwargs = mock_llm.plan.call_args
         system_prompt = call_kwargs.kwargs.get("system", "")

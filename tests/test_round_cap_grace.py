@@ -115,25 +115,6 @@ async def test_round_cap_grants_one_time_grace_then_stops(workspace):
     assert int(send.call_args.kwargs["rounds"]) == max_rounds + _ROUND_CAP_GRACE_ROUNDS
 
 
-async def test_round_cap_grace_also_applies_to_the_non_streaming_turn(workspace):
-    """`turn()` mirrors turn_stream's grace, like it already mirrors the
-    plain round cap and spend ceiling.
-
-    Public API with no in-tree caller, but its cost books are wired, so an
-    unmirrored grace here would under-report every host that uses it.
-    """
-    max_rounds = 5
-    session = _session(
-        workspace, max_tool_rounds=max_rounds,
-        responses=[_tool_call(i) for i in range(1, max_rounds + _ROUND_CAP_GRACE_ROUNDS + 3)],
-    )
-    with patch("anton.analytics.send_event") as send:
-        await session.turn("do the thing")
-    assert send.call_args.kwargs["ended_by"] == "round_cap"
-    assert session._round_cap_grace_used
-    assert int(send.call_args.kwargs["rounds"]) == max_rounds + _ROUND_CAP_GRACE_ROUNDS
-
-
 async def test_round_cap_grace_lets_a_near_finish_wrap_up_without_asking(workspace):
     """A task that actually finishes inside the grace window never asks at all."""
     max_rounds = 5

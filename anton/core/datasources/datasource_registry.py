@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -167,35 +166,6 @@ class DatasourceRegistry:
             if needle in e.display_name.lower() or needle in e.engine.lower()
         ]
         return matches[0] if len(matches) == 1 else None
-
-    def fuzzy_find(self, text: str) -> list[DatasourceEngine]:
-        """Return engines whose name/slug closely matches *text* (fuzzy, for typo tolerance)."""
-
-        def _normalize(s: str) -> str:
-            return re.sub(r"[\s\-_]", "", s).lower()
-
-        needle = _normalize(text)
-        # Build a map from normalized key → engine (display_name takes priority)
-        key_to_engine: dict[str, DatasourceEngine] = {}
-        for engine in self._engines.values():
-            key_to_engine[_normalize(engine.display_name)] = engine
-            # Don't overwrite display_name key with slug key
-            slug_key = _normalize(engine.engine)
-            if slug_key not in key_to_engine:
-                key_to_engine[slug_key] = engine
-
-        close_keys = difflib.get_close_matches(
-            needle, key_to_engine.keys(), n=3, cutoff=0.6
-        )
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        results: list[DatasourceEngine] = []
-        for k in close_keys:
-            eng = key_to_engine[k]
-            if eng.engine not in seen:
-                seen.add(eng.engine)
-                results.append(eng)
-        return results
 
     def all_engines(self) -> list[DatasourceEngine]:
         return sorted(self._engines.values(), key=lambda e: e.display_name)
