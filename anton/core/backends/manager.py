@@ -248,11 +248,6 @@ class ScratchpadManager:
     def list_pads(self) -> list[str]:
         return list(self._pads.keys())
 
-    async def cancel_all_running(self) -> None:
-        """Cancel running executions in all scratchpads and restart them."""
-        for pad in self._pads.values():
-            await pad.cancel()
-
     async def close_all(self) -> None:
         """Cleanup all scratchpads on session end."""
         for pad in self._pads.values():
