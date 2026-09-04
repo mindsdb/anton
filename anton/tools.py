@@ -549,8 +549,13 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # `ChatSessionConfig.settings` is typed `CoreSettings | None`, and
     # `CoreSettings` carries none of the publish fields, so a host that passed
     # a bare CoreSettings (or no settings) must still fall back.
+    # Check every publish field, not just one: a host passing a partial object
+    # that happens to carry `minds_api_key` would skip the fallback and then
+    # AttributeError further down on `artifacts_dir` / `publish_url` /
+    # `minds_ssl_verify`, mid-publish rather than here.
+    _PUBLISH_FIELDS = ("minds_api_key", "artifacts_dir", "publish_url", "minds_ssl_verify")
     settings = getattr(session, "_settings", None)
-    if settings is None or not hasattr(settings, "minds_api_key"):
+    if settings is None or not all(hasattr(settings, f) for f in _PUBLISH_FIELDS):
         settings = AntonSettings()
         # A bare AntonSettings() leaves `artifacts_dir` at its RELATIVE default,
         # so `Path(settings.artifacts_dir)` below would resolve against cwd

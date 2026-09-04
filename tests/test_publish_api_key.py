@@ -338,3 +338,32 @@ async def test_401_does_not_clear_a_key_the_global_vault_did_not_supply(tmp_path
     # ...and the user is told where to look instead of being told it was cleared.
     printed = " ".join(str(c) for c in console.print.call_args_list)
     assert "cowork" in printed
+
+
+@pytest.mark.asyncio
+async def test_401_clears_a_quoted_vault_line(tmp_path, home):
+    """A hand-edited vault must still be recognised as the source of the key.
+
+    `settings.minds_api_key` is parsed by pydantic-settings (python-dotenv:
+    unquotes, drops inline comments) while `Workspace.get_secret` only strips
+    whitespace. Comparing the two made `ANTON_MINDS_API_KEY="k"` take the
+    "not ours" branch, so the rejected key was never cleared — the permanent
+    lock-out this branch exists to remove, back for that vault shape.
+    """
+    from anton.chat import _handle_publish
+    from anton.workspace import vault_key
+
+    (home / ".anton").mkdir(parents=True, exist_ok=True)
+    (home / ".anton" / ".env").write_text('ANTON_MINDS_API_KEY="stale-bad-key"\n')
+    assert vault_key(home / ".anton" / ".env") == "stale-bad-key"  # as settings sees it
+
+    html = _make_html_file(tmp_path)
+    settings = _make_settings(tmp_path, api_key="stale-bad-key")
+
+    with (
+        patch("anton.chat.prompt_or_cancel", new=AsyncMock(side_effect=["public"])),
+        patch("anton.publisher.publish", side_effect=_http_401()),
+    ):
+        await _handle_publish(_make_console(), settings, file_arg=str(html))
+
+    assert vault_key(home / ".anton" / ".env") is None

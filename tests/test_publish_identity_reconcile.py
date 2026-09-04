@@ -17,6 +17,8 @@ import stat
 import sys
 from pathlib import Path
 
+from unittest import mock
+
 import pytest
 
 from anton.cli import _reconcile_publish_identity
@@ -295,3 +297,88 @@ def test_a_symlinked_home_is_still_recognised_as_home(tmp_path, monkeypatch):
 
     assert _reconcile_publish_identity(_settings(real)) is False
     assert Workspace(real).get_secret("ANTON_MINDS_API_KEY") == "THE_ONLY_KEY"
+
+
+def test_a_quoted_vault_line_is_read_the_way_settings_read_it(tmp_path, home):
+    """`load_env` and pydantic-settings disagree on quoted / comment-suffixed lines.
+
+    `load_env` only strips whitespace; pydantic-settings goes through
+    python-dotenv, which unquotes and drops inline comments. Any decision
+    comparing file contents against a RESOLVED setting has to use the second
+    parser, or a hand-edited vault silently takes the "not our key" branch.
+    """
+    from anton.workspace import vault_key
+
+    (home / ".anton").mkdir(parents=True, exist_ok=True)
+    env = home / ".anton" / ".env"
+
+    env.write_text('ANTON_MINDS_API_KEY="abc123"\n')
+    assert vault_key(env) == "abc123"
+    assert Workspace(home).get_secret("ANTON_MINDS_API_KEY") == '"abc123"'  # the mismatch
+
+    env.write_text("ANTON_MINDS_API_KEY=abc123 # note\n")
+    assert vault_key(env) == "abc123"
+
+
+def test_the_archive_is_skipped_when_it_cannot_be_gitignored(tmp_path, home):
+    """Writing a live credential to an unignored file is worse than not archiving.
+
+    An earlier version swallowed the .gitignore failure and wrote the archive
+    anyway — the exact exposure the ignore file exists to prevent.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJECT_KEY")
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_KEY")
+
+    import anton.cli as cli_mod
+
+    with mock.patch.object(cli_mod, "_ensure_vault_gitignored", return_value=False):
+        assert _reconcile_publish_identity(_settings(project)) is False
+
+    # Nothing moved, nothing written, key still where it was.
+    assert Workspace(project).get_secret("ANTON_MINDS_API_KEY") == "PROJECT_KEY"
+    assert not (project / ".anton" / ".env.superseded").exists()
+
+
+def test_gitignore_scopes_to_env_and_appends_to_an_existing_file(tmp_path):
+    """`*` would silently drop anton.md, memory/ and artifacts/ out of `git add -A`."""
+    from anton.cli import _ensure_vault_gitignored
+
+    d = tmp_path / ".anton"
+    d.mkdir()
+    assert _ensure_vault_gitignored(d) is True
+    assert (d / ".gitignore").read_text().split() == [".env*"]
+
+    # An existing file must be appended to, not skipped — skipping left a
+    # project that already had one with no protection at all.
+    (d / ".gitignore").write_text("build/\n")
+    assert _ensure_vault_gitignored(d) is True
+    assert ".env*" in (d / ".gitignore").read_text().split()
+    assert "build/" in (d / ".gitignore").read_text().split()
+
+
+def test_exported_key_is_restored_even_when_a_write_fails(tmp_path, home, monkeypatch):
+    """The restore lives in `finally`.
+
+    `main` catches OSError and boots on, so a failure midway would otherwise
+    leave the operator's exported key replaced for the whole session and every
+    scratchpad child, with no re-resolve to correct it.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "Y_PROJECT")
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "X_EXPORTED")
+
+    import anton.workspace as ws_mod
+
+    original = ws_mod.Workspace.remove_secret
+    def boom(self, key):
+        raise OSError("read-only project dir")
+    monkeypatch.setattr(ws_mod.Workspace, "remove_secret", boom)
+
+    with pytest.raises(OSError):
+        _reconcile_publish_identity(_settings(project))
+
+    monkeypatch.setattr(ws_mod.Workspace, "remove_secret", original)
+    assert os.environ.get("ANTON_MINDS_API_KEY") == "X_EXPORTED"

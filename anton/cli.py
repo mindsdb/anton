@@ -407,6 +407,30 @@ def _get_settings(ctx: typer.Context):
     return ctx.obj["settings"]
 
 
+def _ensure_vault_gitignored(anton_dir: Path) -> bool:
+    """Make sure `.anton/.env*` is ignored by git. True if it now is.
+
+    Scoped to `.env*`, NOT `*`: `.anton/` is the workspace state directory, so
+    ignoring all of it would silently drop `anton.md`, `memory/`, `episodes/`
+    and every published dashboard under `artifacts/` out of `git add -A` —
+    invisibly, because already-tracked files keep working.
+
+    Appends when a `.gitignore` already exists rather than skipping: a project
+    that happens to have one would otherwise get no protection at all.
+    """
+    gitignore = anton_dir / ".gitignore"
+    pattern = ".env*"
+    try:
+        existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+        if pattern in existing.split():
+            return True
+        prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
+        gitignore.write_text(f"{prefix}{pattern}\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 def _reconcile_publish_identity(settings) -> bool:
     """Collapse a legacy project-vault MindsHub key into the global vault.
 
@@ -447,7 +471,7 @@ def _reconcile_publish_identity(settings) -> bool:
     # Reuse the vault's own atomic 0600 writer rather than re-implementing it:
     # the archive holds the same secret as the file it came from, and a plain
     # write_text would leave it at umask mode until a chmod landed.
-    from anton.workspace import Workspace, _write_private
+    from anton.workspace import Workspace, _write_private, vault_key
 
     project_path = Path(settings.workspace_path)
     # resolve() both sides: `workspace_path` is already canonical (Path.cwd() /
@@ -474,42 +498,59 @@ def _reconcile_publish_identity(settings) -> bool:
     # restore around the whole migration.
     exported = os.environ.get("ANTON_MINDS_API_KEY")
 
-    if not global_key:
-        global_ws.set_secret("ANTON_MINDS_API_KEY", project_key)
-        project_ws.remove_secret("ANTON_MINDS_API_KEY")
-        message = "  Moved this project's saved publish key to ~/.anton/.env"
-    elif global_key == project_key:
-        project_ws.remove_secret("ANTON_MINDS_API_KEY")
-        message = "  Removed a duplicate publish key from this project (same key as ~/.anton/.env)"
-    else:
-        archive = project_ws.env_path.with_name(".env.superseded")
-        # `.env.superseded` is matched by neither a `.env` nor a `*.env` ignore
-        # rule, and anton writes no .gitignore of its own, so a live credential
-        # would be staged by `git add -A`. Ignore the whole vault directory
-        # from inside it — self-contained, and it covers `.env` too.
-        gitignore = project_ws.env_path.with_name(".gitignore")
-        if not gitignore.exists():
-            try:
-                gitignore.write_text("*\n", encoding="utf-8")
-            except OSError:
-                pass
-        previous = archive.read_text(encoding="utf-8") if archive.is_file() else ""
-        _write_private(
-            archive,
-            f"{previous}# superseded {datetime.now():%Y-%m-%d %H:%M}, was in .anton/.env\n"
-            f"ANTON_MINDS_API_KEY={project_key}\n",
-        )
-        project_ws.remove_secret("ANTON_MINDS_API_KEY")
-        message = (
-            "  This project had a different publish key than ~/.anton/.env.\n"
-            "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
-            f"  {escape(str(archive))} in case it was the one you wanted."
-        )
+    try:
+        if not global_key:
+            global_ws.set_secret("ANTON_MINDS_API_KEY", project_key)
+            project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            message = "  Moved this project's saved publish key to ~/.anton/.env"
+            # ...but ~/.cowork/.env sits AFTER ~/.anton/.env in the chain, so on
+            # a desktop-configured machine the key we just moved is outranked
+            # the moment it lands. Saying "moved" is true; implying it is now
+            # the publish identity would not be, and this is exactly the silent
+            # identity change the ticket is about.
+            if vault_key(Path.home() / ".cowork" / ".env"):
+                message += (
+                    "\n  (~/.cowork/.env also has a key and takes precedence,"
+                    "\n   so publishing still uses that one.)"
+                )
+        elif global_key == project_key:
+            project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            message = "  Removed a duplicate publish key from this project (same key as ~/.anton/.env)"
+        else:
+            # Do not write the archive unless it is certain to be ignored by
+            # git: the whole point is to keep a live credential out of a commit,
+            # so failing to protect it and writing it anyway is worse than not
+            # archiving at all. Leaving the key in .anton/.env costs nothing —
+            # the machine stays exactly as it was.
+            if not _ensure_vault_gitignored(project_ws.env_path.parent):
+                console.print(
+                    "[anton.muted]  Left this project's publish key in place: could not"
+                    " write .anton/.gitignore to keep the archive out of git.[/]"
+                )
+                return False
 
-    if exported is None:
-        os.environ.pop("ANTON_MINDS_API_KEY", None)
-    else:
-        os.environ["ANTON_MINDS_API_KEY"] = exported
+            archive = project_ws.env_path.with_name(".env.superseded")
+            previous = archive.read_text(encoding="utf-8") if archive.is_file() else ""
+            _write_private(
+                archive,
+                f"{previous}# superseded {datetime.now():%Y-%m-%d %H:%M}, was in .anton/.env\n"
+                f"ANTON_MINDS_API_KEY={project_key}\n",
+            )
+            project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            message = (
+                "  This project had a different publish key than ~/.anton/.env.\n"
+                "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
+                f"  {escape(str(archive))} in case it was the one you wanted."
+            )
+    finally:
+        # In `finally`, not after the branches: `main` catches OSError and boots
+        # on, so a write failing midway would otherwise leave the operator's
+        # exported key replaced for the whole session and every scratchpad child,
+        # with no re-resolve to correct it.
+        if exported is None:
+            os.environ.pop("ANTON_MINDS_API_KEY", None)
+        else:
+            os.environ["ANTON_MINDS_API_KEY"] = exported
 
     # The .env chain is built ONCE at import from the files that existed then
     # (config/settings.py). Creating ~/.anton/.env a moment ago does not add it,

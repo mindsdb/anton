@@ -433,6 +433,13 @@ async def _handle_remote(
     console.print()
 
 
+def _vault_key_of(ws):
+    """The vault's stored key, parsed the way pydantic-settings parsed it."""
+    from anton.workspace import vault_key
+
+    return vault_key(ws.env_path)
+
+
 def _global_vault():
     """The global workspace vault (``~/.anton/.env``) — the CLI's identity file.
 
@@ -795,7 +802,7 @@ async def _handle_publish(
                     # STRC-987 fix), so there is nothing on disk to clear. The
                     # in-memory reset alone re-prompts on the next /publish.
                     console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
-                elif _global_vault().get_secret("ANTON_MINDS_API_KEY") == rejected:
+                elif _vault_key_of(_global_vault()) == rejected:
                     _persist_key_best_effort(console, "", what="clear the rejected key")
                     console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
                 else:
@@ -806,8 +813,9 @@ async def _handle_publish(
                     )
                     console.print(
                         "  [anton.muted]It did not come from ~/.anton/.env, so /publish "
-                        "cannot clear it — check ~/.cowork/.env, a .env in this folder, "
-                        "or an exported ANTON_MINDS_API_KEY.[/]"
+                        "cannot clear it — check ~/.cowork/.env, .anton/.env in this "
+                        "project, a .env in this folder, or an exported "
+                        "ANTON_MINDS_API_KEY.[/]"
                     )
             else:
                 console.print(f"  [anton.error]Publish failed: {e}[/]")

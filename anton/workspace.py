@@ -28,6 +28,30 @@ Created: {date}
 _SECRET_FILE_MODE = 0o600
 
 
+def vault_key(env_path: Path, key: str = "ANTON_MINDS_API_KEY") -> str | None:
+    """Read a key from a .env file with the SAME parser that resolved settings.
+
+    `load_env` below only `.strip()`s the value, while pydantic-settings goes
+    through python-dotenv, which also unquotes and drops inline comments. The
+    two disagree on ordinary hand-edited lines::
+
+        ANTON_MINDS_API_KEY="abc"       load_env -> '"abc"'      dotenv -> 'abc'
+        ANTON_MINDS_API_KEY=abc # note  load_env -> 'abc # note' dotenv -> 'abc'
+
+    Anywhere a decision compares a file's contents against a RESOLVED setting,
+    the file has to be read the way the setting was, or a quoted vault silently
+    takes the "this is not our key" branch.
+    """
+    from dotenv import dotenv_values
+
+    if not env_path.is_file():
+        return None
+    try:
+        return dotenv_values(env_path).get(key)
+    except OSError:
+        return None
+
+
 def _write_private(path: Path, text: str) -> None:
     """Write `text` to `path`, readable and writable only by its owner.
 
