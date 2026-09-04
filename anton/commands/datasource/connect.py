@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from typing import TYPE_CHECKING
 
 from anton.connect_collector import ConnectionCollector, extract_variables
@@ -13,6 +12,7 @@ from anton.utils.datasources import (
     default_user_label,
     ensure_unique_user_label,
     find_matching_connection,
+    generate_unique_conn_name,
     parse_connection_slug,
     register_secret_vars,
     restore_namespaced_env,
@@ -309,7 +309,7 @@ async def handle_connect_datasource(
             ):
                 _telemetry("ds_connect_failed", engine=engine_def.engine)
                 return session
-        conn_name = uuid.uuid4().hex[:8]
+        conn_name = generate_unique_conn_name(vault, engine_def.engine)
         credentials["_user_label"] = default_user_label(vault, engine_def.engine)
         slug = save_connection(vault, engine_def, conn_name, credentials)
         _telemetry("ds_connect_success", engine=engine_def.engine)
@@ -334,7 +334,7 @@ async def handle_connect_datasource(
         return session
 
     assert engine_def is not None
-    # _telemetry("ds_connect_attempt", engine=engine_def.engine)
+    _telemetry("ds_connect_attempt", engine=engine_def.engine)
     active_fields = engine_def.fields
     chosen_method = None
     if engine_def.auth_method == "choice" and engine_def.auth_methods:
@@ -529,9 +529,7 @@ async def handle_connect_datasource(
     credentials: dict[str, str] = dict(collector.collected)
 
     if partial:
-        auto_name = uuid.uuid4().hex[:8]
-        while vault.load(engine_def.engine, auto_name) is not None:
-            auto_name = uuid.uuid4().hex[:8]
+        auto_name = generate_unique_conn_name(vault, engine_def.engine)
         credentials["_user_label"] = default_user_label(vault, engine_def.engine)
         vault.save(engine_def.engine, auto_name, credentials)
         slug = f"{engine_def.engine}-{auto_name}"
@@ -556,9 +554,7 @@ async def handle_connect_datasource(
         conn_name = existing_name
         is_update = True
     else:
-        conn_name = uuid.uuid4().hex[:8]
-        while vault.load(engine_def.engine, conn_name) is not None:
-            conn_name = uuid.uuid4().hex[:8]
+        conn_name = generate_unique_conn_name(vault, engine_def.engine)
         is_update = False
 
         default_label = prefill_label or default_user_label(vault, engine_def.engine)
