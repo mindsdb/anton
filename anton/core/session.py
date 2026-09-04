@@ -4,7 +4,6 @@ import asyncio
 import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
-from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
@@ -75,7 +74,6 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
-from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
@@ -1300,7 +1298,6 @@ class ChatSession:
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
-        self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
         # Router (ENG-648): explicit host override wins; otherwise the
         # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
@@ -1373,10 +1370,6 @@ class ChatSession:
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
         self._turn_cost: TurnCost | None = None
-        # Set per-turn by `turn_stream` so any LLM call made during that
-        # turn can read the current turn identifier (used by telemetry /
-        # langfuse propagation in the provider layer).
-        self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
         self.escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
@@ -4342,19 +4335,12 @@ class ChatSession:
     ) -> AsyncIterator[StreamEvent]:
         """Streaming version of turn(). Yields events as they arrive.
 
-        `turn_id` lets the host (cowork, CLI, …) tag the turn with its
-        own identifier so downstream telemetry can correlate the LLM
-        calls + tool spans made during this turn. Stored on
-        `self._current_turn_id` so the provider layer can read it
-        without threading the arg through every internal call.
-
         `trace_tags` / `trace_metadata` are optional, opaque annotations the
         host can attach to this turn's trace (forwarded to the MindsHub
         langfuse headers — see the provider's `_build_trace_headers`). They
         are deliberately generic: hosts can add arbitrary correlation data
         (e.g. an eval-run id) without any change to Anton.
         """
-        self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must

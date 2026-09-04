@@ -1,4 +1,4 @@
-from anton.core.tools.progress import ToolProgress
+from anton.core.tools.progress import ToolProgress  # noqa: F401 — re-export
 from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
