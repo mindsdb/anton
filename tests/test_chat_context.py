@@ -362,7 +362,7 @@ class TestMindsSetupRecovery:
             ),
         )
         rebuilt = object()
-        monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
+        monkeypatch.setattr("anton.chat.rebuild_session", AsyncMock(return_value=rebuilt))
 
         workspace_base = tmp_path / "workspace"
         workspace_base.mkdir()
@@ -431,7 +431,7 @@ class TestMindsSetupRecovery:
                 ),
             ),
         )
-        monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: object())
+        monkeypatch.setattr("anton.chat.rebuild_session", AsyncMock(side_effect=lambda **kwargs: object()))
 
         workspace_base = tmp_path / "workspace"
         workspace_base.mkdir()
@@ -489,7 +489,7 @@ class TestMindsSetupRecovery:
             ),
         )
         rebuilt = object()
-        monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
+        monkeypatch.setattr("anton.chat.rebuild_session", AsyncMock(return_value=rebuilt))
 
         workspace_base = tmp_path / "workspace"
         workspace_base.mkdir()

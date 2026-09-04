@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import httpx
+import httpx2 as httpx
 import openai
 import pytest
 

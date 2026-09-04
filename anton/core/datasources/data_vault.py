@@ -420,7 +420,7 @@ class TurnKeyDataVault:
     matching the fact that a cloud turn never edits connections mid-turn.
     """
 
-    def __init__(self, oauth: dict[str, Any], *, base_url: str | None = None) -> None:
+    def __init__(self, oauth: dict[str, Any]) -> None:
         self._turn_key = str(oauth.get("turn_key") or "")
         self._connections: list[dict[str, str]] = [
             {"engine": str(c["engine"]), "name": str(c["name"])}
@@ -428,10 +428,18 @@ class TurnKeyDataVault:
             if isinstance(c, dict) and c.get("engine") and c.get("name")
         ]
         self._connection_keys = frozenset((c["engine"], c["name"]) for c in self._connections)
+        # ENG-2128: this used to also accept a keyword-only `base_url`
+        # override, but the one real call site (cloud_turn/session.py)
+        # constructs positionally and never bound it, so a value
+        # cowork-server put in the oauth block's own `base_url` field was
+        # dead on the wire - the module comment on
+        # ANTON_CLOUD_AUTH_BASE_URL_ENV above already states the intended
+        # design ("never taken from the wire request"), which the removed
+        # kwarg contradicted by existing at all. Removed rather than wired
+        # up: the env var is already the correct, working, per-environment
+        # source, and nothing needs cowork-server to steer this per-request.
         self._base_url = (
-            base_url
-            or os.environ.get(ANTON_CLOUD_AUTH_BASE_URL_ENV)
-            or _DEFAULT_AUTH_BASE_URL
+            os.environ.get(ANTON_CLOUD_AUTH_BASE_URL_ENV) or _DEFAULT_AUTH_BASE_URL
         ).rstrip("/")
         # Per-turn cache: the loop in restore_namespaced_env() calls
         # inject_env() once per connection already, but read_record()/load()

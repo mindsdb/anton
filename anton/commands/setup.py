@@ -95,7 +95,7 @@ async def handle_setup_models(
     console.print("[anton.success]Configuration updated.[/]")
     console.print()
 
-    return rebuild_session(
+    return await rebuild_session(
         settings=settings,
         state=state,
         self_awareness=self_awareness,

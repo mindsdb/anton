@@ -428,6 +428,16 @@ class TestScratchpadManager:
         finally:
             await mgr.close_all()
 
+    async def test_get_or_create_passes_workspace_env_overlay_to_new_pad(self):
+        """A manager constructed with workspace_env_overlay hands it to
+        every new pad it creates."""
+        mgr = make_manager(workspace_env_overlay={"MY_PROJECT_VAR": "project-value"})
+        try:
+            pad = await mgr.get_or_create("alpha")
+            assert pad._workspace_env_overlay == {"MY_PROJECT_VAR": "project-value"}
+        finally:
+            await mgr.close_all()
+
 
 class TestScratchpadRenderNotebook:
     async def test_render_notebook_basic(self):
@@ -774,6 +784,69 @@ class TestScratchpadEnvironment:
                 "import os; print(os.environ.get('DS_TEST__KEY', 'NOT_FOUND'))"
             )
             assert cell.stdout.strip() == "new-value"
+        finally:
+            await pad.close()
+
+    async def test_workspace_env_overlay_applied(self):
+        """workspace_env_overlay adds its keys to the subprocess env."""
+        pad = make_scratchpad(
+            name="workspace-env-test",
+            workspace_env_overlay={"MY_PROJECT_VAR": "project-value"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('MY_PROJECT_VAR', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "project-value"
+        finally:
+            await pad.close()
+
+    async def test_workspace_env_overlay_never_overrides_inherited(self, monkeypatch):
+        """The project .env is only-if-unset, as it was when it went through
+        os.environ — it must not be able to replace PATH or an existing key."""
+        monkeypatch.setenv("ALREADY_SET_VAR", "parent-value")
+        pad = make_scratchpad(
+            name="workspace-env-no-override",
+            workspace_env_overlay={"ALREADY_SET_VAR": "project-value"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('ALREADY_SET_VAR', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "parent-value"
+        finally:
+            await pad.close()
+
+    async def test_workspace_env_overlay_cannot_smuggle_ds_vars(self):
+        """A project .env must not be able to define a DS_* the vault did not
+        — the overlay lands before the DS_* strip."""
+        pad = make_scratchpad(
+            name="workspace-env-no-ds",
+            scratchpad_ds_env={},
+            workspace_env_overlay={"DS_FAKE__PASSWORD": "from-dotenv"},
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('DS_FAKE__PASSWORD', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "NOT_FOUND"
+        finally:
+            await pad.close()
+
+    async def test_workspace_env_overlay_none_leaves_env_unchanged(self, monkeypatch):
+        """workspace_env_overlay=None (default) does not touch an unrelated
+        inherited var — no stripping happens for this overlay, unlike DS_*."""
+        monkeypatch.setenv("SOME_INHERITED_VAR", "inherited-value")
+        pad = make_scratchpad(name="workspace-env-none")
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                "import os; print(os.environ.get('SOME_INHERITED_VAR', 'NOT_FOUND'))"
+            )
+            assert cell.stdout.strip() == "inherited-value"
         finally:
             await pad.close()
 
@@ -2064,3 +2137,70 @@ class TestAgentAuthoredModuleSnapshots:
             assert cell.stdout.strip() == "[1, 2, 3]", cell.stdout
         finally:
             await pad.cleanup()
+
+
+class TestConcurrentTurnsOnDivergentVaults:
+    """The ticket's acceptance criteria, at the only boundary that decides
+    them: the environment a scratchpad's child process actually receives.
+
+    Two turns run at once on vaults that disagree — same connection name with
+    a different password, plus a connection only one of them has. Each cell
+    must read its own turn's value, and neither may see the other's.
+    """
+
+    @staticmethod
+    def _vault(tmp_path, subdir: str, connections: dict[str, dict[str, str]]):
+        from anton.core.datasources.data_vault import LocalDataVault
+
+        vault = LocalDataVault(vault_dir=tmp_path / subdir)
+        for name, fields in connections.items():
+            vault.save("postgres", name, fields, secure_keys=["password"])
+        return vault
+
+    async def test_neither_turn_sees_the_others_credentials(self, tmp_path, monkeypatch):
+        # The shared process env, polluted the way the old code left it.
+        # Neither of these may win over a turn's own vault.
+        monkeypatch.setenv("DS_POSTGRES_SHARED__PASSWORD", "leaked-from-elsewhere")
+        monkeypatch.setenv("DS_POSTGRES_ONLY_IN_A__PASSWORD", "leaked-from-elsewhere")
+
+        # Turn A also has `only_in_a`, which turn B has disabled — B's vault
+        # is the filtered one the harness builds for a disabled connection.
+        vault_a = self._vault(tmp_path, "vault_a", {
+            "shared": {"password": "turn-a-password"},
+            "only_in_a": {"password": "a-only-password"},
+        })
+        vault_b = self._vault(tmp_path, "vault_b", {
+            "shared": {"password": "turn-b-password"},
+        })
+
+        code = (
+            "import os\n"
+            "print(os.environ.get('DS_POSTGRES_SHARED__PASSWORD', 'ABSENT'))\n"
+            "print(os.environ.get('DS_POSTGRES_ONLY_IN_A__PASSWORD', 'ABSENT'))"
+        )
+
+        async def turn(vault, pad_name: str) -> list[str]:
+            mgr = make_manager(data_vault=vault)
+            pad = await mgr.get_or_create(pad_name)
+            try:
+                # Yield after start so the other turn's pad spawns in between.
+                await asyncio.sleep(0)
+                cell = await pad.execute(code)
+                return cell.stdout.strip().splitlines()
+            finally:
+                await mgr.close_all()
+
+        lines_a, lines_b = await asyncio.gather(
+            turn(vault_a, "turn-a-pad"),
+            turn(vault_b, "turn-b-pad"),
+        )
+
+        # Each turn reads its own vault's value, not the one sitting in the
+        # shared process env.
+        assert lines_a[0] == "turn-a-password"
+        assert lines_b[0] == "turn-b-password"
+
+        # The connection turn B disabled is never reinstated — not by turn A
+        # running alongside it, and not by the value left in the process env.
+        assert lines_a[1] == "a-only-password"
+        assert lines_b[1] == "ABSENT"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import importlib
+import logging
 import os
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from anton import __version__
+from anton.core.llm.provider import close_live_providers, install_asyncgen_noise_filter
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
@@ -30,6 +32,7 @@ from anton.chat_session import get_runtime_factory
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.client import LLMClient
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.datasources.data_vault import LocalDataVault
 
 from anton.commands.datasource import (
     handle_remove_data_source,
@@ -38,6 +41,23 @@ from anton.commands.datasource import (
     handle_test_datasource
 )
 from anton.minds_client import minds_v1_base, resolve_and_probe, test_llm
+
+# The CLI configures no logging, so without a handler on the package logger
+# Python's lastResort writes WARNING and above straight to stderr — into the
+# middle of the rich Live render. Propagation is untouched, so a host that does
+# configure logging (the cowork sidecar, the cloud pod) still emits them.
+logging.getLogger("anton").addHandler(logging.NullHandler())
+
+
+def _run_and_close(coro):
+    """Run a coroutine, then release provider HTTP pools before the loop dies."""
+    async def _wrapped():
+        install_asyncgen_noise_filter()
+        try:
+            return await coro
+        finally:
+            await close_live_providers()
+    return asyncio.run(_wrapped())
 
 
 def _build_scratchpad_manager(
@@ -53,6 +73,9 @@ def _build_scratchpad_manager(
         coding_api_key=coding_conn.api_key or "",
         coding_base_url=coding_conn.base_url or "",
         workspace_path=settings.workspace_path,
+        # Without a vault the manager cannot derive a pad's DS_* and the pad
+        # falls back to inheriting the whole process env.
+        data_vault=LocalDataVault(),
     )
 
 
@@ -132,8 +155,9 @@ def _reexec() -> None:
 
 # Core dependencies from pyproject.toml that anton needs at runtime
 _REQUIRED_PACKAGES: dict[str, str] = {
-    "anthropic": "anthropic>=0.42.0",
-    "openai": "openai>=2.21.0",
+    "anthropic": "anthropic>=1.0",
+    "openai": "openai>=3.0",
+    "httpx2": "httpx2>=2.7,<3",
     "pydantic": "pydantic>=2.0",
     "pydantic_settings": "pydantic-settings>=2.0",
     "prompt_toolkit": "prompt-toolkit>=3.0",
@@ -345,9 +369,9 @@ def _ensure_terms_consent(console: Console, settings) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Append if file exists, otherwise create
-    existing = env_path.read_text() if env_path.is_file() else ""
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
     if "ANTON_TERMS_CONSENT" not in existing:
-        with env_path.open("a") as f:
+        with env_path.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write("ANTON_TERMS_CONSENT=true\n")
@@ -510,7 +534,7 @@ def _onboard(settings) -> None:
     ]
 
     if sys.stdout.isatty():
-        asyncio.run(
+        _run_and_close(
             _animate_onboard(
                 console, __version__, _INTRO_LINES, settings=settings, ws=ws
             )
@@ -1371,7 +1395,7 @@ def _setup_exa(settings, ws) -> None:
 
         def _test():
             # Sync httpx call — _validate_with_spinner runs us inside a Live.
-            import httpx as _httpx
+            import httpx2 as _httpx
 
             resp = _httpx.post(
                 "https://api.exa.ai/search",
@@ -1424,7 +1448,7 @@ def _setup_brave(settings, ws) -> None:
     try:
 
         def _test():
-            import httpx as _httpx
+            import httpx2 as _httpx
 
             resp = _httpx.get(
                 "https://api.search.brave.com/res/v1/web/search",
@@ -1652,7 +1676,7 @@ def connect_data_source(
         )
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())
 
 
 @app.command("list")
@@ -1687,7 +1711,7 @@ def edit_data_source(
         )
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())
 
 
 @app.command("remove")
@@ -1699,7 +1723,7 @@ def remove_data_source(
 ) -> None:
     """Remove a saved connection from the Local Vault."""
 
-    asyncio.run(handle_remove_data_source(console, name))
+    _run_and_close(handle_remove_data_source(console, name))
 
 
 @app.command("test")
@@ -1717,7 +1741,7 @@ def test_data_source(
     scratchpads = _build_scratchpad_manager(settings)
 
     async def _run() -> None:
-        await _handle_test_datasource(console, scratchpads, name)
+        await handle_test_datasource(console, scratchpads, name)
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())

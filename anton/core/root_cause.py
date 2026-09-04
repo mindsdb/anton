@@ -69,6 +69,23 @@ TRIP_ELIGIBLE_TIERS = frozenset({TIER_WALL})
 #: scores 1 on both rungs and is invisible.
 _EXACT_ONLY_CLASSES = frozenset({"missing_file"})
 
+#: Classes `classify` returns as literals rather than through one of the tables
+#: below — the runtime WORDS these failures instead of raising a mapped type,
+#: so there is no exception name to look up. Named rather than inlined so
+#: `ALL_CLASSES` is a real derivation: a consumer enumerating the vocabulary
+#: from the tables alone silently misses them.
+#:
+#: `timeout` is the one that bites. It is reachable in production on every
+#: scratchpad cell timeout (`backends/local.py` builds "Cell timed out after
+#: {N}s total", which arrives here as the tool's `reason`) and appears in no
+#: table, so a closed-set guard built from the tables reports a legitimate
+#: value as a novel class. `permission_denied` and `connection_refused` were
+#: covered only by coincidence — they happen to also be `_WALL_TYPES` values.
+CLS_UNCLASSIFIED = "unclassified"
+CLS_TIMEOUT = "timeout"
+CLS_PERMISSION_DENIED = "permission_denied"
+CLS_CONNECTION_REFUSED = "connection_refused"
+
 #: The agent's own bugs. It can fix these by writing better code, so repetition
 #: is iteration, not a wall — however many times it repeats.
 _SELF_INFLICTED = frozenset({
@@ -125,17 +142,41 @@ _SENTINEL_REASONS = {
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own
     # bad argument, not an environment wall (ENG-1635).
     "package_install_rejected": (TIER_SELF, "invalid_argument"),
+    # `read_image`, ENG-2248: both are the agent's own file choice, and both
+    # messages tell it what to do instead (use a real image / resize).
+    "not_an_image": (TIER_SELF, "invalid_argument"),
+    "image_too_large": (TIER_SELF, "invalid_argument"),
     # The agent named something that does not exist. Ambiguous — it could be a
     # genuinely absent resource — but the agent chose the identifier and can
     # list the real ones, so it resolves to the non-tripping side.
     "artifact_not_found": (TIER_SELF, "unknown_resource"),
     "unknown_datasource": (TIER_SELF, "unknown_resource"),
+    # Same shape for a path: `read_image` reports the file the agent named as
+    # absent. Genuinely absent files exist, but the agent supplied the path and
+    # can list the directory, so it resolves to the non-tripping side.
+    #
+    # NOT named `missing_file`, though that is what it describes (#435 review).
+    # `missing_file` is already a CLASS in this module, reached by a different
+    # path — `_WALL_TYPES` maps FileNotFoundError to it, `_STATUS_WALLS` maps
+    # 404 to it, it is the sole member of `_EXACT_ONLY_CLASSES`, and it gets
+    # path-identifier extraction below. A sentinel KEY of the same name that
+    # resolves to a DIFFERENT class is the kind of collision a future editor
+    # reads straight past.
+    "path_not_found": (TIER_SELF, "unknown_resource"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
     "store_unavailable": (TIER_WALL, "service_unavailable"),
     # Could be environment or config and the sentinel does not say which, so it
     # stays out of every trip rung until something distinguishes them.
     "launch_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `read_image`'s catch-all read failure wraps a bare `except Exception`, so
+    # one sentinel covers a permissions wall, a corrupt file the agent itself
+    # wrote, and a decode bug. Nothing here distinguishes them, so it stays out
+    # of every trip rung (ENG-2248).
+    "read_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
+    # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
+    "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
 }
 
 # Identifier extraction, per class. Kept narrow on purpose: a wrong identifier
@@ -261,7 +302,7 @@ def classify(reason: str, result_text: str = "") -> RootCause:
     reason = (reason or "").strip()[:_MAX_REASON_CHARS]
     if not reason:
         sig = _normalise_error_signature((result_text or "")[:_MAX_REASON_CHARS])
-        return RootCause(TIER_UNCLASSIFIED, "unclassified", sig[:80], from_reason=False)
+        return RootCause(TIER_UNCLASSIFIED, CLS_UNCLASSIFIED, sig[:80], from_reason=False)
 
     sentinel = _SENTINEL_REASONS.get(reason)
     if sentinel:
@@ -345,23 +386,49 @@ def classify(reason: str, result_text: str = "") -> RootCause:
         if exc == "OSError" and not re.search(
             r"No space|Disk quota|Too many open files|Cannot allocate", reason, re.I
         ):
-            return RootCause(TIER_UNCLASSIFIED, "unclassified",
+            return RootCause(TIER_UNCLASSIFIED, CLS_UNCLASSIFIED,
                              _normalise_error_signature(reason)[:80])
         return RootCause(TIER_WALL, wall_cls, _identifier_for(wall_cls, reason))
 
     # Timeouts and kills the runtime words rather than raises.
     low = reason.lower()
     if "timed out" in low or "timeout" in low or "inactivity" in low or "liveness" in low:
-        return RootCause(TIER_TRANSIENT, "timeout", "")
+        return RootCause(TIER_TRANSIENT, CLS_TIMEOUT, "")
     if "permission denied" in low:
-        return RootCause(TIER_WALL, "permission_denied",
-                         _identifier_for("permission_denied", reason))
+        return RootCause(TIER_WALL, CLS_PERMISSION_DENIED,
+                         _identifier_for(CLS_PERMISSION_DENIED, reason))
     if "connection refused" in low:
-        return RootCause(TIER_WALL, "connection_refused",
-                         _identifier_for("connection_refused", reason))
+        return RootCause(TIER_WALL, CLS_CONNECTION_REFUSED,
+                         _identifier_for(CLS_CONNECTION_REFUSED, reason))
 
-    return RootCause(TIER_UNCLASSIFIED, "unclassified",
+    return RootCause(TIER_UNCLASSIFIED, CLS_UNCLASSIFIED,
                      _normalise_error_signature(reason)[:80])
+
+
+#: Every value `classify` can put in `RootCause.cls`, and every tier. THE
+#: authoritative enumeration — a consumer must read these rather than
+#: reassembling the tables, which is how `timeout` went missing (ENG-2247).
+#:
+#: Adding a class means adding it here. That keeps the SET honest; it does not
+#: by itself keep a closed-set guard honest, because such a guard only catches
+#: an unregistered value if some input actually reaches the branch returning
+#: it. Two of ENG-2247's own adversarial inputs missed their branches (an
+#: `OSError: ` prefix sent them down `_WALL_TYPES` instead) and the guard
+#: still passed. So a new literal needs BOTH an entry here and an input that
+#: reaches it.
+ALL_CLASSES: frozenset[str] = frozenset(
+    set(_SELF_INFLICTED)
+    | set(_TRANSIENT)
+    | set(_WALL_TYPES.values())
+    | {cls for _, cls in _SENTINEL_REASONS.values()}
+    | set(_STATUS_WALLS.values())
+    | {f"http_{code}" for code in _STATUS_TRANSIENT}
+    | {CLS_UNCLASSIFIED, CLS_TIMEOUT, CLS_PERMISSION_DENIED, CLS_CONNECTION_REFUSED}
+)
+
+ALL_TIERS: frozenset[str] = frozenset(
+    {TIER_SELF, TIER_TRANSIENT, TIER_WALL, TIER_UNCLASSIFIED}
+)
 
 
 @dataclass

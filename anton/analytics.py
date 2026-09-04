@@ -171,11 +171,20 @@ _pending_lock = threading.Lock()
 #                    spend-ceiling extensions granted this turn, and the
 #                    ceiling one's size), verifier_failure + verifier_error_type
 #                    (WHY the completion verifier produced no verdict — the
-#                    loop's truncated/transient/hard/denied class and the
+#                    loop's truncated/transient/hard/denied class, or
+#                    latched_{hard,truncated,denied,mixed} for a turn that made
+#                    no call because an earlier one latched, plus the
 #                    content-free exception type; "" on verified turns; ENG-1858),
 #                    harness, surface (desktop / web / cli — WHERE
 #                    the user was, "" when the host did not say; ENG-1945),
-#                    anton_version, conversation_id, turn_index
+#                    anton_version, conversation_id, turn_index,
+#                    turn_attempt_id (unique per turn EXECUTION — `turn_index`
+#                    is only a position in the history and REPEATS across a
+#                    retried or cancelled attempt, so the pair
+#                    (conversation_id, turn_index) is NOT a unique key;
+#                    ENG-2243). Count attempts with turn_attempt_id, turns with
+#                    (conversation_id, turn_index). Absent on pre-ENG-2243
+#                    builds — read as unknown, never as a value.
 #
 #   rule_retrieval   outcome, when_rules, kept_rules, rules_chars,
 #                    stop_reason, input_tokens, output_tokens, duration_ms
@@ -190,9 +199,53 @@ _pending_lock = threading.Lock()
 #                    One event per executed tool call; tool arguments and
 #                    result content are deliberately absent (ENG-1486).
 #                    surface mirrors turn_completed's (ENG-1945).
+#                    root_cause_tier + root_cause_class (WHY it failed, in
+#                    `anton/core/root_cause.py`'s vocabulary — `self_inflicted`
+#                    / `transient` / `external_wall` / `unclassified`, and the
+#                    class within it, which is USUALLY the exception name but
+#                    is a sentinel class where the handler declared the failure
+#                    itself: `empty_code`, `missing_argument`,
+#                    `invalid_argument`, `unknown_resource`, `missing_name`.
+#                    Do NOT join this against Python exception names — nine
+#                    `_SENTINEL_REASONS` map to `self_inflicted` with non-
+#                    exception classes, and `scratchpad_empty_code` is one of
+#                    scratchpad's own, so that join silently drops every
+#                    argument-validation failure. `timeout` is likewise a
+#                    literal, not a type name. `error_type` above only fills in on a
+#                    RAISE; the dominant tool returns a verdict instead, so 83%
+#                    of failures had no cause before ENG-2247. Both are "" on
+#                    success and on an unmigrated handler (`ok="unknown"`).
+#                    Read them as a PAIR with `ok` — a cause only exists where
+#                    the handler said `ok=false`. Same vocabulary as
+#                    turn_completed's `root_cause_*` tally, so where both
+#                    populate they agree; unlike that tally, these are per CALL
+#                    and carry no cumulative-ledger caveat.
+#                    They do NOT reconcile row-for-row, and the gap is
+#                    systematic rather than rare. An `ok="unknown"` call (any
+#                    handler returning a plain string — most of them, see
+#                    ENG-2248) is COUNTED by the turn tally as `unclassified`
+#                    and left BLANK here, because inventing a verdict from
+#                    prose the model can influence is the ENG-1276 defect one
+#                    level up. So `sum(tool rows by tier)` runs systematically
+#                    short of `turn_completed.root_cause_failures`; that is the
+#                    design, not drift. (The inverse also exists but is
+#                    unreachable today: a multimodal `ok=false` result would
+#                    populate here and not in the tally — see
+#                    `_tool_failure_cause`.)
 #                    conversation_id + turn_index mirror turn_completed's
 #                    values, so a tool row joins to its parent turn row and,
 #                    via Langfuse sessionId, to the gateway trace.
+#                    turn_attempt_id also mirrors it, and is the key the join
+#                    should actually use: turn_index alone matched every retry
+#                    of the same turn (18.5% of these rows joined to more than
+#                    one turn row before ENG-2243).
+#                    Not "empty when no books are open" — both emit sites are
+#                    inside the tool loop, so that state is unreachable. The
+#                    divergence that IS reachable: with books closed,
+#                    turn_index falls back to _turn_count + 1 while this would
+#                    be "", so the two join keys would disagree about whether a
+#                    parent turn row exists. Prefer this key and treat an empty
+#                    value as a pre-ENG-2243 build, never as "no parent".
 #                    (anton/core/session.py::_emit_tool_completed)
 #
 # An event NOT listed here keeps the collector path, so moving one is an
@@ -289,8 +342,17 @@ def get_installation_id() -> str:
     usable as a join key.
 
     Returns:
-        A 16-character hex string (64 bits of entropy), or ``"unknown"`` when
-        the machine cannot be fingerprinted at all.
+        A 16-character hex string, or ``"unknown"`` when the machine cannot be
+        fingerprinted at all.
+
+        64 bits on the real-MAC path (a sha256 prefix). The no-MAC fallback
+        persists ``uuid4().hex[:16]``, which is 60: hex position 12 is uuid4's
+        version nibble, so it is the literal ``4`` in every id that branch ever
+        writes. Left as-is deliberately — changing the derivation would give
+        every already-fingerprinted Docker install a NEW ``aid`` and break the
+        continuity of that identity — but do not repeat the 64-bit claim for
+        it. Noted while correcting the same error in
+        ``TurnCost.attempt_id`` (#431 review).
     """
     global _cached_aid
     if _cached_aid is not None:
@@ -328,12 +390,19 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
     moment a queued daemon thread got around to sending, and for a cost event
     that difference is the one you would go on to plot.
 
-    Deliberately no ``$insert_id``.  The natural key would be
-    ``(conversation_id, turn_index)``, but an abandoned turn's books and a
-    later retry can legitimately share both, and dropping that row would lose
-    exactly the runaway a cancel was investigating (anton#309 review).
-    ``TurnCost.emitted`` already stops the same books emitting twice, so
-    dedupe here could only add a way to lose real events.
+    Deliberately no ``$insert_id`` — but not for the reason this comment
+    used to give (#431 review). It said the natural key
+    ``(conversation_id, turn_index)`` was unusable because an abandoned turn's
+    books and a later retry can legitimately share both. True, and ENG-2243
+    then created the key that does not: ``turn_attempt_id`` is unique per turn
+    EXECUTION, so ``(conversation_id, turn_attempt_id)`` would be a sound
+    dedupe key.
+
+    The standing reason is the second half: ``TurnCost.emitted`` already stops
+    the same books emitting twice, one layer earlier and for every sink at
+    once. So dedupe here would be redundant on the path that matters and could
+    only add a way to lose real events. Kept out on those grounds, not on the
+    absence of a key.
     """
     properties = {
         k: v for k, v in params.items()
