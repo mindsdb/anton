@@ -382,3 +382,52 @@ def test_exported_key_is_restored_even_when_a_write_fails(tmp_path, home, monkey
 
     monkeypatch.setattr(ws_mod.Workspace, "remove_secret", original)
     assert os.environ.get("ANTON_MINDS_API_KEY") == "X_EXPORTED"
+
+
+def test_a_quoted_global_vault_is_not_a_divergence(tmp_path, home):
+    """Two spellings of the same key must not look like two keys.
+
+    Reconciliation compared `get_secret` values (whitespace strip only) while
+    the effective key comes from python-dotenv, so `KEY="k"` against `KEY=k`
+    read as a divergence: it archived and "superseded" a key that was never
+    superseded, and told the user their project key had been replaced.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".anton").mkdir()
+    (project / ".anton" / ".env").write_text("ANTON_MINDS_API_KEY=samekey\n")
+    (home / ".anton").mkdir(parents=True, exist_ok=True)
+    (home / ".anton" / ".env").write_text('ANTON_MINDS_API_KEY="samekey"\n')
+
+    assert _reconcile_publish_identity(_settings(project)) is True
+
+    assert not (project / ".anton" / ".env.superseded").exists()
+    assert Workspace(home).get_secret("ANTON_MINDS_API_KEY") == '"samekey"'  # untouched
+
+
+def test_both_claiming_branches_disclose_cowork_precedence(tmp_path, home, capsys):
+    """`~/.cowork/.env` outranks `~/.anton/.env`, so neither branch may imply otherwise.
+
+    The promote branch was corrected for this and the divergent branch was not
+    — it still said "Publishing now uses ~/.anton/.env" while the session
+    resolved the cowork key.
+    """
+    (home / ".cowork").mkdir(parents=True, exist_ok=True)
+    (home / ".cowork" / ".env").write_text("ANTON_MINDS_API_KEY=COWORK_K\n")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJ_K")
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K")
+
+    _reconcile_publish_identity(_settings(project))  # divergent branch
+    assert "takes precedence" in capsys.readouterr().out
+
+    # ...and the promote branch, with no global key at all.
+    Workspace(home).remove_secret("ANTON_MINDS_API_KEY")
+    project2 = tmp_path / "proj2"
+    project2.mkdir()
+    Workspace(project2).set_secret("ANTON_MINDS_API_KEY", "PROJ_K2")
+
+    _reconcile_publish_identity(_settings(project2))
+    assert "takes precedence" in capsys.readouterr().out

@@ -482,13 +482,28 @@ def _reconcile_publish_identity(settings) -> bool:
     if project_path.resolve() == Path.home().resolve():
         return False  # same file — nothing to reconcile
 
+    # Read both vaults with the parser that resolved the settings, not
+    # `get_secret`'s whitespace-only strip. The two disagree on any hand-edited
+    # line — `KEY="abc"` reads as `"abc"` one way and `abc` the other — which
+    # made two identical keys compare unequal, archiving and "superseding" a
+    # key that was never superseded.
     project_ws = Workspace(project_path, settings=settings)
-    project_key = project_ws.get_secret("ANTON_MINDS_API_KEY")
+    project_key = vault_key(project_ws.env_path)
     if not project_key:
         return False
 
     global_ws = Workspace(Path.home(), settings=settings)
-    global_key = global_ws.get_secret("ANTON_MINDS_API_KEY")
+    global_key = vault_key(global_ws.env_path)
+
+    # Any branch that tells the user which file publishing now uses has to
+    # account for ~/.cowork/.env, which sits AFTER ~/.anton/.env in the chain
+    # and silently outranks whatever we do here.
+    outranked = (
+        "\n  (~/.cowork/.env also has a key and takes precedence,"
+        "\n   so publishing still uses that one.)"
+        if vault_key(Path.home() / ".cowork" / ".env")
+        else ""
+    )
 
     # This is a DISK migration; the process environment is not ours to edit.
     # `set_secret`/`remove_secret` both write os.environ as a side effect
@@ -502,17 +517,9 @@ def _reconcile_publish_identity(settings) -> bool:
         if not global_key:
             global_ws.set_secret("ANTON_MINDS_API_KEY", project_key)
             project_ws.remove_secret("ANTON_MINDS_API_KEY")
-            message = "  Moved this project's saved publish key to ~/.anton/.env"
-            # ...but ~/.cowork/.env sits AFTER ~/.anton/.env in the chain, so on
-            # a desktop-configured machine the key we just moved is outranked
-            # the moment it lands. Saying "moved" is true; implying it is now
-            # the publish identity would not be, and this is exactly the silent
-            # identity change the ticket is about.
-            if vault_key(Path.home() / ".cowork" / ".env"):
-                message += (
-                    "\n  (~/.cowork/.env also has a key and takes precedence,"
-                    "\n   so publishing still uses that one.)"
-                )
+            message = (
+                "  Moved this project's saved publish key to ~/.anton/.env" + outranked
+            )
         elif global_key == project_key:
             project_ws.remove_secret("ANTON_MINDS_API_KEY")
             message = "  Removed a duplicate publish key from this project (same key as ~/.anton/.env)"
@@ -540,7 +547,7 @@ def _reconcile_publish_identity(settings) -> bool:
             message = (
                 "  This project had a different publish key than ~/.anton/.env.\n"
                 "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
-                f"  {escape(str(archive))} in case it was the one you wanted."
+                f"  {escape(str(archive))} in case it was the one you wanted." + outranked
             )
     finally:
         # In `finally`, not after the branches: `main` catches OSError and boots
