@@ -34,7 +34,7 @@ import asyncio
 import logging
 import os
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,9 +54,7 @@ from anton.core.dispatch.entities import (
     TriggerRule,
 )
 from anton.core.dispatch.policy import (
-    GateDecision,
     GateResult,
-    PermissionPolicy,
     ProposedAction,
     evaluate as evaluate_policy,
 )

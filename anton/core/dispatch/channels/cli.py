@@ -18,10 +18,8 @@ async I/O on stdin to keep the example readable.
 from __future__ import annotations
 
 import asyncio
-import sys
 import uuid
 from datetime import datetime, timezone
-from typing import Any
 
 from anton.core.dispatch.adapter import (
     ActionCard,
