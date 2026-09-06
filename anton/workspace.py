@@ -25,6 +25,24 @@ Created: {date}
 """
 
 
+_SECRET_FILE_MODE = 0o600
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` to `path`, readable and writable only by its owner.
+
+    The file holds secrets, so it is created 0600 rather than under the
+    process umask. An existing file is tightened before the write, so a
+    mode an earlier version left behind does not outlive the next secret.
+    UTF-8, not the host locale, to match how the file is read back.
+    """
+    if path.exists():
+        os.chmod(path, _SECRET_FILE_MODE)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 class Workspace:
     """Manages the .anton/ workspace directory and its files."""
 
@@ -120,13 +138,14 @@ class Workspace:
         # Create anton.md if it doesn't exist
         if create_anton_md and not self._anton_md.is_file():
             self._anton_md.write_text(
-                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d"))
+                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d")),
+                encoding="utf-8",
             )
             actions.append(f"Created {self._anton_md}")
 
         # Create .env if it doesn't exist
         if not self._env_file.is_file():
-            self._env_file.write_text("# Anton environment variables\n")
+            _write_private(self._env_file, "# Anton environment variables\n")
             actions.append(f"Created {self._env_file}")
 
         # Visible artifacts directory at the workspace root. Replaces
@@ -150,7 +169,7 @@ class Workspace:
         """Read anton.md content. Returns None if it doesn't exist."""
         if not self._anton_md.is_file():
             return None
-        return self._anton_md.read_text()
+        return self._anton_md.read_text(encoding="utf-8")
 
     def anton_md_modified_since_last_read(self) -> bool:
         """Check if anton.md has been modified since last read_anton_md_tracked()."""
@@ -187,7 +206,7 @@ class Workspace:
         result: dict[str, str] = {}
         if not self._env_file.is_file():
             return result
-        for line in self._env_file.read_text().splitlines():
+        for line in self._env_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -217,7 +236,7 @@ class Workspace:
         lines: list[str] = []
         replaced = False
         if self._env_file.is_file():
-            for line in self._env_file.read_text().splitlines():
+            for line in self._env_file.read_text(encoding="utf-8").splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith("#") and "=" in stripped:
                     existing_key = stripped.partition("=")[0].strip()
@@ -230,7 +249,7 @@ class Workspace:
         if not replaced:
             lines.append(f"{key}={value}")
 
-        self._env_file.write_text("\n".join(lines) + "\n")
+        _write_private(self._env_file, "\n".join(lines) + "\n")
 
         # Also set in current process environment
         os.environ[key] = value
@@ -245,7 +264,7 @@ class Workspace:
 
         lines: list[str] = []
         found = False
-        for line in self._env_file.read_text().splitlines():
+        for line in self._env_file.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and "=" in stripped:
                 existing_key = stripped.partition("=")[0].strip()
@@ -255,7 +274,7 @@ class Workspace:
             lines.append(line)
 
         if found:
-            self._env_file.write_text("\n".join(lines) + "\n")
+            _write_private(self._env_file, "\n".join(lines) + "\n")
             os.environ.pop(key, None)
 
         return found

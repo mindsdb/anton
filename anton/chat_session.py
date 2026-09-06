@@ -46,7 +46,7 @@ def get_runtime_factory(settings: AntonSettings):
     return local_scratchpad_runtime_factory
 
 
-def rebuild_session(
+async def rebuild_session(
     *,
     settings: AntonSettings,
     state: dict,
@@ -62,10 +62,16 @@ def rebuild_session(
     from anton.core.llm.client import LLMClient
     from anton.chat import ChatSession
     from anton.core.llm.tracing import HARNESS_ANTON, SURFACE_CLI
+    from anton.core.datasources.data_vault import LocalDataVault
     from anton.core.session import ChatSessionConfig
     from anton.tools import DEFAULT_SESSION_TOOLS
 
+    outgoing = state.get("llm_client")
     state["llm_client"] = LLMClient.from_settings(settings)
+    if outgoing is not None:
+        # Nothing references the outgoing client again; release its provider
+        # HTTP pools now rather than leaving them open until process exit.
+        await outgoing.aclose()
 
     # Update cortex with new LLM client and memory mode
     if cortex is not None:
@@ -87,6 +93,9 @@ def rebuild_session(
             runtime_context=runtime_context,
         ),
         workspace=workspace,
+        # Rebuilding drops the old session's manager, so the new one needs the
+        # vault too or its pads fall back to inheriting the process env.
+        data_vault=LocalDataVault(),
         console=console,
         history_store=history_store,
         session_id=session_id,

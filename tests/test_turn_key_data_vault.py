@@ -210,6 +210,24 @@ def test_base_url_env_override(monkeypatch):
     assert seen["url"] == "https://auth.pr-123.dev.mindshub.ai/v1/oauth/google_drive/token"
 
 
+def test_oauth_blocks_base_url_field_is_ignored(monkeypatch):
+    """ENG-2128: cowork-server no longer sends a base_url field in the oauth
+    block, but even if a stray one arrived (e.g. from an older producer
+    during a rolling deploy), it must have no effect - ANTON_CLOUD_AUTH_BASE_URL
+    is the only source. TurnKeyDataVault no longer accepts base_url as a
+    constructor argument at all, so this only exercises the dict key."""
+    monkeypatch.setenv(ANTON_CLOUD_AUTH_BASE_URL_ENV, "https://auth.staging.mindshub.ai")
+    seen = {}
+
+    def fake(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        seen["url"] = url
+        return b'{"access_token": "tok"}'
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake)
+    _vault(base_url="https://attacker-controlled.example.com").load("google_drive", "primary")
+    assert seen["url"] == "https://auth.staging.mindshub.ai/v1/oauth/google_drive/token"
+
+
 def test_no_turn_key_diagnostic_wins_over_the_allowlist_one(monkeypatch, caplog):
     """A turn with neither a turn key nor a matching connection should log
     the more actionable "no turn key" message, not the allowlist refusal —

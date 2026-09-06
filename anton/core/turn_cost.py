@@ -36,6 +36,7 @@ Stated gaps (by design, documented on ENG-1288):
 
 from __future__ import annotations
 
+import secrets
 import time
 from dataclasses import dataclass, field
 
@@ -142,8 +143,10 @@ class TurnCost:
     # turns, 3x the tokens of a completed one) had no groupable cause. Values
     # are the classification the verdict loop already draws for the latch —
     # `truncated` / `transient` / `hard` / `denied` — plus `latched_hard` /
-    # `latched_denied` for turns that never made the call because an earlier
-    # one latched. Empty when a verdict was produced or the verifier was
+    # `latched_truncated` / `latched_mixed` / `latched_denied` for turns that
+    # never made the call because an earlier one latched. `latched_mixed` means
+    # the counted failures were not all the same class, so neither names the
+    # cause on its own. Empty when a verdict was produced or the verifier was
     # not applicable. Stamped at the loop's exits, never read from latch
     # state at emit (late finalizers would see a later turn's latch).
     verifier_failure: str = ""
@@ -155,6 +158,46 @@ class TurnCost:
     # needs. Empty when no exception ended the verdict (verdict produced, or
     # latched skip with no call made).
     verifier_error_type: str = ""
+    # WHY the retry flow terminated, when a turn ended after retrying (ENG-1361).
+    # Named for TERMINATION, not exhaustion: `rate_limit_wait_too_long` is a
+    # terminal where nothing ran out — the server named an interval past our cap
+    # and we declined to wait — so an "exhaustion" name would be a lie on a
+    # quarter of its own values.
+    #
+    # It exists because ENG-1361 makes the request-time and mid-stream terminals
+    # raise the SAME ProviderOverloadedError, and `code` (which splits the
+    # rate-limit case) is a card contract that never reaches analytics. Without
+    # this, three distinct outcomes become one indistinguishable bucket. Note
+    # the retry count itself is a local in `turn_stream` and reaches nothing —
+    # there is no other telemetry saying a turn retried at all.
+    #   "request_attempt_limit"     — the count-based attempt budget ran out
+    #   "provider_recovery_timeout" — the mid-stream incident budget ran out
+    #   "rate_limit_wait_limit"     — the rate-limit wait allowance ran out
+    #   "rate_limit_wait_too_long"  — Retry-After exceeded our cap; we carded
+    #                                 immediately rather than stalling the turn
+    # Empty for every terminal that did not retry.
+    retry_terminal_reason: str = ""
+    # WHAT kind of provider failure ended the turn — a closed vocabulary
+    # (`PROVIDER_FAILURE_KINDS`), NOT the raw exception `code` (ENG-1361).
+    # `code` selects the client's card and mixes cardinalities (`http_503`
+    # beside `connection_error`), so it is unfit for a groupable analytics
+    # dimension. Empty when the failure was not a provider failure.
+    provider_failure_kind: str = ""
+    # The HTTP status of the failure that ended the turn, whenever it carried
+    # one. `int | None`, never "" — a mid-stream failure (status 200) and a
+    # connection error (no response) are genuinely ABSENT, and an empty string
+    # beside integers is the shape that makes an analytics column unqueryable.
+    # Omitted from the event entirely when None, rather than sent as a
+    # placeholder.
+    #
+    # INDEPENDENT of `provider_failure_kind`, deliberately. The kind classifies
+    # PROVIDER failures and is empty for anything else; the status is a plain
+    # fact about the exception. So a non-transient terminal (an SDK
+    # `BadRequestError` exhausting the attempt budget) books
+    # kind="" with status=400 — not a hole, just the two fields answering two
+    # different questions. Suppressing a real status to keep the pair
+    # symmetrical would discard the only signal those turns carry.
+    provider_http_status: int | None = None
     started_monotonic: float = field(default_factory=time.monotonic)
     # Set when these books have been reported. Replaces "the shared slot is
     # None" as the double-emit guard, because a late finalizer now emits the
@@ -166,6 +209,38 @@ class TurnCost:
     # there gave the abandoned turn a LATER, unrelated turn's index — the
     # cost→Langfuse hop then pointed at the wrong turn (#309 review follow-up).
     turn_index: int = 0
+    # Unique per turn EXECUTION. `turn_index` is only a POSITION in the history
+    # — `_turn_count` is seeded by counting the user messages the session was
+    # handed — and cowork-server rebuilds the session every turn, so a retried
+    # or cancelled attempt arrives with the same history and stamps the same
+    # `turn_index` (ENG-2243). Measured on prod 2026-08-28..09-01: that collided
+    # on 14.5% of desktop turn keys (worst: 16 rows on one key, spanning 34
+    # hours) and left 18.5% of `tool_completed` rows joining to more than one
+    # `turn_completed` row — the join ENG-1486 stamped the pair to enable.
+    #
+    # Random, not a counter, deliberately: ANY session-local counter resets on
+    # that same rebuild, so nothing derived from session state can be unique
+    # across attempts. `token_hex(8)` is 16 hex chars of 64 real bits —
+    # collision-free at our volume (the birthday bound is ~5e9 attempts), short
+    # enough to read in a log line.
+    #
+    # NOT `uuid.uuid4().hex[:16]`, which this field shipped as in review and
+    # which is 60 bits, not 64: hex position 12 is uuid4's version nibble, so
+    # it is the literal `4` in every id ever generated (measured 2000/2000).
+    # The width claim was wrong and so was the comparison to the `aid` install
+    # fingerprint: `get_installation_id()` in `anton/analytics.py` takes the
+    # `sha256(str(node)).hexdigest()[:16]` branch whenever the machine has a
+    # real MAC, which is genuinely 64 bits; its `uuid4().hex[:16]` branch is
+    # the fallback for a host with no MAC to read (Docker with stripped
+    # networking), and carries the same 60-bit shortfall described above.
+    #
+    # A `default_factory` rather than a value passed in at each construction
+    # site: there are two today (the streaming and non-streaming turns in
+    # `session.py`) and a third that forgot would silently reintroduce the
+    # collision this field exists to remove. Also makes it a stamped-at-open
+    # fact like `turn_index` above, so a late finalizer reports the id of the
+    # turn whose books it holds rather than whichever turn owns the slot now.
+    attempt_id: str = field(default_factory=lambda: secrets.token_hex(8))
     # When the turn ended. None until resolved. A late finalizer cannot know the
     # real end, so it falls back to `last_activity_monotonic` (the last LLM
     # call) — understating but bounded, rather than measuring up to whenever

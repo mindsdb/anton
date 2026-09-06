@@ -184,12 +184,21 @@ class TestRecallIdempotence:
         history: list = []
         session = self._session(store, history)
         first = await handle_recall_skill(session, {"label": "build-html-dashboard"})
-        assert "## Procedure" in first
-        # simulate the tool result landing in history
-        history.append({"role": "user", "content": [{"type": "tool_result", "content": first}]})
+        # ENG-2248: both paths are successes — the stub is a success with a
+        # deliberately short body, not a failure.
+        assert first.ok is True
+        assert "## Procedure" in first.content
+        # Simulate the tool result landing in history. `.content` is what the
+        # dispatch loop puts there (`result = outcome.content`), so passing the
+        # ToolOutcome itself would make this test diverge from production.
+        history.append(
+            {"role": "user",
+             "content": [{"type": "tool_result", "content": first.content}]}
+        )
         second = await handle_recall_skill(session, {"label": "build-html-dashboard"})
-        assert "already recalled" in second
-        assert "## Procedure" not in second
+        assert second.ok is True
+        assert "already recalled" in second.content
+        assert "## Procedure" not in second.content
 
     @pytest.mark.asyncio
     async def test_compacted_history_resends_full_body(self, store):
@@ -199,7 +208,8 @@ class TestRecallIdempotence:
         history = [{"role": "user", "content": "[compacted] recalled build-html-dashboard earlier"}]
         session = self._session(store, history)
         result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
-        assert "## Procedure" in result
+        assert result.ok is True
+        assert "## Procedure" in result.content
 
     @pytest.mark.asyncio
     async def test_surviving_stub_does_not_suppress_resend(self, store):
@@ -211,14 +221,21 @@ class TestRecallIdempotence:
         history: list = []
         session = self._session(store, history)
         full = await handle_recall_skill(session, {"label": "build-html-dashboard"})
-        history.append({"role": "user", "content": [{"type": "tool_result", "content": full}]})
+        history.append(
+            {"role": "user",
+             "content": [{"type": "tool_result", "content": full.content}]}
+        )
         stub = await handle_recall_skill(session, {"label": "build-html-dashboard"})
-        assert "already recalled" in stub
+        assert "already recalled" in stub.content
         # simulate compaction: full body evicted, stub survives
         history.clear()
-        history.append({"role": "user", "content": [{"type": "tool_result", "content": stub}]})
+        history.append(
+            {"role": "user",
+             "content": [{"type": "tool_result", "content": stub.content}]}
+        )
         result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
-        assert "## Procedure" in result
+        assert result.ok is True
+        assert "## Procedure" in result.content
 
     @pytest.mark.asyncio
     async def test_summary_quoting_marker_does_not_suppress_resend(self, store):
@@ -229,4 +246,5 @@ class TestRecallIdempotence:
         history = [{"role": "user", "content": f"[compacted] earlier: {_recall_marker('build-html-dashboard')}"}]
         session = self._session(store, history)
         result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
-        assert "## Procedure" in result
+        assert result.ok is True
+        assert "## Procedure" in result.content

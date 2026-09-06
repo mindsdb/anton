@@ -6,6 +6,11 @@ name: Scratchpad image - Dev build on PR
 # rebuilds. The scratchpad-controller references the resulting tag via
 # SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE; there is no Helm chart for this image, so this
 # workflow only builds and scans (no deploy job).
+#
+# The image is smoke-tested inside the build, not here: the Dockerfile's last layer runs
+# docker/image_smoke.py as UID 1000, which executes both entrypoints the controller execs.
+# It sits in the build rather than in a step below it so a failure blocks the PUSH — an
+# image no pod can serve a turn with never reaches ECR to be pinned by mistake.
 
 on:
   pull_request:

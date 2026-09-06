@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import AsyncIterator
 
+import httpx2 as httpx
+
 from anton.core.backends.base import Cell, ScratchpadRuntime
 
 
@@ -56,47 +58,33 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
 
     async def _post(self, path: str, body: dict | None = None) -> dict:
         """POST to the remote service and return parsed JSON."""
-        import aiohttp
-
         url = f"{self._endpoint_url}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=body or {}, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=300)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Remote scratchpad error ({resp.status}): {text}")
-                return await resp.json()
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(url, json=body or {}, headers=self._headers())
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Remote scratchpad error ({resp.status_code}): {resp.text}")
+            return resp.json()
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
         """GET from the remote service and return parsed JSON."""
-        import aiohttp
-
         url = f"{self._endpoint_url}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, params=params, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Remote scratchpad error ({resp.status}): {text}")
-                return await resp.json()
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, params=params, headers=self._headers())
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Remote scratchpad error ({resp.status_code}): {resp.text}")
+            return resp.json()
 
     async def _sse(self, path: str, body: dict) -> AsyncIterator[dict]:
         """POST to an SSE endpoint and yield parsed events."""
-        import aiohttp
-
         url = f"{self._endpoint_url}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=body, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=600)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Remote scratchpad error ({resp.status}): {text}")
+        async with httpx.AsyncClient(timeout=600) as client:
+            async with client.stream("POST", url, json=body, headers=self._headers()) as resp:
+                if resp.status_code >= 400:
+                    text = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Remote scratchpad error ({resp.status_code}): {text}")
 
                 buffer = ""
-                async for chunk in resp.content:
+                async for chunk in resp.aiter_bytes():
                     buffer += chunk.decode("utf-8", errors="replace")
                     while "\n\n" in buffer:
                         event_str, buffer = buffer.split("\n\n", 1)
@@ -236,17 +224,12 @@ class RemoteLightsailScratchpadRuntime(RemoteScratchpadRuntime):
         Calls /resolve on the Cloudflare Worker which returns the instance's
         direct IP. Caches the result for subsequent calls.
         """
-        import aiohttp
-
         url = f"{endpoint_url}/resolve"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Failed to resolve remote scratchpad ({resp.status}): {text}")
-                data = await resp.json()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=self._headers())
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Failed to resolve remote scratchpad ({resp.status_code}): {resp.text}")
+            data = resp.json()
 
         endpoint = data.get("endpoint", "")
         if not endpoint:

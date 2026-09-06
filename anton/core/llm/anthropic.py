@@ -8,7 +8,7 @@ import anthropic
 
 from anton.utils.datasources import scrub_credentials
 
-from .provider import safe_parse_tool_input
+from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
     LLMProvider,
@@ -193,6 +193,12 @@ def _build_native_web_tools(
 class AnthropicProvider(LLMProvider):
     name: str = "anthropic"
 
+    async def aclose(self) -> None:
+        client = getattr(self, "_client", None)
+        if client is not None:
+            await client.close()
+        unregister_provider(self)
+
     def native_web_tools(self) -> set[str]:
         # Anthropic's Messages API ships both server-side web_search and
         # web_fetch tools; we route both through the provider when enabled.
@@ -213,6 +219,7 @@ class AnthropicProvider(LLMProvider):
         if api_key:
             kwargs["api_key"] = api_key
         self._client = anthropic.AsyncAnthropic(**kwargs)
+        register_provider(self)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(provider=self.name, api_key=self._api_key)

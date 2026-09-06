@@ -695,8 +695,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         try:
             # 512 sat inside the measured narration range (245–1,654+), so
             # narrating models truncated on essentially every pass and the
-            # silent except below hid it — confirmed live in prod on
-            # `mindshub_air` (ENG-1084).
+            # silent except below hid it — confirmed live in prod in 2026-07 on
+            # `mindshub_air`, which served Kimi K2.6 then and serves a GPT model
+            # now (ENG-1084, ENG-1687).
             result: _IdentityFacts = await generate_with_truncation_retry(
                 self._llm.generate_object_code,
                 _IdentityFacts,
