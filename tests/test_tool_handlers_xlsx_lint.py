@@ -68,7 +68,10 @@ def test_silent_on_a_clean_workbook(store: _FakeStore):
     _write_workbook(
         folder / "clean.xlsx",
         {
-            "Actuals": {"E6": "100"},
+            # SLOPE needs 6 paired points to actually compute — a single
+            # value here would recalculate to #DIV/0! and (correctly) trip
+            # the LibreOffice oracle even though the reference is qualified.
+            "Actuals": {f"{col}6": str(100 + i * 10) for i, col in enumerate("EFGHIJ")},
             "Assumptions": {"E6": "SLOPE('Actuals'!E6:J6,{1,2,3,4,5,6})"},
         },
     )

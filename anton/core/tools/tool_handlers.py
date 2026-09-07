@@ -180,8 +180,15 @@ def _artifact_linters() -> dict[str, Callable[[Path], list]]:
     """
     from anton.core.artifacts.html_lint import lint_html
     from anton.core.artifacts.xlsx_lint import lint_xlsx
+    from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
-    return {".xlsx": lint_xlsx, ".html": lint_html}
+    def _xlsx_linter(path: Path) -> list:
+        # LibreOffice recalculates and catches any formula error; the
+        # structural lint is the fallback when it isn't installed/usable.
+        findings = check_xlsx_via_office(path)
+        return findings if findings is not None else lint_xlsx(path)
+
+    return {".xlsx": _xlsx_linter, ".html": lint_html}
 
 
 def _lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
