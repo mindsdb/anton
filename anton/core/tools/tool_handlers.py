@@ -178,9 +178,10 @@ def _artifact_linters() -> dict[str, Callable[[Path], list]]:
     method (see `xlsx_lint.CircularRefFinding`) — same contract regardless
     of format, so the dispatch loop below never needs to change.
     """
+    from anton.core.artifacts.html_lint import lint_html
     from anton.core.artifacts.xlsx_lint import lint_xlsx
 
-    return {".xlsx": lint_xlsx}
+    return {".xlsx": lint_xlsx, ".html": lint_html}
 
 
 def _lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
