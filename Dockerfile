@@ -69,5 +69,11 @@ RUN printf '#!/bin/sh\nexec python -m anton.core.backends.scratchpad_boot\n' \
 RUN useradd -u 1000 -m -s /bin/sh scratchpad
 USER 1000
 
+# Run both entrypoints once, as the pod's uid, before this image can be pushed.
+# The build is otherwise green for an image no pod can serve a turn with: every
+# check up to here proves the image was ASSEMBLED, none proves it RUNS. See
+# docker/image_smoke.py for what each check is guarding against.
+RUN python /app/docker/image_smoke.py
+
 # The controller always execs an explicit command; this default keeps the image runnable standalone.
 CMD ["python", "-m", "anton.cloud_turn"]

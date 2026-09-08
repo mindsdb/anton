@@ -420,7 +420,7 @@ class TestResumeSessionScratchpadCleanup:
 
         with (
             patch("anton.commands.session.prompt_or_cancel", new=AsyncMock(return_value="1")),
-            patch("anton.commands.session.rebuild_session", return_value=new_session),
+            patch("anton.commands.session.rebuild_session", new=AsyncMock(return_value=new_session)),
         ):
             await handle_resume(
                 console=MagicMock(),
@@ -459,3 +459,73 @@ class TestChatSessionReplayedCells:
         assert len(session._scratchpads._cells) == 2
         assert session._scratchpads._cells[0].code == "print(1)"
         assert session._scratchpads._cells[1].code == "print(2)"
+
+
+class TestCliHostsSupplyTheVault:
+    """A manager built without a data_vault derives no DS_* overlay, so its
+    pad inherits the whole process env instead. Every CLI host must pass one."""
+
+    def test_config_vault_reaches_the_manager(self, workspace):
+        from anton.core.datasources.data_vault import LocalDataVault
+
+        vault = LocalDataVault(vault_dir=workspace.base / "vault_reaches")
+        session = ChatSession(
+            ChatSessionConfig(
+                llm_client=make_mock_llm(),
+                workspace=workspace,
+                data_vault=vault,
+            )
+        )
+        assert session._scratchpads._data_vault is vault
+        assert session._scratchpads._derive_ds_env() is not None
+
+    def test_manager_without_a_vault_derives_nothing(self, workspace):
+        session = ChatSession(
+            ChatSessionConfig(llm_client=make_mock_llm(), workspace=workspace)
+        )
+        assert session._scratchpads._derive_ds_env() is None
+
+    def test_cli_scratchpad_manager_is_built_with_a_vault(self):
+        import anton.cli as cli
+
+        captured: dict = {}
+
+        def fake_manager(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with (
+            patch.object(cli, "ScratchpadManager", fake_manager),
+            patch.object(cli, "get_runtime_factory", lambda _s: MagicMock()),
+        ):
+            cli._build_scratchpad_manager(MagicMock(), make_mock_llm())
+
+        assert captured["data_vault"] is not None
+
+    async def test_rebuilt_session_is_given_a_vault(self):
+        from anton.core.datasources.data_vault import LocalDataVault
+        import anton.chat_session as chat_session
+
+        captured: dict = {}
+
+        def fake_session(config):
+            captured["config"] = config
+            return MagicMock()
+
+        with (
+            patch("anton.chat.ChatSession", fake_session),
+            patch("anton.core.llm.client.LLMClient.from_settings", return_value=make_mock_llm()),
+            patch.object(chat_session, "get_runtime_factory", lambda _s: MagicMock()),
+            patch.object(chat_session, "refresh_knowledge", lambda *a, **k: None),
+            patch.object(chat_session, "build_runtime_context", lambda _s: ""),
+        ):
+            await chat_session.rebuild_session(
+                settings=MagicMock(),
+                state={},
+                self_awareness=None,
+                cortex=None,
+                workspace=MagicMock(),
+                console=MagicMock(),
+            )
+
+        assert isinstance(captured["config"].data_vault, LocalDataVault)

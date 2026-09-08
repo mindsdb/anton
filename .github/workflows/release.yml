@@ -1,7 +1,7 @@
 name: Auto-release and publish to PyPI
 
 # Stable release stream: on every push to main, validate, cut a CalVer release,
-# publish it to PyPI, and run live release e2e. Staging pre-releases (rc) live in
+# verify the built wheel, then publish it to PyPI. Staging pre-releases (rc) live in
 # publish-staging.yml so each stream keeps its own run tree, permissions,
 # notifications, and publishing identity.
 #
@@ -42,54 +42,49 @@ jobs:
       calver-major: "2"
       runs-on: ubuntu-latest
 
-  publish:
-    name: Publish to PyPI
-    needs: auto-release
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      contents: read
-      id-token: write  # required for trusted publisher (OIDC)
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.auto-release.outputs.tag }}
-          fetch-depth: 0  # hatch-vcs needs tags to derive version
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-
-      - name: Build package
-        env:
-          # A re-run or re-dispatch on an already-tagged head leaves two CalVer
-          # tags on one commit and `git describe` resolves the older one; build
-          # exactly the version the release job minted.
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.auto-release.outputs.version }}
-        run: uv build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        # Trusted publisher (OIDC) — release.yml must be registered at the
-        # anton-agent PyPI project's publishing settings (environment: pypi).
-
-  e2e:
+  verify-wheel:
     needs: auto-release
     permissions:
       contents: read
     uses: ./.github/workflows/tests_e2e_release.yml
     with:
       tag: ${{ needs.auto-release.outputs.tag }}
+      version: ${{ needs.auto-release.outputs.version }}
     secrets: inherit
+
+  publish:
+    name: Publish to PyPI
+    # Gated on verify-wheel: a PyPI upload cannot be withdrawn.
+    needs: [auto-release, verify-wheel]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # required for trusted publisher (OIDC)
+    steps:
+      # Publish the bytes verify-wheel actually tested, not a rebuild of the
+      # same source — a second build verifies equivalence, not the artifact.
+      - name: Download the verified distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-dist
+          path: dist
+
+      - name: Show what is being published
+        run: ls -l dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Trusted publisher (OIDC) — release.yml must be registered at the
+        # anton-agent PyPI project's publishing settings (environment: pypi).
 
   notify:
     # Alert the eng channel if ANY job in the release pipeline fails (tests, tag,
-    # PyPI publish, or release e2e).
+    # wheel verification, or PyPI publish).
     # One job covers both outcomes: a `uses:` job cannot branch on status, so
     # the aggregate result picks the failed or recovered message, and a
     # cancelled run stays silent.
-    needs: [unit-tests, auto-release, publish, e2e]
+    needs: [unit-tests, auto-release, verify-wheel, publish]
     if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
     permissions:
       contents: read

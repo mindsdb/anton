@@ -38,7 +38,7 @@ from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-import httpx
+import httpx2 as httpx
 
 from anton.core.tools.tool_defs import ToolDef
 

@@ -254,7 +254,7 @@ def test_provider_overloaded_error_carries_model_and_provider():
 
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
-import httpx  # noqa: E402
+import httpx2 as httpx  # noqa: E402
 import openai  # noqa: E402
 
 from anton.chat import ChatSession  # noqa: E402

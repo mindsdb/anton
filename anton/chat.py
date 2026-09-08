@@ -339,7 +339,7 @@ async def _handle_connect(
     global_ws.apply_env_to_process()
     console.print()
 
-    return rebuild_session(
+    return await rebuild_session(
         settings=settings,
         state=state,
         self_awareness=self_awareness,
@@ -1318,7 +1318,19 @@ def run_chat(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
     """Launch the interactive chat REPL."""
-    asyncio.run(_chat_loop(console, settings, resume=resume, first_run=first_run, desktop_first_run=desktop_first_run))
+
+    async def _main() -> None:
+        from anton.core.llm.provider import close_live_providers, install_asyncgen_noise_filter
+
+        install_asyncgen_noise_filter()
+        try:
+            await _chat_loop(console, settings, resume=resume, first_run=first_run, desktop_first_run=desktop_first_run)
+        finally:
+            # Release provider HTTP pools before the loop dies, whatever path
+            # the loop exited on (see anton/core/llm/provider.py).
+            await close_live_providers()
+
+    asyncio.run(_main())
 
 
 async def _chat_loop(
@@ -1349,7 +1361,7 @@ async def _chat_loop(
         edef = dreg.get(conn["engine"])
         if edef is not None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
-    del dv, dreg
+    del dreg
 
     global_memory_dir = Path.home() / ".anton" / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
@@ -1407,6 +1419,9 @@ async def _chat_loop(
             runtime_context=runtime_context,
         ),
         workspace=workspace,
+        # The manager derives each pad's DS_* from this vault; without it a
+        # pad inherits the whole process env instead.
+        data_vault=dv,
         console=console,
         history_store=history_store,
         session_id=current_session_id,
@@ -1829,7 +1844,7 @@ async def _chat_loop(
                 elif cmd == "/remote":
                     await _handle_remote(console, settings)
                     # Rebuild session so scratchpad uses remote/local factory
-                    session = rebuild_session(
+                    session = await rebuild_session(
                         settings=settings,
                         state=state,
                         self_awareness=self_awareness,
@@ -2021,7 +2036,7 @@ async def _chat_loop(
                 from anton.cli import _ensure_api_key
 
                 _ensure_api_key(settings)
-                session = rebuild_session(
+                session = await rebuild_session(
                     settings=settings,
                     state=state,
                     self_awareness=self_awareness,
@@ -2104,7 +2119,10 @@ async def _chat_loop(
                 continue
     except KeyboardInterrupt:
         pass
+    finally:
+        # In a finally, not after the except: an exception escaping the loop
+        # must still close scratchpads and provider pools on its way out.
+        await session.close()
 
     console.print()
     console.print("[anton.muted]See you.[/]")
-    await session.close()
