@@ -53,6 +53,17 @@ jobs:
       prerelease: true
       runs-on: ubuntu-latest
 
+  # The worker image staging scratchpad-controller and the PR environments pull
+  # as minds-anton-scratchpad:staging (ENG-2129).
+  scratchpad-image:
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/scratchpad-dev-build.yml
+    with:
+      environment: staging
+      version: ${{ needs.release.outputs.version }}
+
   publish:
     name: Build and publish pre-release to PyPI
     needs: release
@@ -91,7 +102,7 @@ jobs:
     # One job covers both outcomes: a `uses:` job cannot branch on status, so
     # the aggregate result picks the failed or recovered message, and a
     # cancelled run stays silent.
-    needs: [unit-tests, release, publish]
+    needs: [unit-tests, release, scratchpad-image, publish]
     if: ${{ github.ref == 'refs/heads/staging' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
     permissions:
       contents: read
