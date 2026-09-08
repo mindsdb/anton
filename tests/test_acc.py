@@ -388,7 +388,7 @@ class TestAnteriorCingulate:
 
         def fake_detector(events):
             called["count"] += 1
-            return Lesson(rule="duplicate rule", kind="when", triggers=(), detector=f"fake_{called['count']}")
+            return Lesson(rule="duplicate rule", kind="when", detector=f"fake_{called['count']}")
 
         acc = AnteriorCingulate(detectors=(fake_detector, fake_detector))
         acc.observe("scratchpad_call", {"name": "x", "code_len": 100})

@@ -34,7 +34,6 @@ from anton.core.llm.structured import (
 
 from anton.core.memory.skills import (
     Skill,
-    SkillStats,
     SkillStore,
     make_unique_label,
     slugify,
