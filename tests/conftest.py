@@ -127,11 +127,11 @@ os.environ["ANTON_POSTHOG_KEY"] = ""
 
 
 async def run_turn(session, user_input) -> str:
-    """Drive one turn through `turn_stream` and return the reply text.
+    """Drive one turn through `turn_stream`, return all streamed text.
 
-    The migration shim for tests written against the removed non-streaming
-    `ChatSession.turn()`: drains the stream, concatenates the text deltas —
-    the same text `turn()` used to return.
+    Not equivalent to `turn()` (which returns only the last assistant
+    message) except for single-round turns. Call `session.turn(...)`
+    directly to test `turn()` itself.
     """
     from anton.core.llm.provider import StreamTextDelta
 

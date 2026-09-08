@@ -230,6 +230,23 @@ class TestSessionThalamus:
         assert len(completes) == 1
         assert session.history[-1] == {"role": "assistant", "content": "Four."}
 
+    async def test_non_streaming_turn_ignores_truncated_gate_response(self):
+        """turn() must not return a truncated gate response routed to DELEGATE."""
+        llm = make_mock_llm()
+        llm.gate = AsyncMock(
+            return_value=_response(
+                content="SECRET half-written answer that was cut",
+                stop_reason="max_tokens",
+            )
+        )
+        llm.plan = AsyncMock(return_value=_response(""))
+        session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
+
+        reply = await session.turn("hi")
+
+        assert "SECRET" not in reply
+        assert reply == ""
+
     async def test_delegate_preloads_skills_then_plans(self):
         llm = make_mock_llm()
         llm.gate = AsyncMock(
