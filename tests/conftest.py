@@ -191,15 +191,6 @@ def make_mock_llm() -> AsyncMock:
         return gen()
 
     mock.plan_stream = _plan_stream_from_plan
-    # Verifier default: a clean COMPLETE, so a tool-loop test that doesn't
-    # care about verification ends after its scripted rounds instead of
-    # falling into the INCOMPLETE-continuation loop on a bare Mock verdict.
-    # Tests that exercise the verifier set their own `generate_object_code`.
-    from anton.core.session import _VerifierVerdict
-
-    mock.generate_object_code = AsyncMock(
-        return_value=_VerifierVerdict(status="COMPLETE", reason="test default")
-    )
     return mock
 
 

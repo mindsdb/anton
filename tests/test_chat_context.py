@@ -187,6 +187,8 @@ class TestMemorizeTool:
 
     async def test_tool_result_in_history(self, cortex, memory_dirs):
         """memorize tool result appears in conversation history."""
+        from anton.core.session import _VerifierVerdict
+
         mock_llm = make_mock_llm()
         mock_llm.plan = AsyncMock(
             side_effect=[
@@ -196,6 +198,9 @@ class TestMemorizeTool:
                 ),
                 _text_response("Done."),
             ]
+        )
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="test")
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, cortex=cortex))

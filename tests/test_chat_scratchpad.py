@@ -128,6 +128,9 @@ class TestScratchpadExecViaChat:
                 _text_response("The answer is 42."),
             ]
         )
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="test")
+        )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:
@@ -154,6 +157,9 @@ class TestScratchpadViewViaChat:
                 _scratchpad_response("Let me check history.", "view", "analysis"),
                 _text_response("Here's the history."),
             ]
+        )
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="test")
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
@@ -212,6 +218,9 @@ class TestScratchpadDumpViaChat:
                 # Final text reply
                 _text_response("Done!"),
             ]
+        )
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="test")
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
@@ -353,6 +362,9 @@ class TestScratchpadInstallViaChat:
                 ),
                 _text_response("Installed cowsay."),
             ]
+        )
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="test")
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))

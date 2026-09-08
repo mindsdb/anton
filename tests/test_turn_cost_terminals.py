@@ -313,6 +313,8 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
     )
 
 
+# The three hand-back terminals: STUCK, budget-exhausted, verifier-failure.
+# Confirmed load-bearing by a mutation test run.
 def _verdict_llm(status: str, *, tool_rounds: int = 1):
     """A mock client whose turn does `tool_rounds` rounds then gets `status`."""
     mock_llm = make_mock_llm()

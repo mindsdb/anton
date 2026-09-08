@@ -408,7 +408,7 @@ class TestSessionThalamus:
         llm.gate = AsyncMock()
         llm.plan = AsyncMock(return_value=_response("Nice chart."))
         session = ChatSession(ChatSessionConfig(llm_client=llm, router_enabled=True))
-        reply = await run_turn(session, 
+        reply = await run_turn(session,
             [
                 {"type": "text", "text": "what's in this image?"},
                 {"type": "image", "source": {"type": "base64", "data": "…"}},
