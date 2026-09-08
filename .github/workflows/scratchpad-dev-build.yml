@@ -45,43 +45,9 @@ defaults:
 
 jobs:
 
-  # One gate answering "may this pull request reach the cluster-side build".
-  #
-  # This repo is PUBLIC and `mdb-dev` is a pod inside the newdev cluster with IRSA
-  # into the build/ECR account, so without a guard a pull request from any GitHub
-  # account executes its own code there. Fork PRs get no secrets and a read-only
-  # token, but the runner itself is the prize: cloud credentials, a network
-  # position inside the cluster, and a tool cache later internal jobs reuse.
-  # GitHub's first-time-contributor approval does not cover anyone with a merged
-  # PR, and the approval a maintainer clicks is a courtesy extended before anyone
-  # has read the Dockerfile.
-  #
-  # Four answers, not two. A `workflow_call` run carries `inputs.environment`
-  # and is let through first: the only callers are release.yml and
-  # publish-staging.yml, which run on pushes to main and staging, so the tree
-  # being built is one this repository's branch protection already admitted.
-  # Any workflow a fork can trigger that calls this one has to carry its own
-  # gate; test_fork_build_gate.py's sweep resolves through local `uses:` and
-  # fails it otherwise.
-  #
-  # Then `HEAD_REPO` is read from the pull request payload, so on any other
-  # event it is the empty string and compares unequal, which would skip the
-  # build and tell the run page that a fork was responsible. The same trap is
-  # written up on the `Decide whether live mode is required` step in
-  # verifier-eval.yml, which met it from the other direction. So the event is
-  # checked before the repository and gets its own message: adding a trigger
-  # to this workflow stops the build until somebody says how the gate should
-  # read it.
-  #
-  # The `version` job below stays ungated on purpose. It runs on a GitHub-hosted
-  # runner holding no credentials, and a hosted runner executing a fork's code is
-  # what every fork pull request in the world already does.
-  #
-  # Unlike the same gate in cowork and cowork-server, this one does NOT skip a
-  # `staging` -> `main` promotion PR. There those rebuild an image the release
-  # pipeline already produced; here this workflow is the only thing that builds
-  # minds-anton-scratchpad at all, so skipping a promotion would leave that commit
-  # with no image.
+  # Who may reach the self-hosted build runner: pull requests from branches in
+  # this repository, and calls from the release pipelines. Anything else is
+  # refused with a run-summary line saying why.
   gate:
     runs-on: ubuntu-latest
     outputs:
