@@ -162,7 +162,11 @@ def _decide_step(workflow: dict) -> dict:
 
 
 def _run_the_gate(
-    workflow: dict, tmp_path: Path, head_repo: str, is_pr: str = "true"
+    workflow: dict,
+    tmp_path: Path,
+    head_repo: str,
+    is_pr: str = "true",
+    called_for: str = "",
 ) -> _GateRun:
     """Execute the gate's real shell and hand back what it wrote."""
     script = tmp_path / "decide.sh"
@@ -180,6 +184,7 @@ def _run_the_gate(
             "IS_PR": is_pr,
             "HEAD_REPO": head_repo,
             "THIS_REPO": _THIS_REPO,
+            "CALLED_FOR": called_for,
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
         },
@@ -252,6 +257,51 @@ def test_an_event_with_no_pull_request_is_refused_for_the_right_reason(
         "the run summary blames a fork on an event that has no pull request at "
         f"all: {run.summary.strip()!r}"
     )
+
+
+def test_a_release_pipeline_call_is_allowed(workflow: dict, tmp_path: Path) -> None:
+    """release.yml and publish-staging.yml call this workflow from a push.
+
+    A push carries no pull request, so the case above would refuse it. The
+    `environment` input is what says a release pipeline is asking, and those
+    only ever run on main and staging, whose trees branch protection admitted.
+    """
+    run = _run_the_gate(
+        workflow, tmp_path, head_repo="", is_pr="false", called_for="production"
+    )
+    assert run.outputs.get("run") == "true", (
+        "the gate refuses a release pipeline's call, so no release builds the "
+        "staging or production scratchpad image"
+    )
+
+
+# The release pipelines and the environment each one builds the image for. The
+# moving `<env>` tag scratchpad-controller pulls exists only because a caller
+# here names that environment (ENG-2129).
+_RELEASE_CALLERS = {"release.yml": "production", "publish-staging.yml": "staging"}
+
+
+def test_each_release_pipeline_builds_its_environment_image(
+    workflows: dict[str, dict],
+) -> None:
+    """Dropping the job, or its input, leaves that environment's tag frozen at
+    the last image anyone built, and nothing downstream notices."""
+    for filename, environment in _RELEASE_CALLERS.items():
+        callers = [
+            job
+            for job in (workflows[filename].get("jobs") or {}).values()
+            if str(job.get("uses", "")).endswith(_WORKFLOW.name)
+        ]
+        assert len(callers) == 1, f"{filename} must call {_WORKFLOW.name} exactly once"
+        passed = callers[0].get("with") or {}
+        built_for = passed.get("environment")
+        assert built_for == environment, (
+            f"{filename} builds the scratchpad image for {built_for!r}, not {environment!r}"
+        )
+        assert "outputs.version" in str(passed.get("version", "")), (
+            f"{filename} does not hand the minted version to the image build, so "
+            "a re-run on a tagged head would resolve the older tag"
+        )
 
 
 def test_the_gate_reads_the_head_repository_from_the_event(workflow: dict) -> None:
