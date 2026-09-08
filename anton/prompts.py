@@ -21,10 +21,3 @@ satisfied (e.g. tests passing, files written, output verified).
 If any requirement is unmet, continue working without calling `mark_goal_complete`.\
 """
 
-FILE_ATTACHMENTS_PROMPT = """
-FILE ATTACHMENTS:
-- Users can drag files or paste clipboard images. These appear as <file path="..."> tags.
-- For binary files (images, PDFs), use the scratchpad to read and process them.
-- Clipboard images are saved to .anton/uploads/ — open with Pillow, OpenCV, etc.
-"""
-

@@ -1,4 +1,4 @@
-from anton.core.tools.progress import ToolProgress
+from anton.core.tools.progress import ToolProgress as ToolProgress
 from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,

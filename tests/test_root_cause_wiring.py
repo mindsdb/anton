@@ -274,15 +274,6 @@ async def test_successes_are_not_recorded_at_all(workspace):
     assert session._root_causes.failures == 0
 
 
-async def test_the_non_streaming_turn_records_too(workspace):
-    """`turn()` is public API and its books are wired, so its failures count."""
-    session = _session(workspace, [WALL, WALL], n_tool_calls=2)
-    with patch("anton.analytics.send_event"):
-        await session.turn("go")
-    assert session._root_causes.failures == 2
-    assert session._root_causes.max_exact == 2
-
-
 async def test_unmigrated_handlers_count_against_reason_coverage(workspace):
     """A handler that returns an error STRING must not be silently excluded.
 

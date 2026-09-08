@@ -39,6 +39,7 @@ async def run_connection_test(
     retry_edit_callback: "Callable[[], Awaitable[bool]] | None" = None,
     *,
     interactive: bool = True,
+    label: str | None = None,
 ) -> bool:
     """Run engine_def.test_snippet with flat DS_* vars in the pad's own env.
 
@@ -48,10 +49,14 @@ async def run_connection_test(
     skips the "retry?" prompt entirely and fails closed on the first error —
     prompt_or_cancel drives a real terminal regardless of the `console`
     passed in, so it must never be reached without one.
+
+    `label` names the connection in verdict lines and skips the generic
+    banner, for a caller that already printed its own.
     """
     while True:
-        console.print()
-        console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
+        if label is None:
+            console.print()
+            console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
 
         flat_ds_env: dict[str, str] = {
             f"DS_{key.upper()}": value
@@ -67,11 +72,7 @@ async def run_connection_test(
             )
             await pad.reset()
             if engine_def.pip:
-                if isinstance(engine_def.pip, list):
-                    pip_pkgs = engine_def.pip
-                else:
-                    pip_pkgs = engine_def.pip.split()
-                install_result = await pad.install_packages(pip_pkgs)
+                install_result = await pad.install_packages(engine_def.pip.split())
                 if "failed" in (install_result or "").lower():
                     console.print()
                     console.print(f"[anton.warning](anton)[/] Package install issue: {install_result[:200]}")
@@ -123,7 +124,13 @@ async def run_connection_test(
                 (ln for ln in reversed(error_text.splitlines()) if ln.strip()), error_text
             )
             console.print()
-            console.print("[anton.warning](anton)[/] ✗ Connection failed.")
+            if label is not None:
+                console.print(
+                    f"[anton.warning](anton)[/] ✗ Connection test failed for"
+                    f" [bold]{label}[/bold]."
+                )
+            else:
+                console.print("[anton.warning](anton)[/] ✗ Connection failed.")
             console.print()
             console.print(f"        Error: {last_line}")
             console.print()
@@ -145,7 +152,13 @@ async def run_connection_test(
                     return False
             continue
 
-        console.print("[anton.success]        ✓ Connected successfully![/]")
+        if label is not None:
+            console.print(
+                f"[anton.success]        ✓ Connection test passed for"
+                f" [bold]{label}[/bold]![/]"
+            )
+        else:
+            console.print("[anton.success]        ✓ Connected successfully![/]")
         return True
 
 
@@ -155,7 +168,11 @@ async def handle_test_datasource(
     slug: str,
     vault: DataVault | None = None,
 ) -> None:
-    """Test an existing Local Vault connection by running its test_snippet."""
+    """Test an existing Local Vault connection by running its test_snippet.
+
+    Delegates to `run_connection_test`, the same helper `/connect`/`/edit`
+    use, with interactive=False (no retry prompt).
+    """
     if not slug:
         console.print(
             "[anton.warning]Usage: /test <engine-name>[/]"
@@ -173,8 +190,8 @@ async def handle_test_datasource(
         console.print()
         return
     engine, name = parsed
-    fields = vault.load(engine, name)
-    if fields is None:
+    credentials = vault.load(engine, name)
+    if credentials is None:
         console.print(
             f"[anton.warning]No connection '{slug}' found in Local Vault.[/]"
         )
@@ -201,43 +218,9 @@ async def handle_test_datasource(
         f"[anton.cyan](anton)[/] Testing connection [bold]{slug}[/bold]…"
     )
 
-    register_secret_vars(engine_def)  # flat names for scrubbing during test
-    flat_ds_env = vault.env_for(engine, name, flat=True) or {}
-    set_ds_env_values(flat_ds_env)
-
-    cell = None
-    try:
-        pad = await scratchpads.get_or_create(
-            "__datasource_test__", ds_env_override=flat_ds_env
-        )
-        await pad.reset()
-        if engine_def.pip:
-            await pad.install_packages([engine_def.pip])
-        cell = await pad.execute(engine_def.test_snippet)
-    finally:
-        restore_namespaced_env(vault)
-
-    if cell is None or cell.error or (
-        cell.stdout.strip() != "ok" and cell.stderr.strip()
-    ):
-        error_text = ""
-        if cell is not None:
-            error_text = cell.error or cell.stderr.strip() or cell.stdout.strip()
-        first_line = (
-            next((ln for ln in error_text.splitlines() if ln.strip()), error_text)
-            if error_text
-            else "unknown error"
-        )
-        console.print()
-        console.print(
-            f"[anton.warning](anton)[/] ✗ Connection test failed for"
-            f" [bold]{slug}[/bold]."
-        )
-        console.print()
-        console.print(f"        Error: {first_line}")
-    else:
-        console.print(
-            f"[anton.success]        ✓ Connection test passed for"
-            f" [bold]{slug}[/bold]![/]"
-        )
+    await run_connection_test(
+        console, scratchpads, vault, engine_def, credentials, engine_def.fields,
+        interactive=False,
+        label=slug,
+    )
     console.print()

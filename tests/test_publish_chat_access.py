@@ -56,7 +56,7 @@ async def test_publish_passes_password_access(tmp_path):
          mock.patch("webbrowser.open"):
         # _make_candidate only publishes a directory for fullstack artifacts;
         # for an html-report we address the file (the file branch of _make_candidate).
-        await chat._handle_publish(Console(), settings, mock.Mock(), file_arg="sales/report.html")
+        await chat._handle_publish(Console(), settings, file_arg="sales/report.html")
 
     _, kwargs = fake_publish.call_args
     assert kwargs["access"] == {"mode": "password", "password": "hunter2"}

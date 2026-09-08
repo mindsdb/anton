@@ -407,14 +407,12 @@ class TestTheTurnBoundaryOpensTheScope:
         assert "no-scope-pw" in scrub_credentials("pw no-scope-pw")
 
     async def test_the_turn_entry_points_open_one(self):
-        """turn() and turn_stream() must both call it — a host reaching only
-        one of them would keep the hole."""
+        """turn_stream() — the only turn entry point — must call it."""
         import inspect
 
         from anton.core.session import ChatSession
 
-        for method in (ChatSession.turn, ChatSession.turn_stream):
-            assert "_open_ds_turn_scope()" in inspect.getsource(method), method.__name__
+        assert "_open_ds_turn_scope()" in inspect.getsource(ChatSession.turn_stream)
 
     async def test_opening_a_scope_does_not_change_what_a_reader_sees(self, monkeypatch):
         """It seeds from the ambient DS_*, so a host relying on the os.environ

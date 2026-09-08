@@ -17,7 +17,9 @@ import pytest
 
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.memory.skills import Skill, SkillStore
+from anton.core.session import _VerifierVerdict
 from anton.core.tools.tool_defs import ToolDef
+from tests.conftest import run_turn
 
 
 async def _noop_handler(session, tc_input) -> str:  # pragma: no cover - never called
@@ -165,8 +167,11 @@ async def test_recalled_bundle_reaches_the_same_turn_followup(make_session, tmp_
             ),
         ]
     )
+    session._llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="test")
+    )
 
-    await session.turn("connect my db")
+    await run_turn(session, "connect my db")
 
     def _tool_names(call):
         return {t["name"] for t in call.kwargs["tools"]}

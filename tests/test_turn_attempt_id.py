@@ -359,30 +359,6 @@ def test_the_structured_log_line_carries_the_attempt_too(caplog):
     assert live.attempt_id not in lines[0]
 
 
-async def test_the_non_streaming_turn_path_stamps_an_id_too(workspace):
-    """`turn()` opens its OWN books and emits separately.
-
-    The `default_factory` makes this true by construction, but the path is real
-    — the CLI's non-streaming API uses it — and "covered by construction" is
-    how the streaming path got a field the other one lacked in the first place.
-    Two runs, because the value being PRESENT is weaker than it being DISTINCT.
-    """
-    history = [_user("first"), _assistant("reply")]
-    seen = []
-    for _ in range(2):
-        session = _session(workspace, history)
-        with patch("anton.analytics.send_event") as sent:
-            await session.turn("go")
-        rows = [c.kwargs for c in sent.call_args_list
-                if c.args[1] == "turn_completed"]
-        assert len(rows) == 1
-        seen.append(rows[0])
-
-    assert seen[0]["turn_index"] == seen[1]["turn_index"]
-    assert seen[0]["turn_attempt_id"] != seen[1]["turn_attempt_id"]
-    assert all(r["turn_attempt_id"] for r in seen)
-
-
 async def test_two_turns_in_ONE_session_get_different_ids(workspace):
     """Per TURN, not per session — the CLI never rebuilds.
 

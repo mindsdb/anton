@@ -28,6 +28,12 @@ dependencies = [
     "httpx2>=2.7,<3",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
+    # Declared, not inherited: it arrives transitively via pydantic-settings.
+    # `workspace.vault_key` calls dotenv_values directly so a vault file is
+    # parsed exactly the way pydantic-settings parsed it — the two disagreeing
+    # is what let a quoted key take the "not ours" branch. Same floor those
+    # settings require, so the parser matches the one resolving the settings.
+    "python-dotenv>=0.21",
     "typer>=0.12.4",
     "rich>=13.0,<15",
     "prompt-toolkit>=3.0",
