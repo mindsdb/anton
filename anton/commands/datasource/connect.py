@@ -334,7 +334,10 @@ async def handle_connect_datasource(
         return session
 
     assert engine_def is not None
-    _telemetry("ds_connect_attempt", engine=engine_def.engine)
+    # Not `_telemetry("ds_connect_attempt", ...)` here: anton/tools.py already
+    # emits that event for this same call before invoking
+    # handle_connect_datasource, so firing it again would double-count every
+    # model-driven /connect to a known engine.
     active_fields = engine_def.fields
     chosen_method = None
     if engine_def.auth_method == "choice" and engine_def.auth_methods:

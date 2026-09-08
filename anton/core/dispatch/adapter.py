@@ -119,6 +119,8 @@ class OutboundMessage:
 
     address: PlatformAddress
     text: str
+    attachments: list[Attachment] = field(default_factory=list)
+    reply_to_message_id: str | None = None
 
 
 @dataclass
@@ -179,6 +181,10 @@ class ChannelSetup:
     """
 
     on_inbound: Callable[[InboundEvent], Awaitable[None]]
+    on_metadata: Callable[[PlatformAddress, dict[str, Any]], Awaitable[None]]
+    """Called when the adapter learns metadata about a conversation
+    (display name, member count, group/DM flag). The router persists this
+    for routing decisions and observability."""
     on_action_response: Callable[[ActionResponse], Awaitable[None]]
 
 

@@ -39,6 +39,7 @@ async def run_connection_test(
     retry_edit_callback: "Callable[[], Awaitable[bool]] | None" = None,
     *,
     interactive: bool = True,
+    label: str | None = None,
 ) -> bool:
     """Run engine_def.test_snippet with flat DS_* vars in the pad's own env.
 
@@ -48,10 +49,17 @@ async def run_connection_test(
     skips the "retry?" prompt entirely and fails closed on the first error —
     prompt_or_cancel drives a real terminal regardless of the `console`
     passed in, so it must never be reached without one.
+
+    `label` names the connection (e.g. its slug) in the verdict lines and
+    suppresses this function's own "Got it. Testing connection…" banner —
+    for a caller like `/test` that already printed its own labeled banner
+    before calling in. `/connect`/`/edit` leave it unset and keep the
+    original generic banner/verdict wording.
     """
     while True:
-        console.print()
-        console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
+        if label is None:
+            console.print()
+            console.print("[anton.cyan](anton)[/] Got it. Testing connection…")
 
         flat_ds_env: dict[str, str] = {
             f"DS_{key.upper()}": value
@@ -119,7 +127,13 @@ async def run_connection_test(
                 (ln for ln in reversed(error_text.splitlines()) if ln.strip()), error_text
             )
             console.print()
-            console.print("[anton.warning](anton)[/] ✗ Connection failed.")
+            if label is not None:
+                console.print(
+                    f"[anton.warning](anton)[/] ✗ Connection test failed for"
+                    f" [bold]{label}[/bold]."
+                )
+            else:
+                console.print("[anton.warning](anton)[/] ✗ Connection failed.")
             console.print()
             console.print(f"        Error: {last_line}")
             console.print()
@@ -141,7 +155,13 @@ async def run_connection_test(
                     return False
             continue
 
-        console.print("[anton.success]        ✓ Connected successfully![/]")
+        if label is not None:
+            console.print(
+                f"[anton.success]        ✓ Connection test passed for"
+                f" [bold]{label}[/bold]![/]"
+            )
+        else:
+            console.print("[anton.success]        ✓ Connected successfully![/]")
         return True
 
 
@@ -207,8 +227,12 @@ async def handle_test_datasource(
     # interactive=False: `/test` is a one-shot check, not an edit flow —
     # fail closed on the first error rather than prompting to re-enter
     # credentials (that's what `/edit` is for). `retry_fields` is unused
-    # in this mode, so engine_def.fields is just a placeholder.
+    # in this mode, so engine_def.fields is just a placeholder. `label=slug`
+    # keeps /test's own banner/verdict wording instead of run_connection_test's
+    # generic /connect-flavored text.
     await run_connection_test(
         console, scratchpads, vault, engine_def, credentials, engine_def.fields,
         interactive=False,
+        label=slug,
     )
+    console.print()
