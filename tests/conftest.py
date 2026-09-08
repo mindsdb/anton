@@ -125,6 +125,12 @@ os.environ["ANTON_ANALYTICS_ENABLED"] = "false"
 os.environ["ANTON_ANALYTICS_URL"] = ""
 os.environ["ANTON_POSTHOG_KEY"] = ""
 
+#: The developer's real home, captured at import — before `_no_real_home` below
+#: redirects both `Path.home()` and `$HOME`. Tests that must prove the suite did
+#: not touch the real machine compare against this; after the fixture is armed
+#: there is no other way to name it.
+REAL_HOME = os.path.expanduser("~")
+
 
 def make_mock_llm() -> AsyncMock:
     """Return an AsyncMock LLM client with coding_provider configured for sync use.
@@ -214,6 +220,120 @@ def _no_browser_windows(monkeypatch):
 
     for name in ("open", "open_new", "open_new_tab"):
         monkeypatch.setattr(webbrowser, name, lambda *a, **kw: True)
+
+
+@pytest.fixture(scope="session")
+def _suite_home(tmp_path_factory):
+    """One isolated home for the whole run.
+
+    Session-scoped on purpose. A fresh directory per test gave every e2e
+    subprocess a virgin home to first-run into and took the suite from 193s to
+    425s; the e2e scenarios are the entire cost. Sharing one home is also no
+    more coupled than what the suite did before, which was to share the
+    developer's real home — it is the same sharing, minus the real credentials.
+    """
+    return tmp_path_factory.mktemp("suite-home")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_home(_suite_home, monkeypatch):
+    """No test may write to the developer's real home directory.
+
+    Same intent as the analytics kill and ``_no_browser_windows`` above — the
+    suite does not touch the world outside the process — for the last write
+    path that still did. anton addresses its global config vault as
+    ``Workspace(Path.home())`` (``~/.anton/.env``), and several tests reach a
+    writer: ``_handle_publish`` persists the API key there after a successful
+    publish, and onboarding writes ``ANTON_FIRST_RUN_DONE``. Measured on
+    ``origin/staging`` before this fixture, a full run left this in the real
+    ``~/.anton/.env``::
+
+        ANTON_FIRST_RUN_DONE=true
+        ANTON_MINDS_API_KEY=goodkey
+
+    The suite passed while doing it, which is what made it survive: the tests
+    mock the *project* workspace and assert on that mock, so nothing ever
+    looked at the global vault. ``goodkey`` is a 7-character all-letters string
+    — indistinguishable from a user typo once it starts returning 401, and
+    ENG-1424's evidence table recorded exactly such a value on a developer
+    machine as an unexplained invalid key.
+
+    Covers both idioms and both process boundaries. `Path.home()` is patched
+    for anton's `Workspace(Path.home())` form, and `$HOME` is redirected for
+    the `Path("~/...").expanduser()` form — which is the more common one in
+    this codebase (20+ call sites) and the one a `Path.home()`-only guard
+    silently missed. Redirecting `$HOME` also reaches CHILD processes, which is
+    what closes the last leak: `tests/e2e/scenarios/test_boot_config.py` boots
+    anton through `tests/e2e/harness.py`, and that child was writing
+    `ANTON_FIRST_RUN_DONE=true` to the real `~/.anton/.env`.
+
+    `UV_CACHE_DIR` / `PIP_CACHE_DIR` / `XDG_CACHE_HOME` are pointed back at the
+    real home so package caches survive the redirect. Not cosmetic: without the
+    session-scoped home below the suite went 193s -> 425s, and the whole cost
+    was e2e subprocesses first-running into a virgin home.
+
+    It cannot cover `expanduser()` inside `config/settings.py::_build_env_files`,
+    which is evaluated at import time, before any fixture exists.
+
+    A test that isolated `$HOME` for itself still wins over this fixture.
+    Several do (`test_chat_context.py::TestMindsSetupRecovery`) and then assert
+    on files under *their* home; redirecting `Path.home()` somewhere else
+    unconditionally broke them. Deferring is also the more honest rule — a test
+    that named its own home meant it.
+
+    Named `_no_real_home`, not `_isolated_home`: tests/test_build_chat_session_google_drive.py
+    already defines a module-level autouse fixture with the latter name, and a
+    module-level fixture SHADOWS a conftest one of the same name — this guard
+    would have been silently switched off for that whole module, with
+    test_suite_guards.py unable to see it (it asserts inside its own module,
+    where no shadow exists).
+
+    Deleting this fixture is caught by tests/test_suite_guards.py.
+    """
+    from pathlib import Path
+
+    ambient = os.environ.get("HOME")
+    fallback = _suite_home
+
+    def _home(cls):
+        current = os.environ.get("HOME")
+        if current and current != ambient:
+            # This test set $HOME deliberately — honour it.
+            return Path(current)
+        return fallback
+
+    monkeypatch.setattr(Path, "home", classmethod(_home))
+    monkeypatch.setenv("HOME", str(fallback))
+
+    # Keep the package caches on the real home. Redirecting $HOME alone moved
+    # uv and pip onto a cold cache for every scratchpad/venv subprocess test
+    # and took the suite from 193s to 425s; these three put the caches back
+    # without putting the credential files back. Only set when the developer
+    # has not already chosen a location.
+    for var, rel in (("UV_CACHE_DIR", ".cache/uv"),
+                     ("PIP_CACHE_DIR", ".cache/pip"),
+                     ("XDG_CACHE_HOME", ".cache")):
+        if not os.environ.get(var) and ambient:
+            monkeypatch.setenv(var, str(Path(ambient) / rel))
+
+    return fallback
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_credentials(monkeypatch):
+    """No test may leave a credential in `os.environ` for the next one.
+
+    `Workspace.set_secret` writes `os.environ` as a side effect, and
+    `monkeypatch.delenv(..., raising=False)` records nothing when the variable
+    is absent — so a value a test body sets through `set_secret` survives for
+    the rest of the session. `os.environ` outranks every `env_file`, so a later
+    test building `AntonSettings()` resolves the leaked key and the suite
+    becomes order-dependent. Touching the name first puts it on monkeypatch's
+    undo list, whatever the test does with it afterwards.
+    """
+    for name in ("ANTON_MINDS_API_KEY", "ANTON_OPENAI_API_KEY", "ANTON_ANTHROPIC_API_KEY"):
+        monkeypatch.setenv(name, "__sentinel__")
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

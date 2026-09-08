@@ -283,6 +283,29 @@ class TestSecretVaultFilePermissions:
         assert ws.get_secret("KEEP") == "yes"
 
 
+class TestSecretVaultInjection:
+    """A pasted value must not be able to add settings of its own.
+
+    Every `set_secret` caller writes user-supplied input straight through —
+    `cli.py`'s provider setup, `/remote`, `/connect`, `commands/setup.py`. A
+    value carrying a newline would append further `ANTON_*` lines to the vault,
+    which is a config injection with no legitimate use: no API key, URL or
+    model name contains one. Guarded in the shared writer rather than at each
+    prompt, so a new caller is covered by construction.
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        ["k\nANTON_MINDS_URL=http://evil", "k\rANTON_BACKEND=remote"],
+    )
+    def test_a_newline_in_a_value_is_rejected(self, ws, payload):
+        with pytest.raises(ValueError):
+            ws.set_secret("ANTON_MINDS_API_KEY", payload)
+
+        assert "ANTON_MINDS_URL" not in ws.load_env()
+        assert "ANTON_BACKEND" not in ws.load_env()
+
+
 class TestSecretVaultEncoding:
     # AntonSettings reads .anton/.env with env_file_encoding="utf-8"
     # (anton/config/settings.py). The vault must therefore be written as

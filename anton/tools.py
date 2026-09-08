@@ -537,7 +537,35 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     title = tc_input.get("title", "Dashboard")
     action = tc_input.get("action", "ask")
 
-    settings = AntonSettings()
+    # Use the SESSION's settings, never a fresh resolve (ENG-1424). Building a
+    # new AntonSettings() here re-reads config after `apply_env_to_process`
+    # (cli.py, `_ensure_workspace`) has copied the project `.anton/.env` into
+    # os.environ — and pydantic-settings ranks os.environ above every
+    # `env_file`. So a second object resolves a DIFFERENT key than the one the
+    # LLM client, /publish and /unpublish were built with, and the session
+    # publishes as one account while `/unpublish` lists another's reports.
+    #
+    # Same getattr+capability shape as `core/session.py` (`_emit_turn_cost`):
+    # `ChatSessionConfig.settings` is typed `CoreSettings | None`, and
+    # `CoreSettings` carries none of the publish fields, so a host that passed
+    # a bare CoreSettings (or no settings) must still fall back.
+    # Check every publish field, not just one: a host passing a partial object
+    # that happens to carry `minds_api_key` would skip the fallback and then
+    # AttributeError further down on `artifacts_dir` / `publish_url` /
+    # `minds_ssl_verify`, mid-publish rather than here.
+    _PUBLISH_FIELDS = ("minds_api_key", "artifacts_dir", "publish_url", "minds_ssl_verify")
+    settings = getattr(session, "_settings", None)
+    if settings is None or not all(hasattr(settings, f) for f in _PUBLISH_FIELDS):
+        settings = AntonSettings()
+        # A bare AntonSettings() leaves `artifacts_dir` at its RELATIVE default,
+        # so `Path(settings.artifacts_dir)` below would resolve against cwd
+        # while the session's resolves to <workspace>/.anton/artifacts. That
+        # feeds `resolve_publish_target` the wrong roots, so `published_key`
+        # differs from what /publish and cowork-server compute and the next
+        # publish creates a duplicate report instead of updating this one.
+        # Anchor it on the session's own workspace when the host gave us one.
+        base = getattr(session, "_workspace", None)
+        settings.resolve_workspace(str(base.base) if base is not None else None)
     artifacts_root = Path(settings.artifacts_dir)
 
     # Accept the artifact folder (preferred) or any file inside it. Resolve a
