@@ -3894,31 +3894,28 @@ class ChatSession:
             )
 
     async def turn(self, user_input: str | list[dict]) -> str:
-        """Non-streaming turn: run `turn_stream` to completion, return the reply.
+        """Non-streaming compatibility wrapper over `turn_stream`.
 
-        Compatibility wrapper for external `anton-agent` consumers — every
-        in-repo host consumes `turn_stream` directly. This used to be a
-        ~300-line parallel implementation of the tool loop that had to
-        hand-mirror every feature and still lacked several (no completion
-        verifier, no truncation recovery, no trace context); delegating means
-        non-streaming callers now get the full streaming-path behaviour.
-
-        Returns the final reply text: the content of the last completed
-        model response that wasn't a tool-call round — the same message a
-        streaming consumer would have read last. Falls back to the
-        accumulated streamed text for terminal paths that emit a plain
-        text delta without a closing response event.
+        Runs with `enable_interaction=False` (no ask_user choice questions).
+        Returns `history[-1]`'s content rather than reading the event
+        stream, which can carry accounting-only events and tool preamble
+        text instead of the real reply.
         """
-        parts: list[str] = []
-        final: str | None = None
-        async for event in self.turn_stream(user_input):
-            if isinstance(event, StreamTextDelta):
-                parts.append(event.text)
-            elif isinstance(event, StreamComplete):
-                response = event.response
-                if (response.content or "").strip() and not response.tool_calls:
-                    final = response.content
-        return final if final is not None else "".join(parts)
+        async for _event in self.turn_stream(user_input, enable_interaction=False):
+            pass
+        last = self._history[-1] if self._history else None
+        if not isinstance(last, dict) or last.get("role") != "assistant":
+            return ""
+        content = last.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        return ""
 
     async def _dispatch_draining(self, tc):
         """Run one tool while forwarding whatever it emits out of band.
@@ -4008,15 +4005,18 @@ class ChatSession:
         turn_id: int | None = None,
         trace_tags: list[str] | None = None,
         trace_metadata: dict[str, str] | None = None,
+        enable_interaction: bool = True,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming turn. Owns the out-of-band emitter's lifetime.
 
-        The emitter exists only for the duration of one streaming turn.
+        `enable_interaction=False` skips creating the emitter (used by
+        `turn()`, which has no listener for a mid-turn question).
         """
         # Before any tool task is spawned, so a connect made mid-turn registers
         # into a container this turn still holds.
         self._open_ds_turn_scope()
-        self.emitter = TurnEmitter()
+        if enable_interaction:
+            self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
         # Per-turn, so a long-lived session (the CLI reuses one across turns)

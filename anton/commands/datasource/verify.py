@@ -50,11 +50,8 @@ async def run_connection_test(
     prompt_or_cancel drives a real terminal regardless of the `console`
     passed in, so it must never be reached without one.
 
-    `label` names the connection (e.g. its slug) in the verdict lines and
-    suppresses this function's own "Got it. Testing connection…" banner —
-    for a caller like `/test` that already printed its own labeled banner
-    before calling in. `/connect`/`/edit` leave it unset and keep the
-    original generic banner/verdict wording.
+    `label` names the connection in verdict lines and skips the generic
+    banner, for a caller that already printed its own.
     """
     while True:
         if label is None:
@@ -173,11 +170,8 @@ async def handle_test_datasource(
 ) -> None:
     """Test an existing Local Vault connection by running its test_snippet.
 
-    Delegates the actual test run to `run_connection_test` — the same path
-    `/connect` and `/edit` use — instead of a separate implementation, so
-    this command gets the same timeout bound and ModuleNotFoundError retry
-    for free. Runs with interactive=False: unlike `/connect`/`/edit`, `/test`
-    doesn't prompt to re-enter credentials on failure — it's a one-shot check.
+    Delegates to `run_connection_test`, the same helper `/connect`/`/edit`
+    use, with interactive=False (no retry prompt).
     """
     if not slug:
         console.print(
@@ -224,12 +218,6 @@ async def handle_test_datasource(
         f"[anton.cyan](anton)[/] Testing connection [bold]{slug}[/bold]…"
     )
 
-    # interactive=False: `/test` is a one-shot check, not an edit flow —
-    # fail closed on the first error rather than prompting to re-enter
-    # credentials (that's what `/edit` is for). `retry_fields` is unused
-    # in this mode, so engine_def.fields is just a placeholder. `label=slug`
-    # keeps /test's own banner/verdict wording instead of run_connection_test's
-    # generic /connect-flavored text.
     await run_connection_test(
         console, scratchpads, vault, engine_def, credentials, engine_def.fields,
         interactive=False,
