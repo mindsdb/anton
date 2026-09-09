@@ -48,7 +48,8 @@ def test_arguments_after_the_slash_form_are_tolerated():
         "/Users/someone/exit",
     ],
 )
-def test_everything_else_is_a_message_for_the_agent(text: str):
+def test_other_input_does_not_end_the_chat(text: str):
+    # The slash cases here go on to the dispatch chain, not to the agent.
     assert not _is_exit_command(text)
 
 
