@@ -28,34 +28,44 @@ _RESULT_END = "RESULT_JSON_END"
 
 @dataclass(frozen=True)
 class HtmlFinding:
-    """A console error, failed local-asset request, or crash from a headless load."""
+    """A console error, failed local-asset request, crash, or empty-body render."""
 
-    kind: str  # "console_error" | "failed_request" | "crashed"
+    kind: str  # "console_error" | "failed_request" | "crashed" | "empty_page"
     detail: str
 
     def message(self) -> str:
         return f"{self.kind}: {self.detail}"
 
 
-def lint_html(path: Path) -> list[HtmlFinding]:
+def lint_html(path: Path) -> list[HtmlFinding] | None:
     """Load the page headless and flag console errors + failed local assets.
 
-    Best-effort: no browser configured, a crash, a timeout, or malformed
-    output all yield `[]` rather than raising — a checker must never fail
-    the artifact read/cell that triggered it.
+    Returns `None` when the page could not actually be checked — no browser
+    configured, a crash, a timeout, or malformed output — as distinct from
+    `[]`, which means it loaded cleanly. Best-effort either way: none of
+    this ever raises, so a checker failure can't fail the artifact
+    read/cell that triggered it.
     """
     try:
         return _lint_html(path)
     except Exception:
-        return []
+        return None
 
 
-def _lint_html(path: Path) -> list[HtmlFinding]:
+def _lint_html(path: Path) -> list[HtmlFinding] | None:
     browser = _discover_browser()
     if browser is None:
-        return []
+        return None
 
-    env = {**os.environ, "ANTON_HTML_LINT_TARGET": str(path)}
+    # The runner goes through both argv and env on purpose:
+    # - a bare `electron` binary loads argv[1] as the app to run;
+    # - a packaged app ignores argv[1] (it always loads its own app.asar) and
+    #   picks the runner up from the env instead, in its lint-mode entry point.
+    env = {
+        **os.environ,
+        "ANTON_HTML_LINT_TARGET": str(path),
+        "ANTON_HTML_LINT_RUNNER": str(_RUNNER_SCRIPT),
+    }
     try:
         proc = subprocess.run(
             [browser, str(_RUNNER_SCRIPT), "--headless=new", "--disable-gpu"],
@@ -65,11 +75,11 @@ def _lint_html(path: Path) -> list[HtmlFinding]:
             text=True,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return None
 
     result = _extract_result(proc.stdout)
     if result is None:
-        return []
+        return None
     return _findings_from_result(result)
 
 
@@ -108,5 +118,16 @@ def _findings_from_result(result: dict) -> list[HtmlFinding]:
     if result.get("crashed"):
         findings.append(
             HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page")
+        )
+    if result.get("emptyPage"):
+        findings.append(
+            HtmlFinding(
+                kind="empty_page",
+                detail=(
+                    "page rendered with no visible text or elements — could be "
+                    "intentional (content added later) or a sign the markup/script "
+                    "is broken; worth opening to confirm"
+                ),
+            )
         )
     return findings
