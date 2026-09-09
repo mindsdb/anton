@@ -18,9 +18,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import openpyxl
-from openpyxl.worksheet.formula import ArrayFormula
-
 # A sheet-qualified reference: 'Quoted Name'!A1 or Name!A1:B2. Matched and
 # stripped first so its cell/range portion isn't mistaken for a same-sheet one.
 _CROSS_SHEET_REF = re.compile(
@@ -58,13 +55,17 @@ def lint_xlsx(path: Path) -> list[CircularRefFinding]:
     unexpected structure) yields no findings rather than raising —
     a checker must never fail the artifact read that triggered it.
     """
+
     try:
         return _lint_xlsx(path)
     except Exception:
-        return []
+        # something went wrong (corrupt file, not actually an xlsx, unexpected structure)
+        return None
 
 
 def _lint_xlsx(path: Path) -> list[CircularRefFinding]:
+    import openpyxl
+
     findings: list[CircularRefFinding] = []
     wb = openpyxl.load_workbook(path, data_only=False)
     try:
@@ -93,6 +94,8 @@ def _formula_text(cell) -> str | None:
     array-entered ones, which openpyxl surfaces as an `ArrayFormula`
     object with a `.text` attribute instead of a bare string.
     """
+    from openpyxl.worksheet.formula import ArrayFormula
+    
     if cell.data_type != "f":
         return None
     value = cell.value

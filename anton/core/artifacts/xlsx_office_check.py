@@ -21,8 +21,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import openpyxl
-
 from anton.core.artifacts.xlsx_lint import _formula_text
 
 # Headless conversion writes into a scratch profile per call, so parallel
@@ -125,6 +123,8 @@ def _convert(office: str, path: Path, outdir: Path, profile_dir: Path) -> Path |
 
 
 def _diff_formula_errors(original: Path, recalculated: Path) -> list[FormulaErrorFinding]:
+    import openpyxl
+    
     findings: list[FormulaErrorFinding] = []
     formulas_wb = openpyxl.load_workbook(original, data_only=False)
     values_wb = openpyxl.load_workbook(recalculated, data_only=True)
