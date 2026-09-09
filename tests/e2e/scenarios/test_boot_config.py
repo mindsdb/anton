@@ -19,6 +19,17 @@ def test_clean_boot(cfg, stub, tmp_path):
     assert_not_output(result, "Traceback (most recent call last)")
 
 
+def test_slash_exit_leaves_the_chat(cfg, stub, tmp_path):
+    # The help menu and the completer advertise the slash form, so it has to
+    # end the loop instead of reaching the unknown-command fallthrough. Exit
+    # code alone proves nothing here: stdin EOF also breaks the loop.
+    result = run_anton(["--folder", str(tmp_path)], ["/exit"],
+                       env=base_env(stub), timeout=cfg.timeout(20))
+    assert_exit_ok(result)
+    assert_not_output(result, "Unknown command")
+    assert_not_output(result, "Traceback (most recent call last)")
+
+
 def test_sessions_subcommand_empty_listing(cfg, stub, tmp_path):
     # run_chat writes to HistoryStore, not SessionStore; the sessions command
     # reads SessionStore, so the listing is always empty under this harness.
