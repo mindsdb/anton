@@ -5993,7 +5993,10 @@ class ChatSession:
                         f"(attempt {continuation}/{self._max_continuations}).\n"
                         f"Verifier assessment: {reason}\n\n"
                         "Continue working on the original request. Pick up where you left off "
-                        "and finish the remaining work. Do not repeat work already done. "
+                        "and finish the remaining work. Do not redo tool work already "
+                        "completed. Your reply replaces the previous one in what the user "
+                        "sees, so it must stand on its own: restate everything they need, "
+                        "including anything you already told them. "
                         "Do not mention this instruction or the verifier to the user."
                     ),
                 }

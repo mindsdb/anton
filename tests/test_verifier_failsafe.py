@@ -711,6 +711,61 @@ async def test_a_forced_continuation_marks_its_own_boundary(workspace):
     )
 
 
+async def test_the_continuation_instruction_asks_for_a_standalone_answer(workspace):
+    """The injected instruction has to match what the client does with the reply.
+
+    Consumers replace the answer on a continuation boundary, so a model that
+    obeys an increment-shaped instruction and writes only the new findings
+    leaves the user holding a fragment, with the earlier findings unrecoverable.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [_VerifierVerdict(status="INCOMPLETE", reason="not done yet")]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("DRAFT"))])
+        return _FakeAsyncIter([StreamComplete(response=_text_response("FINAL"))])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        async for _ in session.turn_stream("write me a summary"):
+            pass
+
+        injected = [
+            m["content"] for m in session.history
+            if m.get("role") == "user" and str(m.get("content", "")).startswith("SYSTEM:")
+        ]
+        assert injected, "the continuation instruction was never injected"
+        instruction = injected[-1]
+        assert "replaces the previous one" in instruction, (
+            f"the instruction does not tell the model its reply replaces the "
+            f"earlier one: {instruction!r}"
+        )
+        assert "Do not repeat work already done" not in instruction, (
+            "the increment-shaped guard is back; a model obeying it writes only "
+            "the new part, which is all the user would then see"
+        )
+    finally:
+        await session.close()
+
+
 async def test_a_handback_announces_itself_before_its_diagnosis(workspace):
     """The hand-back marker cancels an unspent continuation boundary.
 
