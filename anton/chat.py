@@ -1585,7 +1585,7 @@ async def _chat_loop(
 
     if not first_run and not desktop_first_run:
         console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
-    console.print("[anton.muted] type '/help' for commands or 'exit' to quit.[/]")
+    console.print("[anton.muted] type '/help' for commands or '/exit' to quit.[/]")
     console.print()
 
     from anton.analytics import send_event

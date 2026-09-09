@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from anton.chat import _is_exit_command
+from anton.commands.ui import COMMANDS, Command
 
 
 @pytest.mark.parametrize("text", ["exit", "quit", "bye"])
@@ -49,3 +50,15 @@ def test_arguments_after_the_slash_form_are_tolerated():
 )
 def test_everything_else_is_a_message_for_the_agent(text: str):
     assert not _is_exit_command(text)
+
+
+def test_the_advertised_exit_entry_is_one_the_loop_accepts():
+    # The menu advertising a command the dispatch does not take is the whole
+    # bug: the entry has to be the slash form, and it has to end the chat.
+    entry = next(
+        item
+        for item in COMMANDS
+        if isinstance(item, Command) and item.description == "Exit the chat"
+    )
+    assert entry.command.startswith("/")
+    assert _is_exit_command(entry.command)
