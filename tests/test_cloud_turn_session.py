@@ -102,6 +102,12 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
         output_dir=str(tmp_path),
     )
     assert CLOUD_ARTIFACT_DELIVERY_GUIDANCE.strip() in prompt
+    # Tripwire: the override sentence targets the base ARTIFACTS step-4 text.
+    # If the durable fix lands (web-specific assembly REMOVES that base
+    # instruction), this assertion fails on purpose — the override sentence in
+    # CLOUD_ARTIFACT_DELIVERY_GUIDANCE is then stale and must be cleaned up
+    # rather than left referencing an instruction that no longer exists.
+    assert "include the primary file's path" in prompt
     # The load-bearing sentences, pinned individually so a rewrite that drops
     # one is caught even if the identity assertion above is loosened later.
     assert "Live Artifacts" in suffix
