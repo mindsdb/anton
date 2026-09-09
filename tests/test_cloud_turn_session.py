@@ -94,7 +94,7 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
     # being set proves nothing if the prompt builder stops appending `suffix` —
     # exactly the "fix shipped while the failure continued" class this ticket
     # documents. Assemble the real prompt and require the guidance inside it.
-    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
     prompt = ChatSystemPromptBuilder().build(
         system_prompt_context=cfg.system_prompt_context,
         conversation_started=True,
@@ -107,7 +107,16 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
     # instruction), this assertion fails on purpose — the override sentence in
     # CLOUD_ARTIFACT_DELIVERY_GUIDANCE is then stale and must be cleaned up
     # rather than left referencing an instruction that no longer exists.
-    assert "include the primary file's path" in prompt
+    # Asserted against a prompt built with NO suffix: the override sentence
+    # itself quotes the same phrase, so checking the full prompt was vacuously
+    # true (re-review finding — mutating prompts.py left it green).
+    base_prompt = ChatSystemPromptBuilder().build(
+        system_prompt_context=SystemPromptContext(runtime_context="x"),
+        conversation_started=True,
+        proactive_dashboards=False,
+        output_dir=str(tmp_path),
+    )
+    assert "include the primary file's path" in base_prompt
     # The load-bearing sentences, pinned individually so a rewrite that drops
     # one is caught even if the identity assertion above is loosened later.
     assert "Live Artifacts" in suffix
