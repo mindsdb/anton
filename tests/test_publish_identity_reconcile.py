@@ -576,3 +576,41 @@ def test_the_message_names_the_environment_when_a_key_is_exported(
     assert "~/.cowork/.env" not in claim and "~/.anton/.env" not in claim, claim
     # …and the export itself is still untouched (ENG-1424's original finding).
     assert os.environ["ANTON_MINDS_API_KEY"] == "SHELL_K"
+
+
+def test_an_exported_but_empty_key_still_names_the_environment(
+    tmp_path, home, capsys, monkeypatch
+):
+    """`""` is a VALUE in `os.environ`, and it outranks every env_file.
+
+    Truthiness read it as absent, so the message named `~/.cowork/.env` while
+    `AntonSettings()` resolved `""` from the environment — the same wrong
+    answer to "which account publishes" this PR exists to remove, given once
+    instead of twice (#458 review).
+
+    Reachable without unusual state: `export ANTON_MINDS_API_KEY=` in a
+    profile, `ANTON_MINDS_API_KEY= anton`, or a container that sets it empty.
+    Onboarding does not pre-empt it — `_has_api_key` is False for an empty key
+    so `_onboard()` runs, but reconciliation has already printed by then.
+    """
+    (home / ".cowork").mkdir(parents=True, exist_ok=True)
+    (home / ".cowork" / ".env").write_text("ANTON_MINDS_API_KEY=COWORK_K\n")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJ_K")
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K")
+
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "")     # exported, empty
+
+    _reconcile_publish_identity(_settings(project))
+    claim = next(
+        l for l in capsys.readouterr().out.splitlines() if "Publishing now uses" in l
+    )
+
+    assert "environment" in claim, (
+        "an empty export still outranks both vaults — naming a file here is "
+        f"the wrong answer:\n{claim}"
+    )
+    assert "~/.cowork/.env" not in claim and "~/.anton/.env" not in claim, claim
+    assert os.environ["ANTON_MINDS_API_KEY"] == "", "the empty export was altered"

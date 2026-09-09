@@ -526,9 +526,16 @@ def _reconcile_publish_identity(settings) -> bool:
     # ~/.cowork/.env while the session resolved X (#458 self-review).
     exported = os.environ.get("ANTON_MINDS_API_KEY")
     cowork_key = vault_key(Path.home() / ".cowork" / ".env")
+    #
+    # `is not None`, not truthiness: `os.environ` outranks every env_file and
+    # `""` is a VALUE there, so an exported-but-empty key wins the resolution
+    # while reading as absent. Measured — export empty, and the session
+    # resolves `""` from the environment while this said `~/.cowork/.env`
+    # (#458 review). The `finally` below already discriminates on `is None`
+    # for exactly this reason; these two now agree.
     publishes_from = (
         "the ANTON_MINDS_API_KEY set in your environment"
-        if exported
+        if exported is not None
         else "~/.cowork/.env"
         if cowork_key
         else "~/.anton/.env"
