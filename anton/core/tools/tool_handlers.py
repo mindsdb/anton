@@ -179,25 +179,30 @@ LINT_STATUS_HAS_ERRORS = "has_errors"
 LINT_STATUS_NOT_VALIDATED = "not_validated"
 
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str]]]:
-    """suffix -> checker returning ready-to-display message lines.
+def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+    """suffix -> checker. `None` means it could not run at all (e.g. no
+    headless browser); `[]` means it ran and found nothing; a non-empty
+    list is real findings. `lint_changed_artifact_files` turns `None` into
+    `LINT_STATUS_NOT_VALIDATED` on `status_by_slug` — nothing is appended to
+    the returned message list for it, so a checker that never ran is silent
+    in the agent's own tool-result text (only the end-of-turn status sees
+    it).
 
     Add a format by adding one entry here. Only `.xlsx`/`.html` are
     registered — every other extension is silently unchecked, which is
-    honest as-is: nothing ever claimed to validate a `.csv`, so staying
-    quiet there isn't a lie. The lie is specifically a checker that was
-    supposed to run and quietly didn't, which is why both entries below
-    surface an explicit "not validated" line instead of going silent.
+    honest as-is: nothing ever claimed to validate a `.csv`.
     """
     from anton.core.artifacts.html_lint import lint_html
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
-    def _xlsx_linter(path: Path) -> list[str]:
+    def _xlsx_linter(path: Path) -> list[str] | None:
         # LibreOffice recalculates and catches any formula error; the
-        # structural lint is the fallback when it isn't installed/usable,
-        # but it's a narrower check, so falling back is disclosed rather
-        # than silently reported as if the oracle had run.
+        # structural lint is the fallback when it isn't installed/usable.
+        # `lint_xlsx` never returns None (it swallows its own parse
+        # failures), so this never actually signals not-validated — the
+        # structural check is trusted as sufficient on its own whenever the
+        # office oracle isn't available.
         findings = check_xlsx_via_office(path)
 
         if findings is None:
@@ -205,12 +210,13 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str]]]:
 
         if findings is not None:
             return [f.message() for f in findings]
+        return None
 
-
-    def _html_linter(path: Path) -> list[str]:
+    def _html_linter(path: Path) -> list[str] | None:
         findings = lint_html(path)
         if findings is not None:
             return [f.message() for f in findings]
+        return None
 
     return {".xlsx": _xlsx_linter, ".html": _html_linter}
 
@@ -239,6 +245,8 @@ def lint_changed_artifact_files(
         if current is None or current <= prev_mtime:
             continue
 
+        has_errors = False
+        not_validated = False
         for path in (store.root / slug).rglob("*"):
             linter = linters.get(path.suffix.lower())
             if linter is None or not path.is_file():
@@ -250,14 +258,23 @@ def lint_changed_artifact_files(
                 continue
             file_messages = linter(path)
             if file_messages is None:
-                # validation failed
-                status_by_slug[slug] = LINT_STATUS_NOT_VALIDATED
+                # Checker could not run at all (e.g. no headless browser) —
+                # distinct from an empty list, which means it ran and found
+                # nothing.
+                not_validated = True
                 continue
-            elif len(file_messages) > 0:
-                status_by_slug[slug] = LINT_STATUS_HAS_ERRORS
-
+            if file_messages:
+                has_errors = True
             for message in file_messages:
                 messages.append(f"{slug}/{path.name} — {message}")
+
+        if status_by_slug is not None:
+            if has_errors:
+                status_by_slug[slug] = LINT_STATUS_HAS_ERRORS
+            elif not_validated:
+                status_by_slug[slug] = LINT_STATUS_NOT_VALIDATED
+            else:
+                status_by_slug.pop(slug, None)
 
     return messages
 
