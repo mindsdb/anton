@@ -27,7 +27,11 @@ undefinedFunctionCallXYZ();
 """
 
 _CLEAN_HTML = """<!DOCTYPE html>
-<html><body><script>console.log("all good");</script></body></html>
+<html><body><h1>All good</h1><script>console.log("all good");</script></body></html>
+"""
+
+_EMPTY_BODY_HTML = """<!DOCTYPE html>
+<html><body><script>a = 1 / 0;</script></body></html>
 """
 
 
@@ -45,14 +49,24 @@ def clean_page(tmp_path: Path) -> Path:
     return path
 
 
-def test_no_browser_configured_yields_no_findings(monkeypatch, broken_page: Path):
+@pytest.fixture
+def empty_body_page(tmp_path: Path) -> Path:
+    """No console error, no failed request — division by zero doesn't throw
+    in JS — but nothing visible ever gets rendered either (a real case found
+    manually: an agent-generated page with only a script, no markup)."""
+    path = tmp_path / "empty_body.html"
+    path.write_text(_EMPTY_BODY_HTML)
+    return path
+
+
+def test_no_browser_configured_yields_none(monkeypatch, broken_page: Path):
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
-    assert lint_html(broken_page) == []
+    assert lint_html(broken_page) is None
 
 
-def test_browser_path_that_does_not_exist_yields_no_findings(monkeypatch, broken_page: Path):
+def test_browser_path_that_does_not_exist_yields_none(monkeypatch, broken_page: Path):
     monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/no/such/binary-xyz")
-    assert lint_html(broken_page) == []
+    assert lint_html(broken_page) is None
 
 
 @requires_browser
@@ -69,6 +83,16 @@ def test_flags_console_error_and_missing_local_asset(broken_page: Path):
 @requires_browser
 def test_clean_page_has_no_findings(clean_page: Path):
     assert lint_html(clean_page) == []
+
+
+@requires_browser
+def test_flags_empty_body_with_no_other_signal(empty_body_page: Path):
+    """Division by zero is not a JS error, and there's no missing asset —
+    console_error/failed_request stay silent. empty_page is the only thing
+    that can catch this shape of bug."""
+    findings = lint_html(empty_body_page)
+    kinds = {f.kind for f in findings}
+    assert kinds == {"empty_page"}
 
 
 @requires_browser

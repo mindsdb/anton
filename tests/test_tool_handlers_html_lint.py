@@ -1,7 +1,7 @@
 """Coverage for the exec-time artifact lint hook's html path (ENG-1204 Fix 3).
 
 Mirrors `test_tool_handlers_xlsx_lint.py` — same `_FakeStore`/`_make_artifact`
-shape, exercising `_lint_changed_artifact_files` directly rather than the
+shape, exercising `lint_changed_artifact_files` directly rather than the
 standalone `lint_html` (see `test_html_lint.py` for that).
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.tools.tool_handlers import _lint_changed_artifact_files
+from anton.core.tools.tool_handlers import LINT_STATUS_NOT_VALIDATED, lint_changed_artifact_files
 
 requires_browser = pytest.mark.skipif(
     not os.environ.get("ANTON_HTML_LINT_BROWSER"),
@@ -44,13 +44,20 @@ def _make_artifact(store: _FakeStore, slug: str) -> Path:
     return folder
 
 
-def test_no_browser_configured_is_silent(monkeypatch, store: _FakeStore):
+def test_no_browser_configured_is_silent_in_messages_but_sets_status(monkeypatch, store: _FakeStore):
+    """`lint_html` returns None (couldn't run), not `[]` (ran, found
+    nothing) — ENG-1204: that distinction now only reaches the agent via
+    `status_by_slug`, not as a line in the returned message list."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
+    status: dict[str, str] = {}
 
-    assert _lint_changed_artifact_files(store, before) == []
+    messages = lint_changed_artifact_files(store, before, status_by_slug=status)
+
+    assert messages == []
+    assert status == {"dash-abc12345": LINT_STATUS_NOT_VALIDATED}
 
 
 @requires_browser
@@ -59,7 +66,7 @@ def test_flags_a_changed_html_artifact(store: _FakeStore):
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
 
-    messages = _lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before)
 
     assert any("dash-abc12345/dash.html" in m for m in messages)
 
@@ -74,4 +81,4 @@ def test_skips_artifacts_the_cell_did_not_touch(store: _FakeStore):
     current_mtime = page.stat().st_mtime
     before = {"dash-abc12345": current_mtime}
 
-    assert _lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before) == []
