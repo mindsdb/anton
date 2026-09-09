@@ -26,6 +26,7 @@ from anton.core.llm.provider import (
     ModelUnavailableError,
     StreamComplete,
     StreamTaskProgress,
+    StreamTextDelta,
     TokenLimitExceeded,
     ToolCall,
     Usage,
@@ -640,6 +641,74 @@ async def test_text_only_continuation_answer_is_not_dropped(workspace):
         assert "FINAL_ANSWER_USER_READ" in texts[-1]
     finally:
         await session.close()
+
+
+async def test_a_forced_continuation_marks_its_own_boundary(workspace):
+    """Where a superseded answer ends and its replacement begins.
+
+    Consumers accumulate every text delta of a turn into one bubble, so a
+    replacement needs a signal to replace instead of append. `analyzing`
+    cannot carry it: seven other sites emit that phase for unrelated
+    situations, told apart only by free text.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [_VerifierVerdict(status="INCOMPLETE", reason="not done yet")]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamTextDelta(text="SUPERSEDED"),
+                StreamComplete(response=_text_response("SUPERSEDED")),
+            ])
+        return _FakeAsyncIter([
+            StreamTextDelta(text="REPLACEMENT"),
+            StreamComplete(response=_text_response("REPLACEMENT")),
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        events = [event async for event in session.turn_stream("write me a summary")]
+    finally:
+        await session.close()
+
+    boundaries = [
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTaskProgress) and event.phase == "continuation"
+    ]
+    assert len(boundaries) == 1, (
+        "the boundary must be announced exactly once; progress phases seen: "
+        f"{[e.phase for e in events if isinstance(e, StreamTaskProgress)]}"
+    )
+
+    superseded = next(
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTextDelta) and event.text == "SUPERSEDED"
+    )
+    replacement = next(
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTextDelta) and event.text == "REPLACEMENT"
+    )
+    assert superseded < boundaries[0] < replacement, (
+        "the boundary must land after the superseded text and before its "
+        "replacement, or a consumer cannot tell which text to drop"
+    )
 
 
 async def test_latched_verifier_reprobes_and_can_recover(workspace):

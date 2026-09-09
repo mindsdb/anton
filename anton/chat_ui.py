@@ -416,7 +416,10 @@ class StreamDisplay:
         if not self._active:
             return
 
-        if phase == "analyzing":
+        # `continuation` renders identically here: the CLI keeps one text
+        # buffer, so it has no answer bubble to replace, and the raw phase
+        # would otherwise leak into the status line.
+        if phase in ("analyzing", "continuation"):
             self._line1_fun = random.choice(ANALYZING_MESSAGES)  # noqa: S311
             self._line2_status = "Composing response..."
             self._line3_peek = ""

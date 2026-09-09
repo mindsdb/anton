@@ -80,6 +80,19 @@ class TestStreamDisplay:
         assert live.update.call_count >= 1
 
     @patch("anton.chat_ui.Live")
+    def test_a_forced_continuation_shares_the_analyzing_spinner(self, MockLive):
+        # The verifier's continuation notice carries its own phase so a client
+        # can replace the superseded answer instead of appending to it. The CLI
+        # has no bubble to replace, so it must keep rendering the notice as
+        # before rather than falling through to the raw-phase fallback.
+        display, console = self._make_display()
+        display.start()
+
+        display.update_progress("continuation", "Task incomplete — continuing (1/3)...")
+
+        assert display._line2_status == "Composing response..."
+
+    @patch("anton.chat_ui.Live")
     def test_update_progress_without_eta(self, MockLive):
         display, console = self._make_display()
         display.start()

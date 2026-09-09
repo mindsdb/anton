@@ -5992,8 +5992,12 @@ class ChatSession:
                     ),
                 }
             )
+            # Its own phase, not `analyzing`: this is the boundary between an
+            # answer the user already read and the one that supersedes it, and a
+            # client accumulating deltas into one bubble cannot find it
+            # otherwise. Seven other sites emit `analyzing`.
             yield StreamTaskProgress(
-                phase="analyzing",
+                phase="continuation",
                 message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",
             )
 
