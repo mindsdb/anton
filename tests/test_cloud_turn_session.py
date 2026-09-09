@@ -109,6 +109,11 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
     assert "sandbox:/mnt/data/" in suffix
     assert "127.0.0.1" in suffix
     assert "never repeat a path" in suffix
+    # The base ARTIFACTS prompt tells the agent to include the primary file's
+    # path and to prefer launch_backend's (loopback) url — the cloud block must
+    # override both by name, not just coexist (review note on #461).
+    assert "OVERRIDES the ARTIFACTS workflow instruction" in suffix
+    assert "launch_backend" in suffix
 
 
 def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):

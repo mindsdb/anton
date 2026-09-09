@@ -528,7 +528,14 @@ def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
 # product: artifact cards carry a Download control on web (ENG-2044), HTML and
 # Markdown artifacts are auto-shared at turn end (ENG-1680) with the link
 # surfaced on the card, and the chat renderer neutralises local-path links into
-# inert text. When the pod is driven outside cowork (dev, CI) the panel it
+# inert text. The base ARTIFACTS prompt (anton/core/llm/prompts.py, workflow
+# step 4) instructs the OPPOSITE for the CLI case — "include the primary
+# file's path … so it is clickable/openable in a plain CLI", and for
+# fullstack apps to prefer launch_backend's (loopback) url — so this block
+# overrides both BY NAME rather than merely contradicting them; suffix order
+# gives it the last word, and naming the overridden rule is what makes the
+# model treat it as a deployment exception instead of a conflict (review
+# note from pnewsam on #461). When the pod is driven outside cowork (dev, CI) the panel it
 # names does not exist; that run has no end user reading prose, so the wrong
 # half of the trade is the one where a real user is told to click a dead path.
 CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
@@ -542,7 +549,13 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
     "workspace and can never be opened from the user's browser. Never put "
     "such a path or URL into your reply as a markdown link or as text, and "
     "never invent a download URL such as sandbox:/mnt/data/...; no link of "
-    "that form works. HTML and Markdown artifacts are shared to a live URL "
+    "that form works. This OVERRIDES the ARTIFACTS workflow instruction to "
+    "include the primary file's path in your final message: here, point to "
+    "the artifact by name only — the panel is the pointer. It also overrides "
+    "the fullstack-app instruction to prefer the launch_backend url as the "
+    "pointer: that url is loopback inside this workspace and dead in the "
+    "user's browser; the artifact card's preview is how the user opens the "
+    "app. HTML and Markdown artifacts are shared to a live URL "
     "automatically at the end of the turn and that link appears on the "
     "artifact card — you do not know the link, so point at the card rather "
     "than guessing one. If the user says they cannot find, open, or download "
