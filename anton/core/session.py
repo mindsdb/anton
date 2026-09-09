@@ -98,6 +98,15 @@ from anton.core.utils.scratchpad import (
     format_cell_result,
     observe_scratchpad_cell,
 )
+# Artifact-edit tracking + lint (ENG-1204): shared with handle_scratchpad's
+# own exec branch (tool_handlers.py) rather than duplicated here, since this
+# inline streaming exec bypasses that handler entirely.
+from anton.core.tools.tool_handlers import (
+    resolve_artifact_store,
+    snapshot_existing_artifact_mtimes,
+    track_edits_since,
+    lint_changed_artifact_files,
+)
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
@@ -1279,6 +1288,14 @@ class ChatSession:
         # writing into the same (shared, project-wide) directory can never be
         # mistaken for this turn's work. Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # slug -> "has_errors" | "not_validated" for this turn's lint checks
+        # (ENG-1204). In-memory only, per turn — not persisted to metadata.json,
+        # since the only consumers are: (a) this turn's own model-facing
+        # signal (already carried by result_text) and (b) an end-of-turn
+        # user-facing notice a host builds from this property. Overwritten
+        # (not merged) each time a slug is re-linted, so a later clean re-lint
+        # in the same turn correctly clears an earlier finding.
+        self._artifact_lint_status: dict[str, str] = {}
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
@@ -1383,6 +1400,16 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    @property
+    def artifact_lint_status(self) -> dict[str, str]:
+        """slug -> "has_errors" | "not_validated" for artifacts this turn's
+        lint checks found still invalid at the point each check last ran
+        (ENG-1204). A copy, same reason as `artifacts_touched`: a host reads
+        this after the turn to decide whether to warn the user, and must not
+        be able to mutate the session's own record.
+        """
+        return dict(self._artifact_lint_status)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3993,6 +4020,7 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._artifact_lint_status = {}
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -4913,6 +4941,16 @@ class ChatSession:
                                 _sp_t0 = _time.monotonic()
                                 from anton.core.backends.base import Cell
 
+                                # Snapshot before execute so a post-cell lint
+                                # (below) can tell which artifact this cell
+                                # actually touched (ENG-1204).
+                                artifact_store = resolve_artifact_store(self)
+                                before_artifact_mtimes = (
+                                    snapshot_existing_artifact_mtimes(artifact_store)
+                                    if artifact_store is not None
+                                    else {}
+                                )
+
                                 cell = None
                                 async for item in pad.execute_streaming(
                                     code,
@@ -4941,6 +4979,30 @@ class ChatSession:
                                     if cell
                                     else "No result produced."
                                 )
+                                if cell is not None and artifact_store is not None:
+                                    # handle_scratchpad's exec branch runs
+                                    # this same pair; this inline path is the
+                                    # one the streaming product actually
+                                    # takes, so it needs its own call (ENG-1204).
+                                    track_edits_since(
+                                        self, artifact_store, before_artifact_mtimes
+                                    )
+                                    try:
+                                        lint_messages = lint_changed_artifact_files(
+                                            artifact_store, before_artifact_mtimes,
+                                            status_by_slug=self._artifact_lint_status,
+                                        )
+                                    except Exception:
+                                        lint_messages = []
+                                        logger.warning(
+                                            "artifact lint failed for this cell",
+                                            exc_info=True,
+                                        )
+                                    if lint_messages:
+                                        result_text += (
+                                            "\n\n[artifact lint]\n"
+                                            + "\n".join(lint_messages)
+                                        )
                                 # The runtime's verdict, not a text guess: a
                                 # cell with a raised error/timeout/kill failed;
                                 # stderr-only output (warnings) is not a
