@@ -498,10 +498,31 @@ def _reconcile_publish_identity(settings) -> bool:
     # Any branch that tells the user which file publishing now uses has to
     # account for ~/.cowork/.env, which sits AFTER ~/.anton/.env in the chain
     # and silently outranks whatever we do here.
+    # `~/.cowork/.env` sits AFTER `~/.anton/.env` in the chain, so on a
+    # desktop-configured machine it outranks anything reconciliation does here.
+    #
+    # Two different things are needed from that fact, and conflating them is
+    # what this comment exists to prevent:
+    #
+    #   `publishes_from` — the file that will actually be used. A message that
+    #       states the active identity must name THIS, never `~/.anton/.env`
+    #       by assumption.
+    #   `outranked`      — the explanation, appended to a message whose own
+    #       sentence is about a FILE OPERATION ("moved X to Y") and so stays
+    #       true regardless of precedence.
+    #
+    # Appending `outranked` to a sentence that already asserts the active
+    # identity produces a message that contradicts itself — "Publishing now
+    # uses ~/.anton/.env" immediately followed by "publishing still uses that
+    # one" about a different file. ENG-1424 exists because nobody could tell
+    # which account publishes; answering that twice, differently, is the same
+    # defect in a new place.
+    cowork_key = vault_key(Path.home() / ".cowork" / ".env")
+    publishes_from = "~/.cowork/.env" if cowork_key else "~/.anton/.env"
     outranked = (
         "\n  (~/.cowork/.env also has a key and takes precedence,"
         "\n   so publishing still uses that one.)"
-        if vault_key(Path.home() / ".cowork" / ".env")
+        if cowork_key
         else ""
     )
 
@@ -544,10 +565,13 @@ def _reconcile_publish_identity(settings) -> bool:
                 f"ANTON_MINDS_API_KEY={project_key}\n",
             )
             project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            # Names `publishes_from`, not `~/.anton/.env`, and carries no
+            # `outranked` suffix: this sentence IS the active-identity claim,
+            # so it has to be true on its own rather than corrected below it.
             message = (
                 "  This project had a different publish key than ~/.anton/.env.\n"
-                "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
-                f"  {escape(str(archive))} in case it was the one you wanted." + outranked
+                f"  Publishing now uses {publishes_from}; the project's key was saved to\n"
+                f"  {escape(str(archive))} in case it was the one you wanted."
             )
     finally:
         # In `finally`, not after the branches: `main` catches OSError and boots

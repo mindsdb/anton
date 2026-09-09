@@ -411,6 +411,20 @@ def test_both_claiming_branches_disclose_cowork_precedence(tmp_path, home, capsy
     The promote branch was corrected for this and the divergent branch was not
     — it still said "Publishing now uses ~/.anton/.env" while the session
     resolved the cowork key.
+
+    Asserts the INTENT (each branch discloses that cowork wins), not one
+    phrasing. The two branches disclose it differently on purpose:
+
+      promote   — its sentence is about a file operation ("moved X to Y"),
+                  true whatever outranks it, so the precedence note is
+                  appended.
+      divergent — its sentence IS the active-identity claim, so it names the
+                  winning file outright. Appending the note there instead
+                  produced a message that answered the question twice,
+                  differently; see
+                  `test_the_message_never_names_two_different_publishing_files`.
+
+    Pinning the literal "takes precedence" for both is what let that ship.
     """
     (home / ".cowork").mkdir(parents=True, exist_ok=True)
     (home / ".cowork" / ".env").write_text("ANTON_MINDS_API_KEY=COWORK_K\n")
@@ -421,7 +435,10 @@ def test_both_claiming_branches_disclose_cowork_precedence(tmp_path, home, capsy
     Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K")
 
     _reconcile_publish_identity(_settings(project))  # divergent branch
-    assert "takes precedence" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "~/.cowork/.env" in out, (
+        "the divergent branch did not disclose that ~/.cowork/.env wins:\n" + out
+    )
 
     # ...and the promote branch, with no global key at all.
     Workspace(home).remove_secret("ANTON_MINDS_API_KEY")
@@ -430,4 +447,62 @@ def test_both_claiming_branches_disclose_cowork_precedence(tmp_path, home, capsy
     Workspace(project2).set_secret("ANTON_MINDS_API_KEY", "PROJ_K2")
 
     _reconcile_publish_identity(_settings(project2))
-    assert "takes precedence" in capsys.readouterr().out
+    assert "takes precedence" in capsys.readouterr().out   # promote: appended note
+
+
+def test_the_message_never_names_two_different_publishing_files(tmp_path, home, capsys):
+    """One question, one answer.
+
+    `test_both_claiming_branches_disclose_cowork_precedence` above asserts the
+    precedence NOTE is present. It cannot see the defect that note introduced:
+    appended to a sentence that already asserted the active identity, the
+    divergent branch printed
+
+        Publishing now uses ~/.anton/.env; …
+        (~/.cowork/.env also has a key and takes precedence,
+         so publishing still uses that one.)
+
+    — two different answers to "which account publishes now?", with the wrong
+    one stated first and flatly. ENG-1424 exists because that question had no
+    reliable answer, so answering it twice is the same defect wearing new
+    clothes, and a presence assertion is structurally unable to catch it.
+
+    This pins the property instead: whatever the message claims about the
+    ACTIVE identity, it names exactly one file, and that file is the one the
+    chain actually resolves.
+    """
+    (home / ".cowork").mkdir(parents=True, exist_ok=True)
+    (home / ".cowork" / ".env").write_text("ANTON_MINDS_API_KEY=COWORK_K\n")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJ_K")
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K")
+
+    _reconcile_publish_identity(_settings(project))     # the divergent branch
+    out = capsys.readouterr().out
+
+    claims = [line for line in out.splitlines() if "Publishing now uses" in line]
+    assert len(claims) == 1, out
+    claim = claims[0]
+
+    assert "~/.cowork/.env" in claim, (
+        "the active-identity sentence names ~/.anton/.env while ~/.cowork/.env "
+        "outranks it — this is the wrong answer to the only question the "
+        f"message exists to answer:\n{out}"
+    )
+    assert "~/.anton/.env" not in claim, (
+        f"the sentence names two publishing files at once:\n{claim}"
+    )
+
+    # …and with no cowork key, the same sentence names ~/.anton/.env.
+    (home / ".cowork" / ".env").unlink()
+    project2 = tmp_path / "proj2"
+    project2.mkdir()
+    Workspace(project2).set_secret("ANTON_MINDS_API_KEY", "PROJ_K2")
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K2")
+
+    _reconcile_publish_identity(_settings(project2))
+    claim2 = [l for l in capsys.readouterr().out.splitlines() if "Publishing now uses" in l]
+    assert len(claim2) == 1 and "~/.anton/.env" in claim2[0], claim2
+    assert "~/.cowork/.env" not in claim2[0], claim2
