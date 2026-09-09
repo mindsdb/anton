@@ -31,9 +31,23 @@ function emitAndExit(result) {
   app.exit(0);
 }
 
+// Heuristic, not authoritative: true only when the body has neither visible
+// text nor a non-script/style/meta child element. Catches "nothing rendered
+// at all" (e.g. a page whose entire markup got swallowed as text by an
+// unclosed <title>/<script>/<style> — real case found in testing) without
+// flaging a legitimately content-free page that fills in later (async data,
+// a splash screen). False negatives are expected (e.g. a blank <canvas>).
+const EMPTY_PAGE_CHECK = `(() => {
+  if (!document.body) return true;
+  const NON_VISUAL = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'LINK', 'META', 'NOSCRIPT', 'TITLE']);
+  const visibleChildren = Array.from(document.body.children).filter((el) => !NON_VISUAL.has(el.tagName));
+  const hasText = document.body.innerText.trim().length > 0;
+  return visibleChildren.length === 0 && !hasText;
+})()`;
+
 app.whenReady().then(() => {
   const targetPath = process.env.ANTON_HTML_LINT_TARGET;
-  const result = { consoleErrors: [], failedRequests: [], crashed: false, crashDetails: null };
+  const result = { consoleErrors: [], failedRequests: [], crashed: false, crashDetails: null, emptyPage: false };
 
   if (!targetPath) {
     emitAndExit(result);
@@ -56,11 +70,14 @@ app.whenReady().then(() => {
 
   const hardTimeout = setTimeout(() => emitAndExit(result), HARD_TIMEOUT_MS);
 
-  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
-    // level 3 == error in Electron's console-message event.
-    if (level !== 3) return;
-    if (!sourceId || !sourceId.startsWith(targetDirUrl)) return;
-    result.consoleErrors.push({ message, line });
+  win.webContents.on('console-message', (event) => {
+    // Single-event-object form (the older (event, level, message, line,
+    // sourceId) callback is deprecated and warns on stderr as of this
+    // Electron). `event.level` is the string "error"/"warning"/"info" here,
+    // not the old numeric level.
+    if (event.level !== 'error') return;
+    if (!event.sourceId || !event.sourceId.startsWith(targetDirUrl)) return;
+    result.consoleErrors.push({ message: event.message, line: event.lineNumber });
   });
 
   win.webContents.on('render-process-gone', (_event, details) => {
@@ -101,8 +118,11 @@ app.whenReady().then(() => {
     .loadFile(targetPath)
     .catch(() => {})
     .finally(() => {
-      setTimeout(() => {
+      setTimeout(async () => {
         clearTimeout(hardTimeout);
+        if (!result.crashed) {
+          result.emptyPage = await win.webContents.executeJavaScript(EMPTY_PAGE_CHECK).catch(() => false);
+        }
         emitAndExit(result);
       }, SETTLE_MS);
     });
