@@ -79,6 +79,38 @@ def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypa
     assert cfg.session_id == "conv_1"
 
 
+def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
+    """ENG-2421: ENG-1636 taught the DESKTOP harness to point users at the Live
+    Artifacts panel instead of local paths — but that block lives in
+    cowork-server's in-process harness, which refuses to run org turns, so web
+    agents were never told and handed users sandbox:/mnt/... and loopback
+    "download links" for weeks after every card-side fix shipped. The pod's own
+    prompt context must carry the web-worded equivalent."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+    from anton.cloud_turn.session import CLOUD_ARTIFACT_DELIVERY_GUIDANCE
+    assert suffix == CLOUD_ARTIFACT_DELIVERY_GUIDANCE
+    # Reachability, not just wiring (review finding on #461): the config field
+    # being set proves nothing if the prompt builder stops appending `suffix` —
+    # exactly the "fix shipped while the failure continued" class this ticket
+    # documents. Assemble the real prompt and require the guidance inside it.
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+    prompt = ChatSystemPromptBuilder().build(
+        system_prompt_context=cfg.system_prompt_context,
+        conversation_started=True,
+        proactive_dashboards=False,
+        output_dir=str(tmp_path),
+    )
+    assert CLOUD_ARTIFACT_DELIVERY_GUIDANCE.strip() in prompt
+    # The load-bearing sentences, pinned individually so a rewrite that drops
+    # one is caught even if the identity assertion above is loosened later.
+    assert "Live Artifacts" in suffix
+    assert "do NOT hand them its location on disk" in suffix
+    assert "sandbox:/mnt/data/" in suffix
+    assert "127.0.0.1" in suffix
+    assert "never repeat a path" in suffix
+
+
 def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
     """ENG-1817: `.anton/anton.md` is cowork-server's staged copy of the project
     instructions. If the pod creates a template there, the next staging pass
