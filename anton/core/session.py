@@ -3480,7 +3480,9 @@ class ChatSession:
             "Do NOT retry automatically — wait for the user's response."
         )
 
-    async def _stream_handback_diagnosis(self, *, system: str, label: str):
+    async def _stream_handback_diagnosis(
+        self, *, system: str, label: str, cancels_continuation: bool = False
+    ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
         All three hand-back paths (STUCK, budget-exhausted, verifier-call
@@ -3499,8 +3501,10 @@ class ChatSession:
         # rounds only call tools reaches a hand-back with the boundary still
         # unspent, and this diagnosis would then be taken for the replacement
         # answer — discarding the one the user actually read. It explains that
-        # answer, so it adds to it.
-        yield StreamTaskProgress(phase="handback", message="")
+        # answer, so it adds to it. Gated so a turn that never continued is
+        # unchanged on the wire.
+        if cancels_continuation:
+            yield StreamTaskProgress(phase="handback", message="")
         diagnosis_response = None
         async for event in self.plan_stream_with_recovery(system=system):
             yield event
@@ -4908,7 +4912,8 @@ class ChatSession:
                     # the highest-traffic one of the four).
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="max-tool-rounds"
+                        system=system, label="max-tool-rounds",
+                        cancels_continuation=continuation > 0,
                     ):
                         yield event
                     break
@@ -4957,7 +4962,8 @@ class ChatSession:
                             message="Reached this task's token budget — checking in with you...",
                         )
                         async for event in self._stream_handback_diagnosis(
-                            system=system, label="spend-ceiling"
+                            system=system, label="spend-ceiling",
+                            cancels_continuation=continuation > 0,
                         ):
                             yield event
                         break
@@ -5554,7 +5560,8 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="budget-exhausted"
+                    system=system, label="budget-exhausted",
+                    cancels_continuation=continuation > 0,
                 ):
                     yield event
                 # Consolidation still runs after diagnosis
@@ -5887,7 +5894,8 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="verifier-failure"
+                    system=system, label="verifier-failure",
+                    cancels_continuation=continuation > 0,
                 ):
                     yield event
                 break
@@ -5927,7 +5935,8 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="stuck"
+                    system=system, label="stuck",
+                    cancels_continuation=continuation > 0,
                 ):
                     yield event
                 break
@@ -5977,7 +5986,8 @@ class ChatSession:
                         message="Reached this task's token budget — checking in with you...",
                     )
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="spend-ceiling"
+                        system=system, label="spend-ceiling",
+                        cancels_continuation=continuation > 0,
                     ):
                         yield event
                     break

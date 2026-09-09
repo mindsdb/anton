@@ -766,13 +766,84 @@ async def test_the_continuation_instruction_asks_for_a_standalone_answer(workspa
         await session.close()
 
 
-async def test_a_handback_announces_itself_before_its_diagnosis(workspace):
-    """The hand-back marker cancels an unspent continuation boundary.
+async def test_a_handback_after_a_continuation_announces_itself(workspace):
+    """The marker cancels the boundary the continuation left pending.
 
-    A continuation whose rounds only call tools reaches a hand-back with the
-    boundary still pending, and a client would then take this diagnosis for the
-    replacement answer and discard the one the user read. The marker has to
-    arrive before the diagnosis text, not with it.
+    A continuation that fails to satisfy the verifier still reaches a
+    hand-back, and without this marker the diagnosis streamed there is read as
+    the replacement answer — discarding the one the user had already read. It
+    has to arrive before the diagnosis text, not with it.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [
+        _VerifierVerdict(status="INCOMPLETE", reason="not done yet"),
+        _VerifierVerdict(status="STUCK", reason="missing credentials"),
+    ]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamTextDelta(text="THE ANSWER THE USER READ"),
+                StreamComplete(response=_text_response("THE ANSWER THE USER READ")),
+            ])
+        if call_count == 3:
+            # The continuation must spend a tool round, or the loop breaks at
+            # the verify_min_tool_rounds gate and never verifies a second time.
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Retrying.", "exec", "main", "print(2)"))
+            ])
+        if call_count == 4:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("CONTINUED"))])
+        return _FakeAsyncIter([
+            StreamTextDelta(text="DIAGNOSIS"),
+            StreamComplete(response=_text_response("DIAGNOSIS")),
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        events = [event async for event in session.turn_stream("query my database")]
+    finally:
+        await session.close()
+
+    phases = [
+        (i, e.phase) for i, e in enumerate(events) if isinstance(e, StreamTaskProgress)
+    ]
+    markers = [i for i, phase in phases if phase == "handback"]
+    assert len(markers) == 1, (
+        f"the hand-back must be announced exactly once; phases seen: {phases}"
+    )
+    diagnosis = next(
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTextDelta) and event.text == "DIAGNOSIS"
+    )
+    assert markers[0] < diagnosis, (
+        "the marker must precede the diagnosis text, or a pending boundary is "
+        "already spent by the time it arrives"
+    )
+
+
+async def test_a_handback_with_no_continuation_announces_nothing(workspace):
+    """No boundary was emitted, so there is none to cancel.
+
+    Most hand-backs are reached without any continuation, and a turn that never
+    continued has to look exactly as it did before this marker existed.
     """
     mock_llm = make_mock_llm()
     mock_llm.generate_object_code = AsyncMock(
@@ -789,14 +860,8 @@ async def test_a_handback_announces_itself_before_its_diagnosis(workspace):
                 StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
             ])
         if call_count == 2:
-            return _FakeAsyncIter([
-                StreamTextDelta(text="THE ANSWER THE USER READ"),
-                StreamComplete(response=_text_response("THE ANSWER THE USER READ")),
-            ])
-        return _FakeAsyncIter([
-            StreamTextDelta(text="DIAGNOSIS"),
-            StreamComplete(response=_text_response("DIAGNOSIS")),
-        ])
+            return _FakeAsyncIter([StreamComplete(response=_text_response("REPLY"))])
+        return _FakeAsyncIter([StreamComplete(response=_text_response("DIAGNOSIS"))])
 
     mock_llm.plan_stream = fake_plan_stream
 
@@ -806,21 +871,9 @@ async def test_a_handback_announces_itself_before_its_diagnosis(workspace):
     finally:
         await session.close()
 
-    markers = [
-        i for i, event in enumerate(events)
-        if isinstance(event, StreamTaskProgress) and event.phase == "handback"
-    ]
-    assert len(markers) == 1, (
-        "the hand-back must be announced exactly once; progress phases seen: "
-        f"{[e.phase for e in events if isinstance(e, StreamTaskProgress)]}"
-    )
-    diagnosis = next(
-        i for i, event in enumerate(events)
-        if isinstance(event, StreamTextDelta) and event.text == "DIAGNOSIS"
-    )
-    assert markers[0] < diagnosis, (
-        "the marker must precede the diagnosis text, or a pending boundary is "
-        "already spent by the time it arrives"
+    phases = [e.phase for e in events if isinstance(e, StreamTaskProgress)]
+    assert "handback" not in phases, (
+        f"a turn with no continuation gained a wire event; phases: {phases}"
     )
 
 
