@@ -89,4 +89,4 @@ See [Chat basics](/use/chat-basics) and [Sessions](/use/sessions).
 | Command | What it does |
 |---|---|
 | `/help` | Show the help menu |
-| `exit` | Exit the chat |
+| `/exit` | Exit the chat |

@@ -1404,6 +1404,24 @@ def _default_turn_error_action(exc: BaseException) -> str:
     return "retry" if isinstance(exc, ConnectionError) else "setup"
 
 
+_EXIT_WORDS = ("exit", "quit", "bye")
+
+
+def _is_exit_command(text: str) -> bool:
+    """True for the exit words, bare or written as a slash command.
+
+    The help menu and the completer list the exit command alongside the slash
+    commands, so the slash form has to match the way the dispatch chain below
+    matches every other one: on the first token, arguments tolerated. The bare
+    form stays whole-string so an ordinary sentence starting with "exit" is
+    still a message to the agent.
+    """
+    stripped = text.strip().lower()
+    if stripped.startswith("/"):
+        return stripped.split(maxsplit=1)[0].removeprefix("/") in _EXIT_WORDS
+    return stripped in _EXIT_WORDS
+
+
 def run_chat(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
@@ -1567,7 +1585,7 @@ async def _chat_loop(
 
     if not first_run and not desktop_first_run:
         console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
-    console.print("[anton.muted] type '/help' for commands or 'exit' to quit.[/]")
+    console.print("[anton.muted] type '/help' for commands or '/exit' to quit.[/]")
     console.print()
 
     from anton.analytics import send_event
@@ -1747,7 +1765,7 @@ async def _chat_loop(
                 if not stripped and message_content is None:
                     continue
 
-            if message_content is None and stripped.lower() in ("exit", "quit", "bye"):
+            if message_content is None and _is_exit_command(stripped):
                 break
 
             # Detect dragged file paths early — a dragged absolute path like
