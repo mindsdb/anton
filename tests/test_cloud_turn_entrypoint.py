@@ -596,3 +596,19 @@ def test_no_trace_block_forwards_no_metadata():
     session = _KwargCapturingSession()
     _drive(session)
     assert session.turn_kwargs["trace_metadata"] is None
+
+
+def test_the_handback_marker_outlives_a_progress_flood_too():
+    """It cancels the continuation boundary, so losing it is as bad as losing
+    the boundary: the hand-back diagnosis would replace the answer it explains."""
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            for i in range(50):
+                yield StreamTaskProgress(phase="progress", message=f"m{i}")
+            yield StreamTaskProgress(phase="handback", message="")
+
+    events = _drive(_S())
+    phases = [e["phase"] for e in events if e.get("kind") == "progress"]
+    assert phases.count("handback") == 1, (
+        f"the hand-back marker was dropped by the rate limiter; phases: {phases}"
+    )

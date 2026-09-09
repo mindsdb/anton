@@ -267,7 +267,8 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                 # appended to the answer it was meant to replace. One event per
                 # continuation, so it cannot flood.
                 always = bool(first_progress) or phase in (
-                    "scratchpad_start", "scratchpad_done", "tool_done", "continuation")
+                    "scratchpad_start", "scratchpad_done", "tool_done",
+                    "continuation", "handback")
                 now = time.monotonic()
                 if always or now - last_progress_wire >= PROGRESS_WIRE_INTERVAL:
                     if not always:

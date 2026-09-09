@@ -3495,6 +3495,12 @@ class ChatSession:
         and stale-but-real beats blank.
         """
         log = logging.getLogger(__name__)
+        # Cancels a pending continuation boundary. A forced continuation whose
+        # rounds only call tools reaches a hand-back with the boundary still
+        # unspent, and this diagnosis would then be taken for the replacement
+        # answer — discarding the one the user actually read. It explains that
+        # answer, so it adds to it.
+        yield StreamTaskProgress(phase="handback", message="")
         diagnosis_response = None
         async for event in self.plan_stream_with_recovery(system=system):
             yield event
@@ -5995,7 +6001,7 @@ class ChatSession:
             # Its own phase, not `analyzing`: this is the boundary between an
             # answer the user already read and the one that supersedes it, and a
             # client accumulating deltas into one bubble cannot find it
-            # otherwise. Seven other sites emit `analyzing`.
+            # otherwise. `analyzing` is emitted from several unrelated sites.
             yield StreamTaskProgress(
                 phase="continuation",
                 message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",

@@ -711,6 +711,64 @@ async def test_a_forced_continuation_marks_its_own_boundary(workspace):
     )
 
 
+async def test_a_handback_announces_itself_before_its_diagnosis(workspace):
+    """The hand-back marker cancels an unspent continuation boundary.
+
+    A continuation whose rounds only call tools reaches a hand-back with the
+    boundary still pending, and a client would then take this diagnosis for the
+    replacement answer and discard the one the user read. The marker has to
+    arrive before the diagnosis text, not with it.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="STUCK", reason="missing credentials")
+    )
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamTextDelta(text="THE ANSWER THE USER READ"),
+                StreamComplete(response=_text_response("THE ANSWER THE USER READ")),
+            ])
+        return _FakeAsyncIter([
+            StreamTextDelta(text="DIAGNOSIS"),
+            StreamComplete(response=_text_response("DIAGNOSIS")),
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        events = [event async for event in session.turn_stream("query my database")]
+    finally:
+        await session.close()
+
+    markers = [
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTaskProgress) and event.phase == "handback"
+    ]
+    assert len(markers) == 1, (
+        "the hand-back must be announced exactly once; progress phases seen: "
+        f"{[e.phase for e in events if isinstance(e, StreamTaskProgress)]}"
+    )
+    diagnosis = next(
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTextDelta) and event.text == "DIAGNOSIS"
+    )
+    assert markers[0] < diagnosis, (
+        "the marker must precede the diagnosis text, or a pending boundary is "
+        "already spent by the time it arrives"
+    )
+
+
 async def test_latched_verifier_reprobes_and_can_recover(workspace):
     """Self-review catch. A latched session makes no verdict calls, so "reset on a
     successful verdict" is unreachable and the latch outlives its cause — the user
