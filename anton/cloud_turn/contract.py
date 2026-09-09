@@ -13,6 +13,11 @@ Events written back on stdout (JSONL):
       before it, so cowork replaces the answer rather than appending to it.
       Exempt from the rate limit — dropping it reinstates the duplicated
       answer, since the replacement text still arrives either way.
+      `phase: "handback"` is its counterpart: the turn is explaining instead
+      of delivering that replacement, so the text after it adds to the answer
+      rather than replacing it. Also exempt, and for a sharper reason —
+      dropping it lets the explanation pass as the replacement, and the answer
+      the user already read is lost from the transcript.
   {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork

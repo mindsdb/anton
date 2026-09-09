@@ -3485,24 +3485,28 @@ class ChatSession:
     ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
-        All three hand-back paths (STUCK, budget-exhausted, verifier-call
-        failure) stream a model-generated message and then stop the turn. The
-        message must be captured into history, because it — not the reply the
-        verifier rejected — is what the user actually saw. Persisting it also
-        keeps `history[-1]` an assistant message, which is what stops the
-        post-loop fallback from re-appending the stale reply (ENG-1155).
+        Every hand-back path (STUCK, budget-exhausted, verifier-call failure,
+        max tool rounds, and the two spend-ceiling gates) streams a
+        model-generated message and then stops the turn. The message must be
+        captured into history, because it — not the reply the verifier
+        rejected — is what the user actually saw. Persisting it also keeps
+        `history[-1]` an assistant message, which is what stops the post-loop
+        fallback from re-appending the stale reply (ENG-1155).
 
         An empty diagnosis is logged rather than appended: an empty assistant
         turn would recreate the same out-of-sync history this exists to fix,
         and stale-but-real beats blank.
+
+        `cancels_continuation` says a continuation boundary is pending, which
+        the callers know from the continuation counter. It announces the
+        hand-back so no consumer mistakes this diagnosis for the replacement
+        answer that boundary promised.
         """
         log = logging.getLogger(__name__)
-        # Cancels a pending continuation boundary. A forced continuation whose
-        # rounds only call tools reaches a hand-back with the boundary still
-        # unspent, and this diagnosis would then be taken for the replacement
-        # answer — discarding the one the user actually read. It explains that
-        # answer, so it adds to it. Gated so a turn that never continued is
-        # unchanged on the wire.
+        # Marks this diagnosis as an explanation, not the replacement answer a
+        # pending continuation boundary promised. Without it a consumer takes
+        # it for one and drops the answer the user actually read. Gated so a
+        # turn that never continued is unchanged on the wire.
         if cancels_continuation:
             yield StreamTaskProgress(phase="handback", message="")
         diagnosis_response = None
@@ -4760,6 +4764,11 @@ class ChatSession:
             self._append_history(
                 {"role": "assistant", "content": _TRUNCATION_FAILURE_NOTICE}
             )
+            # Same reason `_stream_handback_diagnosis` announces itself: this
+            # notice is an explanation, not the replacement a pending
+            # continuation boundary promised, and a consumer that took it for
+            # one would drop the answer already read.
+            yield StreamTaskProgress(phase="handback", message="")
             yield StreamTextDelta(text=_TRUNCATION_FAILURE_NOTICE)
         yield retry
 
