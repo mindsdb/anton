@@ -57,7 +57,7 @@ the full list at any time. The complete inventory is in
 | --- | --- | --- |
 | `Esc` | Setup prompts (provider, API key, …) | Go back to the previous step |
 | `Ctrl+D` | Chat prompt | Exit Anton |
-| `/exit` (or `exit`, `quit`, `bye`, each with or without the slash) | Chat prompt | Exit Anton |
+| `/exit`, `exit`, `quit`, or `bye` | Chat prompt | Exit Anton |
 
 ## Themes
 
