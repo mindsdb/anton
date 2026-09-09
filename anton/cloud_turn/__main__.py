@@ -261,9 +261,13 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                     seen_tool_progress.add(event.id)
                 # Step-creating/closing phases and the first tool_progress per
                 # id must never be dropped (they open/close renderer steps);
-                # the rest is rate-limited.
+                # the rest is rate-limited. `continuation` is exempt for a
+                # different reason: it marks the text after it as superseding
+                # the text before it, and dropping it leaves the replacement
+                # appended to the answer it was meant to replace. One event per
+                # continuation, so it cannot flood.
                 always = bool(first_progress) or phase in (
-                    "scratchpad_start", "scratchpad_done", "tool_done")
+                    "scratchpad_start", "scratchpad_done", "tool_done", "continuation")
                 now = time.monotonic()
                 if always or now - last_progress_wire >= PROGRESS_WIRE_INTERVAL:
                     if not always:
