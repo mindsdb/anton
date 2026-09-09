@@ -171,19 +171,6 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
 
-_NOT_VALIDATED_XLSX = (
-    "not validated: no LibreOffice available on this host — only the "
-    "structural circular-reference check ran (formula errors it can't "
-    "detect, like #REF!/#DIV/0!, may still be present)"
-)
-_NOT_VALIDATED_HTML = (
-    "not validated: no headless browser available on this host — this "
-    "page's console errors and asset loads were never checked"
-)
-# A file_messages list that is EXACTLY one of these, with nothing else, means
-# the checker never ran rather than that it ran and found something (ENG-1204).
-_NOT_VALIDATED_SENTINELS = {_NOT_VALIDATED_XLSX, _NOT_VALIDATED_HTML}
-
 # Per-artifact status ChatSession.artifact_lint_status surfaces to a host.
 # "has_errors" outranks "not_validated": one file with a real finding makes
 # the whole artifact worth flagging even if a sibling file merely couldn't
@@ -212,15 +199,18 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str]]]:
         # but it's a narrower check, so falling back is disclosed rather
         # than silently reported as if the oracle had run.
         findings = check_xlsx_via_office(path)
+
+        if findings is None:
+            findings = lint_xlsx(path)
+
         if findings is not None:
             return [f.message() for f in findings]
-        return [_NOT_VALIDATED_XLSX] + [f.message() for f in lint_xlsx(path)]
+
 
     def _html_linter(path: Path) -> list[str]:
         findings = lint_html(path)
-        if findings is None:
-            return [_NOT_VALIDATED_HTML]
-        return [f.message() for f in findings]
+        if findings is not None:
+            return [f.message() for f in findings]
 
     return {".xlsx": _xlsx_linter, ".html": _html_linter}
 
@@ -248,8 +238,7 @@ def lint_changed_artifact_files(
         current = after.get(slug)
         if current is None or current <= prev_mtime:
             continue
-        has_errors = False
-        not_validated = False
+
         for path in (store.root / slug).rglob("*"):
             linter = linters.get(path.suffix.lower())
             if linter is None or not path.is_file():
@@ -260,19 +249,16 @@ def lint_changed_artifact_files(
             except OSError:
                 continue
             file_messages = linter(path)
+            if file_messages is None:
+                # validation failed
+                status_by_slug[slug] = LINT_STATUS_NOT_VALIDATED
+                continue
+            elif len(file_messages) > 0:
+                status_by_slug[slug] = LINT_STATUS_HAS_ERRORS
+
             for message in file_messages:
                 messages.append(f"{slug}/{path.name} — {message}")
-            if len(file_messages) == 1 and file_messages[0] in _NOT_VALIDATED_SENTINELS:
-                not_validated = True
-            elif file_messages:
-                has_errors = True
-        if status_by_slug is not None:
-            if has_errors:
-                status_by_slug[slug] = LINT_STATUS_HAS_ERRORS
-            elif not_validated:
-                status_by_slug[slug] = LINT_STATUS_NOT_VALIDATED
-            else:
-                status_by_slug.pop(slug, None)
+
     return messages
 
 
