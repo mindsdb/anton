@@ -15,7 +15,7 @@ def test_clean_boot(cfg, stub, tmp_path):
     result = run_anton(["--folder", str(tmp_path)], ["exit"],
                        env=base_env(stub), timeout=cfg.timeout(20))
     assert_exit_ok(result)
-    assert_output(result, "exit' to quit")
+    assert_output(result, "/exit' to quit")
     assert_not_output(result, "Traceback (most recent call last)")
 
 
