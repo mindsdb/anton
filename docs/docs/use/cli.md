@@ -35,7 +35,7 @@ terminals, and prints the version and a tagline:
     ▐   ▐
  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  v2.26.4.30.0 — "autonomous by design"
- type '/help' for commands or 'exit' to quit.
+ type '/help' for commands or '/exit' to quit.
 
 you>
 ```
@@ -57,7 +57,7 @@ the full list at any time. The complete inventory is in
 | --- | --- | --- |
 | `Esc` | Setup prompts (provider, API key, …) | Go back to the previous step |
 | `Ctrl+D` | Chat prompt | Exit Anton |
-| `exit`, `quit`, or `bye` | Chat prompt | Exit Anton |
+| `/exit` (or `exit`, `quit`, `bye`, each with or without the slash) | Chat prompt | Exit Anton |
 
 ## Themes
 
