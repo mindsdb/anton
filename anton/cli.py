@@ -504,9 +504,10 @@ def _reconcile_publish_identity(settings) -> bool:
     # Two different things are needed from that fact, and conflating them is
     # what this comment exists to prevent:
     #
-    #   `publishes_from` — the file that will actually be used. A message that
-    #       states the active identity must name THIS, never `~/.anton/.env`
-    #       by assumption.
+    #   `publishes_from` — the SOURCE that will actually be used, which is not
+    #       always a file: an exported `ANTON_MINDS_API_KEY` outranks all of
+    #       them. A message that states the active identity must name THIS,
+    #       never `~/.anton/.env` by assumption.
     #   `outranked`      — the explanation, appended to a message whose own
     #       sentence is about a FILE OPERATION ("moved X to Y") and so stays
     #       true regardless of precedence.
@@ -517,8 +518,21 @@ def _reconcile_publish_identity(settings) -> bool:
     # one" about a different file. ENG-1424 exists because nobody could tell
     # which account publishes; answering that twice, differently, is the same
     # defect in a new place.
+    # Read BEFORE `publishes_from` is decided, not just for the `finally`
+    # below: `os.environ` outranks every env_file in pydantic-settings, so an
+    # exported key is what the session resolves no matter what any file holds.
+    # Choosing between the two FILES and calling the winner "what publishes"
+    # was wrong for `ANTON_MINDS_API_KEY=X anton` — measured: the message said
+    # ~/.cowork/.env while the session resolved X (#458 self-review).
+    exported = os.environ.get("ANTON_MINDS_API_KEY")
     cowork_key = vault_key(Path.home() / ".cowork" / ".env")
-    publishes_from = "~/.cowork/.env" if cowork_key else "~/.anton/.env"
+    publishes_from = (
+        "the ANTON_MINDS_API_KEY set in your environment"
+        if exported
+        else "~/.cowork/.env"
+        if cowork_key
+        else "~/.anton/.env"
+    )
     outranked = (
         "\n  (~/.cowork/.env also has a key and takes precedence,"
         "\n   so publishing still uses that one.)"
@@ -532,7 +546,6 @@ def _reconcile_publish_identity(settings) -> bool:
     # have X silently popped here — and pydantic ranks os.environ above every
     # env_file, so X is exactly the key that session was resolving. Snapshot and
     # restore around the whole migration.
-    exported = os.environ.get("ANTON_MINDS_API_KEY")
 
     try:
         if not global_key:

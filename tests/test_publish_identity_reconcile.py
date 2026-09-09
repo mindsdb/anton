@@ -405,7 +405,9 @@ def test_a_quoted_global_vault_is_not_a_divergence(tmp_path, home):
     assert Workspace(home).get_secret("ANTON_MINDS_API_KEY") == '"samekey"'  # untouched
 
 
-def test_both_claiming_branches_disclose_cowork_precedence(tmp_path, home, capsys):
+def test_both_claiming_branches_disclose_cowork_precedence(
+    tmp_path, home, capsys, monkeypatch
+):
     """`~/.cowork/.env` outranks `~/.anton/.env`, so neither branch may imply otherwise.
 
     The promote branch was corrected for this and the divergent branch was not
@@ -434,10 +436,25 @@ def test_both_claiming_branches_disclose_cowork_precedence(tmp_path, home, capsy
     Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJ_K")
     Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K")
 
+    # `set_secret` writes `os.environ` as a documented side effect, so arranging
+    # the vaults leaves the key EXPORTED — a state real boot never reaches,
+    # because `main()` runs reconciliation before `_ensure_workspace` promotes
+    # any vault into the environment. Clear it so the branch under test is the
+    # file one. Do not "fix" a failure here by weakening the assertion: an
+    # exported key legitimately outranks both vaults, and
+    # `test_the_message_names_the_environment_when_a_key_is_exported` covers it.
+    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
+
     _reconcile_publish_identity(_settings(project))  # divergent branch
     out = capsys.readouterr().out
-    assert "~/.cowork/.env" in out, (
-        "the divergent branch did not disclose that ~/.cowork/.env wins:\n" + out
+    # Scoped to the claim LINE, not the whole output: `~/.cowork/.env` would
+    # still appear somewhere in `out` if the sentence were reverted and the
+    # suffix re-added, so an `in out` check here does less work than the
+    # phrase it replaced (#458 self-review).
+    claim = next(l for l in out.splitlines() if "Publishing now uses" in l)
+    assert "~/.cowork/.env" in claim, (
+        "the divergent branch's active-identity sentence did not name the file "
+        "that actually wins:\n" + out
     )
 
     # ...and the promote branch, with no global key at all.
@@ -445,12 +462,15 @@ def test_both_claiming_branches_disclose_cowork_precedence(tmp_path, home, capsy
     project2 = tmp_path / "proj2"
     project2.mkdir()
     Workspace(project2).set_secret("ANTON_MINDS_API_KEY", "PROJ_K2")
+    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)   # see above
 
     _reconcile_publish_identity(_settings(project2))
     assert "takes precedence" in capsys.readouterr().out   # promote: appended note
 
 
-def test_the_message_never_names_two_different_publishing_files(tmp_path, home, capsys):
+def test_the_message_never_names_two_different_publishing_files(
+    tmp_path, home, capsys, monkeypatch
+):
     """One question, one answer.
 
     `test_both_claiming_branches_disclose_cowork_precedence` above asserts the
@@ -479,6 +499,15 @@ def test_the_message_never_names_two_different_publishing_files(tmp_path, home, 
     Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJ_K")
     Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K")
 
+    # `set_secret` writes `os.environ` as a documented side effect, so arranging
+    # the vaults leaves the key EXPORTED — a state real boot never reaches,
+    # because `main()` runs reconciliation before `_ensure_workspace` promotes
+    # any vault into the environment. Clear it so the branch under test is the
+    # file one. Do not "fix" a failure here by weakening the assertion: an
+    # exported key legitimately outranks both vaults, and
+    # `test_the_message_names_the_environment_when_a_key_is_exported` covers it.
+    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
+
     _reconcile_publish_identity(_settings(project))     # the divergent branch
     out = capsys.readouterr().out
 
@@ -501,8 +530,49 @@ def test_the_message_never_names_two_different_publishing_files(tmp_path, home, 
     project2.mkdir()
     Workspace(project2).set_secret("ANTON_MINDS_API_KEY", "PROJ_K2")
     Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K2")
+    monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)   # see above
 
     _reconcile_publish_identity(_settings(project2))
     claim2 = [l for l in capsys.readouterr().out.splitlines() if "Publishing now uses" in l]
     assert len(claim2) == 1 and "~/.anton/.env" in claim2[0], claim2
     assert "~/.cowork/.env" not in claim2[0], claim2
+
+
+def test_the_message_names_the_environment_when_a_key_is_exported(
+    tmp_path, home, capsys, monkeypatch
+):
+    """`os.environ` outranks every env_file, so neither file is the answer.
+
+    The gap in the test above, found by reviewing it rather than running it: it
+    only ever distinguishes between the two FILES, so it certifies "names the
+    source that wins" while the message names a file and the session resolves
+    an exported key. Measured before the fix — the message said
+    `~/.cowork/.env` while `AntonSettings().minds_api_key` was `SHELL_K`.
+
+    `test_reconciliation_leaves_an_exported_key_alone` already states the
+    precedence rule this rests on: "pydantic ranks `os.environ` above every
+    env_file". That rule was in the repo; the message just did not honour it.
+    """
+    (home / ".cowork").mkdir(parents=True, exist_ok=True)
+    (home / ".cowork" / ".env").write_text("ANTON_MINDS_API_KEY=COWORK_K\n")
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    Workspace(project).set_secret("ANTON_MINDS_API_KEY", "PROJ_K")
+    Workspace(home).set_secret("ANTON_MINDS_API_KEY", "GLOBAL_K")
+
+    # `ANTON_MINDS_API_KEY=SHELL_K anton`
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "SHELL_K")
+
+    _reconcile_publish_identity(_settings(project))
+    claim = next(
+        l for l in capsys.readouterr().out.splitlines() if "Publishing now uses" in l
+    )
+
+    assert "environment" in claim, (
+        "an exported key outranks both vaults, so naming either one is the "
+        f"wrong answer to which account publishes:\n{claim}"
+    )
+    assert "~/.cowork/.env" not in claim and "~/.anton/.env" not in claim, claim
+    # …and the export itself is still untouched (ENG-1424's original finding).
+    assert os.environ["ANTON_MINDS_API_KEY"] == "SHELL_K"
