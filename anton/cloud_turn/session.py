@@ -66,6 +66,27 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
     }
 )
 
+#: Appended to this turn's system prompt. The base prompt forbids asking for a
+#: credential in chat but cannot say where one goes, because that differs per
+#: host; on this surface nothing else was saying it either, so the model
+#: discovered mid-answer that it had nothing to offer and users pasted secrets
+#: instead. Deliberately names no connector: which ones a deployment offers is
+#: decided by auth's OAuth configuration, which the pod cannot see. "Connectors"
+#: is cowork's own label for the chat-side entry; a rename there has no test
+#: here to catch it.
+_CREDENTIAL_CONTEXT = (
+    "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
+    "none will appear mid-turn. The user makes connections through the "
+    "Connectors entry beside the chat. You cannot see which connectors that "
+    "entry offers, so never state that a particular one is or is not available "
+    "there. When a task needs a connection that does not exist yet, name the "
+    "Connectors entry and stop; if the user reports that the connector they "
+    "need is not offered, say plainly that it cannot be connected here yet "
+    "rather than inventing a location or a workaround. Saving a credential "
+    "anywhere else, in this app or another, does not make it usable in this "
+    "conversation."
+)
+
 #: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land
 #: as files. Used only as a fallback when no shared mount is configured (desktop,
 #: CI); see _MEMORY_GLOBAL_ROOT_ENV below for the mounted, cross-turn-persistent path.
@@ -621,6 +642,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
+            suffix=_CREDENTIAL_CONTEXT,
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is

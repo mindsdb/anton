@@ -879,3 +879,69 @@ def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, m
     assert "Planning model: grok" in ctx
     assert "Provider: openai-compatible" in ctx  # minds-cloud → openai-compatible derivation
     assert str(tmp_path) not in ctx  # the workspace path never rides along (security note)
+
+
+# ── the credential referral this surface had no way to give ──────────────────
+
+def test_the_credential_context_reaches_the_built_prompt(tmp_path, monkeypatch):
+    """End to end through the real builder, not just the config field: the
+    model only benefits from text the prompt actually renders. Before this the
+    pod passed no suffix at all, so nothing on this surface could say where a
+    credential goes and users pasted secrets into chat instead."""
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    prompt = ChatSystemPromptBuilder().build(
+        conversation_started="2026-09-10T12:00:00+00:00",
+        system_prompt_context=cfg.system_prompt_context,
+        proactive_dashboards=False,
+        output_dir="",
+        tool_defs=[],
+    )
+    assert "no tool here can capture a credential" in prompt
+    assert "Connectors entry beside the chat" in prompt
+
+
+def test_the_credential_context_promises_no_workaround(tmp_path, monkeypatch):
+    """A credential connected on desktop does not reach a turn here: this
+    turn's connections are only what cowork listed in the oauth block, and
+    auth's cloud vault holds OAuth connectors alone. Naming another surface as
+    the fix would send the user somewhere that cannot help, and saving one
+    elsewhere in the app writes a store no turn reads."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "does not make it usable in this conversation" in suffix
+    for invented in ("desktop", "Settings", "download"):
+        assert invented not in suffix
+
+
+def test_the_credential_context_names_no_connector(tmp_path, monkeypatch):
+    """Which connectors a deployment offers depends on auth's OAuth
+    configuration, which the pod cannot see, so naming any of them risks
+    telling the user to connect something this deployment does not have."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+
+    for connector in ("Google Drive", "google_drive", "Gmail", "gmail"):
+        assert connector not in suffix
+
+
+def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
+    """The regression bar for how this gap arrived: invisibly, via a
+    capability living in a layer web never enters. Compared against a literal
+    set rather than the constant, so adding any tool fails here and forces the
+    referral above to be revisited — a credential-capture tool would make it
+    a lie, and any other new tool is a new place a pasted secret could land.
+    """
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert set(cfg.tool_allowlist) == {
+        "scratchpad",
+        "create_artifact",
+        "list_artifacts",
+        "open_artifact",
+        "update_artifact",
+        "memorize",
+        "recall_skill",
+        "create_skill_draft",
+    }
