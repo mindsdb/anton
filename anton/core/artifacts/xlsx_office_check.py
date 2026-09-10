@@ -29,7 +29,7 @@ from anton.core.artifacts.xlsx_lint import _formula_text
 # don't hang headless soffice — it writes `Err:522` into the cell instead
 # of raising the interactive dialog — but a cold profile can still be slow
 # the very first time a host builds its font cache, hence the generous cap.
-_TIMEOUT_SECONDS = 25
+_TIMEOUT_SECONDS = 15
 
 # Any Excel/LibreOffice error literal a formula can evaluate to.
 _ERROR_PREFIXES = ("#", "Err:")
@@ -51,13 +51,38 @@ class FormulaErrorFinding:
         )
 
 
-def check_xlsx_via_office(path: Path) -> list[FormulaErrorFinding] | None:
+# Longest stderr excerpt carried into a finding message — enough to be
+# useful, short enough not to dump a wall of LibreOffice log noise on the LLM.
+_DETAIL_MAX_LEN = 500
+
+
+@dataclass(frozen=True)
+class FileLoadFinding:
+    """LibreOffice itself refused to open/convert the file.
+
+    Distinct from (and a stronger signal than) `FormulaErrorFinding`: this
+    means the workbook as a whole is broken, not just one formula in it —
+    e.g. a genuinely corrupt file, a wrong-extension `.xlsb`, or an
+    encrypted `.xlsx` openpyxl/LibreOffice can't open without a password.
+    """
+
+    detail: str
+
+    def message(self) -> str:
+        return f"LibreOffice could not open this file: {self.detail}"
+
+
+def check_xlsx_via_office(path: Path) -> list[FormulaErrorFinding | FileLoadFinding] | None:
     """Recalculate `path` with LibreOffice and flag formulas that error out.
 
     Returns `None` when the oracle isn't usable right now (no LibreOffice on
-    this host, the conversion crashed or timed out, or the output couldn't be
-    read back) — never an empty list for "couldn't check", so a caller can
-    tell "verified clean" apart from "unverified" and fall back accordingly.
+    this host, the conversion timed out, or the recalculated output couldn't
+    be read back) — never an empty list for "couldn't check", so a caller
+    can tell "verified clean" apart from "unverified" and fall back
+    accordingly. When LibreOffice *did* run but explicitly rejected the file
+    (nonzero exit with a message on stderr), that's a concrete finding in
+    its own right — surfaced as a `FileLoadFinding`, not folded into the
+    generic "unavailable" case, since the file itself is the actual problem.
     """
     try:
         return _check_via_office(path)
@@ -65,7 +90,7 @@ def check_xlsx_via_office(path: Path) -> list[FormulaErrorFinding] | None:
         return None
 
 
-def _check_via_office(path: Path) -> list[FormulaErrorFinding] | None:
+def _check_via_office(path: Path) -> list[FormulaErrorFinding | FileLoadFinding] | None:
     office = _discover_office()
     if office is None:
         return None
@@ -74,9 +99,11 @@ def _check_via_office(path: Path) -> list[FormulaErrorFinding] | None:
         profile_dir = Path(tmp) / "profile"
         outdir = Path(tmp) / "out"
         outdir.mkdir()
-        recalculated = _convert(office, path, outdir, profile_dir)
+        recalculated, reject_detail = _convert(office, path, outdir, profile_dir)
         if recalculated is None:
-            return None
+            if reject_detail is not None:
+                return [FileLoadFinding(detail=reject_detail)]
+            return None  # timeout, or nothing more specific to say
         return _diff_formula_errors(path, recalculated)
 
 
@@ -89,7 +116,13 @@ def _discover_office() -> str | None:
     return shutil.which("soffice") or shutil.which("libreoffice")
 
 
-def _convert(office: str, path: Path, outdir: Path, profile_dir: Path) -> Path | None:
+def _convert(office: str, path: Path, outdir: Path, profile_dir: Path) -> tuple[Path | None, str | None]:
+    """Run the headless conversion. Returns `(output_path, None)` on success,
+    or `(None, detail)` where `detail` is a human-readable rejection reason
+    when LibreOffice explicitly said why (nonzero exit, or exit 0 with no
+    output file) — `(None, None)` for a timeout, which isn't evidence about
+    the file itself, just that this attempt didn't finish in time.
+    """
     cmd = [
         office,
         "--headless",
@@ -110,16 +143,32 @@ def _convert(office: str, path: Path, outdir: Path, profile_dir: Path) -> Path |
         start_new_session=True,  # own process group, so a timeout can kill the whole tree
     )
     try:
-        proc.communicate(timeout=_TIMEOUT_SECONDS)
+        _, stderr = proc.communicate(timeout=_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         proc.communicate()
-        return None
-    if proc.returncode != 0:
-        return None
-
+        return None, None
     out_path = outdir / f"{path.stem}.xlsx"
-    return out_path if out_path.is_file() else None
+    if out_path.is_file() and proc.returncode == 0:
+        return out_path, None
+
+    # soffice can exit 0 while still having refused the file entirely — a
+    # corrupt/unsupported source produces no output file but no nonzero
+    # code either (confirmed: "no export filter ... aborting", exit 0). The
+    # output file's presence, not the exit code, is what's trustworthy here.
+    stderr_text = _clean_stderr(stderr, outdir)
+    return None, stderr_text or f"soffice exited with code {proc.returncode}, no output produced"
+
+
+# Printed on every headless invocation regardless of the file, in any
+# environment missing a JRE — noise, not a signal about this file.
+_STDERR_NOISE = ("javaldx",)
+
+
+def _clean_stderr(stderr: bytes, outdir: Path) -> str:
+    text = stderr.decode("utf-8", "replace").replace(f"{outdir}/", "")
+    lines = [ln for ln in text.strip().splitlines() if not any(noise in ln for noise in _STDERR_NOISE)]
+    return "\n".join(lines).strip()[:_DETAIL_MAX_LEN]
 
 
 def _diff_formula_errors(original: Path, recalculated: Path) -> list[FormulaErrorFinding]:
