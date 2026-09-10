@@ -4,8 +4,20 @@ Matches what the controller sends (`scratchpad_controller.anton_turn.request_lin
 and what cowork-server consumes off the reply stream. Intentionally minimal and
 data-only: the entrypoint reads ONE newline-terminated JSON line on stdin.
 
-Events written back on stdout (JSONL) are the six the controller translates:
+Events written back on stdout (JSONL):
   {"kind": "delta", "text": "..."}   - streamed assistant text, one per chunk
+  {"kind": "progress", "phase": "...", "message": "..."}  - phase notice, rate
+      limited to one per 250ms except for the phases the entrypoint exempts.
+      `phase: "continuation"` is the boundary the completion verifier crosses
+      when it forces a continuation: the text after it supersedes the text
+      before it, so cowork replaces the answer rather than appending to it.
+      Exempt from the rate limit — dropping it reinstates the duplicated
+      answer, since the replacement text still arrives either way.
+      `phase: "handback"` is its counterpart: the turn is explaining instead
+      of delivering that replacement, so the text after it adds to the answer
+      rather than replacing it. Also exempt, and for a sharper reason —
+      dropping it lets the explanation pass as the replacement, and the answer
+      the user already read is lost from the transcript.
   {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork
@@ -18,6 +30,10 @@ Events written back on stdout (JSONL) are the six the controller translates:
       on failure, in which case that turn replays text-only.
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
+
+The tool/round step kinds the controller relays unchanged as `turn_step` are
+not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
+`round_end`. A `heartbeat` only resets the controller's stall timer.
 """
 
 from __future__ import annotations

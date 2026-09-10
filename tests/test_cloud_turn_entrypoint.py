@@ -177,6 +177,28 @@ def test_progress_flood_is_rate_limited_but_step_phases_pass():
     assert len(progress) < 10  # the 50-call flood collapses on the wire
 
 
+def test_the_continuation_boundary_outlives_a_progress_flood():
+    """The boundary tells cowork the following text supersedes what came before.
+
+    Rate-limiting it away restores the duplicated-answer bug silently, since the
+    replacement text still arrives — it just appends. One event per continuation,
+    so exempting it cannot flood the wire.
+    """
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            for i in range(50):
+                yield StreamTaskProgress(phase="progress", message=f"m{i}")
+            yield StreamTaskProgress(
+                phase="continuation", message="Task incomplete — continuing (1/3)..."
+            )
+
+    events = _drive(_S())
+    phases = [e["phase"] for e in events if e.get("kind") == "progress"]
+    assert phases.count("continuation") == 1, (
+        f"the boundary was dropped by the rate limiter; phases on the wire: {phases}"
+    )
+
+
 def test_tool_args_accumulation_is_bounded():
     class _S(_FakeSession):
         async def turn_stream(self, user_input, **kwargs):
@@ -574,3 +596,19 @@ def test_no_trace_block_forwards_no_metadata():
     session = _KwargCapturingSession()
     _drive(session)
     assert session.turn_kwargs["trace_metadata"] is None
+
+
+def test_the_handback_marker_outlives_a_progress_flood_too():
+    """It cancels the continuation boundary, so losing it is as bad as losing
+    the boundary: the hand-back diagnosis would replace the answer it explains."""
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            for i in range(50):
+                yield StreamTaskProgress(phase="progress", message=f"m{i}")
+            yield StreamTaskProgress(phase="handback", message="")
+
+    events = _drive(_S())
+    phases = [e["phase"] for e in events if e.get("kind") == "progress"]
+    assert phases.count("handback") == 1, (
+        f"the hand-back marker was dropped by the rate limiter; phases: {phases}"
+    )
