@@ -200,10 +200,9 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     def _xlsx_linter(path: Path) -> list[str] | None:
         # LibreOffice recalculates and catches any formula error; the
         # structural lint is the fallback when it isn't installed/usable.
-        # `lint_xlsx` never returns None (it swallows its own parse
-        # failures), so this never actually signals not-validated — the
-        # structural check is trusted as sufficient on its own whenever the
-        # office oracle isn't available.
+        # Both can return None (couldn't check at all) — e.g. no office AND
+        # the file doesn't even parse with openpyxl — which cascades to
+        # this function returning None too, same as either check alone.
         findings = check_xlsx_via_office(path)
 
         if findings is None:

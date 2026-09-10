@@ -94,10 +94,12 @@ def test_clean_workbook_has_no_findings(clean_forecast: Path):
     assert lint_xlsx(clean_forecast) == []
 
 
-def test_non_xlsx_file_yields_no_findings_not_an_exception(tmp_path: Path):
+def test_unparseable_file_yields_none_not_an_exception(tmp_path: Path):
+    """None means 'could not check', distinct from `[]` ('checked, clean') —
+    a parse failure must not be reported as if it verified anything."""
     junk = tmp_path / "not_really.xlsx"
     junk.write_bytes(b"this is not a zip file at all")
-    assert lint_xlsx(junk) == []
+    assert lint_xlsx(junk) is None
 
 
 def test_message_names_sheet_cell_and_formula(broken_forecast: Path):

@@ -48,18 +48,19 @@ class CircularRefFinding:
         )
 
 
-def lint_xlsx(path: Path) -> list[CircularRefFinding]:
+def lint_xlsx(path: Path) -> list[CircularRefFinding] | None:
     """Flag same-sheet formula ranges that contain their own cell.
 
-    Best-effort: any parse failure (corrupt file, not actually an xlsx,
-    unexpected structure) yields no findings rather than raising —
-    a checker must never fail the artifact read that triggered it.
+    Returns `None` when the file could not actually be checked (corrupt,
+    not really an xlsx, an openpyxl-unsupported feature, encrypted, ...) —
+    distinct from `[]`, which means it parsed fine and nothing was flagged.
+    Never raises either way, so a checker failure can't fail the artifact
+    read/cell that triggered it.
     """
 
     try:
         return _lint_xlsx(path)
     except Exception:
-        # something went wrong (corrupt file, not actually an xlsx, unexpected structure)
         return None
 
 
