@@ -283,9 +283,11 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
             )
         return (
             "Interactive connection setup isn't available in this environment "
-            "(no terminal to prompt in)." + note + " Ask the user for the "
-            "credential values directly in chat, then call "
-            "connect_new_datasource again with known_variables set."
+            "(no terminal to prompt in)." + note + " Do not ask the user to "
+            "type the credential into the chat — point them at this host's "
+            "credential form or connector flow, which stores the connection "
+            "itself. Call this tool again only with known_variables you "
+            "already hold."
         )
 
     console.print()
@@ -479,8 +481,10 @@ CONNECT_DATASOURCE_TOOL_NO_CONSOLE = dataclasses.replace(
         "There is no interactive prompt flow in this environment — do NOT "
         "call this tool with just an engine and no known_variables; there is "
         "nothing to prompt with and the call will fail. If the user hasn't "
-        "shared credentials yet, ask for them in chat first, then call this "
-        "tool once you have real values to pass.\n\n"
+        "supplied credentials yet, do NOT ask them to type the values into "
+        "the chat; point them at this host's credential form or connector "
+        "flow, which stores the connection itself. Call this tool once you "
+        "hold real values to pass.\n\n"
         + _CONNECT_DATASOURCE_DESCRIPTION_TAIL
     ),
     # Own copy, not shared with CONNECT_DATASOURCE_TOOL: this variant has no

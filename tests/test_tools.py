@@ -94,6 +94,20 @@ class TestConnectDatasourceToolDescriptionGating:
         assert tool.description == CONNECT_DATASOURCE_TOOL_NO_CONSOLE.description
         assert "(b) Interactive" not in tool.description
 
+    def test_neither_description_asks_for_the_credential_in_chat(self):
+        """The console-less description is the one Cowork desktop gets, and it
+        used to say to ask for the values in chat first."""
+        for tool in (CONNECT_DATASOURCE_TOOL, CONNECT_DATASOURCE_TOOL_NO_CONSOLE):
+            assert "ask for them in chat first" not in tool.description
+
+    def test_vaulting_an_already_shared_credential_is_still_advertised(self):
+        """The prohibition is on soliciting, not on recovery: when a value has
+        already reached the conversation, this tool is how it stops living
+        there. Removing that would reopen the gap it was added to close."""
+        for tool in (CONNECT_DATASOURCE_TOOL, CONNECT_DATASOURCE_TOOL_NO_CONSOLE):
+            assert "when the user shares credentials in chat" in tool.description
+            assert "saves to the vault" in tool.description
+
     def test_console_at_init_keeps_the_full_description(self, vault_dir):
         session = _make_session(vault_dir, console=MagicMock())
         registered = {t.name: t for t in session._extra_tools}
@@ -686,6 +700,17 @@ class TestNoConsole:
         result = await handle_connect_datasource(session, {"engine": "postgres"})
         assert "Interactive connection setup isn't available" in result
         assert session._data_vault.list_connections() == []
+
+    @pytest.mark.asyncio
+    async def test_the_bail_out_does_not_send_the_model_to_ask_in_chat(self, vault_dir):
+        """This string is a tool result, so it is replayed into every later
+        LLM payload. Telling the model to collect the credential in chat from
+        here is what put live secrets in the transcript."""
+        session = _make_session(vault_dir)
+        session._console = None
+        result = await handle_connect_datasource(session, {"engine": "postgres"})
+        assert "directly in chat" not in result
+        assert "Do not ask the user to type the credential into the chat" in result
 
 
 class TestConnectToolUserLabel:
