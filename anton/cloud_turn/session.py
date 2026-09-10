@@ -519,6 +519,51 @@ def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
     return [*image_blocks, {"type": "text", "text": text}]
 
 
+# What the web UI does with a finished file, told to the model because the pod
+# cannot see that UI (ENG-2421). The desktop harness has carried the equivalent
+# guidance since ENG-1636 (cowork-server `_turn_style_context`) — but that
+# harness refuses to run org turns, so the web population never received it and
+# kept handing users pod paths and loopback URLs as "download links" for weeks
+# after every card-side fix shipped. Every claim below is provable from the
+# product: artifact cards carry a Download control on web (ENG-2044), HTML and
+# Markdown artifacts are auto-shared at turn end (ENG-1680) with the link
+# surfaced on the card, and the chat renderer neutralises local-path links into
+# inert text. The base ARTIFACTS prompt (anton/core/llm/prompts.py, workflow
+# step 4) instructs the OPPOSITE for the CLI case — "include the primary
+# file's path … so it is clickable/openable in a plain CLI", and for
+# fullstack apps to prefer launch_backend's (loopback) url — so this block
+# overrides both BY NAME rather than merely contradicting them; suffix order
+# gives it the last word, and naming the overridden rule is what makes the
+# model treat it as a deployment exception instead of a conflict (review
+# note from pnewsam on #461). When the pod is driven outside cowork (dev, CI) the panel it
+# names does not exist; that run has no end user reading prose, so the wrong
+# half of the trade is the one where a real user is told to click a dead path.
+CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
+    "Files you create as artifacts appear automatically in the Live Artifacts "
+    "panel beside the chat, where the user previews them and uses the Download "
+    "control. When a file is ready, tell the user it is in the Live Artifacts "
+    "panel and can be downloaded there — do NOT hand them its location on "
+    "disk. You are running in a sandboxed cloud workspace: filesystem paths "
+    "(for example /mnt/...) and loopback URLs (for example "
+    "http://127.0.0.1:PORT or http://localhost:PORT) exist only inside this "
+    "workspace and can never be opened from the user's browser. Never put "
+    "such a path or URL into your reply as a markdown link or as text, and "
+    "never invent a download URL such as sandbox:/mnt/data/...; no link of "
+    "that form works. This OVERRIDES the ARTIFACTS workflow instruction to "
+    "include the primary file's path in your final message: here, point to "
+    "the artifact by name only — the panel is the pointer. It also overrides "
+    "the fullstack-app instruction to prefer the launch_backend url as the "
+    "pointer: that url is loopback inside this workspace and dead in the "
+    "user's browser; the artifact card's preview is how the user opens the "
+    "app. HTML and Markdown artifacts are shared to a live URL "
+    "automatically at the end of the turn and that link appears on the "
+    "artifact card — you do not know the link, so point at the card rather "
+    "than guessing one. If the user says they cannot find, open, or download "
+    "a file, point them again at the Live Artifacts panel's Download control "
+    "— never repeat a path."
+)
+
+
 def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
 
@@ -621,6 +666,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
+            # The delivery half of the prompt context (ENG-2421) — the desktop
+            # harness injects its own via `_turn_style_context`; this is the
+            # web-worded equivalent, which the pod owns because only it runs
+            # web turns.
+            suffix=CLOUD_ARTIFACT_DELIVERY_GUIDANCE,
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
