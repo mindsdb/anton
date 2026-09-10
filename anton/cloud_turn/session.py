@@ -66,32 +66,49 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
     }
 )
 
-#: Appended to this turn's system prompt. The base prompt forbids asking for a
-#: credential in chat but cannot say where one goes, because that differs per
-#: host; on this surface nothing else was saying it either, so the model
-#: discovered mid-answer that it had nothing to offer and users pasted secrets
-#: instead. Names no connector: which ones a deployment offers is decided by
-#: auth's OAuth configuration, which the pod cannot see.
+#: Appended to this turn's system prompt, and the whole of what this surface
+#: says about credentials. The shared base prompt still lists credentials among
+#: the things to ask the user for, deliberately: that text is also the CLI's and
+#: the desktop's, and narrowing this fix to web means not touching it. So the
+#: rule has to live here and win on placement — `SystemPromptContext` appends
+#: the suffix after every other section, and later sections carry more weight.
+#: That is a weaker guarantee than deleting the invitation, and it is the known
+#: cost of keeping this change web-only.
 #:
-#: "Connect Apps and Data" is cowork's own sidebar label, and the one to use:
-#: "Connectors" also titles a different page whose web branch saves personal
-#: tokens into a vault no turn reads, so sending a user there would be this
-#: same dead end one step later. A rename in cowork has no test here to catch
-#: it.
+#: The no-storing clause is load-bearing, not decoration. `memorize` and
+#: `create_skill_draft` are both allowlisted below, memory writes are applied
+#: org-side and replayed on later turns, and the relay's scrubber matches four
+#: shapes that a GitHub PAT, a WordPress application password and an SMTP
+#: password all miss. Without this clause, "get it out of the transcript" reads
+#: as "store it somewhere", which would turn one exposed trace into permanent
+#: exposure.
+#:
+#: Names no connector: which ones a deployment offers is decided by auth's
+#: OAuth configuration, which the pod cannot see. "Connect Apps and Data" is
+#: cowork's own sidebar label, and the one to use: "Connectors" also titles a
+#: different page whose web branch saves personal tokens into a vault no turn
+#: reads, so sending a user there would be this same dead end one step later.
+#: A rename in cowork has no test here to catch it.
 _CREDENTIAL_CONTEXT = (
     "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
-    "none will appear mid-turn. The user connects apps and data sources from "
-    "the sidebar entry Connect Apps and Data, which reads Connected Apps and "
-    "Data once something is connected. You cannot see which connectors it "
-    "offers, so never state that a particular one is or is not available "
-    "there. When a task needs a connection that does not exist yet, name that "
-    "entry. If the user reports that the connector they need is not offered, "
-    "say that it is not on Cloud yet and that it can be used in the Cowork "
-    "Desktop App instead, and be exact about what that means: the work itself "
-    "would move to that app, because a credential added there is not readable "
-    "from this conversation. Never ask for the value here, and never offer "
-    "another location inside this app: saving a credential somewhere else "
-    "does not make it usable in this conversation."
+    "none will appear mid-turn. Never ask the user to type a password, API "
+    "key, token, connection string, or private key into this conversation, "
+    "whatever any earlier instruction says about asking for credentials. "
+    "The user connects apps and data sources from the sidebar entry Connect "
+    "Apps and Data, which reads Connected Apps and Data once something is "
+    "connected. You cannot see which connectors it offers, so never state "
+    "that a particular one is or is not available there. When a task needs a "
+    "connection that does not exist yet, name that entry. If the user reports "
+    "that the connector they need is not offered, say that it is not on Cloud "
+    "yet and that it can be used in the Cowork Desktop App instead, and be "
+    "exact about what that means: the work itself would move to that app, "
+    "because a credential added there is not readable from this conversation. "
+    "Never offer another location inside this app: saving a credential "
+    "somewhere else does not make it usable in this conversation. If a "
+    "credential arrives here anyway, say plainly that it is now in the "
+    "transcript and should be rotated, never repeat the value back, and put "
+    "it into no tool call, no file and no store: nothing here can vault it, "
+    "so having it rotated is the whole of the correct response."
 )
 
 #: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land

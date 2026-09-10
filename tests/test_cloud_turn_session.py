@@ -904,6 +904,43 @@ def test_the_credential_context_reaches_the_built_prompt(tmp_path, monkeypatch):
     assert "Connect Apps and Data" in prompt
 
 
+def test_the_credential_context_carries_the_whole_rule(tmp_path, monkeypatch):
+    """This surface's only statement about credentials, since the shared base
+    prompt is left alone to keep the change web-only. So the prohibition, the
+    rotation instruction and the no-storing clause all have to be here.
+
+    The no-storing clause is the one that matters most: `memorize` and
+    `create_skill_draft` are allowlisted, memory writes are applied org-side
+    and replayed on later turns, and the relay scrubber misses a GitHub PAT, a
+    WordPress application password and an SMTP password. Without it, "get the
+    secret out of the transcript" reads as "put it somewhere else", and one
+    exposed trace becomes every later one.
+    """
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "Never ask the user to type a password" in suffix
+    assert "should be rotated" in suffix
+    assert "no tool call, no file and no store" in suffix
+
+
+def test_the_credential_context_overrides_the_shared_invitation(tmp_path, monkeypatch):
+    """The base prompt still lists credentials among the things to ask for, and
+    is deliberately untouched. The suffix has to countermand it in the text,
+    not merely by sitting later in the prompt."""
+    from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+
+    # If the shared invitation is ever removed, this override stops being
+    # necessary and the wording here should be revisited.
+    assert "credentials they haven't shared" in CHAT_SYSTEM_PROMPT
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert (
+        "whatever any earlier instruction says about asking for credentials"
+        in cfg.system_prompt_context.suffix
+    )
+
+
 def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypatch):
     """The ticket asks for parity stated plainly: either creation works here or
     the agent says it must happen elsewhere and how. The product's own web copy

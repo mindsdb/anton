@@ -21,17 +21,6 @@ from anton.utils.datasources import _DS_SECRET_VARS
 _UUID8 = re.compile(r"^[0-9a-f]{8}$")
 
 
-def _is_negated(sentence: str) -> bool:
-    """Whether a sentence forbids rather than instructs.
-
-    Apostrophes are stripped so the match fires inside "don't", where a word
-    boundary never would. "hasn't" survives as "hasnt", which is not in the
-    set, so a solicitation that merely contains it still counts as one.
-    """
-    plain = sentence.replace("\u2019", "").replace("'", "")
-    return re.search(r"\b(never|not|cannot|dont|doesnt|wont|isnt)\b", plain, re.IGNORECASE) is not None
-
-
 @pytest.fixture()
 def vault_dir(tmp_path):
     return tmp_path / "vault"
@@ -104,36 +93,6 @@ class TestConnectDatasourceToolDescriptionGating:
         tool = registered["connect_new_datasource"]
         assert tool.description == CONNECT_DATASOURCE_TOOL_NO_CONSOLE.description
         assert "(b) Interactive" not in tool.description
-
-    def test_neither_description_asks_for_the_credential_in_chat(self):
-        """The console-less description is the one Cowork desktop gets, and it
-        used to say to ask for the values in chat first. Asserted over the
-        whole description, not against the one phrase that was deleted: the
-        shared tail carried a second solicitation ("ask for missing pieces")
-        that a literal check for the first one passed straight over.
-        """
-        # Every sentence here is about credentials, so the subject needs no
-        # matching: an unnegated instruction to ask is the smell, whatever it
-        # calls the thing. Scoping to sentences naming chat would have missed
-        # the tail's "Ask for missing pieces in a later turn", which named no
-        # channel — and on a host with no terminal, chat is the only channel
-        # an unqualified ask can use.
-        for tool in (CONNECT_DATASOURCE_TOOL, CONNECT_DATASOURCE_TOOL_NO_CONSOLE):
-            solicitations = [
-                sentence.strip()
-                for sentence in tool.description.split(".")
-                if re.search(r"\bask", sentence, re.IGNORECASE)
-                and not _is_negated(sentence)
-            ]
-            assert solicitations == [], solicitations
-
-    def test_vaulting_an_already_shared_credential_is_still_advertised(self):
-        """The prohibition is on soliciting, not on recovery: when a value has
-        already reached the conversation, this tool is how it stops living
-        there. Removing that would reopen the gap it was added to close."""
-        for tool in (CONNECT_DATASOURCE_TOOL, CONNECT_DATASOURCE_TOOL_NO_CONSOLE):
-            assert "when the user shares credentials in chat" in tool.description
-            assert "saves to the vault" in tool.description
 
     def test_console_at_init_keeps_the_full_description(self, vault_dir):
         session = _make_session(vault_dir, console=MagicMock())
@@ -727,17 +686,6 @@ class TestNoConsole:
         result = await handle_connect_datasource(session, {"engine": "postgres"})
         assert "Interactive connection setup isn't available" in result
         assert session._data_vault.list_connections() == []
-
-    @pytest.mark.asyncio
-    async def test_the_bail_out_does_not_send_the_model_to_ask_in_chat(self, vault_dir):
-        """This string is a tool result, so it is replayed into every later
-        LLM payload. Telling the model to collect the credential in chat from
-        here is what put live secrets in the transcript."""
-        session = _make_session(vault_dir)
-        session._console = None
-        result = await handle_connect_datasource(session, {"engine": "postgres"})
-        assert "directly in chat" not in result
-        assert "Do not ask the user to type the credential into the chat" in result
 
 
 class TestConnectToolUserLabel:

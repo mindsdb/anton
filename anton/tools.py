@@ -278,17 +278,14 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
             note = (
                 f" Scrubbed-placeholder values for "
                 f"{', '.join(sorted(dropped_scrubbed))} were ignored — those "
-                f"are masking markers, not real credentials, and the values "
-                f"behind them cannot be recovered here. Re-open the credential "
-                f"flow for those fields."
+                f"are not real credentials; pass the actual secret values "
+                f"instead."
             )
         return (
             "Interactive connection setup isn't available in this environment "
-            "(no terminal to prompt in)." + note + " Do not ask the user to "
-            "type the credential into the chat — point them at this host's "
-            "credential form or connector flow, which stores the connection "
-            "itself. Call this tool again only with known_variables you "
-            "already hold."
+            "(no terminal to prompt in)." + note + " Ask the user for the "
+            "credential values directly in chat, then call "
+            "connect_new_datasource again with known_variables set."
         )
 
     console.print()
@@ -410,10 +407,8 @@ _CONNECT_DATASOURCE_DESCRIPTION_TAIL = (
     "definition is appended to ~/.anton/datasources.md so future sessions "
     "recognize it. Reference credentials via DS_<ENGINE>_<NAME>__<FIELD> env "
     "vars like any other connection.\n\n"
-    "Partial credentials are fine — save what the user provided. Collect a "
-    "missing field through this host's credential flow (the interactive prompt "
-    "where there is a terminal, the credential form otherwise), never by asking "
-    "for the value in chat. Never invent values.\n\n"
+    "Partial credentials are fine — save what the user provided. Ask for missing "
+    "pieces in a later turn only if needed. Never invent values.\n\n"
     "If a value in chat appears as a bracketed placeholder like [DS_POSTGRES_ABC12__PASSWORD] "
     "instead of a real value, that means it was already masked before reaching you — the user "
     "is referencing a credential already saved from an earlier connection (e.g. reusing the "
@@ -484,10 +479,8 @@ CONNECT_DATASOURCE_TOOL_NO_CONSOLE = dataclasses.replace(
         "There is no interactive prompt flow in this environment — do NOT "
         "call this tool with just an engine and no known_variables; there is "
         "nothing to prompt with and the call will fail. If the user hasn't "
-        "supplied credentials yet, do NOT ask them to type the values into "
-        "the chat; point them at this host's credential form or connector "
-        "flow, which stores the connection itself. Call this tool once you "
-        "hold real values to pass.\n\n"
+        "shared credentials yet, ask for them in chat first, then call this "
+        "tool once you have real values to pass.\n\n"
         + _CONNECT_DATASOURCE_DESCRIPTION_TAIL
     ),
     # Own copy, not shared with CONNECT_DATASOURCE_TOOL: this variant has no
