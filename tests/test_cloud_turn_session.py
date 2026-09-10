@@ -899,21 +899,28 @@ def test_the_credential_context_reaches_the_built_prompt(tmp_path, monkeypatch):
         tool_defs=[],
     )
     assert "no tool here can capture a credential" in prompt
-    assert "Connectors entry beside the chat" in prompt
+    # cowork's own sidebar label. Not "Connectors", which also titles a page
+    # whose web branch saves tokens into a vault no turn reads.
+    assert "Connect Apps and Data" in prompt
 
 
-def test_the_credential_context_promises_no_workaround(tmp_path, monkeypatch):
-    """A credential connected on desktop does not reach a turn here: this
-    turn's connections are only what cowork listed in the oauth block, and
-    auth's cloud vault holds OAuth connectors alone. Naming another surface as
-    the fix would send the user somewhere that cannot help, and saving one
-    elsewhere in the app writes a store no turn reads."""
+def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypatch):
+    """The ticket asks for parity stated plainly: either creation works here or
+    the agent says it must happen elsewhere and how. The product's own web copy
+    already points at the desktop app, so staying silent about it would have
+    the agent contradict the modal on screen.
+
+    The caveat has to ride along, because it is the part the UI does not say: a
+    credential added in the desktop app is not readable from a turn here. This
+    turn sees only the connections cowork listed in the oauth block, and auth's
+    cloud vault holds OAuth connectors alone.
+    """
     _, cfg = _build(tmp_path, monkeypatch)
     suffix = cfg.system_prompt_context.suffix
 
+    assert "Cowork Desktop App" in suffix
+    assert "not readable from this conversation" in suffix
     assert "does not make it usable in this conversation" in suffix
-    for invented in ("desktop", "Settings", "download"):
-        assert invented not in suffix
 
 
 def test_the_credential_context_names_no_connector(tmp_path, monkeypatch):
