@@ -25,13 +25,13 @@ jobs:
     env:
       WHEEL_VENV: /tmp/wheelenv
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0  # hatch-vcs needs tags to derive version
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
         run: uv python install 3.12
@@ -108,7 +108,7 @@ jobs:
       # Hand the publish job these exact bytes. Last step, so a failed
       # verification never leaves a publishable artifact behind.
       - name: Upload the verified distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: verified-dist
           path: dist/
