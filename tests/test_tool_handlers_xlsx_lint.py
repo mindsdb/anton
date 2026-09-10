@@ -1,4 +1,4 @@
-"""Coverage for the exec-time artifact lint hook (ENG-1204).
+"""Coverage for the exec-time artifact lint hook.
 
 `lint_changed_artifact_files` dispatches by file suffix (see
 `_artifact_linters`) and wires it into the scratchpad exec path — scoped to
@@ -76,7 +76,7 @@ def test_flags_circular_refs_in_a_changed_artifact(store: _FakeStore):
 
 def test_clean_workbook_produces_no_messages_via_structural_fallback(store: _FakeStore):
     """No LibreOffice on this 'host', so the structural lint runs instead.
-    `lint_xlsx` never returns None (ENG-1204: `_xlsx_linter` trusts the
+    `lint_xlsx` never returns None (`_xlsx_linter` trusts the
     fallback as sufficient on its own), so a workbook it finds nothing wrong
     with produces no messages at all — not a 'not validated' disclaimer."""
     folder = _make_artifact(store, "clean-abc12345")

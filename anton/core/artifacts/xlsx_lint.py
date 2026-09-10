@@ -1,6 +1,6 @@
 """Structural lint for `.xlsx` artifacts — same-sheet circular refs.
 
-Fix 2 from ENG-1204: a formula that means `SLOPE('Actuals'!E6:J6, ...)`
+A formula that means `SLOPE('Actuals'!E6:J6, ...)`
 but drops the sheet prefix becomes `SLOPE(E6:J6, ...)` inside E6 itself
 — a range that eats its own cell. Caught structurally, no evaluator.
 

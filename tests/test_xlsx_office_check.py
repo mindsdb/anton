@@ -1,4 +1,4 @@
-"""Coverage for the LibreOffice recalculation oracle (ENG-1204).
+"""Coverage for the LibreOffice recalculation oracle.
 
 `check_xlsx_via_office` is the oracle path ahead of the structural lint —
 see `xlsx_office_check.py`'s module docstring for why `None` (not `[]`)

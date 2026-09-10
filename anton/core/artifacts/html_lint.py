@@ -1,4 +1,4 @@
-"""Headless-browser lint for `.html` artifacts (ENG-1204 Fix 3).
+"""Headless-browser lint for `.html` artifacts.
 
 Catches a page that throws on load or references a missing local script —
 things nothing else in the pipeline ever checks. Reuses cowork's own

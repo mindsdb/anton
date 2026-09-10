@@ -99,7 +99,7 @@ from anton.core.utils.scratchpad import (
     format_cell_result,
     observe_scratchpad_cell,
 )
-# Artifact-edit tracking + lint (ENG-1204): shared with handle_scratchpad's
+# Artifact-edit tracking + lint: shared with handle_scratchpad's
 # own exec branch (tool_handlers.py) rather than duplicated here, since this
 # inline streaming exec bypasses that handler entirely.
 from anton.core.tools.tool_handlers import (
@@ -1441,7 +1441,7 @@ class ChatSession:
         # mistaken for this turn's work. Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
         # slug -> "has_errors" | "not_validated" for this turn's lint checks
-        # (ENG-1204). In-memory only, per turn — not persisted to metadata.json,
+        # In-memory only, per turn — not persisted to metadata.json,
         # since the only consumers are: (a) this turn's own model-facing
         # signal (already carried by result_text) and (b) an end-of-turn
         # user-facing notice a host builds from this property. Overwritten
@@ -1557,7 +1557,7 @@ class ChatSession:
     def artifact_lint_status(self) -> dict[str, str]:
         """slug -> "has_errors" | "not_validated" for artifacts this turn's
         lint checks found still invalid at the point each check last ran
-        (ENG-1204). A copy, same reason as `artifacts_touched`: a host reads
+        A copy, same reason as `artifacts_touched`: a host reads
         this after the turn to decide whether to warn the user, and must not
         be able to mutate the session's own record.
         """
@@ -5099,7 +5099,7 @@ class ChatSession:
 
                                 # Snapshot before execute so a post-cell lint
                                 # (below) can tell which artifact this cell
-                                # actually touched (ENG-1204).
+                                # actually touched
                                 artifact_store = resolve_artifact_store(self)
                                 before_artifact_mtimes = (
                                     snapshot_existing_artifact_mtimes(artifact_store)
@@ -5139,7 +5139,7 @@ class ChatSession:
                                     # handle_scratchpad's exec branch runs
                                     # this same pair; this inline path is the
                                     # one the streaming product actually
-                                    # takes, so it needs its own call (ENG-1204).
+                                    # takes, so it needs its own call.
                                     track_edits_since(
                                         self, artifact_store, before_artifact_mtimes
                                     )

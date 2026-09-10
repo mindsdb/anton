@@ -1,4 +1,4 @@
-"""Coverage for the exec-time artifact lint hook's html path (ENG-1204 Fix 3).
+"""Coverage for the exec-time artifact lint hook's html path.
 
 Mirrors `test_tool_handlers_xlsx_lint.py` — same `_FakeStore`/`_make_artifact`
 shape, exercising `lint_changed_artifact_files` directly rather than the
@@ -46,7 +46,7 @@ def _make_artifact(store: _FakeStore, slug: str) -> Path:
 
 def test_no_browser_configured_is_silent_in_messages_but_sets_status(monkeypatch, store: _FakeStore):
     """`lint_html` returns None (couldn't run), not `[]` (ran, found
-    nothing) — ENG-1204: that distinction now only reaches the agent via
+    nothing) — that distinction now only reaches the agent via
     `status_by_slug`, not as a line in the returned message list."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
     folder = _make_artifact(store, "dash-abc12345")

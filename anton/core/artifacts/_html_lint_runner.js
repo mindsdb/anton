@@ -1,4 +1,4 @@
-// Checked-in runner for html_lint.py (ENG-1204 Fix 3) — not agent-authored.
+// Checked-in runner for html_lint.py — not agent-authored.
 // Target file path comes via ANTON_HTML_LINT_TARGET (env, not argv, to
 // avoid mixing Chromium switches with a positional file argument).
 //

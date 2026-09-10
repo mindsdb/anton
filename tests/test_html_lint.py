@@ -1,4 +1,4 @@
-"""Coverage for the html structural lint (ENG-1204 Fix 3)."""
+"""Coverage for the html structural lint."""
 
 from __future__ import annotations
 

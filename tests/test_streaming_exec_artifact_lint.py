@@ -1,4 +1,4 @@
-"""The artifact lint hook must fire on the REAL product path (ENG-1204).
+"""The artifact lint hook must fire on the REAL product path.
 
 `ChatSession.turn_stream`'s inline scratchpad exec (session.py) bypasses
 `handle_scratchpad` (tool_handlers.py) entirely — confirmed by grep: no

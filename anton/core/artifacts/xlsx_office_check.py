@@ -1,4 +1,4 @@
-"""LibreOffice-backed recalculation check for `.xlsx` artifacts (ENG-1204).
+"""LibreOffice-backed recalculation check for `.xlsx` artifacts.
 
 `xlsx_lint.py` catches same-sheet circular refs structurally, without an
 evaluator. This module is the oracle path: when LibreOffice is present, use

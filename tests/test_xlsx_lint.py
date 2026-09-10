@@ -1,4 +1,4 @@
-"""Coverage for the xlsx structural lint (ENG-1204, Fix 2)."""
+"""Coverage for the xlsx structural lint."""
 
 from __future__ import annotations
 

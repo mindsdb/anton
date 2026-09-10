@@ -1,4 +1,4 @@
-"""Per-artifact lint status for the end-of-turn user notice (ENG-1204).
+"""Per-artifact lint status for the end-of-turn user notice.
 
 `lint_changed_artifact_files(..., status_by_slug=...)` collapses per-file
 checker messages into one of two states per artifact — `has_errors` (a real

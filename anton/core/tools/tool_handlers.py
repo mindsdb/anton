@@ -167,8 +167,7 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
     return mtimes
 
 
-# Bounded per ENG-1204 Fix 1: never lint a huge file inline on the agent's
-# turn.
+# Bounded: never lint a huge file inline on the agent's turn.
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
 
@@ -226,7 +225,7 @@ def lint_changed_artifact_files(
 ) -> list[str]:
     """Run the format-appropriate checker on artifact folders this cell
     edited (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list() (ENG-1204).
+    tool-result text right away, not only via a later open()/list()
 
     `status_by_slug`, when given, is updated in place with this call's
     aggregate verdict per touched slug (`LINT_STATUS_HAS_ERRORS` /
@@ -874,7 +873,7 @@ async def handle_scratchpad(
                         status_by_slug=getattr(session, "_artifact_lint_status", None),
                     )
                 except Exception:
-                    # Best-effort (ENG-1204): a lint crash must never fail
+                    # Best-effort: a lint crash must never fail
                     # the cell's own result.
                     _log.warning("artifact lint failed for this cell", exc_info=True)
         else:
