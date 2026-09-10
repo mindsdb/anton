@@ -278,8 +278,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
             note = (
                 f" Scrubbed-placeholder values for "
                 f"{', '.join(sorted(dropped_scrubbed))} were ignored — those "
-                f"are not real credentials; pass the actual secret values "
-                f"instead."
+                f"are masking markers, not real credentials, and the values "
+                f"behind them cannot be recovered here. Re-open the credential "
+                f"flow for those fields."
             )
         return (
             "Interactive connection setup isn't available in this environment "
@@ -409,8 +410,10 @@ _CONNECT_DATASOURCE_DESCRIPTION_TAIL = (
     "definition is appended to ~/.anton/datasources.md so future sessions "
     "recognize it. Reference credentials via DS_<ENGINE>_<NAME>__<FIELD> env "
     "vars like any other connection.\n\n"
-    "Partial credentials are fine — save what the user provided. Ask for missing "
-    "pieces in a later turn only if needed. Never invent values.\n\n"
+    "Partial credentials are fine — save what the user provided. Collect a "
+    "missing field through this host's credential flow (the interactive prompt "
+    "where there is a terminal, the credential form otherwise), never by asking "
+    "for the value in chat. Never invent values.\n\n"
     "If a value in chat appears as a bracketed placeholder like [DS_POSTGRES_ABC12__PASSWORD] "
     "instead of a real value, that means it was already masked before reaching you — the user "
     "is referencing a credential already saved from an earlier connection (e.g. reusing the "

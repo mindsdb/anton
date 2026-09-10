@@ -21,6 +21,17 @@ from anton.utils.datasources import _DS_SECRET_VARS
 _UUID8 = re.compile(r"^[0-9a-f]{8}$")
 
 
+def _is_negated(sentence: str) -> bool:
+    """Whether a sentence forbids rather than instructs.
+
+    Apostrophes are stripped so the match fires inside "don't", where a word
+    boundary never would. "hasn't" survives as "hasnt", which is not in the
+    set, so a solicitation that merely contains it still counts as one.
+    """
+    plain = sentence.replace("\u2019", "").replace("'", "")
+    return re.search(r"\b(never|not|cannot|dont|doesnt|wont|isnt)\b", plain, re.IGNORECASE) is not None
+
+
 @pytest.fixture()
 def vault_dir(tmp_path):
     return tmp_path / "vault"
@@ -96,9 +107,25 @@ class TestConnectDatasourceToolDescriptionGating:
 
     def test_neither_description_asks_for_the_credential_in_chat(self):
         """The console-less description is the one Cowork desktop gets, and it
-        used to say to ask for the values in chat first."""
+        used to say to ask for the values in chat first. Asserted over the
+        whole description, not against the one phrase that was deleted: the
+        shared tail carried a second solicitation ("ask for missing pieces")
+        that a literal check for the first one passed straight over.
+        """
+        # Every sentence here is about credentials, so the subject needs no
+        # matching: an unnegated instruction to ask is the smell, whatever it
+        # calls the thing. Scoping to sentences naming chat would have missed
+        # the tail's "Ask for missing pieces in a later turn", which named no
+        # channel — and on a host with no terminal, chat is the only channel
+        # an unqualified ask can use.
         for tool in (CONNECT_DATASOURCE_TOOL, CONNECT_DATASOURCE_TOOL_NO_CONSOLE):
-            assert "ask for them in chat first" not in tool.description
+            solicitations = [
+                sentence.strip()
+                for sentence in tool.description.split(".")
+                if re.search(r"\bask", sentence, re.IGNORECASE)
+                and not _is_negated(sentence)
+            ]
+            assert solicitations == [], solicitations
 
     def test_vaulting_an_already_shared_credential_is_still_advertised(self):
         """The prohibition is on soliciting, not on recovery: when a value has

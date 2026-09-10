@@ -11,6 +11,8 @@ has to stay.
 
 from __future__ import annotations
 
+import re
+
 from anton.core.llm.prompts import (
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
@@ -20,15 +22,50 @@ from anton.core.llm.prompts import (
 _DISCIPLINES = (CONVERSATION_DISCIPLINE_ACT_FIRST, CONVERSATION_DISCIPLINE_ASK_FIRST)
 
 
-class TestNoCredentialSolicitation:
-    def test_chat_prompt_does_not_list_credentials_as_a_thing_to_ask_for(self):
-        assert "credentials they haven't shared" not in CHAT_SYSTEM_PROMPT
+def _is_negated(sentence: str) -> bool:
+    """Whether a sentence forbids rather than instructs.
 
-    def test_no_discipline_names_credentials_as_a_reason_to_stop_and_ask(self):
-        """Both disciplines, because either can be the active one and the
-        act-first variant is the default (ChatSessionConfig.act_first)."""
-        for discipline in _DISCIPLINES:
-            assert "credentials or access you can't obtain" not in discipline
+    Apostrophes are stripped first: a word-boundary match never fires inside
+    "don't" (the `n` is preceded by a word character), so a prohibition
+    written that way would otherwise read as a solicitation. Stripping leaves
+    "dont" as its own token while "hasn't" becomes "hasnt", which is not in
+    the set — so "if the user hasn't shared credentials yet, ask ..." still
+    counts as a solicitation, which it is.
+    """
+    plain = sentence.replace("\u2019", "").replace("'", "")
+    return re.search(r"\b(never|not|cannot|dont|doesnt|wont|isnt)\b", plain, re.IGNORECASE) is not None
+
+
+def _ask_sentences(text: str) -> list[str]:
+    """Sentences that instruct asking the user for something."""
+    return [s for s in text.split(".") if re.search(r"\bask", s, re.IGNORECASE)]
+
+
+class TestNoCredentialSolicitation:
+    def test_no_ask_instruction_names_a_credential_as_the_thing_to_ask_for(self):
+        """Asserted over every ask-shaped sentence rather than the one phrase
+        that was removed, so a rewording is caught too. The prohibition itself
+        mentions credentials while telling the model not to ask, so a sentence
+        only counts as a solicitation when it is not negated.
+        """
+        # Deliberately not bare "token" or "secret": this prompt also discusses
+        # LLM tokens, and a scan that collides with those fails on edits that
+        # have nothing to do with credentials.
+        subjects = re.compile(
+            r"credential|api key|password|private key|access token|secret value",
+            re.IGNORECASE,
+        )
+        for text in (CHAT_SYSTEM_PROMPT, *_DISCIPLINES):
+            for sentence in _ask_sentences(text):
+                if subjects.search(sentence) is None:
+                    continue
+                assert _is_negated(sentence), sentence
+
+    def test_the_removed_solicitations_stay_removed(self):
+        """The two literals that were actually there, pinned so a revert is
+        visible as a failure rather than as a silently weaker prompt."""
+        assert "credentials they haven't shared" not in CHAT_SYSTEM_PROMPT
+        assert "credentials or access you can't obtain" not in CONVERSATION_DISCIPLINE_ACT_FIRST
 
     def test_the_vault_contract_survives(self):
         """The DS_* block is how scratchpad code reaches a connection at all.
