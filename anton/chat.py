@@ -83,7 +83,6 @@ from anton.minds_client import (
     list_minds,
     list_datasources,
     resolve_and_probe,
-    test_llm,
 )
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.utils.datasources import (
@@ -121,9 +120,7 @@ async def _handle_connect(
     episodic: EpisodicMemory | None = None,
 ) -> ChatSession:
     """Connect to a Minds server: select a Mind, then optionally a datasource."""
-    from anton.workspace import Workspace as _Workspace
-
-    global_ws = _Workspace(Path.home())
+    global_ws = _global_vault()
 
     console.print()
 
@@ -339,7 +336,7 @@ async def _handle_connect(
     global_ws.apply_env_to_process()
     console.print()
 
-    return rebuild_session(
+    return await rebuild_session(
         settings=settings,
         state=state,
         self_awareness=self_awareness,
@@ -387,9 +384,7 @@ async def _handle_remote(
     """Handle /remote command — provision or check status of remote scratchpad."""
     console.print()
 
-    from pathlib import Path as _P
-    from anton.workspace import Workspace as _W
-    _global_ws = _W(_P.home())
+    _global_ws = _global_vault()
 
     # Ensure minds API key — same flow as /publish
     if not settings.minds_api_key:
@@ -437,10 +432,64 @@ async def _handle_remote(
     console.print()
 
 
+def _vault_key_of(ws):
+    """The vault's stored key, parsed the way pydantic-settings parsed it."""
+    from anton.workspace import vault_key
+
+    return vault_key(ws.env_path)
+
+
+def _global_vault():
+    """The global workspace vault (``~/.anton/.env``) — the CLI's identity file.
+
+    Every other ``ANTON_MINDS_API_KEY`` writer targets this file: ``cli.py``'s
+    ``_setup_minds`` / ``_setup_other_provider`` (via ``_onboard``),
+    ``_handle_connect``, ``_handle_remote``, and ``commands/setup.py`` (``/llm``).
+    ``/publish`` was the only writer using the PROJECT vault, and
+    ``_ensure_workspace`` promotes the project vault into ``os.environ`` *before*
+    the global one — so under ``apply_env_to_process``'s only-if-unset rule the
+    minority file became the publish identity while everything else kept using
+    the global one (ENG-1424).
+    """
+    from anton.workspace import Workspace as _W
+
+    return _W(Path.home())
+
+
+def _persist_key_best_effort(console, value: str, *, what: str) -> None:
+    """Write the publish key to the global vault, never at the cost of the turn.
+
+    Persistence is bookkeeping; the publish already succeeded (or already
+    failed). An unwritable ``$HOME`` — a container run as a uid with no home,
+    a read-only mount — used to be impossible to hit here because the write
+    went to ``<cwd>/.anton``, which the CLI had just created itself. Against
+    ``~/.anton`` it is reachable, and an escaping OSError would take out the
+    whole turn: nothing between here and ``_chat_loop``'s ``except
+    KeyboardInterrupt`` catches it, so the user would lose the success message
+    AND the view URL, and ``.published.json`` further down would never record
+    the report id — making the next /publish create a duplicate report instead
+    of updating this one.
+    """
+    try:
+        if value:
+            _global_vault().set_secret("ANTON_MINDS_API_KEY", value)
+        else:
+            # REMOVE the entry rather than writing `ANTON_MINDS_API_KEY=`. An
+            # empty value is still a value: it outranks a real key in a
+            # lower-precedence file, and `core/backends/local.py` tests
+            # membership rather than truthiness when deriving the scratchpad's
+            # OPENAI_API_KEY, so a child would get an empty credential and an
+            # auth error instead of falling through.
+            _global_vault().remove_secret("ANTON_MINDS_API_KEY")
+    except (OSError, ValueError) as exc:
+        console.print(
+            f"  [anton.warning]Could not {what} in ~/.anton/.env: {escape(str(exc))}[/]"
+        )
+
+
 async def _handle_publish(
     console: Console,
     settings,
-    workspace,
     file_arg: str = "",
 ) -> None:
     """Handle /publish command — publish an HTML report to the web."""
@@ -456,6 +505,8 @@ async def _handle_publish(
     from anton.publisher import publish
 
     console.print()
+
+    key_entered_this_session = False
 
     # 1. Ensure Minds API key is available
     if not settings.minds_api_key:
@@ -484,11 +535,19 @@ async def _handle_publish(
             return
         api_key = api_key.strip()
         settings.minds_api_key = api_key
-        # Key is not persisted yet — wait until publish succeeds to avoid
-        # locking the user out with a bad key on every subsequent /publish call.
-        from pathlib import Path as _P
-        from anton.workspace import Workspace as _W
-        _W(_P.home()).set_secret("ANTON_MINDS_API_KEY", api_key)
+        # Only a key the user typed here is ours to persist. One that arrived
+        # from an existing config file already has an owner — copying it into
+        # ~/.anton/.env creates a second, unmanaged copy that no sign-out path
+        # in any repo scrubs (cowork's Sign out clears ~/.cowork/.env only), so
+        # the desktop user who signs out would leave a live credential behind
+        # and the CLI would keep publishing as the account they just left.
+        key_entered_this_session = True
+        # Held in memory only until the publish call below returns. Persisting
+        # here wrote a key that had never been near an auth round-trip, so a
+        # typo landed in ~/.anton/.env — and since the 401 handler cleared the
+        # PROJECT vault rather than this one, it was never cleaned up: every
+        # later run found a key present, skipped this prompt, and 401'd
+        # forever. That is STRC-987, re-broken by the eager write removed here.
         console.print()
 
     # 2. Find the HTML file or fullstack artifact to publish
@@ -728,18 +787,49 @@ async def _handle_publish(
         except Exception as e:
             import urllib.error
             if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+                rejected = settings.minds_api_key
                 settings.minds_api_key = None
-                if workspace:
-                    workspace.set_secret("ANTON_MINDS_API_KEY", "")
-                console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+                # Clear it where it is WRITTEN — but only if the global vault is
+                # actually what supplied the rejected key. The chain has four
+                # files and ~/.cowork/.env outranks ~/.anton/.env, so a session
+                # can be running a key this vault does not hold: blanking it
+                # unconditionally destroys an unrelated working key AND leaves
+                # the one that really 401'd in place, making the lock-out
+                # permanent instead of fixing it (ENG-1424).
+                if key_entered_this_session:
+                    # Typed at the prompt above and never persisted (that is the
+                    # STRC-987 fix), so there is nothing on disk to clear. The
+                    # in-memory reset alone re-prompts on the next /publish.
+                    console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+                elif _vault_key_of(_global_vault()) == rejected:
+                    _persist_key_best_effort(console, "", what="clear the rejected key")
+                    console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+                else:
+                    # It came from a file we do not own. Say where to look rather
+                    # than deleting a key we cannot prove is the bad one.
+                    console.print(
+                        "  [anton.error]The API key this session is using was rejected.[/]"
+                    )
+                    console.print(
+                        "  [anton.muted]It did not come from ~/.anton/.env, so /publish "
+                        "cannot clear it — check ~/.cowork/.env, .anton/.env in this "
+                        "project, a .env in this folder, or an exported "
+                        "ANTON_MINDS_API_KEY.[/]"
+                    )
             else:
                 console.print(f"  [anton.error]Publish failed: {e}[/]")
             console.print()
             return
 
-    # Persist the key now that we know it works
-    if workspace:
-        workspace.set_secret("ANTON_MINDS_API_KEY", settings.minds_api_key)
+    # Persist the key now that we know it works — to the GLOBAL vault, so the
+    # CLI keeps one identity file instead of a frozen per-project snapshot that
+    # goes stale on the next key rotation and then outranks the current key for
+    # publishing alone (ENG-1424). Only if the user typed it here: see the note
+    # at the prompt above.
+    if key_entered_this_session:
+        _persist_key_best_effort(
+            console, settings.minds_api_key, what="save your API key"
+        )
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")
@@ -1167,7 +1257,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     _ansi_cyan = f"\033[1;38;2;{_r};{_g};{_b}m"
     _ansi_reset = "\033[0m"
 
-    for li, line in enumerate(_lines):
+    for line in _lines:
         console.file.write("  ")
         for ch in line:
             console.file.write(ch)
@@ -1314,11 +1404,41 @@ def _default_turn_error_action(exc: BaseException) -> str:
     return "retry" if isinstance(exc, ConnectionError) else "setup"
 
 
+_EXIT_WORDS = ("exit", "quit", "bye")
+
+
+def _is_exit_command(text: str) -> bool:
+    """True for the exit words, bare or written as a slash command.
+
+    The help menu and the completer list the exit command alongside the slash
+    commands, so the slash form has to match the way the dispatch chain below
+    matches every other one: on the first token, arguments tolerated. The bare
+    form stays whole-string so an ordinary sentence starting with "exit" is
+    still a message to the agent.
+    """
+    stripped = text.strip().lower()
+    if stripped.startswith("/"):
+        return stripped.split(maxsplit=1)[0].removeprefix("/") in _EXIT_WORDS
+    return stripped in _EXIT_WORDS
+
+
 def run_chat(
     console: Console, settings: AntonSettings, *, resume: bool = False, first_run: bool = False, desktop_first_run: bool = False
 ) -> None:
     """Launch the interactive chat REPL."""
-    asyncio.run(_chat_loop(console, settings, resume=resume, first_run=first_run, desktop_first_run=desktop_first_run))
+
+    async def _main() -> None:
+        from anton.core.llm.provider import close_live_providers, install_asyncgen_noise_filter
+
+        install_asyncgen_noise_filter()
+        try:
+            await _chat_loop(console, settings, resume=resume, first_run=first_run, desktop_first_run=desktop_first_run)
+        finally:
+            # Release provider HTTP pools before the loop dies, whatever path
+            # the loop exited on (see anton/core/llm/provider.py).
+            await close_live_providers()
+
+    asyncio.run(_main())
 
 
 async def _chat_loop(
@@ -1349,7 +1469,7 @@ async def _chat_loop(
         edef = dreg.get(conn["engine"])
         if edef is not None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
-    del dv, dreg
+    del dreg
 
     global_memory_dir = Path.home() / ".anton" / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
@@ -1407,6 +1527,9 @@ async def _chat_loop(
             runtime_context=runtime_context,
         ),
         workspace=workspace,
+        # The manager derives each pad's DS_* from this vault; without it a
+        # pad inherits the whole process env instead.
+        data_vault=dv,
         console=console,
         history_store=history_store,
         session_id=current_session_id,
@@ -1462,7 +1585,7 @@ async def _chat_loop(
 
     if not first_run and not desktop_first_run:
         console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
-    console.print("[anton.muted] type '/help' for commands or 'exit' to quit.[/]")
+    console.print("[anton.muted] type '/help' for commands or '/exit' to quit.[/]")
     console.print()
 
     from anton.analytics import send_event
@@ -1642,7 +1765,7 @@ async def _chat_loop(
                 if not stripped and message_content is None:
                     continue
 
-            if message_content is None and stripped.lower() in ("exit", "quit", "bye"):
+            if message_content is None and _is_exit_command(stripped):
                 break
 
             # Detect dragged file paths early — a dragged absolute path like
@@ -1829,7 +1952,7 @@ async def _chat_loop(
                 elif cmd == "/remote":
                     await _handle_remote(console, settings)
                     # Rebuild session so scratchpad uses remote/local factory
-                    session = rebuild_session(
+                    session = await rebuild_session(
                         settings=settings,
                         state=state,
                         self_awareness=self_awareness,
@@ -1843,7 +1966,7 @@ async def _chat_loop(
                     continue
                 elif cmd == "/publish":
                     arg = parts[1].strip() if len(parts) > 1 else ""
-                    await _handle_publish(console, settings, workspace, arg)
+                    await _handle_publish(console, settings, arg)
                     continue
                 elif cmd == "/unpublish":
                     await _handle_unpublish(console, settings, workspace)
@@ -2021,7 +2144,7 @@ async def _chat_loop(
                 from anton.cli import _ensure_api_key
 
                 _ensure_api_key(settings)
-                session = rebuild_session(
+                session = await rebuild_session(
                     settings=settings,
                     state=state,
                     self_awareness=self_awareness,
@@ -2104,7 +2227,10 @@ async def _chat_loop(
                 continue
     except KeyboardInterrupt:
         pass
+    finally:
+        # In a finally, not after the except: an exception escaping the loop
+        # must still close scratchpads and provider pools on its way out.
+        await session.close()
 
     console.print()
     console.print("[anton.muted]See you.[/]")
-    await session.close()

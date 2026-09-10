@@ -481,7 +481,9 @@ async def test_memorize_registers_its_write_for_settling(tmp_path, monkeypatch, 
     result = await handle_memorize(session, {"entries": [
         {"text": "Answer in Spanish", "kind": "always", "scope": "global"},
     ]})
-    assert "Memory updated" in result
+    # ENG-2248 tier 1: a stored entry is an explicit success.
+    assert result.ok is True
+    assert "Memory updated" in result.content
     assert len(session._memory_writes) == 1        # registered, not yet awaited
 
     await session.settle_memory_writes()
@@ -610,9 +612,11 @@ def test_a_skill_the_agent_builds_comes_back_out(tmp_path, monkeypatch, skills_t
     from anton.core.tools.skill_draft import handle_create_skill_draft
 
     session = _real_cloud_session(tmp_path, monkeypatch)
-    claimed = json.loads(asyncio.run(
+    claimed = asyncio.run(
         handle_create_skill_draft(session, {"name": "Competitive Analysis"})
-    ))
+    )
+    assert claimed.ok is True          # ENG-2248: a claimed folder is a success
+    claimed = json.loads(claimed.content)
     Path(claimed["skill_file"]).write_text("---\nname: competitive-analysis\n---\nsteps")
 
     entries = drain_pending_skills(session)
@@ -631,7 +635,8 @@ async def test_recall_skill_returns_the_staged_procedure(tmp_path, monkeypatch, 
 
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     out = await handle_recall_skill(session, {"label": "csv-summary"})
-    assert "Describe the columns" in out
+    assert out.ok is True
+    assert "Describe the columns" in out.content
 
 
 async def test_recall_stats_stay_in_the_staging_dir(tmp_path, monkeypatch, skills_tmp):
@@ -830,20 +835,18 @@ def test_oauth_block_populates_ds_env_from_the_turn_key_endpoint(tmp_path, monke
     monkeypatch.delenv("DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN", raising=False)
 
     oauth = {"turn_key": "tk_abc", "connections": [{"engine": "google_drive", "name": "primary"}]}
-    _build(tmp_path, monkeypatch, oauth=oauth)
+    _, cfg = _build(tmp_path, monkeypatch, oauth=oauth)
 
-    assert os.environ["DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN"] == "live-token"
-    assert os.environ["DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL"] == "a@b.com"
     # One fetch to build the env, and restore_namespaced_env's secret-var
     # registration reuses the same cached result rather than fetching again.
     assert calls == [f"{data_vault_mod._DEFAULT_AUTH_BASE_URL}/v1/oauth/google_drive/token"]
 
-    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN", None)
-    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL", None)
-    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__TOKEN_TYPE", None)
-    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__SCOPE", None)
-    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__EXPIRES_AT", None)
-    os.environ.pop("DS_GOOGLE_DRIVE_PRIMARY__AUTH_TYPE", None)
+    # The values reach the scratchpad from the vault, which is what the manager
+    # derives a pad's DS_* from — never through this process's environ.
+    env = cfg.data_vault.env_for("google_drive", "primary")
+    assert env["DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN"] == "live-token"
+    assert env["DS_GOOGLE_DRIVE_PRIMARY__ACCOUNT_EMAIL"] == "a@b.com"
+    assert "DS_GOOGLE_DRIVE_PRIMARY__ACCESS_TOKEN" not in os.environ
 
 
 def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):

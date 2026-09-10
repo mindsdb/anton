@@ -22,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from anton import __version__
+from anton.core.llm.provider import close_live_providers, install_asyncgen_noise_filter
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
@@ -31,6 +32,7 @@ from anton.chat_session import get_runtime_factory
 from anton.core.session import ChatSessionConfig
 from anton.core.llm.client import LLMClient
 from anton.core.backends.manager import ScratchpadManager
+from anton.core.datasources.data_vault import LocalDataVault
 
 from anton.commands.datasource import (
     handle_remove_data_source,
@@ -38,13 +40,24 @@ from anton.commands.datasource import (
     handle_list_data_sources,
     handle_test_datasource
 )
-from anton.minds_client import minds_v1_base, resolve_and_probe, test_llm
+from anton.minds_client import minds_v1_base, resolve_and_probe
 
 # The CLI configures no logging, so without a handler on the package logger
 # Python's lastResort writes WARNING and above straight to stderr — into the
 # middle of the rich Live render. Propagation is untouched, so a host that does
 # configure logging (the cowork sidecar, the cloud pod) still emits them.
 logging.getLogger("anton").addHandler(logging.NullHandler())
+
+
+def _run_and_close(coro):
+    """Run a coroutine, then release provider HTTP pools before the loop dies."""
+    async def _wrapped():
+        install_asyncgen_noise_filter()
+        try:
+            return await coro
+        finally:
+            await close_live_providers()
+    return asyncio.run(_wrapped())
 
 
 def _build_scratchpad_manager(
@@ -60,6 +73,9 @@ def _build_scratchpad_manager(
         coding_api_key=coding_conn.api_key or "",
         coding_base_url=coding_conn.base_url or "",
         workspace_path=settings.workspace_path,
+        # Without a vault the manager cannot derive a pad's DS_* and the pad
+        # falls back to inheriting the whole process env.
+        data_vault=LocalDataVault(),
     )
 
 
@@ -139,8 +155,9 @@ def _reexec() -> None:
 
 # Core dependencies from pyproject.toml that anton needs at runtime
 _REQUIRED_PACKAGES: dict[str, str] = {
-    "anthropic": "anthropic>=0.42.0",
-    "openai": "openai>=1.0",
+    "anthropic": "anthropic>=1.0",
+    "openai": "openai>=3.0",
+    "httpx2": "httpx2>=2.7,<3",
     "pydantic": "pydantic>=2.0",
     "pydantic_settings": "pydantic-settings>=2.0",
     "prompt_toolkit": "prompt-toolkit>=3.0",
@@ -352,9 +369,9 @@ def _ensure_terms_consent(console: Console, settings) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Append if file exists, otherwise create
-    existing = env_path.read_text() if env_path.is_file() else ""
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
     if "ANTON_TERMS_CONSENT" not in existing:
-        with env_path.open("a") as f:
+        with env_path.open("a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write("ANTON_TERMS_CONSENT=true\n")
@@ -388,6 +405,177 @@ from openai import AzureOpenAI
 def _get_settings(ctx: typer.Context):
     """Retrieve the resolved AntonSettings from context."""
     return ctx.obj["settings"]
+
+
+def _ensure_vault_gitignored(anton_dir: Path) -> bool:
+    """Make sure `.anton/.env*` is ignored by git. True if it now is.
+
+    Scoped to `.env*`, NOT `*`: `.anton/` is the workspace state directory, so
+    ignoring all of it would silently drop `anton.md`, `memory/`, `episodes/`
+    and every published dashboard under `artifacts/` out of `git add -A` —
+    invisibly, because already-tracked files keep working.
+
+    Appends when a `.gitignore` already exists rather than skipping: a project
+    that happens to have one would otherwise get no protection at all.
+    """
+    gitignore = anton_dir / ".gitignore"
+    pattern = ".env*"
+    try:
+        existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+        if pattern in existing.split():
+            return True
+        prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
+        gitignore.write_text(f"{prefix}{pattern}\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _reconcile_publish_identity(settings) -> bool:
+    """Collapse a legacy project-vault MindsHub key into the global vault.
+
+    The CLI has ONE publish identity, in ``~/.anton/.env`` (ENG-1424). Before
+    that decision, ``/publish`` persisted the key into ``<project>/.anton/.env``
+    on every success, so machines in the wild carry a copy in every project
+    folder ever published from. Those copies matter even though nothing writes
+    them any more, because ``_ensure_workspace`` below promotes the project
+    vault into ``os.environ`` — above every config file — where the stale key
+    still reaches the scratchpad subprocess (``core/backends/scratchpad_boot``),
+    the ``ANTON_MINDS_API_KEY`` → ``OPENAI_API_KEY`` fallback in
+    ``core/backends/local``, and any mid-turn settings rebuild. Simply removing
+    the writer left them promoted forever, where the old code at least rewrote
+    them with the live key on each publish.
+
+    So reconcile once, at boot, before any promotion — but NEVER destroy a
+    credential to do it. We cannot tell which of two keys authenticates:
+    reading a vault is a presence check, exactly the ``_has_api_key`` weakness
+    this ticket documents elsewhere, and assuming the global one is current
+    gets it backwards on the machine state the ticket actually measured (a
+    valid project key alongside an invalid 7-character global one). Three
+    cases, none lossy:
+
+    * global vault empty → move the project key up. This is also what makes
+      ``anton --folder <dir>`` work: ``_build_env_files`` is evaluated at
+      import time against ``Path.cwd()``, so a ``-f`` target's vault is not in
+      the settings chain at all and its key would otherwise be invisible.
+    * the two are the same string → the project copy is redundant; drop it.
+    * they differ → keep the global one (one identity is the point), but
+      archive the project's to ``.anton/.env.superseded`` first, so a user
+      whose working key was the project one can get it back with ``cat``.
+
+    Returns True when the on-disk state changed, so the caller re-resolves
+    settings (the migrated key only enters the chain via ``~/.anton/.env``).
+    """
+    from datetime import datetime
+
+    # Reuse the vault's own atomic 0600 writer rather than re-implementing it:
+    # the archive holds the same secret as the file it came from, and a plain
+    # write_text would leave it at umask mode until a chmod landed.
+    from anton.workspace import Workspace, _write_private, vault_key
+
+    project_path = Path(settings.workspace_path)
+    # resolve() both sides: `workspace_path` is already canonical (Path.cwd() /
+    # Path(folder).resolve()) while Path.home() is $HOME verbatim, so on a
+    # symlinked home (/home -> /export/home) a lexical == misses. It then treats
+    # ONE file as two vaults, finds them trivially "identical", and deletes the
+    # user's only key down the duplicate branch.
+    if project_path.resolve() == Path.home().resolve():
+        return False  # same file — nothing to reconcile
+
+    # Read both vaults with the parser that resolved the settings, not
+    # `get_secret`'s whitespace-only strip. The two disagree on any hand-edited
+    # line — `KEY="abc"` reads as `"abc"` one way and `abc` the other — which
+    # made two identical keys compare unequal, archiving and "superseding" a
+    # key that was never superseded.
+    project_ws = Workspace(project_path, settings=settings)
+    project_key = vault_key(project_ws.env_path)
+    if not project_key:
+        return False
+
+    global_ws = Workspace(Path.home(), settings=settings)
+    global_key = vault_key(global_ws.env_path)
+
+    # Any branch that tells the user which file publishing now uses has to
+    # account for ~/.cowork/.env, which sits AFTER ~/.anton/.env in the chain
+    # and silently outranks whatever we do here.
+    outranked = (
+        "\n  (~/.cowork/.env also has a key and takes precedence,"
+        "\n   so publishing still uses that one.)"
+        if vault_key(Path.home() / ".cowork" / ".env")
+        else ""
+    )
+
+    # This is a DISK migration; the process environment is not ours to edit.
+    # `set_secret`/`remove_secret` both write os.environ as a side effect
+    # (workspace.py), so an operator running `ANTON_MINDS_API_KEY=X anton` would
+    # have X silently popped here — and pydantic ranks os.environ above every
+    # env_file, so X is exactly the key that session was resolving. Snapshot and
+    # restore around the whole migration.
+    exported = os.environ.get("ANTON_MINDS_API_KEY")
+
+    try:
+        if not global_key:
+            global_ws.set_secret("ANTON_MINDS_API_KEY", project_key)
+            project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            message = (
+                "  Moved this project's saved publish key to ~/.anton/.env" + outranked
+            )
+        elif global_key == project_key:
+            project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            message = "  Removed a duplicate publish key from this project (same key as ~/.anton/.env)"
+        else:
+            # Do not write the archive unless it is certain to be ignored by
+            # git: the whole point is to keep a live credential out of a commit,
+            # so failing to protect it and writing it anyway is worse than not
+            # archiving at all. Leaving the key in .anton/.env costs nothing —
+            # the machine stays exactly as it was.
+            if not _ensure_vault_gitignored(project_ws.env_path.parent):
+                console.print(
+                    "[anton.muted]  Left this project's publish key in place: could not"
+                    " write .anton/.gitignore to keep the archive out of git.[/]"
+                )
+                return False
+
+            archive = project_ws.env_path.with_name(".env.superseded")
+            previous = archive.read_text(encoding="utf-8") if archive.is_file() else ""
+            _write_private(
+                archive,
+                f"{previous}# superseded {datetime.now():%Y-%m-%d %H:%M}, was in .anton/.env\n"
+                f"ANTON_MINDS_API_KEY={project_key}\n",
+            )
+            project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            message = (
+                "  This project had a different publish key than ~/.anton/.env.\n"
+                "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
+                f"  {escape(str(archive))} in case it was the one you wanted." + outranked
+            )
+    finally:
+        # In `finally`, not after the branches: `main` catches OSError and boots
+        # on, so a write failing midway would otherwise leave the operator's
+        # exported key replaced for the whole session and every scratchpad child,
+        # with no re-resolve to correct it.
+        if exported is None:
+            os.environ.pop("ANTON_MINDS_API_KEY", None)
+        else:
+            os.environ["ANTON_MINDS_API_KEY"] = exported
+
+    # The .env chain is built ONCE at import from the files that existed then
+    # (config/settings.py). Creating ~/.anton/.env a moment ago does not add it,
+    # so the caller's re-resolve would read a chain that no longer describes the
+    # disk and come back with no key at all — right after we told the user we
+    # had moved theirs there. Refresh in place: AntonSettings.model_config holds
+    # a reference to this list object, so rebinding the module global would not
+    # reach it.
+    from anton.config.settings import _ENV_FILES, _build_env_files
+
+    _ENV_FILES[:] = _build_env_files()
+
+    # Say so. This can change which account publishes (that is the point of
+    # collapsing to one identity), and a silent identity change is the exact
+    # failure ENG-1424 is about. The wording must not claim the retained key is
+    # the good one — nothing here has authenticated either of them.
+    console.print(f"[anton.muted]{message}[/]")
+    return True
 
 
 def _ensure_workspace(settings) -> None:
@@ -436,6 +624,23 @@ def main(
 
     settings = AntonSettings()
     settings.resolve_workspace(folder)
+
+    # Must run before anything reads a key off `settings`, and before
+    # `_ensure_workspace` promotes the project vault into os.environ.
+    #
+    # Never fatal. This is `@app.callback(invoke_without_command=True)`, so an
+    # OSError escaping here would kill EVERY `anton` invocation — subcommands
+    # included, before terms consent — on a container with no writable home or
+    # a read-only checkout. Migrating is a convenience; not migrating just
+    # leaves the machine as it was.
+    try:
+        migrated = _reconcile_publish_identity(settings)
+    except OSError as exc:
+        console.print(f"[anton.muted]  Could not tidy saved publish keys: {escape(str(exc))}[/]")
+        migrated = False
+    if migrated:
+        settings = AntonSettings()
+        settings.resolve_workspace(folder)
 
     if not settings.terms_consent:
         _ensure_terms_consent(console, settings)
@@ -517,7 +722,7 @@ def _onboard(settings) -> None:
     ]
 
     if sys.stdout.isatty():
-        asyncio.run(
+        _run_and_close(
             _animate_onboard(
                 console, __version__, _INTRO_LINES, settings=settings, ws=ws
             )
@@ -574,7 +779,7 @@ async def _animate_onboard(
 
         typed_so_far: list[str] = []
 
-        for line_idx, line in enumerate(intro_lines):
+        for line in intro_lines:
             if line == "":
                 typed_so_far.append("\n")
                 live.update(_build_frame(_MOUTH_SMILE, typed_so_far))
@@ -1378,7 +1583,7 @@ def _setup_exa(settings, ws) -> None:
 
         def _test():
             # Sync httpx call — _validate_with_spinner runs us inside a Live.
-            import httpx as _httpx
+            import httpx2 as _httpx
 
             resp = _httpx.post(
                 "https://api.exa.ai/search",
@@ -1431,7 +1636,7 @@ def _setup_brave(settings, ws) -> None:
     try:
 
         def _test():
-            import httpx as _httpx
+            import httpx2 as _httpx
 
             resp = _httpx.get(
                 "https://api.search.brave.com/res/v1/web/search",
@@ -1659,7 +1864,7 @@ def connect_data_source(
         )
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())
 
 
 @app.command("list")
@@ -1694,7 +1899,7 @@ def edit_data_source(
         )
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())
 
 
 @app.command("remove")
@@ -1706,7 +1911,7 @@ def remove_data_source(
 ) -> None:
     """Remove a saved connection from the Local Vault."""
 
-    asyncio.run(handle_remove_data_source(console, name))
+    _run_and_close(handle_remove_data_source(console, name))
 
 
 @app.command("test")
@@ -1724,7 +1929,7 @@ def test_data_source(
     scratchpads = _build_scratchpad_manager(settings)
 
     async def _run() -> None:
-        await _handle_test_datasource(console, scratchpads, name)
+        await handle_test_datasource(console, scratchpads, name)
         await scratchpads.close_all()
 
-    asyncio.run(_run())
+    _run_and_close(_run())

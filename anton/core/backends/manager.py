@@ -26,6 +26,7 @@ class ScratchpadManager:
         workspace_path: Path | None = None,
         session_id: str | None = None,
         data_vault: DataVault | None = None,
+        workspace_env_overlay: dict[str, str] | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -39,6 +40,7 @@ class ScratchpadManager:
         # scoped per conversation (ENG-1124).
         self._session_id = session_id
         self._data_vault = data_vault
+        self._workspace_env_overlay = workspace_env_overlay
         # Only pass `session_id` to factories that accept it. A default on the Protocol
         # does not adapt an existing callable, so passing it unconditionally raises
         # `TypeError: unexpected keyword argument` for an out-of-tree factory written
@@ -49,6 +51,9 @@ class ScratchpadManager:
         )
         self._factory_takes_scratchpad_ds_env = self._probe_factory_kwarg(
             runtime_factory, "scratchpad_ds_env"
+        )
+        self._factory_takes_workspace_env_overlay = self._probe_factory_kwarg(
+            runtime_factory, "workspace_env_overlay"
         )
         self._available_packages: list[str] = self.probe_packages()
 
@@ -220,6 +225,11 @@ class ScratchpadManager:
                     if self._factory_takes_scratchpad_ds_env
                     else {}
                 ),
+                **(
+                    {"workspace_env_overlay": self._workspace_env_overlay}
+                    if self._factory_takes_workspace_env_overlay
+                    else {}
+                ),
             )
             await pad.start()
             self._pads[name] = pad
@@ -237,11 +247,6 @@ class ScratchpadManager:
 
     def list_pads(self) -> list[str]:
         return list(self._pads.keys())
-
-    async def cancel_all_running(self) -> None:
-        """Cancel running executions in all scratchpads and restart them."""
-        for pad in self._pads.values():
-            await pad.cancel()
 
     async def close_all(self) -> None:
         """Cleanup all scratchpads on session end."""

@@ -1,11 +1,21 @@
-name: Scratchpad image - Dev build on PR
+name: Scratchpad image build
 
-# Builds and pushes the minds-anton-scratchpad image (the sandbox pod image) to ECR as
-# development-<sha>, on every pull request whose branch lives in this repository. No label
-# is required and none is checked: `labeled` sits in the trigger list so that adding one
-# rebuilds. The scratchpad-controller references the resulting tag via
-# SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE; there is no Helm chart for this image, so this
-# workflow only builds and scans (no deploy job).
+# Builds and pushes the minds-anton-scratchpad image (the sandbox pod image) to ECR.
+# Two ways in:
+#
+#   - Every pull request whose branch lives in this repository builds for the
+#     `development` environment. No label is required and none is checked:
+#     `labeled` sits in the trigger list so that adding one rebuilds.
+#   - release.yml and publish-staging.yml call this workflow after they mint a
+#     tag, building for `production` and `staging` respectively (ENG-2129).
+#
+# The shared build-push-ecr action tags every build three ways:
+# `<env>-<sha>`, `<env>-head-<pr head sha>` (pull requests only), and the
+# moving `<env>` tag. scratchpad-controller points each environment's
+# SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE at the moving tag and pulls with
+# imagePullPolicy Always, so a release reaches worker pods without anyone
+# editing a sha into a values file. There is no Helm chart for this image, so
+# this workflow only builds (no deploy job).
 #
 # The image is smoke-tested inside the build, not here: the Dockerfile's last layer runs
 # docker/image_smoke.py as UID 1000, which executes both entrypoints the controller execs.
@@ -15,6 +25,16 @@ name: Scratchpad image - Dev build on PR
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled]
+  workflow_call:
+    inputs:
+      environment:
+        description: "build-push-ecr environment: staging or production. Pull requests build development."
+        type: string
+        required: true
+      version:
+        description: "The anton version the image reports; the tag the caller just minted."
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -23,54 +43,29 @@ defaults:
   run:
     shell: bash
 
-concurrency:
-  group: ${{ github.workflow_ref }}
-  cancel-in-progress: true
-
 jobs:
 
-  # One gate answering "may this pull request reach the cluster-side build".
-  #
-  # This repo is PUBLIC and `mdb-dev` is a pod inside the newdev cluster with IRSA
-  # into the build/ECR account, so without a guard a pull request from any GitHub
-  # account executes its own code there. Fork PRs get no secrets and a read-only
-  # token, but the runner itself is the prize: cloud credentials, a network
-  # position inside the cluster, and a tool cache later internal jobs reuse.
-  # GitHub's first-time-contributor approval does not cover anyone with a merged
-  # PR, and the approval a maintainer clicks is a courtesy extended before anyone
-  # has read the Dockerfile.
-  #
-  # Three answers, not two. `HEAD_REPO` is read from the pull request payload, so
-  # on any other event it is the empty string and compares unequal, which would
-  # skip the build and tell the run page that a fork was responsible. The same
-  # trap is written up on the `Decide whether live mode is required` step in
-  # verifier-eval.yml, which met it from the other direction. So the event is
-  # checked first and gets its own message: adding a trigger to this workflow
-  # stops the build until somebody says how the gate should read it.
-  #
-  # The `version` job below stays ungated on purpose. It runs on a GitHub-hosted
-  # runner holding no credentials, and a hosted runner executing a fork's code is
-  # what every fork pull request in the world already does.
-  #
-  # Unlike the same gate in cowork and cowork-server, this one does NOT skip a
-  # `staging` -> `main` promotion PR. There those rebuild an image the release
-  # pipeline already produced; here this workflow is the only thing that builds
-  # minds-anton-scratchpad at all, so skipping a promotion would leave that commit
-  # with no image.
+  # Who may reach the self-hosted build runner: pull requests from branches in
+  # this repository, and calls from the release pipelines. Anything else is
+  # refused with a run-summary line saying why.
   gate:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
-      - name: Decide whether this pull request may reach the runner
+      - name: Decide whether this run may reach the runner
         id: decide
         env:
           IS_PR: ${{ github.event_name == 'pull_request' }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           THIS_REPO: ${{ github.repository }}
+          # Empty on every event except a workflow_call from a release pipeline.
+          CALLED_FOR: ${{ inputs.environment }}
         run: |
           set -euo pipefail
-          if [ "$IS_PR" != "true" ]; then
+          if [ -n "${CALLED_FOR:-}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$IS_PR" != "true" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             {
               echo "### Build skipped: this run is not a pull request"
@@ -100,21 +95,30 @@ jobs:
   # dependency in front of the image. And keeping it separate leaves the build's
   # checkout shallow: .git never enters the docker context (see .dockerignore),
   # so only this job needs the history.
+  #
+  # A release pipeline passes the version it just minted instead, for the same
+  # reason publish-staging.yml pins SETUPTOOLS_SCM_PRETEND_VERSION: a re-run on
+  # an already-tagged head leaves two tags on one commit, and `git describe`
+  # would resolve the older. The shape checks below run on both paths.
   version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        if: inputs.version == ''
         with:
           # hatch-vcs derives the version by describing against tags, and the
           # default fetch-depth of 1 fetches none of them.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
+        if: inputs.version == ''
         with:
           python-version: "3.12"
       - id: resolve
         name: Resolve the anton version from tags
+        env:
+          PINNED_VERSION: ${{ inputs.version }}
         # The image reported a hardcoded 2.0.0 until 2026-08-26, so a pod turn
         # could not say which anton served it and bumping the image pin produced
         # no observable change at all.
@@ -129,7 +133,7 @@ jobs:
           # `tail -n 1`: hatch prints progress to stderr today, but a stray line
           # on stdout would otherwise ride along into $GITHUB_OUTPUT, where a
           # second line is parsed as another key=value pair rather than failing.
-          version="$(uvx hatch version | tail -n 1)"
+          version="${PINNED_VERSION:-$(uvx hatch version | tail -n 1)}"
 
           # Whole-line match, PEP 440 characters only. This is a boundary, not a
           # formatting nicety: the shared action expands `extra-build-args`
@@ -161,6 +165,14 @@ jobs:
     needs: [version, gate]
     if: needs.gate.outputs.run == 'true'
     runs-on: mdb-dev
+    # Job-level rather than workflow-level so it holds when this workflow is
+    # called: a pull request cancels its own superseded build; a release build
+    # queues behind the previous one for the same environment and is never
+    # cancelled, because a half-finished push has already moved nothing but a
+    # cancelled one leaves the release without an image.
+    concurrency:
+      group: scratchpad-image-${{ inputs.environment || github.workflow_ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     outputs:
       image: ${{ steps.build.outputs.image }}
     env:
@@ -174,7 +186,7 @@ jobs:
         with:
           # Override the repo-slug default so the image lands at .../minds-anton-scratchpad.
           module-name: minds-anton-scratchpad
-          build-for-environment: development
+          build-for-environment: ${{ inputs.environment || 'development' }}
           # Expanded unquoted by the shared action, so the value must not contain
           # whitespace — a PEP 440 version never does, and the shape check in the
           # `version` job would have rejected it.

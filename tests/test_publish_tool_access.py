@@ -38,6 +38,13 @@ def _session(tmp_path):
     ws = mock.Mock()
     ws.base = str(tmp_path)
     s._workspace = ws
+    # A host that passed no settings, so the handler falls back to resolving
+    # them itself — which is what the `AntonSettings` patch in each test below
+    # stands in for. Without this, Mock would auto-create `_settings` as a Mock
+    # that passes the handler's `hasattr(..., "minds_api_key")` check and
+    # silently shadow the patch (ENG-1424). The session-carries-settings path
+    # is covered in tests/test_publish_session_identity.py.
+    s._settings = None
     return s
 
 

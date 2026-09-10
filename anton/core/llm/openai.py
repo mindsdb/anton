@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import NoReturn
 
 import openai
+from contextlib import aclosing
+
 from openai import AsyncAzureOpenAI
 
 from anton.utils.datasources import scrub_credentials
 
-from .provider import safe_parse_tool_input
+from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContentValidationError,
     ContextOverflowError,
@@ -19,6 +22,7 @@ from .provider import (
     LLMProvider,
     LLMResponse,
     ModelUnavailableError,
+    ProviderAuthError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -42,6 +46,8 @@ from .provider import (
 
 logger = logging.getLogger(__name__)
 
+AsyncAPIKeyProvider = Callable[[], Awaitable[str]]
+
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
     """Map a provider HTTP error onto anton's typed/curated exceptions.
@@ -51,8 +57,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     previous four copy-pasted blocks had already diverged in wording.
 
     Mapping policy:
-      - 401 → ConnectionError with the invalid-key copy (cowork-server's
-        provider_auth detection keys on this exact phrase).
+      - 401 → ProviderAuthError with the invalid-key copy.
       - 403 with a structured gateway code (``model_access_denied`` /
         ``model_disabled``) → ModelUnavailableError carrying the code +
         model, with actionable copy. Detection is code-exact on purpose:
@@ -74,8 +79,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     ``code`` sits at top level. The gateway's 429 is FastAPI-style
     (``{"detail": …}``, no envelope) and passes through untouched. Both
     fields are therefore read from the top level first, with an envelope
-    fallback for clients that deliver the wire shape unmodified (anton's
-    pyproject allows ``openai>=1.0``, and proxies exist that re-wrap).
+    fallback for clients that deliver the wire shape unmodified (anton requires
+    ``openai>=2.21.0``, and proxies exist that re-wrap).
     The originally shipped ENG-598 mapper read only
     ``body["error"]["code"]`` — a key the SDK had already peeled off —
     which left the model-403 card dead in production.
@@ -93,7 +98,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     _foreign = origin_is_known_third_party(exc)
 
     if exc.status_code == 401:
-        raise ConnectionError(
+        raise ProviderAuthError(
             "Invalid API key — check your OpenAI API key configuration."
         ) from exc
 
@@ -807,6 +812,28 @@ def _split_cached_input(usage) -> tuple[int, int, int]:
     return total - read - write, read, write
 
 
+
+async def _aclose_stream(stream: object) -> None:
+    """Release a provider stream and its HTTP pool connection.
+
+    Cleanup-only failures are swallowed so they cannot replace the primary
+    exception; cancellation propagates.
+    """
+    if stream is None:
+        return
+    # Prefer aclose (plain async generators); SDK streams expose close(). The
+    # order matters: an object with a sync close() beside an async aclose()
+    # must not short-circuit onto the sync one and leak with no diagnostic.
+    closer = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+    if closer is not None:
+        try:
+            result = closer()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            pass
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -816,6 +843,12 @@ class OpenAIProvider(LLMProvider):
     FLAVOR_OPENAI = "openai"  # Direct OpenAI BYOK — uses Responses API.
     FLAVOR_MINDS_PASSTHROUGH = "minds-passthrough"  # mdb.ai — chat.completions w/ native tools.
     FLAVOR_OPENAI_COMPATIBLE_GENERIC = "openai-compatible-generic"  # third-party.
+
+    async def aclose(self) -> None:
+        client = getattr(self, "_client", None)
+        if client is not None:
+            await client.close()
+        unregister_provider(self)
 
     def __init__(
         self,
@@ -827,7 +860,12 @@ class OpenAIProvider(LLMProvider):
         vision_format: str = "openai",
         flavor: str = FLAVOR_OPENAI_COMPATIBLE_GENERIC,
         reasoning_effort: str | None = None,
+        api_key_provider: AsyncAPIKeyProvider | None = None,
     ) -> None:
+        # Keep the construction-time value separate from the live supplier.
+        # ChatSession passes export_connection_info() into ScratchpadManager,
+        # whose subprocess/env boundary cannot carry a callable. The main-process
+        # async OpenAI client can ask the supplier for a fresh bearer per request.
         self._api_key = api_key
         self._base_url = base_url
         self._ssl_verify = ssl_verify
@@ -858,14 +896,33 @@ class OpenAIProvider(LLMProvider):
         }:
             self._emit_trace_headers = True
 
-        import httpx
+        import httpx2 as httpx
 
+        client_api_key = api_key_provider if api_key_provider is not None else api_key
         if api_version and _is_azure_endpoint(base_url):
             # Azure OpenAI: use the dedicated client which handles deployment
             # URL construction and api-version automatically.
+            if callable(client_api_key):
+                # AsyncAzureOpenAI._prepare_options fully overrides the base
+                # hook and never chains to super(), so AsyncOpenAI's
+                # _refresh_api_key never runs and the supplier is never
+                # awaited. The base __init__ has already replaced a callable
+                # api_key with "", so the client would send an empty api-key
+                # header on every request and 401 forever. Refuse at
+                # construction instead of failing on the first call.
+                #
+                # Keyed on the resolved value, not on `api_key_provider`: the
+                # `api_key` parameter is annotated `str` but nothing enforces
+                # that at runtime, and a callable arriving through it reaches
+                # the same SDK path with the same empty header.
+                raise EndpointConfigurationError(
+                    "Azure OpenAI cannot refresh credentials per request: "
+                    "AsyncAzureOpenAI ignores a callable api_key. Pass a "
+                    "static api_key for Azure endpoints."
+                )
             azure_kwargs: dict = {"api_version": api_version}
-            if api_key:
-                azure_kwargs["api_key"] = api_key
+            if client_api_key:
+                azure_kwargs["api_key"] = client_api_key
             if base_url:
                 azure_kwargs["azure_endpoint"] = base_url
             if not ssl_verify:
@@ -873,13 +930,17 @@ class OpenAIProvider(LLMProvider):
             self._client = AsyncAzureOpenAI(**azure_kwargs)
         else:
             kwargs: dict = {}
-            if api_key:
-                kwargs["api_key"] = api_key
+            if client_api_key:
+                kwargs["api_key"] = client_api_key
             if base_url:
                 kwargs["base_url"] = base_url
             if not ssl_verify:
                 kwargs["http_client"] = httpx.AsyncClient(verify=False)
             self._client = openai.AsyncOpenAI(**kwargs)
+
+        # After the if/else, not per branch: a future client flavor must not be
+        # able to skip registration and leave its pool unclosed.
+        register_provider(self)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(
@@ -1114,15 +1175,19 @@ class OpenAIProvider(LLMProvider):
         native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         if self._flavor == self.FLAVOR_OPENAI:
-            async for event in self._stream_via_responses(
+            # aclosing, not a bare `async for`: if the consumer abandons us the
+            # inner generator closes now rather than at asyncgen finalization.
+            inner = self._stream_via_responses(
                 model=model,
                 system=system,
                 messages=messages,
                 tools=tools,
                 max_tokens=max_tokens,
                 native_web_tools=native_web_tools,
-            ):
-                yield event
+            )
+            async with aclosing(inner):
+                async for event in inner:
+                    yield event
             return
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
@@ -1164,6 +1229,7 @@ class OpenAIProvider(LLMProvider):
         # BEFORE this (request establishment) was already SDK-retried → fail fast.
         stream_started = False
 
+        stream = None
         try:
             stream = await self._client.chat.completions.create(**kwargs)
             stream_started = True
@@ -1308,6 +1374,9 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", code="stream_error",
                 session_backoff=True, model=model,
             ) from exc
+
+        finally:
+            await _aclose_stream(stream)
 
         # Finalize tool calls. Same safe-parse protection as the
         # non-streaming path — a model cut off mid-JSON-arguments
@@ -1495,6 +1564,7 @@ class OpenAIProvider(LLMProvider):
         # a failure after this is mid-stream and was never SDK-retried (ENG-673).
         stream_started = False
 
+        stream = None
         try:
             stream = await self._client.responses.create(**kwargs)
             stream_started = True
@@ -1649,6 +1719,9 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", code="stream_error",
                 session_backoff=True, model=model,
             ) from exc
+
+        finally:
+            await _aclose_stream(stream)
 
         yield StreamComplete(
             response=LLMResponse(

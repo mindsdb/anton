@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import httpx
+import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
-from contextlib import aclosing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
@@ -40,10 +39,12 @@ from anton.core.llm.prompts import (
     SCRATCHPAD_TIMEOUT_NUDGE,
 )
 from anton.core.llm.provider import (
+    CURATED_PROVIDER_ERRORS,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
     ModelUnavailableError,
+    ProviderAuthError,
     ProviderOverloadedError,
     StreamComplete,
     StreamContextCompacted,
@@ -58,6 +59,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.thalamus import (
@@ -72,7 +74,6 @@ from anton.core.llm.tracing import (
     set_trace_context,
 )
 from anton.core.backends.manager import ScratchpadManager
-from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
@@ -111,7 +112,9 @@ from anton.core.tools.tool_handlers import (
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
 from anton.utils.datasources import (
+    begin_ds_turn_scope,
     build_datasource_context,
+    restore_namespaced_env,
     scrub_credentials,
 )
 from anton.core.settings import CoreSettings
@@ -384,22 +387,40 @@ class _VerifierVerdict(BaseModel):
 # Output budgets for the verdict call: first attempt, then the retry used when
 # it comes back truncated (ENG-1081).
 #
-# Models that narrate before acting (`mindshub_air`/`kimi`, `deepseek`, `qwen`)
-# spend the budget on prose and never reach the forced tool call. The original
-# 256 truncated them on essentially every call — 98.6% of `mindshub_air` verdicts
-# in prod returned no tool call, which the fail-safe below turned into a silent
+# HISTORY, and read the tense — it is why the numbers are what they are, not a
+# claim about today's catalog. In 2026-07 the aliases that narrated before acting
+# (`mindshub_air` — then Kimi K2.6 — `kimi`, `deepseek`, `qwen`) spent the budget
+# on prose and never reached the forced tool call. The original 256 truncated
+# them on essentially every call: 98.6% of `mindshub_air` verdicts in prod
+# returned no tool call, which the fail-safe below turned into a silent
 # "task complete".
 #
-# 2048 is sized from a measured distribution, not one sample: 16 identical calls
-# spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is also
-# why *truncation* never latches — one truncation is a tail sample, not proof
-# about the next turn — and why the 4096 retry exists rather than a single bigger
-# budget. 1024 was measurably too small. Nothing pays for headroom it doesn't
-# use; first-party models answer in 43–115 tokens either way.
+# `mindshub_air` has since been repointed to a GPT model, and re-measured
+# 2026-09-03 no MindsHub alias narrates on this call shape at all — 0 narration
+# characters on eight of them, with and without `_VERIFIER_NO_PREAMBLE`
+# (ENG-1687). Prod agrees: `verifier_failure = 'truncated'` is 0 over 30 days.
+# The budget stays anyway. It was sized from a distribution, anton runs on
+# arbitrary BYOK and local models nobody has measured, and per the note below
+# a model that answers in 43-115 tokens never pays for headroom it doesn't use.
 #
-# A *hard* failure does latch, which is a different claim: a 400 rejecting the
-# forced `tool_choice` is a statement about the model, not about this transcript
-# (ENG-1095/ENG-1155). See `_verifier_latched`.
+# 2048 is sized from a measured distribution, not one sample: 16 identical calls
+# spanned 245–1654 output tokens (median ~290). That 6.7x per-call spread is why
+# the 4096 retry exists rather than a single bigger budget. 1024 was measurably
+# too small. Nothing pays for headroom it doesn't use; first-party models answer
+# in 43–115 tokens either way.
+#
+# An EXHAUSTED ladder counts toward the latch. `retrying` is false at the last
+# budget, so the only truncation that ever reaches the latch check is one that
+# blew past 4096 after already blowing past 2048 — never a single sample of a
+# model's verbosity. Against the distribution above that is a statement about
+# the model. Typed transients never latch, see `_TRANSIENT_VERDICT_ERRORS`.
+#
+# Accepted cost, worth knowing: unlike a rejected `tool_choice`, this is a
+# STOCHASTIC failure. Two unlucky ladders with no successful verdict between
+# them latch a model that mostly works, and a turn inside the window ends
+# unverified. The threshold of two, a re-probe that a successful verdict
+# clears, and the shorter window at `_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED`
+# are what bound that.
 _VERIFIER_TOKEN_BUDGETS = (2048, 4096)
 
 # Verdict-call failures that are transient by nature rather than statements about
@@ -445,11 +466,55 @@ _DENIED_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
     ModelUnavailableError,
 )
 
+# Verdict-call outcomes that count toward the latch: a provider that rejects
+# the call itself (ENG-1095) and a ladder exhausted by a narrating model. Named
+# beside the two sets above so the comments that reason about it point at one
+# definition instead of restating it by hand, which is how they drifted before.
+_LATCHING_VERDICT_FAILURES = ("hard", "truncated")
+
+# Verdict calls producing no verdict before the latch engages. Two, because the
+# first can be a one-off and ENG-1079 wants its honest diagnosis for that. A
+# deterministic denial is the exception: it recurs by construction, so it
+# latches on its own branch at the first occurrence.
+_VERIFIER_LATCH_THRESHOLD = 2
+
 # Turns a latched session skips before spending one verdict call to see whether
 # the cause has gone away (user switched model, gateway fix shipped). Without a
 # re-probe the latch is permanent for the session and "reset on a successful
 # verdict" can never fire, since a latched session makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
+
+# Shorter window when the last thing that failed was a truncation, because a
+# re-probe can actually land: output length varies per call (245-1654 tokens
+# over 16 identical calls, see `_VERIFIER_TOKEN_BUDGETS`), so a narrating model
+# that exhausted the ladder twice may still fit a verdict next time. A provider
+# that rejects the forced `tool_choice` rejects every call, so re-probing it
+# more often only spends tokens on a certain 400.
+#
+# The shorter window is the EXPENSIVE one, which is easy to read backwards. A
+# truncating re-probe runs the whole ladder before it gives up, so it costs two
+# calls, and at 3 turns that is ~0.67 verdict calls per turn against ~0.1 for a
+# capability latch at 10. Bought deliberately: recovery is plausible here and
+# impossible there, so the spend buys a real chance of verification coming back.
+#
+# 3 is a judgment, not a measurement, and so was the 10 above it. What would
+# settle it is how often a verdict call recovers k turns after a truncation,
+# read from turn_completed's verifier_failure per conversation. Nobody has
+# read it yet. Do not cite either window as evidence-backed.
+_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED = 3
+
+
+def _reprobe_turns_for(last_failure: str) -> int:
+    """Skipped turns before a latched session spends one verdict call again.
+
+    Keyed on the LAST no-verdict class, not the accumulated latch reason: this
+    is a prediction about what is failing now, and a truncation ten turns ago
+    says nothing about a model that has been rejecting the call ever since.
+    """
+    if last_failure == "truncated":
+        return _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
+    return _VERIFIER_LATCH_REPROBE_TURNS
+
 
 # Floor for the tokens held back from the spend ceiling (ENG-1286).
 #
@@ -555,6 +620,64 @@ def _safe_error_detail(exc: BaseException) -> str:
     return name
 
 
+def _tool_failure_cause(ok: bool | None, reason: str) -> tuple[str, str]:
+    """`(tier, class)` for one failed tool call, or `("", "")` (ENG-2247).
+
+    Reuses `root_cause.classify` — the SAME vocabulary the turn-level
+    `root_cause_*` tally is built from — so for a string tool result the row
+    and its turn cannot disagree about what a failure was. A parallel taxonomy
+    here would put two spellings of one failure in two fields.
+
+    **Scoped to string results deliberately, and it is not a full agreement
+    guarantee.** This runs unconditionally at the emit, but
+    `_record_root_cause` is reached only from the string branch — the
+    multimodal arms `continue` past it. So a handler returning
+    `content=[...]` with `ok=False` puts a cause on the tool row that the turn
+    tally never counts (measured: row `self_inflicted`/`NameError`, tally
+    `root_cause_failures=0`). Unreachable today — no handler returns
+    multimodal content at all — but `ToolOutcome.content` permits it, so
+    whoever migrates the first one must add `_record_root_cause` to both list
+    arms, alongside the nudge the #308-review NOTE already asks for there.
+
+    **Deliberately does NOT touch `RootCauseLedger`.** That ledger drops every
+    non-trip-eligible class one line into `add()` (`if not rc.trip_eligible:
+    return`), and that early return is how "structurally cannot trip" is
+    implemented for ENG-1531's breaker — widening it to keep `self_inflicted`
+    names would arm the breaker on the agent's own `NameError`s, the exact
+    ENG-836 ping-pong the tier exists to exclude. Reading the classifier
+    directly bypasses the ledger, so nothing a trip rung reads can change.
+
+    `result_text` is deliberately not taken. `classify` consults it only to
+    build the `identifier` of a reason-less failure; the CLASS in that branch is
+    the constant `"unclassified"` either way. So the class is identical with or
+    without it — which is what lets this run at the emit site, where the result
+    has not been assigned yet, instead of reordering the dispatch loop.
+
+    Only a handler's explicit `ok is False` produces a cause. `ok is None` is an
+    unmigrated handler (ENG-2248): the event already reports `ok="unknown"`, and
+    attaching a cause to a call we cannot say failed would invent a verdict.
+
+    **Emit `tier` and `cls` only — never `identifier`, and never `key`.**
+    `key` is `class:identifier` and is the tempting "more useful" field, but the
+    identifier is extracted from the reason and carries absolute paths and
+    internal hostnames verbatim: `permission_denied:/root/.ssh/id_rsa`,
+    `connection_refused:db.internal.corp:5432`. It is the nearer trap than
+    `reason`, because it sits on the object this function already destructures.
+    `test_no_prose_from_the_reason_reaches_the_payload` fails if either is
+    forwarded — verified by mutation, not by hope.
+
+    Never raises: it runs on the reporting path, where an escape would turn a
+    handled tool failure into a dead turn.
+    """
+    if ok is not False:
+        return "", ""
+    try:
+        rc = classify_root_cause(reason or "", "")
+        return rc.tier, rc.cls
+    except Exception:  # pragma: no cover - defensive; classify is total
+        return "", ""
+
+
 def _safe_error_type(exc: BaseException) -> str:
     """The exception's class name, and nothing else, for analytics.
 
@@ -595,19 +718,42 @@ def _verifier_error_type(exc: BaseException | None) -> str:
     return name
 
 
-def _is_provider_auth_error(exc: BaseException) -> bool:
-    """A provider-auth 401 — anton's "Invalid API key — …" copy from
-    `openai.py`/`anthropic.py` (ENG-1310): the credential is wrong, not the
-    request, so retrying can't succeed either. The substring match mirrors
-    cowork-server's `turn_errors.is_auth_error()`; the `isinstance` check is
-    an anton-only narrowing on top of it (both 401 raise sites always type
-    it this way, so it's a no-op in practice) — anything else (a bare
-    "temporarily unavailable" ConnectionError) is a different failure.
+def _stamp_retry_terminal(
+    tc: "TurnCost | None", exc: BaseException, reason: str
+) -> None:
+    """Record WHY the retry flow terminated, plus the provider failure behind it.
 
-    Shared by both `turn_stream` re-raise sites so the check can't drift
-    between them (review feedback on ENG-1310).
+    Called immediately before each terminal raise so the books carry the split
+    that `ended_by` and `error_type` cannot express: after ENG-1361 the
+    request-time and mid-stream terminals raise the SAME
+    ``ProviderOverloadedError``, and the ``code`` that separates the rate-limit
+    case is a card contract that never reaches analytics.
+
+    Reads the ORIGINATING exception, not the one about to be raised — the
+    conversion to ``ProviderOverloadedError`` is exactly where the cause would
+    otherwise be lost. Never raises: it runs on the failure path, where an
+    escape would turn a handled failure into a dead turn.
     """
-    return isinstance(exc, ConnectionError) and "invalid api key" in str(exc).lower()
+    if tc is None:
+        return
+    try:
+        tc.retry_terminal_reason = reason
+        tc.provider_failure_kind = provider_failure_kind(getattr(exc, "code", None))
+        status = getattr(exc, "status_code", None)
+        tc.provider_http_status = status if isinstance(status, int) else None
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def _is_provider_auth_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is the canonical provider HTTP-401 mapping.
+
+    ``LLMClient`` propagates this after a failed confirmation, or immediately
+    when a stream has emitted an event and cannot be replayed. The session must
+    propagate either terminal refusal, while unrelated ``ConnectionError``
+    values keep their existing recovery behavior.
+    """
+    return isinstance(exc, ProviderAuthError)
 
 
 # Shared closing instruction for every path that hands control back to the
@@ -991,6 +1137,9 @@ class ChatSessionConfig:
     to ChatSession — the session never needs to know where values came from.
     """
 
+    # Ownership transfers with it: ChatSession.close() closes the client's
+    # provider transports. A host that shares one client across sessions must
+    # not close both sessions.
     llm_client: LLMClient
     runtime_factory: ScratchpadRuntimeFactory = field(default=local_scratchpad_runtime_factory)
     cells: list[Cell] | None = None
@@ -1001,6 +1150,7 @@ class ChatSessionConfig:
     system_prompt_context: SystemPromptContext = field(default_factory=SystemPromptContext)
     workspace: Workspace | None = None
     data_vault: DataVault | None = None
+    workspace_env_overlay: dict[str, str] | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1136,23 +1286,27 @@ class ChatSession:
         # builds a fresh one per HTTP turn, so there this resets every turn.
         # See `RootCauseLedger` for what that does and does not still measure.
         self._root_causes = RootCauseLedger()
-        # Latch for a verifier that fails the same hard way every turn — e.g.
-        # kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), which
-        # fails on every verdict call until the gateway fix lands. Without the
-        # latch, each multi-step turn pays a full-history diagnosis call and
-        # shows the "checking in" message (ENG-1155). Session-scoped: a hard
-        # failure twice in a row latches, a successful verdict clears it.
-        self._verifier_hard_failures = 0
+        # Latch for a verifier that produces no verdict the same way every turn
+        # — kimi-K3 rejecting forced `tool_choice` with a 400 (ENG-1095), or a
+        # narrating model exhausting the budget ladder. Without it, each
+        # multi-step turn pays a full-history diagnosis call and shows the
+        # "checking in" message (ENG-1155). Two such failures with no successful
+        # verdict between them latch; a successful verdict clears it. Scoped to
+        # this session: Cowork rebuilds it per message, so a persistent failure
+        # there still diagnoses per message until a host carries this state.
+        self._verifier_no_verdict_failures = 0
         self._verifier_latched = False
         self._verifier_latch_skips = 0
-        # Why the latch is set — "hard" (capability, ENG-1095) or "denied"
-        # (billing/model access, ENG-1632) — so the skip log names the real
-        # cause instead of reporting "0 hard failures" for a denied latch.
+        # ACCUMULATED evidence: every class that produced no verdict since the
+        # last success ("hard", "truncated", "denied", or "mixed" once they
+        # differ). Feeds the skip log and the books.
         self._verifier_latch_reason = ""
+        # The LAST such class, which is a different question: it predicts what a
+        # re-probe would hit, so it picks the window. See `_reprobe_turns_for`.
+        self._verifier_last_no_verdict = ""
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
-        self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = config.llm_client
         # Router (ENG-648): explicit host override wins; otherwise the
         # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
@@ -1164,9 +1318,8 @@ class ChatSession:
         )
         self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
         # Monotonic counter for thalamus-preloaded tool_use ids. Deliberately
-        # separate from `_turn_count`, which only increments in turn_stream()
-        # — using it here would emit the same id on every call made through
-        # the non-streaming turn() API.
+        # separate from `_turn_count`, which only increments at end of turn —
+        # preloads happen before that, so reusing it would repeat ids.
         self._thalamus_recall_counter = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
@@ -1186,6 +1339,9 @@ class ChatSession:
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
+        # Kept so an artifact backend can be given the same project .env the
+        # scratchpad gets; it is never applied to this process.
+        self._workspace_env_overlay = config.workspace_env_overlay or {}
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to
@@ -1222,10 +1378,6 @@ class ChatSession:
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
         self._turn_cost: TurnCost | None = None
-        # Set per-turn by `turn_stream` so any LLM call made during that
-        # turn can read the current turn identifier (used by telemetry /
-        # langfuse propagation in the provider layer).
-        self._current_turn_id: int | None = None
         self._cancel_event = asyncio.Event()
         self.escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
@@ -1248,8 +1400,7 @@ class ChatSession:
 
             self.elicitor = CLIElicitor(config.console)
         # Out-of-band event path, attached for the duration of a
-        # `turn_stream` turn only. `turn()` leaves it None, which is what
-        # makes questions unavailable on the non-streaming path.
+        # `turn_stream` turn only; None outside one.
         self.emitter = None
         self.question_count = 0
         # Seconds spent waiting on humans during the current tool dispatch,
@@ -1268,6 +1419,7 @@ class ChatSession:
             workspace_path=config.workspace.base if config.workspace else None,
             session_id=config.session_id,
             data_vault=config.data_vault,
+            workspace_env_overlay=config.workspace_env_overlay,
         )
 
         self.tool_registry = ToolRegistry()
@@ -1428,6 +1580,25 @@ class ChatSession:
             "covered_through": min(self._last_compacted_count, self._seed_len),
         }
 
+
+    def _note_latch_class(self, failure: str) -> None:
+        """Record one no-verdict class: accumulated for the books, last for the
+        window.
+
+        "mixed" once the classes differ, so attribution never depends on which
+        failure arrived last. A denial is the exception and STAYS the reason: it
+        is the only class the user can act on, one call failing another way is
+        no evidence the wallet was topped up, and the re-probe turn books its
+        own class anyway, so nothing is lost by keeping the actionable label.
+        """
+        self._verifier_last_no_verdict = failure
+        current = self._verifier_latch_reason
+        if current == "denied" or failure == "denied":
+            self._verifier_latch_reason = "denied"
+        elif not current or current == failure:
+            self._verifier_latch_reason = failure
+        elif current != "mixed":
+            self._verifier_latch_reason = "mixed"
 
     def _record_root_cause(
         self, tool_ok: bool | None, reason: str, result_text: str
@@ -1737,8 +1908,7 @@ class ChatSession:
             + self._coerce_to_block_list(content)
         )
         self._history[-1] = {**prev, "role": role, "content": merged_blocks}
-        import logging as _logging
-        _logging.getLogger(__name__).info(
+        logger.info(
             "Merged consecutive %s messages in history (would have violated "
             "Anthropic role alternation). Combined block count: %d.",
             role, len(merged_blocks),
@@ -1760,12 +1930,10 @@ class ChatSession:
         raise — sending the request and letting the provider return
         its own 400 is more useful for debugging than crashing here.
         """
-        import logging as _logging
-        log = _logging.getLogger(__name__)
         if not messages:
             return
         if messages[0].get("role") != "user":
-            log.warning(
+            logger.warning(
                 "History pre-flight: first message has role %r, expected 'user'. "
                 "The provider call is likely to 400.",
                 messages[0].get("role"),
@@ -1774,7 +1942,7 @@ class ChatSession:
             prev_role = messages[i - 1].get("role")
             curr_role = messages[i].get("role")
             if prev_role == curr_role and prev_role in ("user", "assistant"):
-                log.warning(
+                logger.warning(
                     "History pre-flight: consecutive %s messages at indices "
                     "%d and %d. Most providers will reject this; OpenAI may "
                     "accept it but produce worse output. Some append site "
@@ -2141,8 +2309,14 @@ class ChatSession:
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
-        await self._reap_tracked_backends()
-        await self._scratchpads.close_all()
+        try:
+            await self._reap_tracked_backends()
+            await self._scratchpads.close_all()
+        finally:
+            # Provider clients own an HTTP pool. This runs even if the steps
+            # above raise, or the pool outlives the process.
+            if self._llm is not None:
+                await self._llm.aclose()
 
     async def emit(self, event) -> None:
         """Push an out-of-band event to the host, if one is listening.
@@ -2158,7 +2332,7 @@ class ChatSession:
         SIGTERM first, then SIGKILL after a short grace period. Errors
         are swallowed — close() must not raise on shutdown.
         """
-        for slug, info in list(self._tracked_backends.items()):
+        for info in list(self._tracked_backends.values()):
             proc = info.get("proc")
             if proc is None or proc.returncode is not None:
                 continue
@@ -2760,8 +2934,8 @@ class ChatSession:
         # whatever the thread is CURRENTLY handling, including an exception the
         # caller had already caught before invoking the turn, and reading it on
         # a clean turn reported `error` for one that succeeded. The lookup
-        # remains only for the legacy non-streaming `turn()`, which has no
-        # wrapping handler to capture from (#309 review).
+        # remains as a fallback for bare-session callers with no wrapping
+        # handler to capture from (#309 review).
         if exc is _EXC_UNSET:
             exc = sys.exc_info()[1]
         cancelled = bool(
@@ -2782,6 +2956,12 @@ class ChatSession:
             # not exotic. Leaving the stale value would let plain Stops appear
             # in an error-cause breakdown, which is the opposite of the point.
             tc.error_type = ""
+            # Same reasoning for ENG-1361's fields, and the same site stamps
+            # them: a Stop during the summarize call would otherwise book a
+            # retry terminal that the turn never actually reached.
+            tc.retry_terminal_reason = ""
+            tc.provider_failure_kind = ""
+            tc.provider_http_status = None
         elif exc is not None:
             tc.ended_by = "error"
             # The exception was in scope here and thrown away until ENG-1689,
@@ -2799,13 +2979,20 @@ class ChatSession:
         except Exception:  # pragma: no cover - defensive
             _root_cause_fields = {}
         logger.info(
-            "turn_cost session=%s turn=%d ended_by=%s verification_skipped=%s "
+            # `attempt` alongside `turn`: `turn_index` is a history position,
+            # so two attempts of one turn used to produce two indistinguishable
+            # log lines (ENG-2243). This line is also the ONLY forensics
+            # surface that survives the collector allowlist (see the note
+            # below) and, per ENG-2193, the only one a desktop customer has —
+            # `cowork-server.log`, not PostHog. Without it the new analytics
+            # property has no fallback at all.
+            "turn_cost session=%s turn=%d attempt=%s ended_by=%s verification_skipped=%s "
             "grace_granted=%s grace_tokens=%d "
             "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
             "by_role=%s %s",
-            self._session_id, turn_index, tc.ended_by,
+            self._session_id, turn_index, tc.attempt_id, tc.ended_by,
             str(tc.verification_skipped).lower(),
             tc.grace_granted or "-", tc.grace_tokens,
             tc.verifier_failure, tc.verifier_error_type, tc.total_tokens,
@@ -2933,6 +3120,26 @@ class ChatSession:
                 # `TurnCost.verifier_failure`.
                 verifier_failure=tc.verifier_failure,
                 verifier_error_type=tc.verifier_error_type,
+                # WHY the retry flow terminated + WHAT failed underneath
+                # (ENG-1361). `ended_by`/`error_type` cannot express either:
+                # the request-time and mid-stream terminals now raise the same
+                # ProviderOverloadedError, and the `code` that splits the
+                # rate-limit case is a card contract, not analytics. Empty
+                # strings for turns that did not retry, consistent with every
+                # other unset string property here.
+                retry_terminal_reason=tc.retry_terminal_reason,
+                provider_failure_kind=tc.provider_failure_kind,
+                # `provider_http_status` is OMITTED rather than sent blank when
+                # there was no status (a mid-stream failure carried a 200; a
+                # connection error had no response at all). The transport is
+                # string-typed, so a placeholder would have to be "" — which
+                # sorts and groups alongside real statuses and makes the column
+                # unusable. Absent is the honest encoding of absent.
+                **(
+                    {"provider_http_status": str(tc.provider_http_status)}
+                    if tc.provider_http_status is not None
+                    else {}
+                ),
                 tokens_total=str(tc.total_tokens),
                 input_tokens=str(tc.input_tokens),
                 output_tokens=str(tc.output_tokens),
@@ -3006,6 +3213,16 @@ class ChatSession:
                 # forensics.
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
+                # Unique per turn EXECUTION, where `turn_index` is a history
+                # position that repeats across retries (ENG-2243). This is the
+                # key `tool_completed` joins on; `turn_index` stays the field
+                # the Langfuse trace name and the artifact index are built
+                # from, so both readings remain available:
+                #   COUNT(DISTINCT turn_attempt_id) -> attempts
+                #   COUNT(DISTINCT conversation_id, turn_index) -> turns
+                # Absent on a pre-ENG-2243 build: read that as "unknown",
+                # never as a value.
+                turn_attempt_id=tc.attempt_id,
             )
         except Exception:
             # Reporting must never affect the turn that just ran.
@@ -3017,8 +3234,28 @@ class ChatSession:
         ok: bool | None,
         duration_ms: float,
         error_type: str,
+        reason: str = "",
     ) -> None:
         """Per-tool-call analytics event (ENG-1486).
+
+        ``reason`` is the handler's own ``ToolOutcome.reason``, taken so the
+        root-cause class can be derived HERE rather than at each call site
+        (ENG-2247 review). Deriving it here is what makes it impossible to
+        forget: there is no cause argument a new dispatch path can omit, and a
+        caller that passes no ``reason`` at all degrades to ``unclassified``
+        — "we do not know why" — instead of to the empty string, which reads
+        as "this call did not fail". Defaulting the CAUSE was the earlier
+        shape and it failed in the wrong direction; making it required instead
+        was worse still, since a missing argument raises ``TypeError`` at the
+        CALL, outside this method's guard, and kills the turn over telemetry.
+
+        **``reason`` is prose and must never be emitted.** It is a traceback
+        line or a handler message and carries file paths and user input; that
+        is the whole reason ``error_type`` was narrowed to a class name. It is
+        consumed by ``_tool_failure_cause`` two lines down and never touched
+        again — do not add it, ``rc.identifier`` or ``rc.key`` to the payload.
+        ``test_no_prose_from_the_reason_reaches_the_payload`` and the
+        exact-keys assertion both fail if you do.
 
         The verdict the dispatch loop already computes for the UI's
         ``tool_done`` marker, sent where it can be aggregated: without this,
@@ -3033,17 +3270,27 @@ class ChatSession:
         is reported as ``"unknown"`` rather than coerced either way.
 
         Payload is deliberately name + verdict + duration + exception CLASS
-        + surface (a closed enum, ENG-1945) plus the two join keys, and
-        nothing else. Arguments, result content and ``str(exc)`` routinely
+        + surface (a closed enum, ENG-1945) + the root-cause tier and class
+        (both closed vocabularies, ENG-2247) plus the THREE join keys
+        (``conversation_id``, ``turn_index``, ``turn_attempt_id``), and
+        nothing else — ten keys, and the exact-keys assertion in
+        ``test_tool_completed.py`` is what keeps that number honest. This
+        paragraph is the privacy-audit enumeration, so keep it in step with
+        the payload: arguments, result content and ``str(exc)`` routinely
         carry file paths, user data and credentials-adjacent strings — none
         of them may ever appear here.
 
-        ``conversation_id`` / ``turn_index`` mirror ``turn_completed``'s
-        values exactly (same names, same derivation), so a tool failure spotted
-        in PostHog joins to its parent turn row there and, via
-        ``conversation_id`` → Langfuse ``sessionId``, to the gateway trace of
-        the turn it happened in. Both already ride ``turn_completed`` through
-        this same sink — no new privacy surface.
+        ``conversation_id`` / ``turn_index`` / ``turn_attempt_id`` mirror
+        ``turn_completed``'s values exactly (same names, same derivation), so a
+        tool failure spotted in PostHog joins to its parent turn row there and,
+        via ``conversation_id`` → Langfuse ``sessionId``, to the gateway trace
+        of the turn it happened in. All three already ride ``turn_completed``
+        through this same sink — no new privacy surface.
+
+        Prefer ``turn_attempt_id`` for that join: ``turn_index`` is a history
+        position and repeats across every retry of the same turn, so
+        ``(conversation_id, turn_index)`` matched more than one turn row for
+        18.5% of these rows before ENG-2243.
         """
         try:
             # Same settings resolution as `_emit_turn_cost` above: the
@@ -3056,6 +3303,10 @@ class ChatSession:
                 settings = AntonSettings()
             from anton.analytics import send_event
 
+            # Derived here, not handed in — see the docstring. `reason` is
+            # consumed and dropped; only the two closed-vocabulary tokens go on.
+            _rc_tier, _rc_class = _tool_failure_cause(ok, reason)
+
             # send_event takes STRING values only — every extra is a wire
             # parameter (tests/test_ask_user.py:496 exists because a first
             # draft assumed a (name, props) shape).
@@ -3067,6 +3318,12 @@ class ChatSession:
             turn_index = (
                 getattr(_tc, "turn_index", 0) or (self._turn_count + 1)
             )
+            # Read from the SAME books as `turn_index` above, so a tool row and
+            # its parent turn row can never disagree about which attempt they
+            # belong to (ENG-2243). Empty outside a turn — the tool ran with no
+            # books open, which is not an attempt and must not be given an id
+            # that looks like one.
+            turn_attempt_id = str(getattr(_tc, "attempt_id", "") or "")
             send_event(
                 settings,
                 "tool_completed",
@@ -3084,6 +3341,20 @@ class ChatSession:
                 surface=str(getattr(self, "_surface", None) or ""),
                 conversation_id=str(self._session_id or ""),
                 turn_index=str(turn_index),
+                # WHY the call failed, in `root_cause.py`'s vocabulary
+                # (ENG-2247). `error_type` above only fills in when the failure
+                # was a RAISE; `scratchpad` — 79% of tool volume, 9.35% of it
+                # failing — returns a verdict instead, so 83% of failures
+                # reached analytics with no cause at all. Both empty on success
+                # and on an unmigrated handler; see `_tool_failure_cause`.
+                root_cause_tier=_rc_tier,
+                root_cause_class=_rc_class,
+                # Makes the tool -> turn join exact (ENG-2243). Before this,
+                # `(conversation_id, turn_index)` matched every retry of the
+                # same turn, so 18.5% of these rows joined to more than one
+                # turn row and "which tools ran in the attempt that hit the
+                # spend ceiling" had no answer.
+                turn_attempt_id=turn_attempt_id,
             )
         except Exception:
             # Analytics must never affect the tool call that just ran.
@@ -3279,6 +3550,7 @@ class ChatSession:
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         messages_factory: Callable[[], list[dict]] | None = None,
+        allow_native_web_tools: bool = True,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming analogue of plan_with_recovery.
 
@@ -3286,6 +3558,16 @@ class ChatSession:
         ContextOverflowError, yields StreamContextCompacted, shrinks
         history (summarize+compact, then hard-truncate on a repeat
         overflow), and restarts the stream. A fourth overflow propagates.
+
+        ``allow_native_web_tools=False`` suppresses the session's native web
+        tools for this call. Default True, so every agent-loop caller is
+        unchanged: there the tools are the point. It exists for the
+        retry-exhausted wrap-up (ENG-1361 review of #433), which asks the model
+        to STOP and explain a failure — handing it a research tool contradicts
+        the instruction, and the prompt embeds the raw error, so a provider-side
+        search could carry file paths or user content from it to a search
+        backend. That call needs this method for the COMPACTION, not for the
+        capabilities that ride along with it.
         """
         factory = messages_factory if messages_factory is not None else (lambda: self._history)
         # Same defensive pre-flight as plan_with_recovery — see the
@@ -3300,7 +3582,7 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
-        if self._native_web_tools:
+        if allow_native_web_tools and self._native_web_tools:
             kwargs["native_web_tools"] = self._native_web_tools
 
         try:
@@ -3621,302 +3903,46 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": tool_uses})
             self._append_history({"role": "user", "content": results})
 
-    async def turn(self, user_input: str | list[dict]) -> str:
-        user_input = _scrub_user_input(user_input)
-        # Stamp the inbound user turn here, not in _append_history: tool_result
-        # and synthetic user-role messages also flow through append and must
-        # NOT be stamped.
-        stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
-        self._append_history({"role": "user", "content": stamped_input})
+    def _open_ds_turn_scope(self) -> None:
+        """Open this turn's DS_* scope and rebuild it from the session's vault.
 
-        # Open the turn's cost books (ENG-1288) — same contract as
-        # turn_stream. This non-streaming path has no wrapping finally, so
-        # emission happens at both returns; an exception propagating out of
-        # this method skips emission (stated gap: the CLI path's error exits
-        # go unreported rather than restructuring the method around it).
-        self._turn_cost = TurnCost(turn_index=self._turn_count + 1)
-        self._llm.usage_listener = self._turn_cost.add
-
-        user_msg_str = (
-            user_input
-            if isinstance(user_input, str)
-            else next((b["text"] for b in user_input if b.get("type") == "text"), "")
-        )
-
-        # Cheap front-model routing (ENG-648). Text-only turns first hit
-        # the thalamus model, which either answers trivial/from-context
-        # requests directly (skipping the full prompt + tools + planning
-        # model entirely) or delegates, optionally preloading skills.
-        # Image turns skip the thalamus — attachments imply real work.
-        if self._router_enabled and isinstance(user_input, str):
-            decision = await self._gate_turn()
-            if decision is not None and decision.action == ACTION_RESPOND:
-                self._append_history(
-                    {"role": "assistant", "content": decision.text}
-                )
-                if self._background_memory_active:
-                    self._cortex.maybe_vacuum()
-                self._schedule_cerebellum_flush()
-                self._schedule_acc_flush()
-                self._emit_turn_cost()
-                return decision.text
-            if decision is not None and decision.skills:
-                self._inject_recalled_skills(decision.skills)
-
-        tools = self._build_tools()
-        system = await self._build_system_prompt(user_msg_str)
-        self._compacted_this_turn = False
-        self._compaction_failed_this_turn = False
-        # Same reset turn_stream does — without it a grace granted in an
-        # earlier turn_stream call leaks into every later turn() call on
-        # this session, permanently widening its round cap / spend ceiling.
-        self._spend_ceiling_grace_used = False
-        self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
-
-        response = await self.plan_with_recovery(system=system, tools=tools)
-
-        # Proactive compaction — attempted at most once per turn, and not
-        # re-attempted after a failure (see `_compaction_failed_this_turn`).
-        if (
-            not self._compacted_this_turn
-            and not self._compaction_failed_this_turn
-            and response.usage.context_pressure > self._context_pressure_threshold
-        ):
-            compacted = await self._summarize_history()
-            self._compact_scratchpads()
-            if compacted:
-                self._compacted_this_turn = True
-            else:
-                self._compaction_failed_this_turn = True
-
-        # Handle tool calls
-        tool_round = 0
-        error_streak: dict[str, int] = {}
-        resilience_nudged: set[str] = set()
-        # Mirrors turn_stream's one-time grants, the same way the round-cap
-        # and spend-ceiling checks below already mirror it. This path has no
-        # continuation loop — unlike `_stream_and_handle_tools`, which needs
-        # its own per-continuation flag — so `_round_cap_grace_used` alone
-        # already tracks whether THIS call earned the wider cap.
-        while response.tool_calls:
-            tool_round += 1
-            # `> 0` excludes a configured 0 (or misconfigured negative) cap:
-            # that means "no tool rounds", not "one round of free grace".
-            if (
-                tool_round > self._max_tool_rounds
-                and not self._round_cap_grace_used
-                and self._max_tool_rounds > 0
-            ):
-                self._round_cap_grace_used = True
-                _record_grace(self._turn_cost, "round")
-            effective_round_cap = self._max_tool_rounds + (
-                _ROUND_CAP_GRACE_ROUNDS if self._round_cap_grace_used else 0
+        Rebuilt here rather than trusted from the host: the pod builds its
+        session in a `run_in_executor` worker, whose ContextVar writes never
+        reach this task, which would leave the turn scrubbing against nothing.
+        """
+        begin_ds_turn_scope()
+        if self._data_vault is None:
+            return
+        try:
+            restore_namespaced_env(self._data_vault)
+        except Exception:
+            logger.warning(
+                "Could not rebuild this turn's DS_* scrub state", exc_info=True
             )
-            if self._turn_cost is not None and tool_round <= effective_round_cap:
-                self._turn_cost.rounds += 1
-            if tool_round > effective_round_cap:
-                # Mirror turn_stream's cap mark (#309 review) — this path is
-                # public API even without in-repo callers, and the books are
-                # wired here too.
-                if self._turn_cost is not None:
-                    self._turn_cost.ended_by = "round_cap"
-                self._append_history(
-                    {"role": "assistant", "content": response.content or ""}
-                )
-                self._append_history(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
-                            "Pause here. Summarize what you have accomplished so far and what remains. "
-                            "If you believe you are on a good track and can finish the task with more steps, "
-                            "tell the user and ask if they'd like you to continue. "
-                            "Do NOT retry automatically — wait for the user's response."
-                        ),
-                    }
-                )
-                response = await self.plan_with_recovery(system=system)
-                break
 
-            # Spend ceiling (ENG-1286), mirroring turn_stream. Same reasoning as
-            # the cap mark above: public API, and the books are wired here too.
-            # This path runs no completion verifier, so there is no continuation
-            # gate to also check — the per-round check is the whole gate here.
-            #
-            # Uses the same `_spend_ceiling_stops_the_tool_loop` as the streaming
-            # loop, NOT the bare predicate: the "never end a turn that dispatched
-            # no tools" guarantee is stated unconditionally ("at any ceiling"),
-            # and CLI/host callers have no lower bound on `max_turn_tokens` at
-            # all, so this path is exactly where a tiny ceiling would break the
-            # loop on round 1 having run nothing (#344 review).
-            if self._spend_ceiling_stops_the_tool_loop():
-                # One-time, unconditional extension, mirroring turn_stream's
-                # mid-loop grant — no verdict exists on this verifier-less
-                # path either, so the grant is unconditional here too.
-                if not self._spend_ceiling_grace_used:
-                    self._grant_spend_ceiling_grace()
-                if self._spend_ceiling_stops_the_tool_loop():
-                    if self._turn_cost is not None:
-                        self._turn_cost.ended_by = "spend_ceiling"
-                    logger.info(
-                        "spend ceiling reached (turn): tokens=%d ceiling=%d "
-                        "tool_round=%d — pausing to ask the user",
-                        self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, tool_round,
-                    )
-                    self._append_history(
-                        {"role": "assistant", "content": response.content or ""}
-                    )
-                    self._append_history(
-                        {"role": "user", "content": self._spend_ceiling_notice()}
-                    )
-                    response = await self.plan_with_recovery(system=system)
-                    break
+    async def turn(self, user_input: str | list[dict]) -> str:
+        """Non-streaming compatibility wrapper over `turn_stream`.
 
-            # Build assistant message with content blocks
-            assistant_content: list[dict] = []
-            if response.content:
-                assistant_content.append({"type": "text", "text": response.content})
-            for tc in response.tool_calls:
-                assistant_content.append(
-                    {
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    }
-                )
-            self._append_history({"role": "assistant", "content": assistant_content})
-
-            # Process each tool call via registry
-            tool_results: list[dict] = []
-            for tc in response.tool_calls:
-                # Same refusal as the streaming loop: arguments the model never
-                # finished are answered, not executed. This loop has no
-                # truncation retry of its own, so the tool_result is the whole
-                # recovery here — the model re-emits the call next round, with a
-                # full budget again.
-                damaged = damaged_tool_call_result(tc)
-                if damaged is not None:
-                    tool_results.append(damaged)
-                    continue
-
-                import time as _time  # same local-import idiom as turn_stream
-
-                _tool_t0 = _time.monotonic()
-                _tool_error_type = ""
-                try:
-                    outcome = await self.tool_registry.dispatch_tool(
-                        self, tc.name, tc.input, tool_call_id=tc.id,
-                    )
-                except Exception as exc:
-                    # A raise is a definitive failure verdict — no text
-                    # classification needed (ENG-1276).
-                    outcome = ToolOutcome(
-                        content=f"Tool '{tc.name}' failed: {exc}",
-                        ok=False,
-                        reason=type(exc).__name__,
-                    )
-                    _tool_error_type = _safe_error_type(exc)
-                # Same per-tool-call analytics as the streaming loop's tail
-                # (ENG-1486) — without this, a host on the non-streaming API
-                # silently undercounts. Raw elapsed, no human-wait deduction:
-                # elicitation is structurally unavailable on this path (no
-                # emitter to render a question), so there is no wait to
-                # subtract.
-                self._emit_tool_completed(
-                    name=tc.name,
-                    ok=outcome.ok,
-                    duration_ms=(_time.monotonic() - _tool_t0) * 1000.0,
-                    error_type=_tool_error_type,
-                )
-                result = outcome.content
-
-                if isinstance(result, list):
-                    # Multimodal tool result — scrub credentials from text
-                    # blocks; image-block payloads are raw bytes and have
-                    # nothing to scrub. A list result signals success unless
-                    # the handler explicitly said otherwise (ENG-1276), so
-                    # mirror the matching branch of `_apply_error_tracking`
-                    # instead of running the full string-only nudge logic.
-                    content: "str | list[dict]" = [
-                        {**b, "text": scrub_credentials(b.get("text", ""))}
-                        if b.get("type") == "text"
-                        else b
-                        for b in result
-                    ]
-                    # NOTE for whoever migrates the first multimodal handler to declare
-                    # ok=False: the streak climbs here, but the resilience-nudge and
-                    # circuit-breaker TEXT are only appended by _apply_error_tracking
-                    # on the string path — this branch skips it, so the model is never
-                    # told to stop retrying. When that handler exists, append the nudge
-                    # as an extra {"type": "text"} block here (#308 review).
-                    if outcome.ok is False:
-                        error_streak[tc.name] = error_streak.get(tc.name, 0) + 1
-                    else:
-                        error_streak[tc.name] = 0
-                        resilience_nudged.discard(tc.name)
-                else:
-                    result = scrub_credentials(result)
-                    self._record_root_cause(outcome.ok, outcome.reason, result)
-                    result = self._apply_error_tracking(
-                        result,
-                        tc.name,
-                        error_streak,
-                        resilience_nudged,
-                        ok=outcome.ok,
-                    )
-                    content = result
-
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": content,
-                    }
-                )
-
-            self._append_history({"role": "user", "content": tool_results})
-
-            # Rebuild: a tool this round (e.g. recall_skill) may have
-            # registered new tools the follow-up must see.
-            tools = self._build_tools()
-
-            # Get follow-up from LLM
-            response = await self.plan_with_recovery(system=system, tools=tools)
-
-            # Proactive compaction during tool loop — at most once per turn,
-            # and not re-attempted after a failure.
-            if (
-                not self._compacted_this_turn
-                and not self._compaction_failed_this_turn
-                and response.usage.context_pressure > self._context_pressure_threshold
-            ):
-                compacted = await self._summarize_history()
-                self._compact_scratchpads()
-                if compacted:
-                    self._compacted_this_turn = True
-                else:
-                    self._compaction_failed_this_turn = True
-
-        # Text-only response
-        reply = response.content or ""
-        self._append_history({"role": "assistant", "content": reply})
-
-        # Periodic memory vacuum (Systems Consolidation)
-        if self._background_memory_active:
-            self._cortex.maybe_vacuum()
-
-        # Cerebellar consolidation — fire-and-forget so the user gets
-        # their reply immediately while supervised error learning runs
-        # in the background. Brain analogue: cerebellar plasticity
-        # operates in parallel with continued action, not blocking it.
-        self._schedule_cerebellum_flush()
-        self._schedule_acc_flush()
-
-        self._emit_turn_cost()
-        return reply
+        Runs with `enable_interaction=False` (no ask_user choice questions).
+        Returns `history[-1]`'s content rather than reading the event
+        stream, which can carry accounting-only events and tool preamble
+        text instead of the real reply.
+        """
+        async for _event in self.turn_stream(user_input, enable_interaction=False):
+            pass
+        last = self._history[-1] if self._history else None
+        if not isinstance(last, dict) or last.get("role") != "assistant":
+            return ""
+        content = last.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        return ""
 
     async def _dispatch_draining(self, tc):
         """Run one tool while forwarding whatever it emits out of band.
@@ -4006,14 +4032,18 @@ class ChatSession:
         turn_id: int | None = None,
         trace_tags: list[str] | None = None,
         trace_metadata: dict[str, str] | None = None,
+        enable_interaction: bool = True,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming turn. Owns the out-of-band emitter's lifetime.
 
-        The emitter exists only for the duration of one streaming turn, which
-        is what makes questions unavailable on the non-streaming `turn()`
-        path: nothing there would render them.
+        `enable_interaction=False` skips creating the emitter (used by
+        `turn()`, which has no listener for a mid-turn question).
         """
-        self.emitter = TurnEmitter()
+        # Before any tool task is spawned, so a connect made mid-turn registers
+        # into a container this turn still holds.
+        self._open_ds_turn_scope()
+        if enable_interaction:
+            self.emitter = TurnEmitter()
         self.question_count = 0
         self.answer_wait_s = 0.0
         # Per-turn, so a long-lived session (the CLI reuses one across turns)
@@ -4052,13 +4082,7 @@ class ChatSession:
         trace_tags: list[str] | None = None,
         trace_metadata: dict[str, str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Streaming version of turn(). Yields events as they arrive.
-
-        `turn_id` lets the host (cowork, CLI, …) tag the turn with its
-        own identifier so downstream telemetry can correlate the LLM
-        calls + tool spans made during this turn. Stored on
-        `self._current_turn_id` so the provider layer can read it
-        without threading the arg through every internal call.
+        """The turn implementation. Yields events as they arrive.
 
         `trace_tags` / `trace_metadata` are optional, opaque annotations the
         host can attach to this turn's trace (forwarded to the MindsHub
@@ -4066,7 +4090,6 @@ class ChatSession:
         are deliberately generic: hosts can add arbitrary correlation data
         (e.g. an eval-run id) without any change to Anton.
         """
-        self._current_turn_id = turn_id
         user_input = _scrub_user_input(user_input)
         # Stamp the inbound user turn here, not in _append_history: tool_result
         # and synthetic user-role messages also flow through append and must
@@ -4209,8 +4232,10 @@ class ChatSession:
                     ):
                         raise
 
-                    # Same reasoning applies to a provider-auth 401 (ENG-1310)
-                    # — see _is_provider_auth_error.
+                    # LLMClient propagates a typed provider-auth 401 after a
+                    # failed confirmation, or immediately after stream output
+                    # to avoid replay. Either terminal refusal must reach the
+                    # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
 
@@ -4249,6 +4274,9 @@ class ChatSession:
                         # decide it for them by stalling the turn.
                         _hint = getattr(_agent_exc, "retry_after", None)
                         if _rate_limited and _hint is not None and _hint > max_delay:
+                            _stamp_retry_terminal(
+                                self._turn_cost, _agent_exc, "rate_limit_wait_too_long"
+                            )
                             raise ProviderOverloadedError(
                                 "Too many requests too quickly — the limit clears in about "
                                 f"{int(_hint)}s. This isn't a credits problem.",
@@ -4307,6 +4335,9 @@ class ChatSession:
                             # one. Never say "incident": nothing is broken, and
                             # never imply credits — buying more cannot raise a
                             # per-minute ceiling (ENG-1537).
+                            _stamp_retry_terminal(
+                                self._turn_cost, _agent_exc, "rate_limit_wait_limit"
+                            )
                             raise ProviderOverloadedError(
                                 "Too many requests too quickly — the rate limit didn't "
                                 "clear in time. Waiting a moment and continuing should work; "
@@ -4316,6 +4347,9 @@ class ChatSession:
                                 code="rate_limited",
                                 retry_after=getattr(_agent_exc, "retry_after", None),
                             ) from _agent_exc
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "provider_recovery_timeout"
+                        )
                         raise ProviderOverloadedError(
                             f"{_agent_exc.provider or 'The model provider'} is experiencing an "
                             "incident and didn't recover in time.",
@@ -4361,12 +4395,99 @@ class ChatSession:
                         # again with the error context now in history
                         continue
                     else:
+                        # A transient that outlasted the COUNT budget is the
+                        # same product event as one that outlasted the TIME
+                        # budget on the backoff path above: the provider is
+                        # unreachable and the user needs the provider_overloaded
+                        # card — with Retry, and the MindsHub failover nudge for
+                        # BYOK — not prose (ENG-1361).
+                        #
+                        # Before this, the count path had NO exit that produced
+                        # a card: it asked the model to explain the outage, a
+                        # call that needs the very provider that is failing, and
+                        # when that call failed too the turn ended as "An
+                        # unexpected error occurred: <our own message>. Please
+                        # try again or rephrase your request." Rephrasing cannot
+                        # reach an unreachable provider, and users followed the
+                        # advice — the incident this ticket came from shows the
+                        # user retyping the same request, then leaving.
+                        #
+                        # Raised BEFORE the SYSTEM message is appended below:
+                        # appending first would leave "The task has failed N
+                        # times" dangling in a history the next turn replays.
+                        #
+                        # KNOWINGLY DEFERRED: this is scoped on the exception
+                        # TYPE, so it also sweeps in the `bad_response` codes
+                        # (`empty_response`, `truncated_stream`) — which anton
+                        # classifies as "a weak incident signal and a STRONG
+                        # broken/misconfigured-endpoint signal", and which
+                        # therefore inherit a card whose primary action is
+                        # Retry (and, in the CLI, a prompt defaulting to
+                        # `retry` rather than `setup`). For a wrong base URL
+                        # that is the wrong steer. It is not a regression — the
+                        # prose this replaces also said "try again in a moment"
+                        # — and the signal is genuinely ambiguous by the
+                        # classifier's own wording, so it is left alone rather
+                        # than guessed at. `provider_failure_kind=bad_response`
+                        # (added by this change) is what will size the
+                        # population; routing it is ENG-2264.
+                        if isinstance(_agent_exc, TransientProviderError):
+                            _stamp_retry_terminal(
+                                self._turn_cost, _agent_exc, "request_attempt_limit"
+                            )
+                            # Name the model that actually failed (planning OR
+                            # coding) so the card's provider lookup — and so the
+                            # BYOK-vs-managed nudge it picks — is right.
+                            _model = (getattr(_agent_exc, "model", "") or "") or getattr(
+                                self._llm, "planning_model", ""
+                            ) or ""
+                            # NO rate-limit special case here, deliberately.
+                            # A 429 reaching the COUNT path is by definition one
+                            # `classify_transient` could NOT confirm was a
+                            # velocity limit (`session_backoff=velocity_confirmed`),
+                            # and its docstring names that exact population: a
+                            # daily quota in a dialect the string-exact billing
+                            # guards miss (Gemini's RESOURCE_EXHAUSTED) "would
+                            # otherwise spend the whole budget waiting out a
+                            # daily quota that resets at midnight — then be told
+                            # it is not a credits problem." Promising "waiting
+                            # should work" and denying a credits problem is
+                            # precisely that mis-report, on precisely that
+                            # population. It also buys nothing: an unconfirmed
+                            # 429 carries `retry_after=None` (same line), so the
+                            # rate_limited card has no interval to time-gate its
+                            # Retry with. The generic branch below is honest —
+                            # anton's own typed message, no claim either way.
+                            # KEEP anton's own classification in the copy. The
+                            # typed message already says what happened ("The
+                            # model provider returned 500.") and ENG-673 put it
+                            # there deliberately; replacing it with a generic
+                            # "could not be reached" would throw away the one
+                            # detail that tells a user — or a support thread —
+                            # which failure this was. Only the attempt count is
+                            # new information.
+                            _detail = str(_agent_exc).rstrip()
+                            if _detail and _detail[-1] not in ".!?":
+                                _detail += "."
+                            raise ProviderOverloadedError(
+                                f"{_detail} It did not recover after {_retry_count} attempts.",
+                                provider=getattr(_agent_exc, "provider", "") or "",
+                                model=_model,
+                            ) from _agent_exc
                         # Exhausted retries — stop and summarize for the user.
                         # Mark the terminal: the apology below is yielded as
                         # ordinary text and nothing is in flight when the
                         # finally runs, so without this the turn reported
                         # "completed" — undercounting the most common failure
                         # mode in any error-rate query (#309 review).
+                        #
+                        # Still reached by NON-transient failures (a 400, a tool
+                        # crash), which keep the summarize-and-explain behaviour:
+                        # for those the model genuinely can say something useful,
+                        # and there is no card to route them to.
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_attempt_limit"
+                        )
                         if self._turn_cost is not None:
                             self._turn_cost.ended_by = "retry_exhausted"
                             # Same exception the SYSTEM message below shows the
@@ -4381,51 +4502,88 @@ class ChatSession:
                                     "Stop retrying. Please:\n"
                                     "1. Summarize what you accomplished so far.\n"
                                     "2. Explain what went wrong in plain language.\n"
-                                    "3. Suggest next steps — what the user can try (e.g. rephrase, "
-                                    "simplify the request, or ask you to continue from where you left off).\n"
+                                    "3. Suggest next steps — but only ones that follow from the "
+                                    "error above. Do NOT suggest rephrasing or simplifying the "
+                                    "request unless the error was actually about what was asked; "
+                                    "for an infrastructure or provider failure, say plainly that "
+                                    "retrying later is the remedy.\n"
                                     "Be concise and helpful."
                                 ),
                             }
                         )
                         try:
                             self._validate_history_for_provider(self._history)
-                            async for event in self._llm.plan_stream(
+                            # ...with_recovery, not the raw call: a history too
+                            # long to SUMMARIZE is the one overflow where
+                            # shrinking it is exactly the remedy, and this is
+                            # the only plan_stream site that lacked it. Without
+                            # it a ContextOverflowError here propagates to a
+                            # card-less generic "An unexpected error occurred."
+                            # — strictly less than the prose it replaced, and on
+                            # the one failure whose fix anton can perform
+                            # itself. A fourth consecutive overflow still
+                            # propagates (ENG-1361 review).
+                            async for event in self.plan_stream_with_recovery(
                                 system=await self._build_system_prompt(user_msg_str),
-                                messages=self._history,
+                                # This call wants the compaction, NOT the
+                                # session's web tools: the prompt above says
+                                # "Stop retrying" and asks for an explanation,
+                                # and it embeds the raw error text. Leaving them
+                                # on would both contradict the instruction and
+                                # let a provider-side search carry paths or user
+                                # content out of that error (#433 review).
+                                allow_native_web_tools=False,
                             ):
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
                         except Exception as e:
-                            if isinstance(e, (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError)):
+                            if isinstance(e, CURATED_PROVIDER_ERRORS):
                                 # Curated provider failures must FAIL the turn, not
                                 # get wrapped into assistant prose: the server maps
-                                # token_limit/model_unavailable to actionable cards,
-                                # which can only fire when the exception propagates.
-                                # Wrapping them as text is how "Server returned 403"
-                                # ended up mid-chat with "please rephrase your
-                                # request" advice. EndpointConfigurationError added
-                                # here to match the immediate re-raise site above —
-                                # this wrap-up call had been the one place it still
-                                # fell through (review feedback on ENG-1310). NOTE:
-                                # cowork-server has no dedicated card for
-                                # EndpointConfigurationError yet (grepped — zero
-                                # hits, friendly_turn_error falls through to the
-                                # generic message for it); re-raising it here still
-                                # stops the misleading "adjust your approach" prose,
-                                # it just doesn't get a *better* card until that
-                                # mapping exists server-side.
+                                # them to actionable cards, which can only fire when
+                                # the exception propagates. Wrapping them as text is
+                                # how "Server returned 403" ended up mid-chat with
+                                # "please rephrase your request" advice.
+                                #
+                                # ENG-1361 moved the membership list from HERE to
+                                # `provider.py`, beside the classes themselves, so
+                                # a new type is triaged where it is born.
+                                #
+                                # Be precise about what that does and does NOT buy
+                                # (review of #433): this is STILL an allowlist at
+                                # runtime — an unlisted type still becomes prose.
+                                # The default-safe property comes only from
+                                # `test_every_exception_defined_in_a_provider_module_is_triaged`,
+                                # which is why that test's module list must cover
+                                # every module that defines one of these.
+                                #
+                                # And propagating is not automatically better.
+                                # Four members currently have NO card on either
+                                # transport (ContextOverflowError,
+                                # StructuredOutputError, TransientProviderError,
+                                # EndpointConfigurationError): cowork-server
+                                # replaces the message with a flat "An unexpected
+                                # error occurred." and the client renders a
+                                # BUTTONLESS alert, so for those the turn trades
+                                # anton's own diagnosis for less text. It is still
+                                # the right trade — the prose asserted a remedy
+                                # that could not work — but it is a trade, not a
+                                # free win, and the cards are the follow-up.
                                 raise
                             if _is_provider_auth_error(e):
-                                # Same reasoning for a provider-auth 401 — see
-                                # _is_provider_auth_error. cowork-server's
-                                # turn_errors.is_auth_error() matches this exact
-                                # text and renders the "Reconnect MindsHub" /
-                                # BYOK-key action card, but only if the exception
-                                # propagates instead of being flattened into chat
-                                # text here (ENG-1310).
+                                # Preserve a refusal after failed confirmation,
+                                # or the first refusal after stream output, for
+                                # the host's auth-error mapping.
                                 raise
-                            fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
+                            # No "rephrase your request": everything reaching
+                            # this line is an UNEXPECTED failure, and we have no
+                            # basis to claim the user's wording caused it. The
+                            # curated failures — where we DO know the cause, and
+                            # where rephrasing provably cannot help — are re-
+                            # raised above (ENG-1361). Say what happened and stop
+                            # inventing a remedy.
+                            fallback = f"An unexpected error occurred: {e}"
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break
@@ -4689,8 +4847,6 @@ class ChatSession:
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
         _reply_persisted = False
-        import logging as _logging
-        _verifier_log = _logging.getLogger(__name__)
 
         while True:  # Completion verification loop
             # Per-iteration, NOT per-turn: the flag means "the reply currently in
@@ -5246,6 +5402,7 @@ class ChatSession:
                             0.0,
                         ) * 1000.0,
                         error_type=_tool_error_type,
+                        reason=tool_reason,
                     )
 
                     if isinstance(result_text, list):
@@ -5459,9 +5616,9 @@ class ChatSession:
                 # Consolidation still runs after diagnosis
                 break
 
-            # A verifier that already failed hard twice in a row will keep
-            # failing for the rest of the session (ENG-1095's forced-tool_choice
-            # 400 is per-model, not per-call). Skip the verdict rather than pay a
+            # A verifier that already produced no verdict twice will keep
+            # failing for this model (ENG-1095's forced-tool_choice 400 is
+            # per-model, not per-call). Skip the verdict rather than pay a
             # full-history diagnosis every turn and show "checking in" each time
             # (ENG-1155). The turn ends on the model's own answer, which is
             # already in history — unverified, but that beats a per-turn
@@ -5470,32 +5627,34 @@ class ChatSession:
             # user may switch off the broken model mid-session, or the gateway
             # fix may land. Without this, "reset on a successful verdict" is
             # unreachable — a latched session skips every verdict call, so there
-            # is never another success to reset on. A hard-failing re-probe stays
-            # latched and does NOT re-diagnose (the latched branch below breaks
-            # before the diagnosis), so the cost is one verdict call per
-            # _VERIFIER_LATCH_REPROBE_TURNS turns.
-            # A re-probe that TRUNCATES (or hits a typed TransientProviderError)
-            # instead is intended to fall through to the honest diagnosis below,
-            # and it leaves the latch set: neither counts toward or against the
-            # latch (truncation is a tail sample, see _VERIFIER_TOKEN_BUDGETS;
-            # typed transients never latch by definition), so only a successful
-            # verdict clears it. A latched session re-probing into a
-            # persistently-verbose model therefore diagnoses once per re-probe
-            # cycle rather than never — matching "every truncated turn keeps its
-            # honest diagnosis".
+            # is never another success to reset on. A re-probe that produces no
+            # verdict stays latched and does NOT re-diagnose (the latched branch
+            # below breaks before the diagnosis), so the cost is one FAILED
+            # verdict attempt per window — which for a truncation is the whole
+            # ladder, two calls, not one. See `_reprobe_turns_for` for why the
+            # window depends on what failed last. A re-probe hitting a typed
+            # TransientProviderError still falls through to the honest
+            # diagnosis and leaves the latch set — those never latch by
+            # definition, so only a successful verdict clears it.
             if self._verifier_latched:
                 self._verifier_latch_skips += 1
-                if self._verifier_latch_skips < _VERIFIER_LATCH_REPROBE_TURNS:
-                    _verifier_log.info(
+                reprobe_turns = _reprobe_turns_for(self._verifier_last_no_verdict)
+                if self._verifier_latch_skips < reprobe_turns:
+                    logger.info(
                         "completion-verifier skipped — latched (%s) "
                         "(skip %d/%d before re-probe); "
                         "continuation=%d/%d tool_rounds=%d",
+                        # States what happened, never why it was enough: a
+                        # denial latches on call one and a failed re-probe can
+                        # leave the count below the threshold, so any sentence
+                        # naming the threshold here would sometimes be false.
                         "deterministic denial: billing or model access"
                         if self._verifier_latch_reason == "denied"
-                        else f"{self._verifier_hard_failures} hard failures "
-                        "with no successful verdict between them",
+                        else f"{self._verifier_latch_reason}, "
+                        f"{self._verifier_no_verdict_failures} verdict call(s) with "
+                        "no successful verdict since",
                         self._verifier_latch_skips,
-                        _VERIFIER_LATCH_REPROBE_TURNS, continuation,
+                        reprobe_turns, continuation,
                         self._max_continuations, tool_round,
                     )
                     # Stamp the books: this turn books ended_by="completed"
@@ -5508,12 +5667,14 @@ class ChatSession:
                         self._turn_cost.verification_skipped = True
                         # ...and WHY it was skipped (ENG-1858): no call was
                         # made this turn, so there is no exception type — the
-                        # latch reason is the whole story.
+                        # latch reason is the whole story. No fallback: the
+                        # reason is always set before the latch, and guessing
+                        # "hard" here would file a capability claim we never saw.
                         self._turn_cost.verifier_failure = (
-                            f"latched_{self._verifier_latch_reason or 'hard'}"
+                            f"latched_{self._verifier_latch_reason}"
                         )
                     break
-                _verifier_log.info(
+                logger.info(
                     "completion-verifier re-probing after %d skipped verifications",
                     self._verifier_latch_skips,
                 )
@@ -5526,9 +5687,9 @@ class ChatSession:
                 self._history, user_message
             )
             verdict = None
-            # Truncation vs hard failure decides whether this counts toward the
-            # latch: a blown budget is a tail sample of one model's verbosity,
-            # an identical hard error twice is a capability problem (ENG-1155).
+            # Which class of no-verdict failure this was. Everything except a
+            # typed transient counts toward the latch; the class is kept so the
+            # books can name it (ENG-1155/ENG-1858).
             verdict_failure: str | None = None
             # The last attempt's exception, kept only long enough to stamp
             # its TYPE on the turn books below (ENG-1858). `except ... as exc`
@@ -5555,8 +5716,8 @@ class ChatSession:
                     verdict_exc = exc
                     # WARNING only when this attempt ends the loop: a truncation
                     # the larger budget recovers from is not a failure to report.
-                    _verifier_log.log(
-                        _logging.INFO if retrying else _logging.WARNING,
+                    logger.log(
+                        logging.INFO if retrying else logging.WARNING,
                         "completion-verifier verdict=%s budget=%d output_tokens=%d "
                         "stop_reason=%s error=%s retrying=%s",
                         truncation_verdict(exc),
@@ -5565,6 +5726,23 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except ProviderAuthError:
+                    # The client already made the one bounded confirmation
+                    # attempt. ProviderAuthError subclasses ConnectionError,
+                    # so it must stay ahead of the broad transient-verdict
+                    # catch below or a confirmed verifier 401 is swallowed.
+                    #
+                    # This is deliberately unlike the wallet 402 and model 403
+                    # on this same call, which break and latch quietly per the
+                    # aux-surface reasoning at _DENIED_VERDICT_ERRORS: those
+                    # say the request was refused, while a confirmed 401 says
+                    # the credential is dead for every later call too. ENG-2116
+                    # requires a confirmed refusal on a required planning,
+                    # coding, or verifier call to reach the host as
+                    # provider_auth so the reconnect action survives. The cost
+                    # is that a turn whose reply already streamed still ends in
+                    # an auth error.
+                    raise
                 except _DENIED_VERDICT_ERRORS as exc:
                     # Deterministic denial — see _DENIED_VERDICT_ERRORS (and the
                     # ordering note there: this clause must stay ahead of the
@@ -5572,7 +5750,7 @@ class ChatSession:
                     # user buys nothing: handled below by latching silently.
                     verdict_failure = "denied"
                     verdict_exc = exc
-                    _verifier_log.warning(
+                    logger.warning(
                         "completion-verifier verdict=DENIED budget=%d model=%s error=%s",
                         budget, self._llm.coding_model, _safe_error_detail(exc),
                     )
@@ -5589,7 +5767,7 @@ class ChatSession:
                     # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
                     verdict_exc = exc
-                    _verifier_log.warning(
+                    logger.warning(
                         "completion-verifier verdict=TRANSIENT budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -5601,7 +5779,7 @@ class ChatSession:
                     # content (ENG-1081).
                     verdict_failure = "hard"
                     verdict_exc = exc
-                    _verifier_log.warning(
+                    logger.warning(
                         "completion-verifier verdict=ERROR budget=%d error=%s",
                         budget, _safe_error_detail(exc),
                     )
@@ -5611,9 +5789,10 @@ class ChatSession:
                 # A working verdict clears the latch: whatever was failing
                 # (transient provider error, a model the user has since changed)
                 # is no longer failing.
-                self._verifier_hard_failures = 0
+                self._verifier_no_verdict_failures = 0
                 self._verifier_latched = False
                 self._verifier_latch_reason = ""
+                self._verifier_last_no_verdict = ""
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
@@ -5651,61 +5830,70 @@ class ChatSession:
                     # resolution (cowork-server, same ticket); this branch is
                     # the guarantee the user is never told the turn failed.
                     self._verifier_latched = True
-                    self._verifier_latch_reason = "denied"
+                    # Through the same accumulator as every other class, but
+                    # WITHOUT touching the counter: this branch latches on call
+                    # one, so the threshold never applies to it.
+                    self._note_latch_class("denied")
                     # INFO, unlike the other latch lines: this one latches on
                     # call one, so at WARNING it doubles verdict=DENIED above.
-                    _verifier_log.info(
+                    logger.info(
                         "completion-verifier latched after a deterministic "
-                        "denial (billing or model access) — skipping further "
-                        "verification this session; turn ends on the "
+                        "denial (billing or model access) — skipping "
+                        "verification until the next re-probe; turn ends on the "
                         "already-streamed reply"
                     )
                     # Unverified turn — see the latched-skip stamp above.
                     if self._turn_cost is not None:
                         self._turn_cost.verification_skipped = True
                     break
-                if verdict_failure == "hard":
-                    self._verifier_hard_failures += 1
+                if verdict_failure in _LATCHING_VERDICT_FAILURES:
+                    self._verifier_no_verdict_failures += 1
+                    # Before the latched check, so a failed re-probe joins the
+                    # evidence rather than leaving the books naming only
+                    # whichever class happened to latch first.
+                    self._note_latch_class(verdict_failure)
                     if self._verifier_latched:
                         # A failed re-probe: the cause is still there. Stay
                         # latched with its own log line — re-announcing "latched
                         # after N failures" with an ever-growing N would read as
                         # a new event each cycle. No re-diagnosis (one per
                         # session, ENG-1155).
-                        _verifier_log.warning(
+                        logger.warning(
                             "completion-verifier re-probe failed — staying latched"
                         )
                         # Unverified turn — see the latched-skip stamp above.
                         if self._turn_cost is not None:
                             self._turn_cost.verification_skipped = True
                         break
-                    if self._verifier_hard_failures >= 2:
-                        # Second hard failure in a row: the first could have been
-                        # transient, this one establishes the pattern. Latch and
-                        # skip the diagnosis on this turn too — a second
+                    if self._verifier_no_verdict_failures >= _VERIFIER_LATCH_THRESHOLD:
+                        # Threshold reached: the cause is established, so latch
+                        # and skip the diagnosis on this turn too — a second
                         # "checking in" message plus a second full-history call
                         # buys nothing once the cause is known to recur. One
                         # diagnosis per session (ENG-1155).
                         #
-                        # "Hard" = neither truncation nor anything in
-                        # `_TRANSIENT_VERDICT_ERRORS` (see that except-clause
-                        # above). Connection drops and timeouts are transient and
-                        # never latch; what remains is the shape ENG-1095 has —
-                        # a provider that rejects the call itself.
+                        # Counted: a provider that rejects the call itself
+                        # (ENG-1095's 400 on forced `tool_choice`) and a ladder
+                        # exhausted by a narrating model. Not counted: anything
+                        # in `_TRANSIENT_VERDICT_ERRORS`; a deterministic denial
+                        # latched on its own branch above.
                         #
-                        # Not strictly "consecutive" either: the counter is reset
-                        # only by a *successful* verdict, so hard → truncated →
-                        # hard still latches on the second hard failure. That is
-                        # deliberate — only a real verdict proves the model can
-                        # produce one, and a truncation in between is no evidence
-                        # that it can (review: pnewsam on #299).
+                        # Not strictly "consecutive": the counter is reset only
+                        # by a *successful* verdict, since only a real verdict
+                        # proves the model can produce one.
+                        #
+                        # The reason carries the class, so the books can tell
+                        # latched_hard from latched_truncated rather than
+                        # mislabelling one as the other.
                         self._verifier_latched = True
-                        self._verifier_latch_reason = "hard"
-                        _verifier_log.warning(
-                            "completion-verifier latched after %d hard failures with "
-                            "no successful verdict between them — skipping further "
-                            "verification this session",
-                            self._verifier_hard_failures,
+                        logger.warning(
+                            "completion-verifier latched after %d verdict calls that "
+                            "produced no verdict (%s) with no successful verdict "
+                            "between them — skipping verification until the next "
+                            "re-probe, in %d turns",
+                            self._verifier_no_verdict_failures,
+                            self._verifier_latch_reason,
+                            _reprobe_turns_for(self._verifier_last_no_verdict),
                         )
                         # Unverified turn — see the latched-skip stamp above.
                         if self._turn_cost is not None:
@@ -5720,7 +5908,7 @@ class ChatSession:
                 # user to help). Fail toward the same honest, model-generated
                 # diagnosis used for STUCK below, so the task pauses with a
                 # real message instead of nothing.
-                _verifier_log.warning(
+                logger.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
                     "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
                     continuation, self._max_continuations, tool_round,
@@ -5760,7 +5948,7 @@ class ChatSession:
                     yield event
                 break
 
-            _verifier_log.info(
+            logger.info(
                 # No `reason` — it's the model's free-text justification, derived
                 # from the user's conversation, and this is an ordinary app log.
                 # It stays in the Langfuse trace, where that content belongs.

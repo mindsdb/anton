@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 
-from tests.conftest import make_mock_llm
+from tests.conftest import make_mock_llm, run_turn
 
 from anton.core.llm.client import LLMClient
 from anton.core.llm.identity import (
@@ -220,7 +220,7 @@ class TestClientRecordsServedModel:
 
 async def _system_prompt_after_turn(mock_llm, **config) -> str:
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, **config))
-    await session.turn("which model are you?")
+    await run_turn(session, "which model are you?")
     return mock_llm.plan.call_args.kwargs.get("system", "")
 
 
@@ -287,16 +287,16 @@ class TestSessionRuntimeIdentity:
             coding_provider=provider, coding_model="grok",
         )
         seen: list[str] = []
-        real_plan = client.plan
+        real_plan_stream = client.plan_stream
 
-        async def spy(**kwargs):
+        def spy(**kwargs):
             seen.append(kwargs.get("system", ""))
-            return await real_plan(**kwargs)
+            return real_plan_stream(**kwargs)
 
-        client.plan = spy  # type: ignore[method-assign]
+        client.plan_stream = spy  # type: ignore[method-assign]
         session = ChatSession(ChatSessionConfig(llm_client=client))
-        await session.turn("hi")
-        await session.turn("which model are you?")
+        await run_turn(session, "hi")
+        await run_turn(session, "which model are you?")
         assert "Serving model: grok (the model requested for this conversation)" in seen[0]
         assert "Serving model: grok-4.6 (as reported by the provider" in seen[-1]
 
@@ -314,15 +314,15 @@ class TestSessionRuntimeIdentity:
                 planning_provider=provider, planning_model="grok",
                 coding_provider=provider, coding_model="grok",
             )
-            real_plan = client.plan
+            real_plan_stream = client.plan_stream
 
-            async def spy(**kwargs):
+            def spy(**kwargs):
                 seen.append(kwargs.get("system", ""))
-                return await real_plan(**kwargs)
+                return real_plan_stream(**kwargs)
 
-            client.plan = spy  # type: ignore[method-assign]
+            client.plan_stream = spy  # type: ignore[method-assign]
             session = ChatSession(ChatSessionConfig(llm_client=client, initial_history=history))
-            await session.turn("which model are you?")
+            await run_turn(session, "which model are you?")
             history = list(session.history)
         lines = [[l for l in s.splitlines() if l.startswith("- Serving model:")][0] for s in seen]
         assert lines == ["- Serving model: grok (the model requested for this conversation)."] * 3
