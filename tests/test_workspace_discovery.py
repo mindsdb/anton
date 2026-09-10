@@ -1,11 +1,11 @@
 """ENG-578 slice 2: cold-start discovery — manager accessors + context block."""
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from anton.core.backends.local import (
     LocalScratchpadRuntime,
+    default_venvs_base,
     local_scratchpad_runtime_factory,
     snapshot_file,
 )
@@ -31,26 +31,6 @@ def make_manager(tmp_path: Path | None = None, session_id: str | None = "conv1")
 class TestManagerAccessors:
     def test_workspace_path_exposed(self, tmp_path):
         assert make_manager(tmp_path).workspace_path == tmp_path
-
-    def test_snapshot_mtime_none_when_unscoped(self, tmp_path):
-        mgr = make_manager(tmp_path, session_id=None)
-        assert mgr.pad_snapshot_mtime("anything") is None
-
-    def test_snapshot_mtime_none_when_missing(self, tmp_path):
-        assert make_manager(tmp_path).pad_snapshot_mtime("ghost") is None
-
-    def test_snapshot_mtime_reads_existing_snapshot(self, tmp_path):
-        # Compose the snapshot path exactly the way the runtime does, write a
-        # stub snapshot, and confirm the mtime comes back.
-        from anton.core.backends.local import default_venvs_base
-
-        mgr = make_manager(tmp_path)
-        path = snapshot_file(default_venvs_base(tmp_path), "conv1", "campaign")
-        assert path is not None
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"stub")
-        got = mgr.pad_snapshot_mtime("campaign")
-        assert got is not None and abs(got - time.time()) < 60
 
 
 from anton.core.utils.scratchpad import build_workspace_discovery_context
@@ -91,6 +71,22 @@ class TestDiscoveryBlock:
         block = build_workspace_discovery_context(mgr)
         assert "catanah (active)" in block
         assert "artifact-slug-pad" not in block
+
+    def test_snapshotted_pad_carries_no_age(self, tmp_path):
+        # A pad with an on-disk snapshot used to render "(snapshot 4m old)".
+        # That label ticked every minute and changed the prompt bytes on
+        # every turn, so the block must stay byte-stable while nothing in the
+        # workspace changes: bare name, no age.
+        mgr = make_manager(tmp_path)
+        seed_agent_pads(mgr, ["campaign"])
+        path = snapshot_file(default_venvs_base(tmp_path), "conv1", "campaign")
+        assert path is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"stub")
+        block = build_workspace_discovery_context(mgr)
+        assert "Scratchpads for this conversation: campaign —" in block
+        assert "snapshot" not in block
+        assert build_workspace_discovery_context(mgr) == block
 
     def test_caps_and_remainders(self, tmp_path):
         for i in range(35):
