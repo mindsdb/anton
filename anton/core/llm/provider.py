@@ -508,6 +508,14 @@ def replayable_tool_call(tc: ToolCall) -> ToolCall | None:
       cannot be replayed costs the whole conversation.
 
     Callers append the RESULT, never `tc`, and treat None as "no such call".
+
+    The minted id is random (`call_anton_*`) because it is minted ONCE, at
+    generation, and then persisted with the rest of this turn's rows. The
+    read-time repair in `repair_replayed_tool_ids` uses a different prefix
+    (`call_repaired_*`) and a DETERMINISTIC, content-derived id, because it
+    re-runs on every load and is never written back — a random id there would
+    change the replayed prefix every turn and miss the prompt cache. The two
+    prefixes also make it obvious in a log which layer fixed a given call.
     """
     import logging as _logging
     import uuid as _uuid

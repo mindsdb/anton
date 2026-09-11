@@ -79,10 +79,39 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
     """
     from anton.core.llm.provider import UNNAMED_REPLAYED_TOOL, usable_call_id
 
-    def _mint() -> str:
-        import uuid
+    seen: dict[str, int] = {}
 
-        return f"call_repaired_{uuid.uuid4().hex}"
+    def _mint(block: dict | None = None) -> str:
+        """A DETERMINISTIC id, derived from what the block already says.
+
+        Not `uuid4`, and that is the whole point. This repair is re-applied on
+        every load and is never written back: cowork-server leaves
+        `history_store` unset, and it persists only `session.history[seed_len:]`
+        — this turn's messages — so the repaired seed never reaches the
+        `messages` table. A random id would therefore differ on every turn,
+        changing the replayed prefix each time and missing the prompt cache on
+        the WHOLE conversation, forever, for exactly the conversations being
+        healed. Byte-stability of the history prefix is an explicit design goal
+        of the host that builds it (see `_stamp_message`, "cache-safe").
+
+        Keyed on content rather than position so a compaction summary being
+        prepended — which shifts every index — does not change the ids of the
+        tail it kept. The occurrence counter disambiguates a conversation that
+        made the identical call twice.
+        """
+        import hashlib
+        import json as _json
+
+        if block is None:
+            basis = "orphan"
+        else:
+            basis = _json.dumps(
+                [block.get("name") or "", block.get("input")],
+                sort_keys=True, default=str,
+            )
+        seen[basis] = seen.get(basis, 0) + 1
+        digest = hashlib.sha256(f"{basis}|{seen[basis]}".encode()).hexdigest()
+        return f"call_repaired_{digest[:24]}"
 
     def _blocks(msg) -> list | None:
         content = msg.get("content") if isinstance(msg, dict) else None
@@ -127,7 +156,7 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
         minted: list[str] = []
         for b in new_blocks:
             if isinstance(b, dict) and b.get("type") == "tool_use" and _bad(b, "id"):
-                b["id"] = _mint()
+                b["id"] = _mint(b)
                 if not isinstance(b.get("name"), str) or not b["name"]:
                     b["name"] = UNNAMED_REPLAYED_TOOL
                 minted.append(b["id"])

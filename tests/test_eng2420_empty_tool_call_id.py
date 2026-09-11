@@ -256,6 +256,39 @@ class TestRepairOfAnAlreadyPoisonedConversation:
         repair_replayed_tool_ids(poisoned)
         assert poisoned == snapshot
 
+    def test_two_separate_loads_produce_byte_identical_history(self):
+        """The repair is re-applied on EVERY load and never written back —
+        cowork-server leaves `history_store` unset and persists only
+        `session.history[seed_len:]`, so the repaired seed never reaches the
+        messages table. A random minted id would therefore change the replayed
+        prefix every turn and miss the prompt cache on the whole conversation,
+        forever, for exactly the conversations being healed.
+
+        Note this is a strictly stronger property than `test_repair_is_idempotent`
+        below, which re-repairs an ALREADY-repaired list and so cannot catch a
+        non-deterministic mint.
+        """
+        import json
+
+        first, _ = repair_replayed_tool_ids(self._poisoned())
+        second, _ = repair_replayed_tool_ids(self._poisoned())
+        assert json.dumps(first) == json.dumps(second)
+
+    def test_two_identical_calls_still_get_distinct_ids(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "", "name": "scratchpad", "input": {"a": 1}},
+                {"type": "tool_use", "id": "", "name": "scratchpad", "input": {"a": 1}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "", "content": "x"},
+                {"type": "tool_result", "tool_use_id": "", "content": "y"}]},
+        ]
+        fixed, _ = repair_replayed_tool_ids(history)
+        ids = [b["id"] for b in fixed[1]["content"]]
+        assert len(set(ids)) == 2
+        assert ids == [b["tool_use_id"] for b in fixed[2]["content"]]
+
     def test_repair_is_idempotent(self):
         fixed, _ = repair_replayed_tool_ids(self._poisoned())
         again, repaired = repair_replayed_tool_ids(fixed)
