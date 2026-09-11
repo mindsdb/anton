@@ -498,10 +498,52 @@ def _reconcile_publish_identity(settings) -> bool:
     # Any branch that tells the user which file publishing now uses has to
     # account for ~/.cowork/.env, which sits AFTER ~/.anton/.env in the chain
     # and silently outranks whatever we do here.
+    # `~/.cowork/.env` sits AFTER `~/.anton/.env` in the chain, so on a
+    # desktop-configured machine it outranks anything reconciliation does here.
+    #
+    # Two different things are needed from that fact, and conflating them is
+    # what this comment exists to prevent:
+    #
+    #   `publishes_from` — the SOURCE that will actually be used, which is not
+    #       always a file: an exported `ANTON_MINDS_API_KEY` outranks all of
+    #       them. A message that states the active identity must name THIS,
+    #       never `~/.anton/.env` by assumption.
+    #   `outranked`      — the explanation, appended to a message whose own
+    #       sentence is about a FILE OPERATION ("moved X to Y") and so stays
+    #       true regardless of precedence.
+    #
+    # Appending `outranked` to a sentence that already asserts the active
+    # identity produces a message that contradicts itself — "Publishing now
+    # uses ~/.anton/.env" immediately followed by "publishing still uses that
+    # one" about a different file. ENG-1424 exists because nobody could tell
+    # which account publishes; answering that twice, differently, is the same
+    # defect in a new place.
+    # Read BEFORE `publishes_from` is decided, not just for the `finally`
+    # below: `os.environ` outranks every env_file in pydantic-settings, so an
+    # exported key is what the session resolves no matter what any file holds.
+    # Choosing between the two FILES and calling the winner "what publishes"
+    # was wrong for `ANTON_MINDS_API_KEY=X anton` — measured: the message said
+    # ~/.cowork/.env while the session resolved X (#458 self-review).
+    exported = os.environ.get("ANTON_MINDS_API_KEY")
+    cowork_key = vault_key(Path.home() / ".cowork" / ".env")
+    #
+    # `is not None`, not truthiness: `os.environ` outranks every env_file and
+    # `""` is a VALUE there, so an exported-but-empty key wins the resolution
+    # while reading as absent. Measured — export empty, and the session
+    # resolves `""` from the environment while this said `~/.cowork/.env`
+    # (#458 review). The `finally` below already discriminates on `is None`
+    # for exactly this reason; these two now agree.
+    publishes_from = (
+        "the ANTON_MINDS_API_KEY set in your environment"
+        if exported is not None
+        else "~/.cowork/.env"
+        if cowork_key
+        else "~/.anton/.env"
+    )
     outranked = (
         "\n  (~/.cowork/.env also has a key and takes precedence,"
         "\n   so publishing still uses that one.)"
-        if vault_key(Path.home() / ".cowork" / ".env")
+        if cowork_key
         else ""
     )
 
@@ -511,7 +553,6 @@ def _reconcile_publish_identity(settings) -> bool:
     # have X silently popped here — and pydantic ranks os.environ above every
     # env_file, so X is exactly the key that session was resolving. Snapshot and
     # restore around the whole migration.
-    exported = os.environ.get("ANTON_MINDS_API_KEY")
 
     try:
         if not global_key:
@@ -544,10 +585,13 @@ def _reconcile_publish_identity(settings) -> bool:
                 f"ANTON_MINDS_API_KEY={project_key}\n",
             )
             project_ws.remove_secret("ANTON_MINDS_API_KEY")
+            # Names `publishes_from`, not `~/.anton/.env`, and carries no
+            # `outranked` suffix: this sentence IS the active-identity claim,
+            # so it has to be true on its own rather than corrected below it.
             message = (
                 "  This project had a different publish key than ~/.anton/.env.\n"
-                "  Publishing now uses ~/.anton/.env; the project's key was saved to\n"
-                f"  {escape(str(archive))} in case it was the one you wanted." + outranked
+                f"  Publishing now uses {publishes_from}; the project's key was saved to\n"
+                f"  {escape(str(archive))} in case it was the one you wanted."
             )
     finally:
         # In `finally`, not after the branches: `main` catches OSError and boots
