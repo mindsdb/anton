@@ -302,3 +302,55 @@ class TestCoworkProductSkill:
         assert "Never answer a question about Cowork from general" in body
         # And says what to do instead of inventing a missing fact.
         assert "say you are not certain" in body
+
+
+class TestPromptAndSkillAgree:
+    """The always-on block and the on-demand skill must state the same facts.
+
+    They are two sources for one truth, and they have already drifted once: the
+    skill said macOS/Windows/Linux while the prompt line said macOS/Windows,
+    with Linux `.deb`s shipping on every release. That drift matters more in
+    one direction than the other — the prompt block ships unconditionally, the
+    skill only if the model recalls it — so the wrong fact was the one with the
+    higher authority, which is ENG-2423's own failure mode reproduced with our
+    fact instead of the base model's prior.
+    """
+
+    PLATFORMS = ("macOS", "Windows", "Linux")
+
+    def _named(self, text: str) -> set[str]:
+        low = text.lower()
+        return {p for p in self.PLATFORMS if p.lower() in low}
+
+    def test_platform_lists_match(self, store):
+        from anton.core.llm.identity import product_lines
+
+        in_prompt = self._named("\n".join(product_lines("desktop")))
+        in_skill = self._named(store.load("cowork-product").declarative_md)
+
+        assert in_prompt == in_skill, (
+            f"prompt names {sorted(in_prompt)}, skill names {sorted(in_skill)} — "
+            "the always-on block is the one users meet first, so it must not be "
+            "the narrower of the two"
+        )
+
+    def test_both_name_every_platform_that_ships_an_installer(self, store):
+        """Pinned to the build, not just to each other: two sources agreeing on
+        a wrong list would pass the test above."""
+        from anton.core.llm.identity import product_lines
+
+        for source in (
+            "\n".join(product_lines("desktop")),
+            store.load("cowork-product").declarative_md,
+        ):
+            assert self._named(source) == set(self.PLATFORMS)
+
+    def test_both_name_the_product_and_its_maker(self, store):
+        from anton.core.llm.identity import product_lines
+
+        for source in (
+            "\n".join(product_lines("web")),
+            store.load("cowork-product").declarative_md,
+        ):
+            assert "Cowork" in source
+            assert "MindsDB" in source
