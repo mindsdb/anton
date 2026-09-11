@@ -31,10 +31,6 @@ from anton.core.artifacts.xlsx_lint import _formula_text
 # the very first time a host builds its font cache, hence the generous cap.
 _TIMEOUT_SECONDS = 15
 
-# Any Excel/LibreOffice error literal a formula can evaluate to.
-_ERROR_PREFIXES = ("#", "Err:")
-
-
 @dataclass(frozen=True)
 class FormulaErrorFinding:
     """A formula that LibreOffice itself could not evaluate cleanly."""
@@ -187,14 +183,19 @@ def _diff_formula_errors(original: Path, recalculated: Path) -> list[FormulaErro
                     formula = _formula_text(cell)
                     if formula is None:
                         continue
-                    value = values_ws[cell.coordinate].value
-                    if isinstance(value, str) and value.startswith(_ERROR_PREFIXES):
+                    value_cell = values_ws[cell.coordinate]
+                    # openpyxl sets data_type to "e" only for a genuine
+                    # formula-error value (the OOXML `t="e"` cell type) — a
+                    # string result that merely starts with "#" or "Err:"
+                    # (e.g. a rank badge "#3", a literal label "Err:522")
+                    # is data_type "str"/"s" and must not be flagged.
+                    if value_cell.data_type == "e":
                         findings.append(
                             FormulaErrorFinding(
                                 sheet=ws.title,
                                 cell=cell.coordinate,
                                 formula=formula,
-                                error=value,
+                                error=value_cell.value,
                             )
                         )
     finally:

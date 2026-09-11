@@ -89,3 +89,34 @@ def test_flags_a_formula_that_recalculates_to_an_error(circular_workbook: Path):
 @requires_office
 def test_clean_workbook_has_no_findings(clean_workbook: Path):
     assert check_xlsx_via_office(clean_workbook) == []
+
+
+@pytest.fixture
+def string_results_workbook(tmp_path: Path) -> Path:
+    """Formulas whose STRING result merely starts with '#'/'Err:' — none of
+    these are formula errors, just text a real workbook can legitimately
+    produce (a rank badge, a tag, a label someone chose to write)."""
+    path = tmp_path / "labels.xlsx"
+    _write_workbook(
+        path,
+        {
+            "Sheet1": {
+                "B2": 5,
+                # Rank badge, e.g. "#3" — a formula concatenating a literal
+                # "#" with a computed number.
+                "C1": '="#"&TEXT(RANK(B2,B2:B5),"0")',
+                "C2": '=CONCATENATE("#tag-",B2)',
+                # A literal string that happens to spell an error code.
+                "C3": '="Err:"&"522"',
+            }
+        },
+    )
+    return path
+
+
+@requires_office
+def test_does_not_flag_a_string_result_that_looks_like_an_error(string_results_workbook: Path):
+    """The exact false-positive shape from the review: `_ERROR_PREFIXES`
+    string-matching flagged these; only `data_type == 'e'` — a genuine
+    formula error, not any string starting with '#' — should."""
+    assert check_xlsx_via_office(string_results_workbook) == []
