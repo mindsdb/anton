@@ -136,6 +136,67 @@ _IDENTITY_RULE_LINE = (
     "training, your style, or any configured model id."
 )
 
+#: What the agent is part of, and where the user is running it (ENG-2423).
+#:
+#: A third question the old block never answered: not "which model is serving
+#: this conversation" and not "what should code you write call", but "what
+#: product am I, and what can it do here". Left unanswered, the model answers it
+#: from training data, where the AI assistant with a desktop app is ChatGPT —
+#: prod told a user to install the ChatGPT desktop app when they asked how to
+#: install Cowork, and told a prospect it could not identify MindsHub Cowork.
+#:
+#: Deliberately a handful of lines, not a fact sheet. Everything that varies by
+#: platform or needs detail (install steps, editions, which features are
+#: web-only) lives in the ``cowork-product`` built-in skill, which the last line
+#: points at — the same pointer-plus-skill split ``BACKEND_GENERATION_PROMPT``
+#: already uses, so the always-on cost stays fixed as the facts grow.
+_PRODUCT_HEADER = "PRODUCT (what you are — not what model is serving you):"
+
+_PRODUCT_LINES = [
+    "- You are Cowork, an AI agent made by MindsDB, Inc. Never identify as, or as "
+    "built by, any other AI product or company — you are not ChatGPT, Claude, "
+    "Gemini or Copilot, and MindsDB is not OpenAI, Anthropic or Google.",
+    "- Cowork runs as a desktop app on macOS and Windows, and in the browser. Some "
+    "features exist on only one of those, so never assume a feature you know about "
+    "is reachable from where this user is.",
+]
+
+#: Surface → the sentence naming where this conversation is running. A surface
+#: the host did not report is omitted rather than guessed, for the same reason
+#: the serving model is: an absent fact reads as unknown, a wrong one reads as
+#: certain. Keys are ``anton.core.llm.tracing.VALID_SURFACES``; a value outside
+#: it was already dropped by the session's ``_validated_surface``.
+_SURFACE_LINES: dict[str, str] = {
+    "desktop": "- This conversation is running in the Cowork desktop app.",
+    "web": "- This conversation is running in Cowork in the browser. Desktop-only "
+           "features are not reachable from here.",
+    "cli": "- This conversation is running in the anton command-line interface.",
+}
+
+_PRODUCT_RULE_LINE = (
+    "- If asked what Cowork is, who makes it, how to install, update or remove it, "
+    "which platforms or editions exist, where a setting or feature lives, or what it "
+    "costs, call `recall_skill(\"cowork-product\")` and answer from it. Do not answer "
+    "those from general knowledge, and do not guess or web-search for them."
+)
+
+
+def product_lines(surface: object) -> list[str]:
+    """The PRODUCT sub-block's lines for a given surface.
+
+    ``surface`` is the session's validated surface (``desktop`` / ``web`` /
+    ``cli``), or None when the host reported none — in which case the
+    surface-specific line is omitted and the rest still stands.
+    """
+    lines = list(_PRODUCT_LINES)
+    if isinstance(surface, str):
+        line = _SURFACE_LINES.get(surface)
+        if line:
+            lines.append(line)
+    lines.append(_PRODUCT_RULE_LINE)
+    return lines
+
+
 _CONFIGURED_HEADER = (
     "CONFIGURED LLM (what code you write should call — not necessarily what is "
     "serving this conversation):"
@@ -149,15 +210,18 @@ _CONFIGURED_RULE_LINE = (
 
 
 def build_runtime_identity_section(
-    *, identity_lines: list[str], configured_block: str
+    *, identity_lines: list[str], configured_block: str, product_block: list[str] | None = None
 ) -> str:
     """Render the ``RUNTIME IDENTITY`` system-prompt section.
 
-    Two sub-blocks, one per question:
+    Three sub-blocks, one per question:
 
     - identity — ``identity_lines`` from :func:`serving_model_lines`, or the
       cannot-verify fallback when empty. There is always an identity answer;
       what is never emitted is a claim that the model "already knows".
+    - product — ``product_block`` from :func:`product_lines` (ENG-2423): what
+      product this is and which surface the user is on. Omitted entirely when
+      not supplied, so a host that predates it renders exactly as before.
     - configured — ``configured_block`` from :func:`build_runtime_context`
       (provider + model ids for code the agent writes). Omitted entirely when
       empty, so a host that injects nothing gets no dangling reference to
@@ -169,6 +233,11 @@ def build_runtime_identity_section(
         out.append(_IDENTITY_RULE_LINE)
     else:
         out.append(_CANNOT_VERIFY_LINE)
+
+    if product_block:
+        out.append("")
+        out.append(_PRODUCT_HEADER)
+        out.extend(product_block)
 
     configured = configured_block.strip()
     if configured:

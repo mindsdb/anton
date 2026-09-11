@@ -19,7 +19,7 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.endpoints import classify_endpoint
-from anton.core.llm.identity import serving_model_lines
+from anton.core.llm.identity import product_lines, serving_model_lines
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -2023,6 +2023,9 @@ class ChatSession:
             conversation_started=_conversation_started,
             system_prompt_context=self._system_prompt_context,
             runtime_identity_lines=identity_lines,
+            # ENG-2423. Cache-stable like the identity lines above: the surface
+            # is fixed for the life of the session.
+            product_lines=product_lines(getattr(self, "_surface", None)),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
