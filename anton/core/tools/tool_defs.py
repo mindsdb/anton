@@ -5,6 +5,7 @@ from anton.core.tools.tool_handlers import (
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
+    handle_edit_artifact,
     handle_open_artifact,
     handle_read_image,
     handle_recall,
@@ -331,6 +332,41 @@ OPEN_ARTIFACT_TOOL = ToolDef(
         "required": ["slug"],
     },
     handler=handle_open_artifact,
+)
+
+
+EDIT_ARTIFACT_TOOL = ToolDef(
+    name="edit_artifact",
+    description=(
+        "Change files in an artifact that already exists, by describing the change "
+        "in plain language. Prefer this over the scratchpad for editing: it writes "
+        "the change as a diff and applies it, so it cannot half-apply, and it does "
+        "not need you to write a program that performs string surgery.\n\n"
+        "Use the scratchpad instead for: creating an artifact from nothing, "
+        "generating or transforming data, and anything that needs computation. "
+        "This tool will not write `*.data.js` files.\n\n"
+        "If it reports it could not apply the change, nothing was written — fall "
+        "back to the scratchpad and make the edit there."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Folder slug of the artifact to edit.",
+            },
+            "task": {
+                "type": "string",
+                "description": (
+                    "What to change, in plain language — e.g. \"rename the title to "
+                    "TicTacTris\" or \"make the chart fill the viewport\". Be specific "
+                    "about the intended result; you do not need to say which files."
+                ),
+            },
+        },
+        "required": ["slug", "task"],
+    },
+    handler=handle_edit_artifact,
 )
 
 

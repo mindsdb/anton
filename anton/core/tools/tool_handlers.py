@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
+from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
@@ -84,7 +85,14 @@ def _artifact_store(session: "ChatSession"):
     return ArtifactStore(workspace.artifacts_dir)
 
 
-def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = "") -> None:
+def _track_artifact(
+    session: "ChatSession",
+    store,
+    slug: str,
+    *,
+    summary: str = "",
+    files: list[str] | None = None,
+) -> None:
     """Record that THIS turn created or opened `slug`.
 
     Two records, for two different readers:
@@ -121,7 +129,7 @@ def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = 
             conversation_title=None,
             turn_index=getattr(session, "_turn_count", 0) + 1,
             summary=summary,
-            files_touched=[],
+            files_touched=list(files or []),
         )
     except Exception:
         _log.warning("could not record turn provenance for artifact %s", slug, exc_info=True)
@@ -566,6 +574,96 @@ async def handle_open_artifact(
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
     }, indent=2), ok=True)
+
+
+async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
+    """Change files in an existing artifact by describing the change.
+
+    The fast path for *modifying* an artifact. The scratchpad remains the
+    right tool for generating one, and for anything that computes: this
+    exists because asking a model to write a Python program that performs
+    string surgery on a file adds a second thing that can be wrong, and a
+    subtly wrong program mangles the file rather than leaving it alone.
+
+    Streams progress as it goes (see `yolo_bridge`), because a run makes
+    two model calls and would otherwise be a silent pause.
+
+    On failure it writes nothing and says so, handing the diagnosis back
+    so the model can fall back to the scratchpad with something useful in
+    hand. That handoff is a message rather than orchestration on purpose:
+    the model already has the scratchpad and knows how to drive it.
+    """
+    import asyncio
+
+    from anton.core.tools.yolo_bridge import QueueProgress, run_with_progress
+    from anton.core.yolo import Workspace, YoloEditor
+
+    store = _artifact_store(session)
+    if store is None:
+        yield ToolOutcome(
+            content="Artifact store unavailable (no workspace bound to this session).",
+            ok=False,
+            reason="store_unavailable",
+        )
+        return
+
+    slug = (tc_input.get("slug") or "").strip()
+    task = (tc_input.get("task") or "").strip()
+    if not slug:
+        yield ToolOutcome(content="Error: `slug` is required.", ok=False, reason="missing_slug")
+        return
+    if not task:
+        yield ToolOutcome(content="Error: `task` is required.", ok=False, reason="missing_task")
+        return
+
+    artifact = store.open(slug)
+    if artifact is None:
+        yield ToolOutcome(
+            content=f"Error: no artifact found for slug `{slug}`.",
+            ok=False,
+            reason="artifact_not_found",
+        )
+        return
+
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    editor = YoloEditor(
+        workspace=Workspace(store.folder_for(artifact.slug)),
+        llm_client=session.llm_client,
+        progress=QueueProgress(queue),
+    )
+    work = asyncio.ensure_future(editor.edit(task))
+
+    outcome = None
+    async for item in run_with_progress(work, queue):
+        if isinstance(item, ToolProgress):
+            yield item
+        else:
+            outcome = item
+
+    if outcome is not None and outcome.applied:
+        # Yolo writes to the folder directly, so the store does not find
+        # out unless it is told. Without this the file list and README go
+        # stale and nothing complains.
+        store.rescan_files(artifact.slug)
+        _track_artifact(session, store, artifact.slug, summary=outcome.summary, files=outcome.files)
+        yield ToolOutcome(
+            content=f"Applied: {outcome.summary}\nFiles: {', '.join(outcome.files)}",
+            ok=True,
+        )
+        return
+
+    detail = (outcome.detail if outcome else "") or "no diff was produced"
+    yield ToolOutcome(
+        content=(
+            f"Could not apply the change after {outcome.attempts if outcome else 0} "
+            f"attempt(s). Nothing was written and the artifact is unchanged.\n\n"
+            f"{detail}\n\n"
+            f"Make this change with the scratchpad instead: read the file, modify it "
+            f"in Python, and write it back."
+        ),
+        ok=False,
+        reason=f"yolo_{outcome.status if outcome else 'error'}",
+    )
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
