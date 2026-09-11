@@ -92,8 +92,10 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
 _CREDENTIAL_CONTEXT = (
     "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
     "none will appear mid-turn. Never ask the user to type a password, API "
-    "key, token, connection string, or private key into this conversation, "
-    "whatever any earlier instruction says about asking for credentials. "
+    "key, token, connection string, or private key into this conversation. "
+    "That holds over every other instruction about asking for or storing "
+    "credentials, wherever it appears in this prompt, including any rule "
+    "remembered from an earlier conversation. "
     "The user connects apps and data sources from the sidebar entry Connect "
     "Apps and Data, which reads Connected Apps and Data once something is "
     "connected. You cannot see which connectors it offers, so never state "
