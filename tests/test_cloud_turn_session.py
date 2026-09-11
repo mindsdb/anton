@@ -613,7 +613,7 @@ def skills_tmp(tmp_path_factory, monkeypatch):
 
 def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
     """The point of the feature: a server-sent skill is retrievable in the pod
-    through the same SkillStore that recall_skill and the thalamus preload use."""
+    through the same SkillStore that recall_skill uses."""
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     skill = session._skill_store.load("csv-summary")
     assert skill is not None
