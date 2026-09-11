@@ -97,7 +97,13 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
         Keyed on content rather than position so a compaction summary being
         prepended — which shifts every index — does not change the ids of the
         tail it kept. The occurrence counter disambiguates a conversation that
-        made the identical call twice.
+        made the identical call twice; note that counter IS positional in
+        effect, so a compaction that drops one of two identical calls does
+        renumber the survivor. That costs one cache miss on a prefix the
+        compaction had already invalidated, so it is not worth engineering
+        around — but the claim is "stable across repeated loads of the same
+        history", not "stable across every edit of it" (review: pnewsam on
+        #471, which correctly caught the earlier wording overstating this).
         """
         import hashlib
         import json as _json
@@ -123,6 +129,28 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
     out = [m for m in history]
     repaired = 0
 
+    # Names first, and separately: renaming never affects tool_use/tool_result
+    # pairing, so it needs none of the pairing machinery below. Keeping it out
+    # of the `broken` predicate is also what stops the two poisoned shapes from
+    # being conflated — pre-fix anton could write a block with a perfectly
+    # usable id and a blank name (a provider sending a good `call_id` with no
+    # name), and selecting on the id alone let that shape through all three
+    # layers untouched and onto the wire as `name: ''` (review: pnewsam on
+    # anton#471).
+    for i, msg in enumerate(out):
+        blocks = _blocks(msg)
+        if blocks is None or msg.get("role") != "assistant":
+            continue
+        if not any(isinstance(b, dict) and b.get("type") == "tool_use"
+                   and not usable_call_id(b.get("name")) for b in blocks):
+            continue
+        new_blocks = [dict(b) if isinstance(b, dict) else b for b in blocks]
+        for b in new_blocks:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and not usable_call_id(b.get("name")):
+                b["name"] = UNNAMED_REPLAYED_TOOL
+                repaired += 1
+        out[i] = {**msg, "content": new_blocks}
+
     for i, msg in enumerate(out):
         blocks = _blocks(msg)
         if blocks is None or msg.get("role") != "assistant":
@@ -133,7 +161,16 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
             continue
 
         nxt = out[i + 1] if i + 1 < len(out) else None
-        reply_blocks = _blocks(nxt) if nxt is not None and nxt.get("role") == "user" else None
+        # isinstance BEFORE .get: every other message access in this function
+        # goes through `_blocks`/`_bad`, which are guarded; this one was not,
+        # and a non-dict message directly after a broken assistant message
+        # raised AttributeError straight out of `ChatSession.__init__` —
+        # strictly worse than the 400 being fixed (review: pnewsam on #471).
+        reply_blocks = (
+            _blocks(nxt)
+            if isinstance(nxt, dict) and nxt.get("role") == "user"
+            else None
+        )
         pairable = reply_blocks is not None and any(
             isinstance(b, dict) and b.get("type") == "tool_result" for b in reply_blocks
         )

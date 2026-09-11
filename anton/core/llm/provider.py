@@ -475,13 +475,13 @@ def usable_call_id(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
-def replayable_tool_call(tc: ToolCall) -> ToolCall | None:
-    """`tc` in a form that can be replayed in history, or None to drop it.
+def ensure_replayable_tool_call(tc: ToolCall) -> ToolCall:
+    """Return `tc` with anything that cannot be replayed made replayable.
 
-    ENG-2420: the readers can build a call with an EMPTY id. Three provider
+    ENG-2420: the readers can build a call with an empty `id`. Three provider
     shapes reach it, and only the first is the one the bug was filed for — a
     `function_call_arguments.delta` with no preceding `output_item.added`; an
-    `output_item.added` that DOES arrive but carries a blank `call_id`; and an
+    `output_item.added` that DOES arrive carrying a blank `call_id`; and an
     item labelled as something other than `function_call`. The last two never
     touch the buffer path, so guarding that path alone would miss them.
 
@@ -495,55 +495,62 @@ def replayable_tool_call(tc: ToolCall) -> ToolCall | None:
     `ContextOverflowError` or on pressure computed from a successful
     response's usage, and a 400 produces neither.
 
-    Two outcomes, because the two shapes differ in what is salvageable:
+    **Salvage, never drop**, and both halves matter:
 
-    - **id missing, name known** — the model's intent survived and only the
-      handle is gone. Mint one: the call dispatches normally, its
-      `tool_result` pairs with the minted id, and the turn simply works. This
-      is strictly better than dropping, and it matters because neither
-      streaming path calls `raise_on_empty_response` — dropping the only call
-      of a streaming turn yields a silently empty turn, not an error.
-    - **name missing too** — there is no tool to dispatch and no way to ask
-      for one. Drop it: a call that cannot run buys nothing, and a call that
-      cannot be replayed costs the whole conversation.
+    - An unusable **id** is replaced with a minted one. The call then
+      dispatches normally and its `tool_result` pairs with the minted id.
+    - An unusable **name** is replaced with `UNNAMED_REPLAYED_TOOL`, which
+      restores the pre-fix behaviour for that shape: the registry raises
+      ``Tool ... not found``, the dispatcher turns that into an ordinary
+      ``Tool 'x' failed`` tool_result, and the model re-emits the call inside
+      the same turn. Dropping it instead looked tidier and was worse — the
+      three non-streaming paths call `raise_on_empty_response`
+      (`anthropic.py`, and both OpenAI ones) but the streaming paths do not,
+      so a dropped sole call ends a streaming turn silently with no error at
+      all. That is the failure this function exists to avoid, so it must not
+      introduce it through the name (review: pnewsam on #471).
 
-    Callers append the RESULT, never `tc`, and treat None as "no such call".
+    Returning unconditionally is deliberate: it is what keeps this layer, the
+    read-time repair in `repair_replayed_tool_ids`, and the session/boot belts
+    agreeing about the same two fields. They disagreed in the first revision
+    and a stored ``{"id": "call_x", "name": ""}`` block slipped through all
+    three.
 
     The minted id is random (`call_anton_*`) because it is minted ONCE, at
     generation, and then persisted with the rest of this turn's rows. The
-    read-time repair in `repair_replayed_tool_ids` uses a different prefix
-    (`call_repaired_*`) and a DETERMINISTIC, content-derived id, because it
-    re-runs on every load and is never written back — a random id there would
-    change the replayed prefix every turn and miss the prompt cache. The two
-    prefixes also make it obvious in a log which layer fixed a given call.
+    read-time repair uses a different prefix (`call_repaired_*`) and a
+    deterministic id, because it re-runs on every load and is never written
+    back — a random id there would change the replayed prefix every turn and
+    miss the prompt cache. The two prefixes also make it obvious in a log
+    which layer fixed a given call.
     """
     import logging as _logging
     import uuid as _uuid
 
-    name = tc.name if isinstance(tc.name, str) else ""
-    if usable_call_id(tc.id) and name:
-        return tc
-
     log = _logging.getLogger(__name__)
-    if not name:
-        log.warning(
-            "ENG-2420: dropping a tool call the provider sent unnamed (id=%r) — "
-            "it cannot be dispatched, and replaying it would reject every later "
-            "request in this conversation.",
-            tc.id,
-        )
-        return None
 
-    was = tc.id
-    # Mutated in place: every caller constructs the ToolCall immediately
-    # before this call, and the readers already mutate one after the fact
-    # (`tool_calls[-1].repaired = True` on the Anthropic max_tokens path).
-    tc.id = f"call_anton_{_uuid.uuid4().hex}"
-    log.warning(
-        "ENG-2420: tool call %r arrived with an unusable id (%r); minted %s so "
-        "the call can still run and replay.",
-        name, was, tc.id,
-    )
+    if not usable_call_id(tc.id):
+        was = tc.id
+        # Mutated in place: every caller constructs the ToolCall immediately
+        # before this call, and the readers already mutate one after the fact
+        # (`tool_calls[-1].repaired = True` on the Anthropic max_tokens path).
+        tc.id = f"call_anton_{_uuid.uuid4().hex}"
+        log.warning(
+            "ENG-2420: tool call %r arrived with an unusable id (%r); minted %s "
+            "so the call can still run and replay.",
+            tc.name, was, tc.id,
+        )
+
+    if not usable_call_id(tc.name):
+        was = tc.name
+        tc.name = UNNAMED_REPLAYED_TOOL
+        log.warning(
+            "ENG-2420: tool call %s arrived with an unusable name (%r); renamed "
+            "to %r so it fails as a normal tool_result the model can recover "
+            "from, instead of vanishing from the turn.",
+            tc.id, was, tc.name,
+        )
+
     return tc
 
 

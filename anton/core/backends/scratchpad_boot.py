@@ -73,20 +73,20 @@ _INJECTED_HELPER_NAMES = frozenset(
 _INJECTED_HELPERS: dict = {}
 
 
-def _drop_unreplayable_calls(response) -> None:
-    """Strip calls that cannot be replayed in history (ENG-2420)."""
-    from anton.core.llm.provider import usable_call_id
-
+def _ensure_replayable_calls(response) -> None:
+    """Make every call on `response` replayable in history (ENG-2420)."""
     import logging as _logging
 
+    from anton.core.llm.provider import ensure_replayable_tool_call, usable_call_id
+
     calls = getattr(response, "tool_calls", None) or []
-    keep = [tc for tc in calls if usable_call_id(tc.id) and tc.name]
-    if len(keep) != len(calls):
+    broken = [tc for tc in calls if not (usable_call_id(tc.id) and usable_call_id(tc.name))]
+    if broken:
         _logging.getLogger(__name__).error(
-            "ENG-2420: dropped %d unreplayable tool call(s) during scratchpad boot.",
-            len(calls) - len(keep),
+            "ENG-2420: %d unreplayable tool call(s) during scratchpad boot.", len(broken),
         )
-        response.tool_calls = keep
+        for tc in broken:
+            ensure_replayable_tool_call(tc)
 
 
 def _inject_helper(name: str, fn) -> None:
@@ -674,9 +674,7 @@ if _scratchpad_model:
                 # here is only this boot loop's own `messages` list — nothing
                 # is persisted to a user conversation — but an unreplayable id
                 # still 400s every remaining round of the boot.
-                _drop_unreplayable_calls(response)
-                if not response.tool_calls:
-                    return response.content
+                _ensure_replayable_calls(response)
 
                 # Build assistant message with text + tool_use blocks
                 assistant_content = []

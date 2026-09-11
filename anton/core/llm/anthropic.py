@@ -31,7 +31,7 @@ from .provider import (
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
-    replayable_tool_call,
+    ensure_replayable_tool_call,
     wallet_denial_code,
     raise_on_empty_response,
 )
@@ -286,11 +286,9 @@ class AnthropicProvider(LLMProvider):
                 # is written straight through, so a relay that sends a blank id
                 # produces the identical poisoned history (ENG-2420). The guard
                 # belongs on the VALUE, not on the missing-start case.
-                call = replayable_tool_call(
+                tool_calls.append(ensure_replayable_tool_call(
                     ToolCall(id=block.id, name=block.name, input=block.input)
-                )
-                if call is not None:
-                    tool_calls.append(call)
+                ))
 
         # The SDK hands back an already-parsed `input`, so unlike the streaming
         # path there is no raw JSON to check: `stop_reason` is the only evidence
@@ -388,7 +386,14 @@ class AnthropicProvider(LLMProvider):
                                 "name": block.name,
                                 "json_parts": [],
                             }
-                            yield StreamToolUseStart(id=block.id, name=block.name)
+                            # Gated like both OpenAI readers, which this path
+                            # did not match. Unguarded, a blank id opened a UI
+                            # step keyed "" that nothing could retire: the
+                            # marker that actually closes a step carries the
+                            # call's id, which is now the MINTED one
+                            # (review: pnewsam on #471).
+                            if block.id and block.name:
+                                yield StreamToolUseStart(id=block.id, name=block.name)
                         elif block.type in ("thinking", "redacted_thinking"):
                             # Adaptive thinking (triggered by output_config.effort,
                             # set above when self._reasoning_effort is configured)
@@ -424,17 +429,17 @@ class AnthropicProvider(LLMProvider):
                             # the session what the body was missing. See
                             # `safe_parse_tool_input`.
                             parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
-                            call = replayable_tool_call(
+                            tool_calls.append(ensure_replayable_tool_call(
                                 ToolCall(
                                     id=info["id"], name=info["name"], input=parsed_input,
                                     parse_error=parse_error, repaired=repaired,
                                 )
-                            )
-                            if call is not None:
-                                tool_calls.append(call)
-                            # Original id, not a minted one — see the matching
-                            # note in the OpenAI chat-completions reader.
-                            yield StreamToolUseEnd(id=info["id"])
+                            ))
+                            # Same gate as the Start above, and the ORIGINAL id
+                            # rather than the minted one — an End with no Start
+                            # is a worse event stream than neither.
+                            if info["id"] and info["name"]:
+                                yield StreamToolUseEnd(id=info["id"])
 
                     elif event.type == "message_delta":
                         stop_reason = event.delta.stop_reason

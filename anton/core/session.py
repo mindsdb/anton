@@ -1895,29 +1895,35 @@ class ChatSession:
         )
 
     @staticmethod
-    def _drop_unreplayable_calls(response) -> None:
-        """Belt for ENG-2420: strip any call that cannot be replayed.
+    def _ensure_replayable_calls(response) -> None:
+        """Belt for ENG-2420: make every call on `response` replayable.
 
-        The provider readers already guarantee this (`replayable_tool_call`),
-        so this is expected to be a permanent no-op. It exists because the cost
-        of one escaping is not a failed call but a conversation that can never
-        be used again, and because a host can run an anton older than itself.
+        The provider readers already guarantee this
+        (`ensure_replayable_tool_call`), so this is expected to be a permanent
+        no-op — it logs at ERROR when it is not, because the only way it fires
+        is a reader missing its guard. It exists because the cost of one
+        escaping is not a failed call but a conversation that can never be used
+        again.
 
-        Filters the response ONCE, before the loop reads `tool_calls`, so the
-        history block and the dispatch stay consistent — dropping a `tool_use`
-        while still dispatching it would leave an orphan `tool_result`.
+        Salvages rather than drops, for the same reason the readers do and for
+        one more: this runs before the tool loop reads `tool_calls`, and
+        emptying that list would leave the round with no calls and no content,
+        so both `_append_history` calls below become no-ops and the loop
+        re-issues an identical request until `_max_tool_rounds`
+        (review: pnewsam on #471). Salvaging cannot change the list's length,
+        so that shape is unreachable by construction rather than by a guard.
         """
-        from anton.core.llm.provider import usable_call_id
+        from anton.core.llm.provider import ensure_replayable_tool_call, usable_call_id
 
         calls = getattr(response, "tool_calls", None) or []
-        keep = [tc for tc in calls if usable_call_id(tc.id) and tc.name]
-        if len(keep) != len(calls):
+        broken = [tc for tc in calls if not (usable_call_id(tc.id) and usable_call_id(tc.name))]
+        if broken:
             logging.getLogger(__name__).error(
-                "ENG-2420: %d tool call(s) reached the session with an "
-                "unreplayable id/name and were dropped — a provider reader is "
-                "missing its guard.", len(calls) - len(keep),
+                "ENG-2420: %d tool call(s) reached the session unreplayable — "
+                "a provider reader is missing its guard.", len(broken),
             )
-            response.tool_calls = keep
+            for tc in broken:
+                ensure_replayable_tool_call(tc)
 
     def _validate_history_for_provider(self, messages: list[dict]) -> None:
         """Defensive pre-flight: warn (don't raise) if the messages
@@ -5010,7 +5016,7 @@ class ChatSession:
                         break
 
                 # Build assistant message with content blocks
-                self._drop_unreplayable_calls(llm_response)
+                self._ensure_replayable_calls(llm_response)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(
