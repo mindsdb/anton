@@ -360,6 +360,76 @@ def _real_session_with_workspace(tmp_path, **cfg_overrides):
     return session
 
 
+def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
+    """A REAL ChatSession off the cloud builder, not a captured config.
+
+    The date is rendered inside `ChatSession._build_system_prompt`, so a test
+    that calls the prompt builder directly would supply `conversation_started`
+    itself and pass with the whole fix reverted.
+    """
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: _mock_llm()),
+    )
+    body = dict(protocol_version=1, conversation_id="conv_1", input="hi")
+    body.update(req_overrides)
+    session = build_cloud_chat_session(TurnRequestV1(**body))
+    session._scratchpads = MagicMock(available_packages=[])
+    return session
+
+
+async def test_two_pods_render_one_start_date_for_the_same_conversation(
+    tmp_path, monkeypatch,
+):
+    """Every turn runs in a fresh pod, so before this the date came from
+    whichever day that pod booted and the prefix changed at every midnight.
+    Two independently built sessions for one conversation must render the same
+    prompt, which is the ticket's acceptance stated directly.
+    """
+    started = "2026-09-01T08:15:00+00:00"
+    first = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at=started,
+    )._build_system_prompt()
+    second = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at=started,
+    )._build_system_prompt()
+
+    assert first == second
+    # The equality above cannot carry this on its own: two pods booted on the
+    # same day agree on "today" with the bug fully present, and the ticket's
+    # "on different days" is not reproducible without faking the clock. So the
+    # stored date is what actually proves the clock was not consulted.
+    assert "Tuesday, September 01, 2026" in first
+
+
+async def test_the_stored_start_date_wins_over_the_pods_own_clock(
+    tmp_path, monkeypatch,
+):
+    """The clock is consulted only as the fallback. Asserted by rendering a
+    date that is not today rather than by faking time: there is no clock
+    freezing dependency here, and patching the module attribute would do
+    nothing, since `_build_system_prompt` re-imports datetime at call time.
+    """
+    import datetime as _dt
+
+    session = _real_cloud_session(
+        tmp_path, monkeypatch, started_at="2026-09-01T08:15:00+00:00",
+    )
+    prompt = await session._build_system_prompt()
+
+    assert "Tuesday, September 01, 2026" in prompt
+    today = _dt.datetime.now().strftime("%A, %B %d, %Y")
+    if today != "Tuesday, September 01, 2026":
+        assert today not in prompt
+
+    # And without it, today is what renders — the behavior every cloud turn had.
+    fallback = await _real_cloud_session(tmp_path, monkeypatch)._build_system_prompt()
+    assert today in fallback
+
+
 def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch):
     """The registry is built LAZILY at turn time, so the allowlist must be
     enforced by the real _build_tools() - assert the EXACT final tool set."""
