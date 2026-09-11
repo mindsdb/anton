@@ -1019,9 +1019,8 @@ def test_the_credential_context_overrides_the_shared_invitation(tmp_path, monkey
 def test_the_credential_context_outranks_every_channel_that_instructs(tmp_path, monkeypatch):
     """The guard cannot win by position, so it has to name the channels it
     beats. Two of them sit outside the text above it: the relevance-filtered
-    memory snapshot renders after the suffix, since the volatile tail is
-    deliberately last so everything above stays cache stable
-    (`ChatSystemPromptBuilder.build`); and a recalled skill body never reaches
+    memory snapshot is appended after the suffix by
+    `ChatSystemPromptBuilder.build`, and a recalled skill body never reaches
     the prompt at all, arriving mid-turn as tool output. `recall_skill` is
     allowlisted and the skill tree is the organization's, so "ask the user for
     their API key" can be text a tenant wrote.
