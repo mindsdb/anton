@@ -455,6 +455,90 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     return parsed, None, False
 
 
+#: Name given to a replayed tool call the provider never named (ENG-2420).
+#: History items must carry one — the Responses API declares ``name`` required
+#: — and a name outside the CURRENT tool list already replays fine: anton
+#: rebuilds its tool list every round (``_build_tools()`` in the session's tool
+#: loop, so `recall_skill` can add tools mid-turn), which means a call to a
+#: tool that is no longer offered is an ordinary, working shape in history.
+UNNAMED_REPLAYED_TOOL = "unavailable_tool_call"
+
+
+def usable_call_id(value: object) -> bool:
+    """True when `value` can be replayed as a tool-call handle.
+
+    Non-empty *string*, not merely truthy: a dict or list id is valid JSON and
+    passes a truthiness check, then fails much later and much less legibly.
+    Both provider APIs use string ids, so the strictness costs nothing. Same
+    test cowork-server's `sanitize_turn_history_rows` applies to pod rows.
+    """
+    return isinstance(value, str) and bool(value)
+
+
+def replayable_tool_call(tc: ToolCall) -> ToolCall | None:
+    """`tc` in a form that can be replayed in history, or None to drop it.
+
+    ENG-2420: the readers can build a call with an EMPTY id. Three provider
+    shapes reach it, and only the first is the one the bug was filed for — a
+    `function_call_arguments.delta` with no preceding `output_item.added`; an
+    `output_item.added` that DOES arrive but carries a blank `call_id`; and an
+    item labelled as something other than `function_call`. The last two never
+    touch the buffer path, so guarding that path alone would miss them.
+
+    Every *yield* in the readers was already guarded on a truthy id. Only the
+    append that builds the turn's result was not, so an id-less call escaped
+    into `session.history`, and the next request serialised it back out
+    verbatim (``"call_id": block["id"]``). The provider then rejects the whole
+    request — ``400 Invalid 'input[N].call_id': empty string`` — on that turn
+    and on every later turn of the conversation, which never recovers on its
+    own: the only trimming path anton has runs on a caught
+    `ContextOverflowError` or on pressure computed from a successful
+    response's usage, and a 400 produces neither.
+
+    Two outcomes, because the two shapes differ in what is salvageable:
+
+    - **id missing, name known** — the model's intent survived and only the
+      handle is gone. Mint one: the call dispatches normally, its
+      `tool_result` pairs with the minted id, and the turn simply works. This
+      is strictly better than dropping, and it matters because neither
+      streaming path calls `raise_on_empty_response` — dropping the only call
+      of a streaming turn yields a silently empty turn, not an error.
+    - **name missing too** — there is no tool to dispatch and no way to ask
+      for one. Drop it: a call that cannot run buys nothing, and a call that
+      cannot be replayed costs the whole conversation.
+
+    Callers append the RESULT, never `tc`, and treat None as "no such call".
+    """
+    import logging as _logging
+    import uuid as _uuid
+
+    name = tc.name if isinstance(tc.name, str) else ""
+    if usable_call_id(tc.id) and name:
+        return tc
+
+    log = _logging.getLogger(__name__)
+    if not name:
+        log.warning(
+            "ENG-2420: dropping a tool call the provider sent unnamed (id=%r) — "
+            "it cannot be dispatched, and replaying it would reject every later "
+            "request in this conversation.",
+            tc.id,
+        )
+        return None
+
+    was = tc.id
+    # Mutated in place: every caller constructs the ToolCall immediately
+    # before this call, and the readers already mutate one after the fact
+    # (`tool_calls[-1].repaired = True` on the Anthropic max_tokens path).
+    tc.id = f"call_anton_{_uuid.uuid4().hex}"
+    log.warning(
+        "ENG-2420: tool call %r arrived with an unusable id (%r); minted %s so "
+        "the call can still run and replay.",
+        name, was, tc.id,
+    )
+    return tc
+
+
 def damaged_tool_call_result(tc: ToolCall) -> dict | None:
     """The `tool_result` to answer an unfinished tool call with, or None.
 

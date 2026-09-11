@@ -42,6 +42,7 @@ from .provider import (
     origin_is_known_third_party,
     wallet_denial_code,
     raise_on_empty_response,
+    replayable_tool_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -1127,7 +1128,9 @@ class OpenAIProvider(LLMProvider):
                 # Both flags ride on the ToolCall for the session to act
                 # on. See `safe_parse_tool_input`.
                 parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
-                tool_calls.append(
+                # The SDK types `id` as a required `str`, which an empty string
+                # satisfies — a non-conforming server can still send one (ENG-2420).
+                call = replayable_tool_call(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
@@ -1136,6 +1139,8 @@ class OpenAIProvider(LLMProvider):
                         repaired=repaired,
                     )
                 )
+                if call is not None:
+                    tool_calls.append(call)
 
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
@@ -1388,10 +1393,18 @@ class OpenAIProvider(LLMProvider):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
             parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
-            tool_calls.append(ToolCall(
+            # `info["id"]` is seeded `tc_delta.id or ""` and only updated when a
+            # later chunk carries one, so a provider that never sends an id
+            # leaves it empty here (ENG-2420).
+            call = replayable_tool_call(ToolCall(
                 id=info["id"], name=info["name"], input=parsed,
                 parse_error=parse_error, repaired=repaired,
             ))
+            if call is not None:
+                tool_calls.append(call)
+            # Yielded on the ORIGINAL id, not a minted one: no StreamToolUseStart
+            # was emitted for a call that had no id at the time, and an End with
+            # no Start is a worse event stream than no pair at all.
             yield StreamToolUseEnd(id=info["id"])
 
         # Missing finish_reason is ambiguous: it's a genuine truncation only when
@@ -1626,12 +1639,18 @@ class OpenAIProvider(LLMProvider):
                     # a body cut mid-JSON must not raise out of this generator,
                     # and the flags are what let the session refuse the call.
                     parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
-                    tool_calls.append(
+                    # The three yields around this append were already guarded
+                    # on a truthy id; this append was not, which is how an
+                    # id-less call reached history and 400'd every later
+                    # request in the conversation (ENG-2420).
+                    call = replayable_tool_call(
                         ToolCall(
                             id=info["call_id"], name=info["name"], input=parsed,
                             parse_error=parse_error, repaired=repaired,
                         )
                     )
+                    if call is not None:
+                        tool_calls.append(call)
                     if info["call_id"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
@@ -1768,10 +1787,13 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             # into `{}`: an empty dict cannot be told apart from a call the
             # model deliberately sent with no arguments.
             parsed, parse_error, repaired = safe_parse_tool_input(args_str)
-            tool_calls.append(ToolCall(
+            # Same `or ""` fallback as the streaming reader, same consequence.
+            call = replayable_tool_call(ToolCall(
                 id=call_id, name=name, input=parsed,
                 parse_error=parse_error, repaired=repaired,
             ))
+            if call is not None:
+                tool_calls.append(call)
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 

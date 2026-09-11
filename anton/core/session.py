@@ -29,7 +29,7 @@ from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
-from anton.memory.history_store import is_user_turn
+from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
@@ -1347,8 +1347,15 @@ class ChatSession:
                 else tool
                 for tool in self._extra_tools
             ]
+        # Repaired at the ingress every surface shares — desktop, the cloud pod
+        # and the CLI all arrive here — so a conversation ENG-2420 already
+        # poisoned starts replying again on its next turn instead of 400ing
+        # forever. Count-preserving on purpose: `_seed_len` below and
+        # `last_compaction`'s `covered_through` are positional, and the host
+        # maps that count onto its OWN message list.
         self._history: list[dict] = (
-            list(config.initial_history) if config.initial_history else []
+            repair_replayed_tool_ids(list(config.initial_history))[0]
+            if config.initial_history else []
         )
         # Seed length + how many leading history messages the last compaction
         # folded into its summary — lets a host map the compaction back onto
@@ -1886,6 +1893,31 @@ class ChatSession:
             "Anthropic role alternation). Combined block count: %d.",
             role, len(merged_blocks),
         )
+
+    @staticmethod
+    def _drop_unreplayable_calls(response) -> None:
+        """Belt for ENG-2420: strip any call that cannot be replayed.
+
+        The provider readers already guarantee this (`replayable_tool_call`),
+        so this is expected to be a permanent no-op. It exists because the cost
+        of one escaping is not a failed call but a conversation that can never
+        be used again, and because a host can run an anton older than itself.
+
+        Filters the response ONCE, before the loop reads `tool_calls`, so the
+        history block and the dispatch stay consistent — dropping a `tool_use`
+        while still dispatching it would leave an orphan `tool_result`.
+        """
+        from anton.core.llm.provider import usable_call_id
+
+        calls = getattr(response, "tool_calls", None) or []
+        keep = [tc for tc in calls if usable_call_id(tc.id) and tc.name]
+        if len(keep) != len(calls):
+            logging.getLogger(__name__).error(
+                "ENG-2420: %d tool call(s) reached the session with an "
+                "unreplayable id/name and were dropped — a provider reader is "
+                "missing its guard.", len(calls) - len(keep),
+            )
+            response.tool_calls = keep
 
     def _validate_history_for_provider(self, messages: list[dict]) -> None:
         """Defensive pre-flight: warn (don't raise) if the messages
@@ -4978,6 +5010,7 @@ class ChatSession:
                         break
 
                 # Build assistant message with content blocks
+                self._drop_unreplayable_calls(llm_response)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(

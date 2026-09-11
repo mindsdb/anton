@@ -73,6 +73,22 @@ _INJECTED_HELPER_NAMES = frozenset(
 _INJECTED_HELPERS: dict = {}
 
 
+def _drop_unreplayable_calls(response) -> None:
+    """Strip calls that cannot be replayed in history (ENG-2420)."""
+    from anton.core.llm.provider import usable_call_id
+
+    import logging as _logging
+
+    calls = getattr(response, "tool_calls", None) or []
+    keep = [tc for tc in calls if usable_call_id(tc.id) and tc.name]
+    if len(keep) != len(calls):
+        _logging.getLogger(__name__).error(
+            "ENG-2420: dropped %d unreplayable tool call(s) during scratchpad boot.",
+            len(calls) - len(keep),
+        )
+        response.tool_calls = keep
+
+
 def _inject_helper(name: str, fn) -> None:
     """Expose a helper to scratchpad code, and remember the object we injected.
 
@@ -651,6 +667,14 @@ if _scratchpad_model:
                     max_tokens=max_tokens,
                 )
 
+                if not response.tool_calls:
+                    return response.content
+
+                # Same ENG-2420 belt as the session's tool loop. Blast radius
+                # here is only this boot loop's own `messages` list — nothing
+                # is persisted to a user conversation — but an unreplayable id
+                # still 400s every remaining round of the boot.
+                _drop_unreplayable_calls(response)
                 if not response.tool_calls:
                     return response.content
 

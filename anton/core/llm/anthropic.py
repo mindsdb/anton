@@ -31,6 +31,7 @@ from .provider import (
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
+    replayable_tool_call,
     wallet_denial_code,
     raise_on_empty_response,
 )
@@ -280,9 +281,16 @@ class AnthropicProvider(LLMProvider):
             if block.type == "text":
                 content_text += block.text
             elif block.type == "tool_use":
-                tool_calls.append(
+                # Anthropic's reader has no empty-id BUFFER path — a missing
+                # `content_block_start` appends nothing at all — but `block.id`
+                # is written straight through, so a relay that sends a blank id
+                # produces the identical poisoned history (ENG-2420). The guard
+                # belongs on the VALUE, not on the missing-start case.
+                call = replayable_tool_call(
                     ToolCall(id=block.id, name=block.name, input=block.input)
                 )
+                if call is not None:
+                    tool_calls.append(call)
 
         # The SDK hands back an already-parsed `input`, so unlike the streaming
         # path there is no raw JSON to check: `stop_reason` is the only evidence
@@ -416,12 +424,16 @@ class AnthropicProvider(LLMProvider):
                             # the session what the body was missing. See
                             # `safe_parse_tool_input`.
                             parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
-                            tool_calls.append(
+                            call = replayable_tool_call(
                                 ToolCall(
                                     id=info["id"], name=info["name"], input=parsed_input,
                                     parse_error=parse_error, repaired=repaired,
                                 )
                             )
+                            if call is not None:
+                                tool_calls.append(call)
+                            # Original id, not a minted one — see the matching
+                            # note in the OpenAI chat-completions reader.
                             yield StreamToolUseEnd(id=info["id"])
 
                     elif event.type == "message_delta":
