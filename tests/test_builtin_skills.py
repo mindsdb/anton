@@ -353,4 +353,4 @@ class TestPromptAndSkillAgree:
             store.load("cowork-product").declarative_md,
         ):
             assert "Cowork" in source
-            assert "MindsDB" in source
+            assert "MindsHub" in source

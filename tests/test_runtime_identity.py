@@ -470,7 +470,12 @@ class TestProductLines:
         for surface in ("desktop", "web", "cli", None, "", "nonsense"):
             joined = "\n".join(product_lines(surface))
             assert "You are Cowork" in joined
-            assert "MindsDB, Inc." in joined
+            # MindsHub, not the legal entity: the journey reaching this agent is
+            # MindsHub-branded, and naming MindsDB here adds a third brand to an
+            # answer meant to reduce confusion. The company relationship lives in
+            # the skill, for whoever asks or sees the copyright line.
+            assert "MindsHub" in joined
+            assert "MindsDB" not in joined
             # The denial is the load-bearing half: prod identified as ChatGPT.
             assert "not ChatGPT" in joined
 
@@ -558,3 +563,16 @@ class TestSessionRendersProduct:
 
         assert "You are Cowork" in prompt
         assert "This conversation is running" not in prompt
+
+
+class TestDocsFallback:
+    """The answer of last resort, so "not in the fact sheet" never becomes a guess."""
+
+    def test_always_on_block_carries_the_docs_url(self):
+        """In the unconditional lines on purpose: a model that never recalls the
+        skill would never see a fallback that lived only inside it."""
+        from anton.core.llm.identity import product_lines
+
+        joined = "\n".join(product_lines("web"))
+        assert "https://docs.mindshub.ai" in joined
+        assert "never fill the gap with a guess" in joined
