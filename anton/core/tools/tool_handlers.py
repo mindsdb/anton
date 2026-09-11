@@ -5,7 +5,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from anton.core.backends.base import Cell
 from anton.core.tools.registry import ToolOutcome
@@ -70,7 +70,7 @@ async def _fire_post_execute(session: "ChatSession", cell: Cell) -> None:
             )
 
 
-def _artifact_store(session: "ChatSession"):
+def resolve_artifact_store(session: "ChatSession"):
     """Return the artifact store rooted at the session's workspace.
 
     Returns None when the session has no workspace (e.g. CLI calls
@@ -155,7 +155,7 @@ def _artifact_content_mtime(folder: Path) -> float:
         return 0.0
 
 
-def _snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
+def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
     """slug -> content mtime, for every artifact folder that exists right now."""
     root = store.root
     if not root.is_dir():
@@ -167,7 +167,128 @@ def _snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
     return mtimes
 
 
-def _track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
+# Bounded: never lint a huge file inline on the agent's turn.
+_ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
+
+
+# Per-artifact status ChatSession.artifact_lint_status surfaces to a host.
+# "has_errors" outranks "not_validated": one file with a real finding makes
+# the whole artifact worth flagging even if a sibling file merely couldn't
+# be checked.
+LINT_STATUS_HAS_ERRORS = "has_errors"
+LINT_STATUS_NOT_VALIDATED = "not_validated"
+
+
+def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+    """suffix -> checker. `None` means it could not run at all (e.g. a
+    configured browser crashed or timed out this time); `[]` means it ran
+    and found nothing; a non-empty list is real findings.
+    `lint_changed_artifact_files` turns `None` into `LINT_STATUS_NOT_VALIDATED`
+    on `status_by_slug` — nothing is appended to the returned message list
+    for it, so a checker that never ran is silent in the agent's own
+    tool-result text (only the end-of-turn status sees it).
+
+    Add a format by adding one entry here. `.xlsx` is always registered;
+    every other extension not listed is silently unchecked, which is honest
+    as-is: nothing ever claimed to validate a `.csv`. `.html` follows the
+    same rule rather than being a special case: with no browser configured
+    for this deployment at all (cloud/web has none to find), there is no
+    checker for it here — registering it anyway would report every html
+    artifact `not_validated` forever, which is a deployment fact, not a
+    finding about any one artifact.
+    """
+    from anton.core.artifacts.html_lint import is_browser_configured, lint_html
+    from anton.core.artifacts.xlsx_lint import lint_xlsx
+    from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
+
+    def _xlsx_linter(path: Path) -> list[str] | None:
+        # LibreOffice recalculates and catches any formula error; the
+        # structural lint is the fallback when it isn't installed/usable.
+        # Both can return None (couldn't check at all) — e.g. no office AND
+        # the file doesn't even parse with openpyxl — which cascades to
+        # this function returning None too, same as either check alone.
+        findings = check_xlsx_via_office(path)
+
+        if findings is None:
+            findings = lint_xlsx(path)
+
+        if findings is not None:
+            return [f.message() for f in findings]
+        return None
+
+    linters: dict[str, Callable[[Path], list[str] | None]] = {".xlsx": _xlsx_linter}
+
+    if is_browser_configured():
+        def _html_linter(path: Path) -> list[str] | None:
+            findings = lint_html(path)
+            if findings is not None:
+                return [f.message() for f in findings]
+            return None
+
+        linters[".html"] = _html_linter
+
+    return linters
+
+
+def lint_changed_artifact_files(
+    store, before: dict[str, float], *, status_by_slug: dict[str, str] | None = None
+) -> list[str]:
+    """Run the format-appropriate checker on artifact folders this cell
+    edited (mtime moved since `before`), so findings reach the agent as
+    tool-result text right away, not only via a later open()/list()
+
+    `status_by_slug`, when given, is updated in place with this call's
+    aggregate verdict per touched slug (`LINT_STATUS_HAS_ERRORS` /
+    `LINT_STATUS_NOT_VALIDATED`), or has the slug's entry cleared when every
+    checked file in it now comes back clean — in-memory, per turn, this is
+    the end-of-turn still-invalid signal (`ChatSession.artifact_lint_status`),
+    not persisted anywhere past the turn.
+    """
+    linters = _artifact_linters()
+    if not linters:
+        return []
+    after = snapshot_existing_artifact_mtimes(store)
+    messages: list[str] = []
+    for slug, prev_mtime in before.items():
+        current = after.get(slug)
+        if current is None or current <= prev_mtime:
+            continue
+
+        has_errors = False
+        not_validated = False
+        for path in (store.root / slug).rglob("*"):
+            linter = linters.get(path.suffix.lower())
+            if linter is None or not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
+                    continue
+            except OSError:
+                continue
+            file_messages = linter(path)
+            if file_messages is None:
+                # Checker could not run at all (e.g. no headless browser) —
+                # distinct from an empty list, which means it ran and found
+                # nothing.
+                not_validated = True
+                continue
+            if file_messages:
+                has_errors = True
+            for message in file_messages:
+                messages.append(f"{slug}/{path.name} — {message}")
+
+        if status_by_slug is not None:
+            if has_errors:
+                status_by_slug[slug] = LINT_STATUS_HAS_ERRORS
+            elif not_validated:
+                status_by_slug[slug] = LINT_STATUS_NOT_VALIDATED
+            else:
+                status_by_slug.pop(slug, None)
+
+    return messages
+
+
+def track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
     """Catch an artifact edit the agent made without calling `open_artifact`.
 
     `open_artifact` is how attribution is SUPPOSED to work (see
@@ -187,7 +308,7 @@ def _track_edits_since(session: "ChatSession", store, before: dict[str, float]) 
     Hermes's edits.
     """
     already_touched = getattr(session, "_artifacts_touched", None) or ()
-    after = _snapshot_existing_artifact_mtimes(store)
+    after = snapshot_existing_artifact_mtimes(store)
     for slug, prev_mtime in before.items():
         current = after.get(slug)
         if current is not None and current > prev_mtime and slug not in already_touched:
@@ -200,7 +321,7 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
     Returns a `SideEffectResult` whose `message` carries the artifact path the
     agent writes output files under (`<path>/...`) after this call returns.
     """
-    store = _artifact_store(session)
+    store = resolve_artifact_store(session)
     if store is None:
         return SideEffectResult.failed(
             "Artifact store unavailable (no workspace bound to this session).",
@@ -263,7 +384,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
     """
-    store = _artifact_store(session)
+    store = resolve_artifact_store(session)
     if store is None:
         return SideEffectResult.failed(
             "Artifact store unavailable (no workspace bound to this session).",
@@ -364,7 +485,7 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     """
     from anton.core.artifacts.backend_launcher import launch_artifact_backend
 
-    store = _artifact_store(session)
+    store = resolve_artifact_store(session)
     if store is None:
         return SideEffectResult.failed(
             "Artifact store unavailable (no workspace bound to this session).",
@@ -486,7 +607,7 @@ async def handle_list_artifacts(
     """
     import json
 
-    store = _artifact_store(session)
+    store = resolve_artifact_store(session)
     if store is None:
         # Tier 2 (ENG-2248): the tool cannot operate at all, so a retry
         # cannot help and repetition is thrash. Reuses the existing
@@ -524,7 +645,7 @@ async def handle_open_artifact(
     """
     import json
 
-    store = _artifact_store(session)
+    store = resolve_artifact_store(session)
     if store is None:
         # Tier 2 (ENG-2248): the tool cannot operate at all, so a retry
         # cannot help and repetition is thrash. Reuses the existing
@@ -731,10 +852,10 @@ async def handle_scratchpad(
 
         # Snapshot existing artifacts' content mtimes before the cell runs, so
         # an edit the cell makes without a prior `open_artifact` call this
-        # turn still gets attributed below (see `_track_edits_since`).
-        artifact_store = _artifact_store(session)
+        # turn still gets attributed below (see `track_edits_since`).
+        artifact_store = resolve_artifact_store(session)
         before_artifact_mtimes = (
-            _snapshot_existing_artifact_mtimes(artifact_store)
+            snapshot_existing_artifact_mtimes(artifact_store)
             if artifact_store is not None
             else {}
         )
@@ -753,16 +874,38 @@ async def handle_scratchpad(
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
+            lint_messages: list[str] = []
             if artifact_store is not None:
-                _track_edits_since(session, artifact_store, before_artifact_mtimes)
+                track_edits_since(session, artifact_store, before_artifact_mtimes)
+                try:
+                    import asyncio
+
+                    # the checkers might be with multi-second timeouts, run them async
+                    lint_messages = await asyncio.to_thread(
+                        lint_changed_artifact_files,
+                        artifact_store, before_artifact_mtimes,
+                        status_by_slug=getattr(session, "_artifact_lint_status", None),
+                    )
+                except Exception:
+                    # Best-effort: a lint crash must never fail
+                    # the cell's own result.
+                    _log.warning("artifact lint failed for this cell", exc_info=True)
+        else:
+            lint_messages = []
         # The runtime's verdict: a raised error/timeout/kill is a failure;
         # stderr-only output (warnings) is not, and stdout containing words
         # like "failed" is not either — the streak reads this flag, never the
         # text (ENG-1276). The reason is the traceback's LAST line (the cause),
         # the machine-comparable key ENG-1286's thrash breaker will consume.
         error = (cell.error or "").strip() if cell is not None else ""
+        content = format_cell_result(cell)
+        if lint_messages:
+            # [artifact lint] follows format_cell_result's own [output]/[error]
+            # labeling convention so the agent can tell the finding apart from
+            # its own code's output.
+            content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
-            content=format_cell_result(cell),
+            content=content,
             ok=not error,
             reason=cell_failure_reason(error),
         )
