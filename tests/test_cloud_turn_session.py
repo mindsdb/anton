@@ -142,6 +142,50 @@ def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
     assert not (tmp_path / ".anton" / "anton.md").exists()
 
 
+# ── the conversation's start date, which this pod cannot derive ──────────────
+
+def test_both_stored_timestamp_shapes_reach_the_session(tmp_path, monkeypatch):
+    """The server sends `created_at.isoformat()`. On the Postgres cloud path
+    that column is timezone-aware so the string carries an offset; on SQLite it
+    does not. Both have to arrive, since the naive shape is what a developer
+    and CI actually run against."""
+    from datetime import datetime, timedelta, timezone
+
+    aware = "2026-09-01T08:15:00+00:00"
+    _, cfg = _build(tmp_path, monkeypatch, started_at=aware)
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15, tzinfo=timezone.utc)
+
+    naive = "2026-09-01T08:15:00"
+    _, cfg = _build(tmp_path, monkeypatch, started_at=naive)
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15)
+
+    # Trailing Z is accepted too, so a server that formats UTC that way is not
+    # silently discarded.
+    _, cfg = _build(tmp_path, monkeypatch, started_at="2026-09-01T08:15:00Z")
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15, tzinfo=timezone.utc)
+    assert timedelta(0) == cfg.started_at.utcoffset()
+
+
+def test_a_missing_start_time_leaves_the_session_to_fall_back(tmp_path, monkeypatch):
+    """A controller too old to forward the field, or a server that could not
+    resolve it, must not fail the turn: None is what every cloud turn used
+    before this existed."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.started_at is None
+
+
+def test_an_unparsable_start_time_degrades_but_is_logged(tmp_path, monkeypatch, caplog):
+    """Degrading in silence would make a server sending a shape anton cannot
+    read look identical to a controller that stopped sending the field, and the
+    only symptom either way is a date quietly reverting to today."""
+    with caplog.at_level("WARNING"):
+        _, cfg = _build(tmp_path, monkeypatch, started_at="2026/09/01 08:15")
+
+    assert cfg.started_at is None
+    assert "started_at" in caplog.text
+    assert "2026/09/01 08:15" in caplog.text
+
+
 def test_db_history_is_seeded_not_loaded(tmp_path, monkeypatch):
     _, cfg = _build(
         tmp_path, monkeypatch,
