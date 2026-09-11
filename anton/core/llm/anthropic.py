@@ -385,6 +385,12 @@ class AnthropicProvider(LLMProvider):
                                 "id": block.id,
                                 "name": block.name,
                                 "json_parts": [],
+                                # Same record-don't-re-derive rule as both
+                                # OpenAI readers. Nothing updates id/name after
+                                # this on the Anthropic path, so the two are
+                                # equivalent here today — the flag keeps them
+                                # equivalent if that ever changes.
+                                "started": False,
                             }
                             # Gated like both OpenAI readers, which this path
                             # did not match. Unguarded, a blank id opened a UI
@@ -393,6 +399,7 @@ class AnthropicProvider(LLMProvider):
                             # call's id, which is now the MINTED one
                             # (review: pnewsam on #471).
                             if block.id and block.name:
+                                blocks[idx]["started"] = True
                                 yield StreamToolUseStart(id=block.id, name=block.name)
                         elif block.type in ("thinking", "redacted_thinking"):
                             # Adaptive thinking (triggered by output_config.effort,
@@ -435,10 +442,10 @@ class AnthropicProvider(LLMProvider):
                                     parse_error=parse_error, repaired=repaired,
                                 )
                             ))
-                            # Same gate as the Start above, and the ORIGINAL id
-                            # rather than the minted one — an End with no Start
-                            # is a worse event stream than neither.
-                            if info["id"] and info["name"]:
+                            # Gated on whether a Start was emitted, and on the
+                            # ORIGINAL id rather than the minted one — an End
+                            # with no Start is a worse event stream than neither.
+                            if info.get("started"):
                                 yield StreamToolUseEnd(id=info["id"])
 
                     elif event.type == "message_delta":

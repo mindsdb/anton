@@ -542,13 +542,14 @@ class TestTheWiringIsPinned:
         `tests/test_verifier_truncation.py`'s wiring pins."""
         import ast
         import inspect
+        import textwrap
 
         from anton.core.session import ChatSession
 
         src = inspect.getsource(ChatSession._stream_and_handle_tools)
         called = {
             n.func.attr
-            for n in ast.walk(ast.parse(textwrap_dedent(src)))
+            for n in ast.walk(ast.parse(textwrap.dedent(src)))
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
         }
         assert "_ensure_replayable_calls" in called
@@ -571,7 +572,80 @@ class TestTheWiringIsPinned:
         assert "_ensure_replayable_calls" in called
 
 
-def textwrap_dedent(src: str) -> str:
-    import textwrap
 
-    return textwrap.dedent(src)
+class TestNoToolStepIsLeftOpenOrClosedTwice:
+    """Every `StreamToolUseEnd` must have had a matching Start.
+
+    The first attempt at this gated the End on `id and name` being set at the
+    end of the stream, which is a different question from "did we announce this
+    call": both fields can be filled in by a LATER chunk, so a call that never
+    emitted a Start could still emit an End and close a step the consumer never
+    opened. Caught while auditing the review-response commit.
+    """
+
+    @staticmethod
+    def _pairs(events):
+        from anton.core.llm.provider import StreamToolUseEnd, StreamToolUseStart
+
+        starts = [e.id for e in events if isinstance(e, StreamToolUseStart)]
+        ends = [e.id for e in events if isinstance(e, StreamToolUseEnd)]
+        return starts, ends
+
+    async def test_chat_completions_name_arriving_in_a_later_chunk(self):
+        """id in the first chunk, name only in the second: no Start fires, so
+        no End may either."""
+
+        def chunk(tool_calls, finish=None):
+            return SimpleNamespace(
+                model="m", usage=None,
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content=None, tool_calls=tool_calls,
+                                          reasoning_content=None),
+                    finish_reason=finish)])
+
+        first = SimpleNamespace(index=0, id="call_ok",
+                                function=SimpleNamespace(name=None, arguments=None))
+        second = SimpleNamespace(index=0, id=None,
+                                 function=SimpleNamespace(name="scratchpad", arguments='{"a": 1}'))
+        with patch("anton.core.llm.openai.openai") as mock_openai:
+            client = AsyncMock()
+            mock_openai.AsyncOpenAI.return_value = client
+            client.chat.completions.create = AsyncMock(return_value=_fake_async_iter(
+                [chunk([first]), chunk([second]), chunk(None, finish="tool_calls")]))
+            provider = OpenAIProvider(
+                api_key="k", flavor=OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC)
+            events = [e async for e in provider.stream(
+                model="m", system="s", messages=[{"role": "user", "content": "hi"}],
+                tools=[{"name": "scratchpad", "description": "x", "input_schema": {}}])]
+
+        starts, ends = self._pairs(events)
+        assert starts == ends, f"unbalanced tool steps: {starts} opened, {ends} closed"
+        # The call itself still survives and is dispatchable.
+        assert len(_completed(events).tool_calls) == 1
+
+    async def test_responses_added_with_a_good_id_but_no_name(self):
+        """`output_item.added` arrives with a usable `call_id` and a blank
+        name: no Start fires, so no End may either."""
+        events = [
+            SimpleNamespace(
+                type="response.output_item.added", output_index=0,
+                item=SimpleNamespace(type="function_call", call_id="call_ok", name=""),
+            ),
+            *_args_events(),
+        ]
+        out = await _run_responses_stream(events)
+        starts, ends = self._pairs(out)
+        assert starts == ends, f"unbalanced tool steps: {starts} opened, {ends} closed"
+        calls = _completed(out).tool_calls
+        assert len(calls) == 1 and calls[0].name == UNNAMED_REPLAYED_TOOL
+
+    async def test_a_healthy_call_still_opens_and_closes_exactly_one_step(self):
+        events = [
+            SimpleNamespace(
+                type="response.output_item.added", output_index=0,
+                item=SimpleNamespace(type="function_call", call_id="call_ok", name="scratchpad"),
+            ),
+            *_args_events(),
+        ]
+        starts, ends = self._pairs(await _run_responses_stream(events))
+        assert starts == ["call_ok"] and ends == ["call_ok"]

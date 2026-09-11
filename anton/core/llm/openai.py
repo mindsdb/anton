@@ -1283,8 +1283,18 @@ class OpenAIProvider(LLMProvider):
                                 if tc_delta.function and tc_delta.function.name
                                 else "",
                                 "args_parts": [],
+                                # Whether a Start was actually emitted for this
+                                # call. Recorded rather than re-derived at the
+                                # End: id and name can BOTH be filled in by a
+                                # later chunk (the branch just below), so
+                                # re-testing them there would answer "are they
+                                # set now", not "did we announce this call" —
+                                # and emit an End for a step the consumer never
+                                # opened (ENG-2420).
+                                "started": False,
                             }
                             if tc_state[idx]["id"] and tc_state[idx]["name"]:
+                                tc_state[idx]["started"] = True
                                 yield StreamToolUseStart(
                                     id=tc_state[idx]["id"],
                                     name=tc_state[idx]["name"],
@@ -1398,12 +1408,12 @@ class OpenAIProvider(LLMProvider):
                 id=info["id"], name=info["name"], input=parsed,
                 parse_error=parse_error, repaired=repaired,
             )))
-            # Gated on the same condition as the StreamToolUseStart above, and
-            # on the ORIGINAL id rather than a minted one: a call that never
-            # announced a Start must not emit an End, or the consumer is left
-            # with a step it cannot retire (review: pnewsam on #471, reported
-            # against the Anthropic reader — this is the same shape).
-            if info["id"] and info["name"]:
+            # Gated on whether a Start was actually emitted, and carrying the
+            # ORIGINAL id rather than a minted one: a call that never announced
+            # a Start must not emit an End, or the consumer is left with a step
+            # it cannot retire (review: pnewsam on #471, reported against the
+            # Anthropic reader — this is the same shape).
+            if info["started"]:
                 yield StreamToolUseEnd(id=info["id"])
 
         # Missing finish_reason is ambiguous: it's a genuine truncation only when
@@ -1608,8 +1618,17 @@ class OpenAIProvider(LLMProvider):
                         idx = event.output_index
                         call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
                         name = getattr(item, "name", "") or ""
-                        fc_state[idx] = {"call_id": call_id, "name": name, "args_parts": []}
+                        # `started` for the same reason as the chat-completions
+                        # reader: an `output_item.added` carrying a good
+                        # `call_id` but a blank name emits no Start, and gating
+                        # the End on the id alone then closed a step that was
+                        # never opened (ENG-2420).
+                        fc_state[idx] = {
+                            "call_id": call_id, "name": name,
+                            "args_parts": [], "started": False,
+                        }
                         if call_id and name:
+                            fc_state[idx]["started"] = True
                             yield StreamToolUseStart(id=call_id, name=name)
 
                 # Function-call argument deltas
@@ -1619,7 +1638,10 @@ class OpenAIProvider(LLMProvider):
                     info = fc_state.get(idx)
                     if info is None:
                         # output_item.added didn't surface this call yet — buffer
-                        info = {"call_id": "", "name": "", "args_parts": []}
+                        info = {
+                            "call_id": "", "name": "", "args_parts": [],
+                            "started": False,
+                        }
                         fc_state[idx] = info
                     info["args_parts"].append(delta)
                     if info["call_id"]:
@@ -1648,7 +1670,7 @@ class OpenAIProvider(LLMProvider):
                             parse_error=parse_error, repaired=repaired,
                         )
                     ))
-                    if info["call_id"]:
+                    if info["started"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
                 # Final completion event carries the resolved Response object
