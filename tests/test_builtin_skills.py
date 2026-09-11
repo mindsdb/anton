@@ -10,7 +10,12 @@ from anton.core.memory.skills import Skill, SkillStore
 REAL_BUILTIN_ROOT = (
     Path(skills_mod.__file__).parent / "builtin_skills"
 )
-SHIPPED_LABELS = {"build-fullstack-backend", "build-html-dashboard", "public-data-sources"}
+SHIPPED_LABELS = {
+    "build-fullstack-backend",
+    "build-html-dashboard",
+    "public-data-sources",
+    "cowork-product",
+}
 
 
 @pytest.fixture()
@@ -248,3 +253,52 @@ class TestRecallIdempotence:
         result = await handle_recall_skill(session, {"label": "build-html-dashboard"})
         assert result.ok is True
         assert "## Procedure" in result.content
+
+
+class TestCoworkProductSkill:
+    """ENG-2423 — the facts the agent must not improvise.
+
+    Asserted on content, not just presence: a skill that ships but says the
+    wrong thing is the bug, not the fix. Each fact here was read out of the
+    code that implements it, and each is one a prod answer got wrong.
+    """
+
+    def test_recallable_by_the_label_the_system_prompt_names(self, store):
+        """The prompt tells the model to call `recall_skill("cowork-product")`.
+        If that label does not resolve, the pointer is dead and the model falls
+        back to exactly the priors this ticket exists to stop."""
+        skill = store.load("cowork-product")
+        assert skill is not None
+        assert skill.provenance == "builtin"
+
+    def test_names_the_installed_app_and_the_download_page(self, store):
+        """`productName` in cowork's package.json is "MindsHub Cowork" — the
+        string a user looks for in Applications. Getting this wrong is what
+        "drag ChatGPT to the Trash" was."""
+        body = store.load("cowork-product").declarative_md
+        assert "MindsHub Cowork" in body
+        assert "https://mindshub.ai/download" in body
+
+    def test_carries_every_platform_that_ships_an_installer(self, store):
+        """build-installers.yml uploads macOS .pkg, Windows .exe and Linux .deb
+        (amd64 + arm64). Omitting Linux would make a correct answer wrong for
+        the users who have it."""
+        body = store.load("cowork-product").declarative_md
+        for platform in ("macOS", "Windows", "Linux"):
+            assert platform in body
+
+    def test_states_the_harness_split_in_the_direction_the_code_implements(self, store):
+        """SettingsView gates the account-wide Agent Harness group on
+        `host.isWeb`, and Coding Mode (where desktop picks a harness) is
+        Electron-only. A fact sheet with this backwards would send the desktop
+        user who filed this ticket hunting for a setting that is not there."""
+        body = store.load("cowork-product").declarative_md
+        assert "Settings → Agent Harness" in body
+        assert "browser only" in body
+        assert "Coding Mode: **desktop only**" in body
+
+    def test_forbids_answering_from_general_knowledge(self, store):
+        body = store.load("cowork-product").declarative_md
+        assert "Never answer a question about Cowork from general" in body
+        # And says what to do instead of inventing a missing fact.
+        assert "say you are not certain" in body
