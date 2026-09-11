@@ -11,6 +11,9 @@ Two layers:
 from __future__ import annotations
 
 import os
+# Bound at import so the constants below are built from the real class, which
+# `_pin_today` later replaces on the module.
+from datetime import datetime as _stdlib_datetime
 
 import pytest
 
@@ -163,7 +166,9 @@ def test_both_stored_timestamp_shapes_reach_the_session(tmp_path, monkeypatch):
     # silently discarded.
     _, cfg = _build(tmp_path, monkeypatch, started_at="2026-09-01T08:15:00Z")
     assert cfg.started_at == datetime(2026, 9, 1, 8, 15, tzinfo=timezone.utc)
-    assert timedelta(0) == cfg.started_at.utcoffset()
+    # Pinned explicitly: datetime equality compares instants, so the assertion
+    # above alone would also accept a wrong offset with a matching wall clock.
+    assert cfg.started_at.utcoffset() == timedelta(0)
 
 
 def test_a_missing_start_time_leaves_the_session_to_fall_back(tmp_path, monkeypatch):
@@ -360,6 +365,11 @@ def _real_session_with_workspace(tmp_path, **cfg_overrides):
     return session
 
 
+#: Two pod boots either side of a midnight, for the across-days assertion.
+_DAY_ONE = _stdlib_datetime(2030, 1, 1, 23, 55)
+_DAY_TWO = _stdlib_datetime(2030, 1, 2, 0, 5)
+
+
 def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     """A REAL ChatSession off the cloud builder, not a captured config.
 
@@ -381,53 +391,64 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     return session
 
 
-async def test_two_pods_render_one_start_date_for_the_same_conversation(
+def _pin_today(monkeypatch, moment):
+    """Pin what the session sees as "now".
+
+    Patches the class on the `datetime` module rather than on the module that
+    imports it: `_build_system_prompt` does `import datetime as _dt` in the
+    function body, so it re-resolves the module every call and only a patch
+    there is visible to it.
+    """
+    import datetime as _dt
+
+    class _PinnedNow(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment
+
+    monkeypatch.setattr(_dt, "datetime", _PinnedNow)
+
+
+async def test_two_pods_on_different_days_render_the_same_prompt(
     tmp_path, monkeypatch,
 ):
-    """Every turn runs in a fresh pod, so before this the date came from
-    whichever day that pod booted and the prefix changed at every midnight.
-    Two independently built sessions for one conversation must render the same
-    prompt, which is the ticket's acceptance stated directly.
+    """The ticket's acceptance, stated as it asks for it. Every turn runs in a
+    fresh pod, so the date used to come from whichever day that pod happened to
+    boot, and a conversation open across midnight got a different prompt the
+    next morning — taking the cached history with it.
     """
     started = "2026-09-01T08:15:00+00:00"
+
+    _pin_today(monkeypatch, _DAY_ONE)
     first = await _real_cloud_session(
         tmp_path, monkeypatch, started_at=started,
     )._build_system_prompt()
+
+    _pin_today(monkeypatch, _DAY_TWO)
     second = await _real_cloud_session(
         tmp_path, monkeypatch, started_at=started,
     )._build_system_prompt()
 
     assert first == second
-    # The equality above cannot carry this on its own: two pods booted on the
-    # same day agree on "today" with the bug fully present, and the ticket's
-    # "on different days" is not reproducible without faking the clock. So the
-    # stored date is what actually proves the clock was not consulted.
     assert "Tuesday, September 01, 2026" in first
 
 
-async def test_the_stored_start_date_wins_over_the_pods_own_clock(
-    tmp_path, monkeypatch,
-):
-    """The clock is consulted only as the fallback. Asserted by rendering a
-    date that is not today rather than by faking time: there is no clock
-    freezing dependency here, and patching the module attribute would do
-    nothing, since `_build_system_prompt` re-imports datetime at call time.
+async def test_the_clock_is_only_the_fallback(tmp_path, monkeypatch):
+    """Both halves of the rule, since the equality above holds trivially if the
+    date is wrong in the same way on both days: a stored value is used instead
+    of today, and today is what renders when there is no stored value.
     """
-    import datetime as _dt
+    _pin_today(monkeypatch, _DAY_TWO)
+    pinned_today = _DAY_TWO.strftime("%A, %B %d, %Y")
 
-    session = _real_cloud_session(
+    stored = await _real_cloud_session(
         tmp_path, monkeypatch, started_at="2026-09-01T08:15:00+00:00",
-    )
-    prompt = await session._build_system_prompt()
+    )._build_system_prompt()
+    assert "Tuesday, September 01, 2026" in stored
+    assert pinned_today not in stored
 
-    assert "Tuesday, September 01, 2026" in prompt
-    today = _dt.datetime.now().strftime("%A, %B %d, %Y")
-    if today != "Tuesday, September 01, 2026":
-        assert today not in prompt
-
-    # And without it, today is what renders — the behavior every cloud turn had.
     fallback = await _real_cloud_session(tmp_path, monkeypatch)._build_system_prompt()
-    assert today in fallback
+    assert pinned_today in fallback
 
 
 def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch):

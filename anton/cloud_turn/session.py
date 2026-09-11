@@ -650,15 +650,15 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         clear_ds_env()
 
     # When the conversation began, so the prompt dates it from the conversation
-    # rather than from this pod, which is new every turn. Unparsable degrades to
-    # None, which is today, rather than failing a turn over a prompt line — but
-    # it says so, because a silent degrade cannot be told apart from a
-    # controller that stopped sending the field. The value is a timestamp.
+    # rather than from this pod, which is new every turn.
     started_at = None
     if request.started_at:
         try:
             started_at = datetime.fromisoformat(request.started_at)
         except ValueError:
+            # Degrades to today rather than failing a turn over a prompt line,
+            # but logs the value: silence makes a shape anton cannot read look
+            # exactly like a controller that sends nothing.
             logger.warning(
                 "cloud session ignoring unparsable started_at=%r conversation=%s",
                 request.started_at, request.conversation_id,
