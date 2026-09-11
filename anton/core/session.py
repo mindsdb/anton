@@ -29,7 +29,7 @@ from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
-from anton.memory.history_store import is_user_turn
+from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
@@ -1347,8 +1347,15 @@ class ChatSession:
                 else tool
                 for tool in self._extra_tools
             ]
+        # Repaired at the ingress every surface shares — desktop, the cloud pod
+        # and the CLI all arrive here — so a conversation ENG-2420 already
+        # poisoned starts replying again on its next turn instead of 400ing
+        # forever. Count-preserving on purpose: `_seed_len` below and
+        # `last_compaction`'s `covered_through` are positional, and the host
+        # maps that count onto its OWN message list.
         self._history: list[dict] = (
-            list(config.initial_history) if config.initial_history else []
+            repair_replayed_tool_ids(list(config.initial_history))[0]
+            if config.initial_history else []
         )
         # Seed length + how many leading history messages the last compaction
         # folded into its summary — lets a host map the compaction back onto
@@ -1886,6 +1893,37 @@ class ChatSession:
             "Anthropic role alternation). Combined block count: %d.",
             role, len(merged_blocks),
         )
+
+    @staticmethod
+    def _ensure_replayable_calls(response) -> None:
+        """Belt for ENG-2420: make every call on `response` replayable.
+
+        The provider readers already guarantee this
+        (`ensure_replayable_tool_call`), so this is expected to be a permanent
+        no-op — it logs at ERROR when it is not, because the only way it fires
+        is a reader missing its guard. It exists because the cost of one
+        escaping is not a failed call but a conversation that can never be used
+        again.
+
+        Salvages rather than drops, for the same reason the readers do and for
+        one more: this runs before the tool loop reads `tool_calls`, and
+        emptying that list would leave the round with no calls and no content,
+        so both `_append_history` calls below become no-ops and the loop
+        re-issues an identical request until `_max_tool_rounds`
+        (review: pnewsam on #471). Salvaging cannot change the list's length,
+        so that shape is unreachable by construction rather than by a guard.
+        """
+        from anton.core.llm.provider import ensure_replayable_tool_call, usable_call_id
+
+        calls = getattr(response, "tool_calls", None) or []
+        broken = [tc for tc in calls if not (usable_call_id(tc.id) and usable_call_id(tc.name))]
+        if broken:
+            logging.getLogger(__name__).error(
+                "ENG-2420: %d tool call(s) reached the session unreplayable — "
+                "a provider reader is missing its guard.", len(broken),
+            )
+            for tc in broken:
+                ensure_replayable_tool_call(tc)
 
     def _validate_history_for_provider(self, messages: list[dict]) -> None:
         """Defensive pre-flight: warn (don't raise) if the messages
@@ -4978,6 +5016,7 @@ class ChatSession:
                         break
 
                 # Build assistant message with content blocks
+                self._ensure_replayable_calls(llm_response)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(
