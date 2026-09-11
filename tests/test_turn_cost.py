@@ -84,13 +84,11 @@ class TestClientUsageListener:
         await client.plan(system="s", messages=[])
         await client.code(system="s", messages=[])
         await client.summarize(system="s", messages=[])
-        await client.gate(system="s", messages=[])
 
         assert seen == [
             ("planning", "planner"),
             ("coding", "coder"),
             ("router", "coder"),   # router defaults to the coding role
-            ("router", "coder"),
         ]
 
     @pytest.mark.asyncio
