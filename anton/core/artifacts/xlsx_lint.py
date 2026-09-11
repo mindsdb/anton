@@ -18,6 +18,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+# A double-quoted Excel string literal (`""` is an escaped quote inside one).
+# Stripped before anything else so text that merely looks like a reference —
+# a label such as "A5 is high" — is never scanned as one.
+_STRING_LITERAL = re.compile(r'"(?:[^"]|"")*"')
+
 # A sheet-qualified reference: 'Quoted Name'!A1 or Name!A1:B2. Matched and
 # stripped first so its cell/range portion isn't mistaken for a same-sheet one.
 _CROSS_SHEET_REF = re.compile(
@@ -76,7 +81,8 @@ def _lint_xlsx(path: Path) -> list[CircularRefFinding]:
                     formula = _formula_text(cell)
                     if formula is None:
                         continue
-                    remaining = _CROSS_SHEET_REF.sub(" ", formula)
+                    remaining = _STRING_LITERAL.sub(" ", formula)
+                    remaining = _CROSS_SHEET_REF.sub(" ", remaining)
                     if _contains_own_cell(remaining, (cell.column, cell.row)):
                         findings.append(
                             CircularRefFinding(

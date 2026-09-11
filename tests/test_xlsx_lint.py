@@ -111,6 +111,50 @@ def test_message_names_sheet_cell_and_formula(broken_forecast: Path):
     assert "SLOPE" in msg
 
 
+# ─── String literals ──────────────────────────────────────────────────────
+#
+# A formula's own cell address can appear inside a quoted label it emits —
+# that text was never a reference and must not be scanned as one.
+
+
+def test_does_not_flag_a_cell_address_inside_a_string_literal(tmp_path: Path):
+    path = tmp_path / "labels.xlsx"
+    _write_workbook(
+        path,
+        {"Sheet1": {"B1": "1", 'A5': 'IF(B1>0,"A5 is high","")'}},
+    )
+    assert lint_xlsx(path) == []
+
+
+def test_does_not_flag_a_cell_address_inside_a_concatenated_label(tmp_path: Path):
+    """The exact shape from the false-positive report: a status label built
+    from a real cross-sheet-free formula, where the label text happens to
+    repeat the formula's own cell address."""
+    path = tmp_path / "status.xlsx"
+    _write_workbook(
+        path,
+        {
+            "Sheet1": {
+                "B2": "10", "B10": "20",
+                "H1": 'IF(SUM(B2:B10)>0,"H1 on track","H1 behind")',
+            }
+        },
+    )
+    assert lint_xlsx(path) == []
+
+
+def test_does_not_flag_an_escaped_quote_inside_a_label(tmp_path: Path):
+    """`""` is Excel's escaped quote — the literal keeps running past it, so
+    a naive `"[^"]*"` would end the string early and leave the rest of the
+    formula (which still contains the cell's own address) exposed."""
+    path = tmp_path / "escaped.xlsx"
+    _write_workbook(
+        path,
+        {"Sheet1": {"A5": 'IF(1>0,"say ""A5"" out loud","")'}},
+    )
+    assert lint_xlsx(path) == []
+
+
 # ─── Shared formulas ──────────────────────────────────────────────────────
 #
 # openpyxl's public write API always writes one explicit formula per cell —
