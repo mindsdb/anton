@@ -70,11 +70,29 @@ def test_has_errors_when_a_real_finding_is_present(store: _FakeStore):
     assert status == {"forecast-abc12345": LINT_STATUS_HAS_ERRORS}
 
 
-def test_not_validated_when_the_checker_could_not_run(monkeypatch, store: _FakeStore):
-    """`.xlsx` always has the structural lint as a fallback (it never
-    returns None), so this state only actually arises for `.html`, when no
-    headless browser is configured — there is no fallback checker for it."""
+def test_no_browser_at_all_sets_no_status(monkeypatch, store: _FakeStore):
+    """No browser configured for this deployment at all (cloud/web) is a
+    capability fact, not a per-artifact finding — `.html` isn't registered
+    as a checker here, so it never contributes `not_validated` either.
+    Otherwise every html artifact on such a host would carry a permanent,
+    uncloseable 'Not validated' badge."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    folder = _make_artifact(store, "dash-abc12345")
+    (folder / "dash.html").write_text("<html></html>")
+    status: dict[str, str] = {}
+
+    lint_changed_artifact_files(store, {"dash-abc12345": 0.0}, status_by_slug=status)
+
+    assert status == {}
+
+
+def test_not_validated_when_a_configured_checker_could_not_run(monkeypatch, store: _FakeStore):
+    """`.xlsx` always has the structural lint as a fallback (it never
+    returns None). For `.html`, this state now arises only when a browser
+    IS configured but this particular run didn't produce a result (crash/
+    timeout/malformed output) — distinct from no browser being configured
+    at all, which sets no status (see the test above)."""
+    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/bin/true")  # exits 0, no output
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text("<html></html>")
     status: dict[str, str] = {}
@@ -115,10 +133,11 @@ def test_status_clears_once_the_artifact_re_lints_clean(monkeypatch, store: _Fak
 
 
 def test_has_errors_outranks_not_validated_across_sibling_files(monkeypatch, store: _FakeStore):
-    """One sibling file only got as far as "could not run" (no browser for
-    its `.html`), another has a real `.xlsx` finding — the artifact-level
-    status must reflect the worse one, regardless of file processing order."""
-    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    """One sibling file only got as far as "could not run" (a configured
+    browser whose run produced no result for its `.html`), another has a
+    real `.xlsx` finding — the artifact-level status must reflect the worse
+    one, regardless of file processing order."""
+    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/bin/true")  # exits 0, no output
     folder = _make_artifact(store, "mixed-abc12345")
     _write_workbook(
         folder / "broken.xlsx",

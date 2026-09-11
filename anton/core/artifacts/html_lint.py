@@ -37,6 +37,19 @@ class HtmlFinding:
         return f"{self.kind}: {self.detail}"
 
 
+def is_browser_configured() -> bool:
+    """Whether `ANTON_HTML_LINT_BROWSER` resolves to a usable binary right
+    now — a capability check, distinct from what `lint_html` returns.
+
+    A caller uses this to tell "no browser was ever configured for this
+    deployment" (expected on cloud/web; there is nothing to check with)
+    apart from "a browser is configured but this particular run failed"
+    (a real, worth-surfacing problem). Both would otherwise collapse into
+    the same `None`.
+    """
+    return _discover_browser() is not None
+
+
 def lint_html(path: Path) -> list[HtmlFinding] | None:
     """Load the page headless and flag console errors + failed local assets.
 

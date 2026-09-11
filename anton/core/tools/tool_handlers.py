@@ -180,19 +180,24 @@ LINT_STATUS_NOT_VALIDATED = "not_validated"
 
 
 def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
-    """suffix -> checker. `None` means it could not run at all (e.g. no
-    headless browser); `[]` means it ran and found nothing; a non-empty
-    list is real findings. `lint_changed_artifact_files` turns `None` into
-    `LINT_STATUS_NOT_VALIDATED` on `status_by_slug` — nothing is appended to
-    the returned message list for it, so a checker that never ran is silent
-    in the agent's own tool-result text (only the end-of-turn status sees
-    it).
+    """suffix -> checker. `None` means it could not run at all (e.g. a
+    configured browser crashed or timed out this time); `[]` means it ran
+    and found nothing; a non-empty list is real findings.
+    `lint_changed_artifact_files` turns `None` into `LINT_STATUS_NOT_VALIDATED`
+    on `status_by_slug` — nothing is appended to the returned message list
+    for it, so a checker that never ran is silent in the agent's own
+    tool-result text (only the end-of-turn status sees it).
 
-    Add a format by adding one entry here. Only `.xlsx`/`.html` are
-    registered — every other extension is silently unchecked, which is
-    honest as-is: nothing ever claimed to validate a `.csv`.
+    Add a format by adding one entry here. `.xlsx` is always registered;
+    every other extension not listed is silently unchecked, which is honest
+    as-is: nothing ever claimed to validate a `.csv`. `.html` follows the
+    same rule rather than being a special case: with no browser configured
+    for this deployment at all (cloud/web has none to find), there is no
+    checker for it here — registering it anyway would report every html
+    artifact `not_validated` forever, which is a deployment fact, not a
+    finding about any one artifact.
     """
-    from anton.core.artifacts.html_lint import lint_html
+    from anton.core.artifacts.html_lint import is_browser_configured, lint_html
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
@@ -211,13 +216,18 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             return [f.message() for f in findings]
         return None
 
-    def _html_linter(path: Path) -> list[str] | None:
-        findings = lint_html(path)
-        if findings is not None:
-            return [f.message() for f in findings]
-        return None
+    linters: dict[str, Callable[[Path], list[str] | None]] = {".xlsx": _xlsx_linter}
 
-    return {".xlsx": _xlsx_linter, ".html": _html_linter}
+    if is_browser_configured():
+        def _html_linter(path: Path) -> list[str] | None:
+            findings = lint_html(path)
+            if findings is not None:
+                return [f.message() for f in findings]
+            return None
+
+        linters[".html"] = _html_linter
+
+    return linters
 
 
 def lint_changed_artifact_files(

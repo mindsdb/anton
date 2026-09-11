@@ -44,11 +44,33 @@ def _make_artifact(store: _FakeStore, slug: str) -> Path:
     return folder
 
 
-def test_no_browser_configured_is_silent_in_messages_but_sets_status(monkeypatch, store: _FakeStore):
-    """`lint_html` returns None (couldn't run), not `[]` (ran, found
-    nothing) — that distinction now only reaches the agent via
-    `status_by_slug`, not as a line in the returned message list."""
+def test_no_browser_configured_sets_no_status_at_all(monkeypatch, store: _FakeStore):
+    """No browser configured for this deployment (cloud/web) is a
+    capability fact, not a finding about any one artifact — `.html` isn't
+    registered as a checker here at all, the same as an unregistered
+    extension, so it never contributes `not_validated` either. Without
+    this, every html artifact on a browser-less host would carry a
+    permanent, uncloseable 'Not validated' badge."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    folder = _make_artifact(store, "dash-abc12345")
+    (folder / "dash.html").write_text(_BROKEN_HTML)
+    before = {"dash-abc12345": 0.0}
+    status: dict[str, str] = {}
+
+    messages = lint_changed_artifact_files(store, before, status_by_slug=status)
+
+    assert messages == []
+    assert status == {}
+
+
+def test_a_configured_browser_that_fails_to_produce_output_sets_not_validated(
+    monkeypatch, store: _FakeStore
+):
+    """Unlike no browser at all, a browser IS configured here — the run
+    itself just didn't produce a usable result (stands in for a crash/
+    timeout/malformed output). That is a real, worth-surfacing signal, so
+    `not_validated` is still correct."""
+    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/bin/true")  # exits 0, no output
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
