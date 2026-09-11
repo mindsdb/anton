@@ -143,6 +143,7 @@ class ChatSystemPromptBuilder:
         skill_store: "SkillStore | None" = None,
         workspace_context: str = "",
         runtime_identity_lines: list[str] | None = None,
+        product_lines: list[str] | None = None,
     ) -> str:
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
@@ -167,6 +168,7 @@ class ChatSystemPromptBuilder:
         runtime_identity_section = build_runtime_identity_section(
             identity_lines=list(runtime_identity_lines or []),
             configured_block=system_prompt_context.runtime_context,
+            product_block=list(product_lines) if product_lines else None,
         )
         prompt += CHAT_SYSTEM_PROMPT.format(
             runtime_identity_section=runtime_identity_section,

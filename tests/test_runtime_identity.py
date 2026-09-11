@@ -456,3 +456,123 @@ class TestProvidersSurfaceServedModel:
             )]
         (done,) = [e for e in events if isinstance(e, StreamComplete)]
         assert done.response.model == "claude-sonnet-4-6-20260101"
+
+
+# ── ENG-2423: the PRODUCT sub-block ──────────────────────────────────────────
+
+
+class TestProductLines:
+    """`product_lines` — what the agent is, and where the user is running it."""
+
+    def test_never_identify_as_another_product_is_always_present(self):
+        from anton.core.llm.identity import product_lines
+
+        for surface in ("desktop", "web", "cli", None, "", "nonsense"):
+            joined = "\n".join(product_lines(surface))
+            assert "You are Cowork" in joined
+            # MindsHub, not the legal entity: the journey reaching this agent is
+            # MindsHub-branded, and naming MindsDB here adds a third brand to an
+            # answer meant to reduce confusion. The company relationship lives in
+            # the skill, for whoever asks or sees the copyright line.
+            assert "MindsHub" in joined
+            assert "MindsDB" not in joined
+            # The denial is the load-bearing half: prod identified as ChatGPT.
+            assert "not ChatGPT" in joined
+
+    def test_each_surface_names_itself(self):
+        from anton.core.llm.identity import product_lines
+
+        assert any("desktop app" in ln for ln in product_lines("desktop"))
+        assert any("browser" in ln for ln in product_lines("web"))
+        assert any("command-line" in ln for ln in product_lines("cli"))
+
+    def test_unknown_surface_omits_the_claim_rather_than_guessing(self):
+        """Same rule as the serving model: absent reads as unknown, wrong reads
+        as certain. A host that reports no surface must not be told it is desktop."""
+        from anton.core.llm.identity import product_lines
+
+        for unknown in (None, "", "nonsense", 3, object()):
+            joined = "\n".join(product_lines(unknown))
+            assert "This conversation is running" not in joined
+            # …but the rest of the block still stands.
+            assert "You are Cowork" in joined
+            assert "cowork-product" in joined
+
+    def test_points_at_the_skill_for_everything_it_does_not_carry(self):
+        from anton.core.llm.identity import product_lines
+
+        joined = "\n".join(product_lines("desktop"))
+        assert 'recall_skill("cowork-product")' in joined
+        assert "install" in joined
+
+
+class TestProductBlockRendering:
+    def test_section_renders_the_product_block(self):
+        section = build_runtime_identity_section(
+            identity_lines=["- Serving model: X."],
+            configured_block="",
+            product_block=["- You are Cowork.", "- On desktop."],
+        )
+        assert "PRODUCT" in section
+        assert "- You are Cowork." in section
+        assert "- On desktop." in section
+
+    def test_section_without_a_product_block_is_unchanged(self):
+        """Back-compat: a host that predates ENG-2423 renders exactly as before,
+        with no dangling header referring to a block that was never supplied."""
+        before = build_runtime_identity_section(
+            identity_lines=["- Serving model: X."], configured_block=""
+        )
+        assert "PRODUCT" not in before
+        assert before.startswith("RUNTIME IDENTITY:")
+
+
+class TestSessionRendersProduct:
+    async def test_desktop_session_states_the_surface_in_the_prompt(self):
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
+        mock_llm.planning_model = "mindshub_air"
+
+        prompt = await _system_prompt_after_turn(mock_llm, surface="desktop")
+
+        assert "PRODUCT" in prompt
+        assert "You are Cowork" in prompt
+        assert "running in the Cowork desktop app" in prompt
+        # Exactly one surface is claimed. ("browser" alone would match the
+        # always-present line listing where Cowork runs at all.)
+        assert "running in Cowork in the browser" not in prompt
+
+    async def test_web_session_states_the_browser_and_warns_about_desktop_only(self):
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
+        mock_llm.planning_model = "mindshub_air"
+
+        prompt = await _system_prompt_after_turn(mock_llm, surface="web")
+
+        assert "running in Cowork in the browser" in prompt
+        assert "Desktop-only features are not reachable" in prompt
+
+    async def test_session_without_a_surface_still_carries_the_identity(self):
+        """The pod/host may report no surface; the product identity must not
+        depend on it — that is the half that stops the ChatGPT answer."""
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(return_value=_text_response("Hello!"))
+        mock_llm.planning_model = "mindshub_air"
+
+        prompt = await _system_prompt_after_turn(mock_llm)
+
+        assert "You are Cowork" in prompt
+        assert "This conversation is running" not in prompt
+
+
+class TestDocsFallback:
+    """The answer of last resort, so "not in the fact sheet" never becomes a guess."""
+
+    def test_always_on_block_carries_the_docs_url(self):
+        """In the unconditional lines on purpose: a model that never recalls the
+        skill would never see a fallback that lived only inside it."""
+        from anton.core.llm.identity import product_lines
+
+        joined = "\n".join(product_lines("web"))
+        assert "https://docs.mindshub.ai" in joined
+        assert "never fill the gap with a guess" in joined
