@@ -79,6 +79,62 @@ def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypa
     assert cfg.session_id == "conv_1"
 
 
+def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
+    """ENG-2421: ENG-1636 taught the DESKTOP harness to point users at the Live
+    Artifacts panel instead of local paths — but that block lives in
+    cowork-server's in-process harness, which refuses to run org turns, so web
+    agents were never told and handed users sandbox:/mnt/... and loopback
+    "download links" for weeks after every card-side fix shipped. The pod's own
+    prompt context must carry the web-worded equivalent."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+    from anton.cloud_turn.session import CLOUD_ARTIFACT_DELIVERY_GUIDANCE
+    # `in`, not `==`: the suffix carries the credential block too now. What the
+    # whole field may contain is pinned in
+    # `test_the_pod_suffix_is_exactly_the_two_deployment_blocks`, so nothing is
+    # given up here — the individual sentences below still pin this block.
+    assert CLOUD_ARTIFACT_DELIVERY_GUIDANCE in suffix
+    # Reachability, not just wiring (review finding on #461): the config field
+    # being set proves nothing if the prompt builder stops appending `suffix` —
+    # exactly the "fix shipped while the failure continued" class this ticket
+    # documents. Assemble the real prompt and require the guidance inside it.
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+    prompt = ChatSystemPromptBuilder().build(
+        system_prompt_context=cfg.system_prompt_context,
+        conversation_started=True,
+        proactive_dashboards=False,
+        output_dir=str(tmp_path),
+    )
+    assert CLOUD_ARTIFACT_DELIVERY_GUIDANCE.strip() in prompt
+    # Tripwire: the override sentence targets the base ARTIFACTS step-4 text.
+    # If the durable fix lands (web-specific assembly REMOVES that base
+    # instruction), this assertion fails on purpose — the override sentence in
+    # CLOUD_ARTIFACT_DELIVERY_GUIDANCE is then stale and must be cleaned up
+    # rather than left referencing an instruction that no longer exists.
+    # Asserted against a prompt built with NO suffix: the override sentence
+    # itself quotes the same phrase, so checking the full prompt was vacuously
+    # true (re-review finding — mutating prompts.py left it green).
+    base_prompt = ChatSystemPromptBuilder().build(
+        system_prompt_context=SystemPromptContext(runtime_context="x"),
+        conversation_started=True,
+        proactive_dashboards=False,
+        output_dir=str(tmp_path),
+    )
+    assert "include the primary file's path" in base_prompt
+    # The load-bearing sentences, pinned individually so a rewrite that drops
+    # one is caught even if the identity assertion above is loosened later.
+    assert "Live Artifacts" in suffix
+    assert "do NOT hand them its location on disk" in suffix
+    assert "sandbox:/mnt/data/" in suffix
+    assert "127.0.0.1" in suffix
+    assert "never repeat a path" in suffix
+    # The base ARTIFACTS prompt tells the agent to include the primary file's
+    # path and to prefer launch_backend's (loopback) url — the cloud block must
+    # override both by name, not just coexist (review note on #461).
+    assert "OVERRIDES the ARTIFACTS workflow instruction" in suffix
+    assert "launch_backend" in suffix
+
+
 def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
     """ENG-1817: `.anton/anton.md` is cowork-server's staged copy of the project
     instructions. If the pod creates a template there, the next staging pass
@@ -883,11 +939,30 @@ def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, m
 
 # ── the credential referral this surface had no way to give ──────────────────
 
+def test_the_pod_suffix_is_exactly_the_two_deployment_blocks(tmp_path, monkeypatch):
+    """One field, two blocks, nothing else. Each block used to carry its own
+    identity assertion, which a second block makes impossible, so the whole
+    field is pinned once here instead. A third thing appended to the suffix
+    then has to be added deliberately rather than riding in unnoticed — which
+    matters because this is the only place a web turn is told a deployment
+    fact, and the suffix is the surface where those accumulate.
+    """
+    from anton.cloud_turn.session import (
+        _CREDENTIAL_CONTEXT,
+        CLOUD_ARTIFACT_DELIVERY_GUIDANCE,
+    )
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.system_prompt_context.suffix == "\n\n".join(
+        (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT)
+    )
+
+
 def test_the_credential_context_reaches_the_built_prompt(tmp_path, monkeypatch):
     """End to end through the real builder, not just the config field: the
     model only benefits from text the prompt actually renders. Before this the
-    pod passed no suffix at all, so nothing on this surface could say where a
-    credential goes and users pasted secrets into chat instead."""
+    pod's suffix said nothing about credentials, so nothing on this surface
+    could say where one goes and users pasted secrets into chat instead."""
     from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
 
     _, cfg = _build(tmp_path, monkeypatch)
