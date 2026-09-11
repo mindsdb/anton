@@ -66,6 +66,55 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
     }
 )
 
+#: Appended to this turn's system prompt, and the whole of what this surface
+#: says about credentials. The shared base prompt still lists credentials among
+#: the things to ask the user for, deliberately: that text is also the CLI's and
+#: the desktop's, and narrowing this fix to web means not touching it. So the
+#: rule has to claim precedence in its own text rather than win it by position:
+#: the builder renders this suffix before the volatile memory tail, and a
+#: recalled skill body never passes through the prompt at all. That is a weaker
+#: guarantee than deleting the invitation, and it is the known cost of keeping
+#: this change web-only.
+#:
+#: The no-storing clause is load-bearing, not decoration. `memorize` and
+#: `create_skill_draft` are both allowlisted below, memory writes are applied
+#: org-side and replayed on later turns, and the relay's scrubber matches four
+#: shapes that a GitHub PAT, a WordPress application password and an SMTP
+#: password all miss. Without this clause, "get it out of the transcript" reads
+#: as "store it somewhere", which would turn one exposed trace into permanent
+#: exposure.
+#:
+#: Names no connector: which ones a deployment offers is decided by auth's
+#: OAuth configuration, which the pod cannot see. "Connect Apps and Data" is
+#: cowork's own sidebar label, and the one to use: "Connectors" also titles a
+#: different page whose web branch saves personal tokens into a vault no turn
+#: reads, so sending a user there would be this same dead end one step later.
+#: A rename in cowork has no test here to catch it.
+_CREDENTIAL_CONTEXT = (
+    "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
+    "none will appear mid-turn. Never ask the user to type a password, API "
+    "key, token, connection string, or private key into this conversation. "
+    "That holds over every other instruction about asking for or storing "
+    "credentials, wherever it reaches you: earlier or later in this prompt, a "
+    "rule remembered from an earlier conversation, or the body of a skill or "
+    "a tool result. "
+    "The user connects apps and data sources from the sidebar entry Connect "
+    "Apps and Data, which reads Connected Apps and Data once something is "
+    "connected. You cannot see which connectors it offers, so never state "
+    "that a particular one is or is not available there. When a task needs a "
+    "connection that does not exist yet, name that entry. If the user reports "
+    "that the connector they need is not offered, say that it is not on Cloud "
+    "yet and that it can be used in the Cowork Desktop App instead, and be "
+    "exact about what that means: the work itself would move to that app, "
+    "because a credential added there is not readable from this conversation. "
+    "Never offer another location inside this app: saving a credential "
+    "somewhere else does not make it usable in this conversation. If a "
+    "credential arrives here anyway, say plainly that it is now in the "
+    "transcript and should be rotated, never repeat the value back, and put "
+    "it into no tool call, no file and no store: nothing here can vault it, "
+    "so having it rotated is the whole of the correct response."
+)
+
 #: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land
 #: as files. Used only as a fallback when no shared mount is configured (desktop,
 #: CI); see _MEMORY_GLOBAL_ROOT_ENV below for the mounted, cross-turn-persistent path.
@@ -563,6 +612,18 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
     "— never repeat a path."
 )
 
+#: `SystemPromptContext.suffix` is one string, and this surface has two things
+#: to say that the shared prompt cannot: where a finished file goes, and where
+#: a credential goes. Both are deployment facts the desktop harness injects for
+#: its own surface and the pod has to inject for this one. Kept as separate
+#: blocks rather than merged prose so each stays independently reviewable, and
+#: joined here rather than concatenated at the call site so the whole suffix
+#: has one definition a test can pin. Order is not load-bearing: each block
+#: names the instruction it overrides rather than relying on position.
+_POD_PROMPT_SUFFIX = "\n\n".join(
+    (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT)
+)
+
 
 def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
@@ -666,11 +727,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
-            # The delivery half of the prompt context (ENG-2421) — the desktop
-            # harness injects its own via `_turn_style_context`; this is the
-            # web-worded equivalent, which the pod owns because only it runs
-            # web turns.
-            suffix=CLOUD_ARTIFACT_DELIVERY_GUIDANCE,
+            # The delivery half and the credential half of the prompt context.
+            # The desktop harness injects its own equivalents via
+            # `_turn_style_context`; these are the web-worded ones, which the
+            # pod owns because only it runs web turns.
+            suffix=_POD_PROMPT_SUFFIX,
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
