@@ -83,3 +83,16 @@ Ask which one they are on (or read it from the PRODUCT block in your system
 prompt, which names the surface for this conversation) before troubleshooting.
 The most common cause of "it doesn't work" here is a feature that belongs to
 the other surface.
+
+WHERE THESE FACTS COME FROM (for whoever maintains this file)
+Each fact was read out of the code that implements it. Nothing here fails
+automatically when that code changes, so re-check these when touching:
+- installed app name — `package.json` `productName` (cowork)
+- platforms and installer types — `.github/workflows/build-installers.yml`
+- download URL — `src/renderer/lib/mindsUrls.ts` and the `mindshub.ai/download`
+  call sites in `ComingSoonModal`, `ConnectorPicker`, `useAppUpdates`
+- account-wide harness toggle — the `host.isWeb` gate on the `Agent Harness`
+  group in `src/renderer/cowork/views/settings/SettingsView.jsx`
+- Coding Mode being desktop-only — `codeModeAvailable` in
+  `src/renderer/platform/host.ts`, and `renderCodingModeSection`
+If the app and this file disagree, the app is right and this file is stale.
