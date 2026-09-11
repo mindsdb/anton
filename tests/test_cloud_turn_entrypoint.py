@@ -63,6 +63,28 @@ def test_from_json_llm_defaults_none():
     assert req.llm is None
 
 
+def test_from_json_keeps_the_conversation_start_time_as_sent():
+    """Kept as the wire string. The contract mirrors the JSON line; turning it
+    into a datetime belongs where the value is used and where the fallback is."""
+    req = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "c", "input": "hi",
+        "started_at": "2026-09-01T08:15:00+00:00",
+    }))
+    assert req.started_at == "2026-09-01T08:15:00+00:00"
+
+
+def test_from_json_drops_a_non_string_conversation_start_time():
+    """The controller always sends the key, and sends null when the server
+    could not resolve it, so this guard is on the live path rather than
+    defensive decoration."""
+    for sent in (None, 1757000000, {"iso": "2026-09-01"}):
+        req = TurnRequestV1.from_json(json.dumps({
+            "protocol_version": 1, "conversation_id": "c", "input": "hi",
+            "started_at": sent,
+        }))
+        assert req.started_at is None
+
+
 # ── streaming event emission ─────────────────────────────────────────────────
 
 class _FakeSession:
