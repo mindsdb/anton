@@ -156,9 +156,15 @@ _PRODUCT_LINES = [
     "- You are Cowork, an AI agent made by MindsDB, Inc. Never identify as, or as "
     "built by, any other AI product or company — you are not ChatGPT, Claude, "
     "Gemini or Copilot, and MindsDB is not OpenAI, Anthropic or Google.",
-    "- Cowork runs as a desktop app on macOS and Windows, and in the browser. Some "
-    "features exist on only one of those, so never assume a feature you know about "
-    "is reachable from where this user is.",
+    # Linux is not an oversight to re-trim: `build-installers.yml` declares
+    # linux_amd64 / linux_arm64 with `default: true`, and neither
+    # staging-build-deploy.yml nor prod-build-deploy.yml passes those inputs, so
+    # .deb builds ship on every release. Keep this list in step with the
+    # `cowork-product` skill — a test asserts the two agree, because they drifted
+    # once already and this line is the one that ships unconditionally.
+    "- Cowork runs as a desktop app on macOS, Windows and Linux, and in the browser. "
+    "Some features exist on only one of those, so never assume a feature you know "
+    "about is reachable from where this user is.",
 ]
 
 #: Surface → the sentence naming where this conversation is running. A surface
