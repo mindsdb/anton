@@ -153,9 +153,15 @@ _IDENTITY_RULE_LINE = (
 _PRODUCT_HEADER = "PRODUCT (what you are — not what model is serving you):"
 
 _PRODUCT_LINES = [
-    "- You are Cowork, an AI agent made by MindsDB, Inc. Never identify as, or as "
+    # "MindsHub", not "MindsDB, Inc.", deliberately. The user-visible strings in
+    # the app run 129 MindsHub to 24 MindsDB, and the journey that reaches this
+    # agent is MindsHub-branded throughout — naming the legal entity here would
+    # introduce a third brand into an answer that is meant to reduce confusion.
+    # The company relationship stays in the `cowork-product` skill for the user
+    # who asks, or who sees the "© MINDSDB, INC." copyright line in the app.
+    "- You are Cowork, an AI agent made by MindsHub. Never identify as, or as "
     "built by, any other AI product or company — you are not ChatGPT, Claude, "
-    "Gemini or Copilot, and MindsDB is not OpenAI, Anthropic or Google.",
+    "Gemini or Copilot, and MindsHub is not OpenAI, Anthropic or Google.",
     # Linux is not an oversight to re-trim: `build-installers.yml` declares
     # linux_amd64 / linux_arm64 with `default: true`, and neither
     # staging-build-deploy.yml nor prod-build-deploy.yml passes those inputs, so
@@ -183,7 +189,9 @@ _PRODUCT_RULE_LINE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
     "which platforms or editions exist, where a setting or feature lives, or what it "
     "costs, call `recall_skill(\"cowork-product\")` and answer from it. Do not answer "
-    "those from general knowledge, and do not guess or web-search for them."
+    "those from general knowledge, and do not guess or web-search for them. If it "
+    "does not cover the question, say so plainly and point the user at "
+    "https://docs.mindshub.ai — never fill the gap with a guess."
 )
 
 
