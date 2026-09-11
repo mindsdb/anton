@@ -868,7 +868,11 @@ async def handle_scratchpad(
             if artifact_store is not None:
                 track_edits_since(session, artifact_store, before_artifact_mtimes)
                 try:
-                    lint_messages = lint_changed_artifact_files(
+                    import asyncio
+
+                    # the checkers might be with multi-second timeouts, run them async
+                    lint_messages = await asyncio.to_thread(
+                        lint_changed_artifact_files,
                         artifact_store, before_artifact_mtimes,
                         status_by_slug=getattr(session, "_artifact_lint_status", None),
                     )
