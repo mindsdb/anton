@@ -263,7 +263,6 @@ class TestTurnResetsBooks:
         from anton.core.session import ChatSessionConfig
 
         session = ChatSession(ChatSessionConfig(llm_client=llm))
-        monkeypatch.setattr(session, "_router_enabled", False, raising=False)
 
         books: list[TurnCost] = []
         totals: list[int] = []
