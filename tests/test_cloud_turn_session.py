@@ -11,6 +11,9 @@ Two layers:
 from __future__ import annotations
 
 import os
+# Bound at import so the constants below are built from the real class, which
+# `_pin_today` later replaces on the module.
+from datetime import datetime as _stdlib_datetime
 
 import pytest
 
@@ -140,6 +143,52 @@ def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
     _build(tmp_path, monkeypatch)
     assert (tmp_path / ".anton").is_dir()  # the rest of the workspace is set up
     assert not (tmp_path / ".anton" / "anton.md").exists()
+
+
+# ── the conversation's start date, which this pod cannot derive ──────────────
+
+def test_both_stored_timestamp_shapes_reach_the_session(tmp_path, monkeypatch):
+    """The server sends `created_at.isoformat()`. On the Postgres cloud path
+    that column is timezone-aware so the string carries an offset; on SQLite it
+    does not. Both have to arrive, since the naive shape is what a developer
+    and CI actually run against."""
+    from datetime import datetime, timedelta, timezone
+
+    aware = "2026-09-01T08:15:00+00:00"
+    _, cfg = _build(tmp_path, monkeypatch, started_at=aware)
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15, tzinfo=timezone.utc)
+
+    naive = "2026-09-01T08:15:00"
+    _, cfg = _build(tmp_path, monkeypatch, started_at=naive)
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15)
+
+    # Trailing Z is accepted too, so a server that formats UTC that way is not
+    # silently discarded.
+    _, cfg = _build(tmp_path, monkeypatch, started_at="2026-09-01T08:15:00Z")
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15, tzinfo=timezone.utc)
+    # Pinned explicitly: datetime equality compares instants, so the assertion
+    # above alone would also accept a wrong offset with a matching wall clock.
+    assert cfg.started_at.utcoffset() == timedelta(0)
+
+
+def test_a_missing_start_time_leaves_the_session_to_fall_back(tmp_path, monkeypatch):
+    """A controller too old to forward the field, or a server that could not
+    resolve it, must not fail the turn: None is what every cloud turn used
+    before this existed."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.started_at is None
+
+
+def test_an_unparsable_start_time_degrades_but_is_logged(tmp_path, monkeypatch, caplog):
+    """Degrading in silence would make a server sending a shape anton cannot
+    read look identical to a controller that stopped sending the field, and the
+    only symptom either way is a date quietly reverting to today."""
+    with caplog.at_level("WARNING"):
+        _, cfg = _build(tmp_path, monkeypatch, started_at="2026/09/01 08:15")
+
+    assert cfg.started_at is None
+    assert "started_at" in caplog.text
+    assert "2026/09/01 08:15" in caplog.text
 
 
 def test_db_history_is_seeded_not_loaded(tmp_path, monkeypatch):
@@ -314,6 +363,92 @@ def _real_session_with_workspace(tmp_path, **cfg_overrides):
     )
     session._scratchpads = MagicMock(available_packages=[])
     return session
+
+
+#: Two pod boots either side of a midnight, for the across-days assertion.
+_DAY_ONE = _stdlib_datetime(2030, 1, 1, 23, 55)
+_DAY_TWO = _stdlib_datetime(2030, 1, 2, 0, 5)
+
+
+def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
+    """A REAL ChatSession off the cloud builder, not a captured config.
+
+    The date is rendered inside `ChatSession._build_system_prompt`, so a test
+    that calls the prompt builder directly would supply `conversation_started`
+    itself and pass with the whole fix reverted.
+    """
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: _mock_llm()),
+    )
+    body = dict(protocol_version=1, conversation_id="conv_1", input="hi")
+    body.update(req_overrides)
+    session = build_cloud_chat_session(TurnRequestV1(**body))
+    session._scratchpads = MagicMock(available_packages=[])
+    return session
+
+
+def _pin_today(monkeypatch, moment):
+    """Pin what the session sees as "now".
+
+    Patches the class on the `datetime` module rather than on the module that
+    imports it: `_build_system_prompt` does `import datetime as _dt` in the
+    function body, so it re-resolves the module every call and only a patch
+    there is visible to it.
+    """
+    import datetime as _dt
+
+    class _PinnedNow(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment
+
+    monkeypatch.setattr(_dt, "datetime", _PinnedNow)
+
+
+async def test_two_pods_on_different_days_render_the_same_prompt(
+    tmp_path, monkeypatch,
+):
+    """The ticket's acceptance, stated as it asks for it. Every turn runs in a
+    fresh pod, so the date used to come from whichever day that pod happened to
+    boot, and a conversation open across midnight got a different prompt the
+    next morning — taking the cached history with it.
+    """
+    started = "2026-09-01T08:15:00+00:00"
+
+    _pin_today(monkeypatch, _DAY_ONE)
+    first = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at=started,
+    )._build_system_prompt()
+
+    _pin_today(monkeypatch, _DAY_TWO)
+    second = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at=started,
+    )._build_system_prompt()
+
+    assert first == second
+    assert "Tuesday, September 01, 2026" in first
+
+
+async def test_the_clock_is_only_the_fallback(tmp_path, monkeypatch):
+    """Both halves of the rule, since the equality above holds trivially if the
+    date is wrong in the same way on both days: a stored value is used instead
+    of today, and today is what renders when there is no stored value.
+    """
+    _pin_today(monkeypatch, _DAY_TWO)
+    pinned_today = _DAY_TWO.strftime("%A, %B %d, %Y")
+
+    stored = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at="2026-09-01T08:15:00+00:00",
+    )._build_system_prompt()
+    assert "Tuesday, September 01, 2026" in stored
+    assert pinned_today not in stored
+
+    fallback = await _real_cloud_session(tmp_path, monkeypatch)._build_system_prompt()
+    assert pinned_today in fallback
 
 
 def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch):

@@ -25,6 +25,7 @@ import hashlib
 import logging
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -648,11 +649,29 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
 
         clear_ds_env()
 
+    # When the conversation began, so the prompt dates it from the conversation
+    # rather than from this pod, which is new every turn.
+    started_at = None
+    if request.started_at:
+        try:
+            started_at = datetime.fromisoformat(request.started_at)
+        except ValueError:
+            # Degrades to today rather than failing a turn over a prompt line,
+            # but logs the value: silence makes a shape anton cannot read look
+            # exactly like a controller that sends nothing.
+            logger.warning(
+                "cloud session ignoring unparsable started_at=%r conversation=%s",
+                request.started_at, request.conversation_id,
+            )
+
     config = ChatSessionConfig(
         llm_client=llm_client,
         settings=settings,
         workspace=workspace,
         session_id=request.conversation_id,
+        # None falls back to today, which is what every cloud turn did before
+        # the server started sending this.
+        started_at=started_at,
         # WHICH AGENT: this pod image is "anton + boot" — the agent running here
         # IS anton, so "cloud" was factually wrong, not merely overloaded
         # (ENG-1694). Where it ran comes from `surface` below, which cowork

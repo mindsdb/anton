@@ -85,6 +85,12 @@ class TurnRequestV1:
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
     oauth: dict | None = None
+    #: Optional ISO 8601 creation time of the conversation, as cowork-server
+    #: resolved it. The pod is new every turn and cannot derive this: history
+    #: rows carry no timestamps. Without it the session dates the conversation
+    #: from the pod's own clock, so the prompt says a three week old
+    #: conversation started today and changes at every midnight.
+    started_at: str | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -104,4 +110,9 @@ class TurnRequestV1:
             trace=d.get("trace") if isinstance(d.get("trace"), dict) else None,
             # Same defensive isinstance check as trace, for the same reason.
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
+            # The controller always sends the key and sends None when
+            # cowork-server could not resolve it, so the guard does real work.
+            started_at=(
+                d.get("started_at") if isinstance(d.get("started_at"), str) else None
+            ),
         )
