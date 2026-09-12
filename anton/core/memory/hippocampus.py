@@ -27,6 +27,13 @@ from typing import Literal
 
 from anton.core.memory.base import Engram
 
+# The `## ` headings of rules.md, in file order. save_rules writes exactly
+# these three and get_rules reads each entry's `kind` off them, so both have to
+# round-trip the same set. The first doubles as the fallback heading — the same
+# default Cortex._compact_file already applies to an unrecognised heading.
+RULE_SECTIONS = ("always", "never", "when")
+
+
 def _entry_text(text: str) -> str:
     """Make `text` safe to store as one entry line, changing nothing else.
 
@@ -432,16 +439,21 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return []
 
-        current_kind = None
+        # get_rules/save_rules is a read-modify-write cycle, so an entry skipped
+        # here is deleted from the file by the next encode_rule(). Entries above
+        # the first heading (a hand-edited file) are read under the fallback
+        # heading rather than dropped.
+        current_kind = RULE_SECTIONS[0]
         entries: list[Engram] = []
 
         for line in content.splitlines():
             stripped = line.strip()
             if stripped.startswith("## "):
-                current_kind = stripped[3:].lower()
-            elif stripped.startswith("- ") and current_kind:
+                heading = stripped[3:].lower()
+                current_kind = heading if heading in RULE_SECTIONS else RULE_SECTIONS[0]
+            elif stripped.startswith("- "):
                 text, meta = _extract_metadata(stripped[2:])
-                if text and current_kind is not None:
+                if text:
                     entries.append(Engram(text=text, kind=current_kind, **meta))
 
         entries.sort(key=lambda x: x.kind)
@@ -476,10 +488,10 @@ class Hippocampus:
 
     def save_rules(self, rules: list[Engram]) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        sections: dict[str, list[Engram]] = {"always": [], "never": [], "when": []}
+        sections: dict[str, list[Engram]] = {name: [] for name in RULE_SECTIONS}
         for rule in rules:
-            if rule.kind in sections:
-                sections[rule.kind].append(rule)
+            kind = (rule.kind or "").lower()
+            sections[kind if kind in sections else RULE_SECTIONS[0]].append(rule)
 
         lines = ["# Rules\n"]
         for section, entries in sections.items():
