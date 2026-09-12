@@ -337,3 +337,45 @@ class TestEntryTextSanitization:
         before = hc.get_rules()[0].text
         hc.encode_rule("Second rule", kind="always")        # rewrites rules.md
         assert [r.text for r in hc.get_rules() if r.text == before] == [before]
+
+
+class TestRulesRoundTrip:
+    """get_rules -> save_rules is read-modify-write: anything the read pass
+    skips, or the write pass fails to bucket, is deleted from the file by the
+    next rule Anton learns.
+    """
+
+    META = "<!-- confidence:high source:user ts:2026-01-01 -->"
+
+    def test_reads_entries_above_the_first_heading(self, hc, mem_dir):
+        (mem_dir / "rules.md").write_text(
+            f"# Rules\n- Prefer httpx over requests {self.META}\n"
+            f"\n## Always\n- Call progress() before long API calls {self.META}\n",
+            encoding="utf-8",
+        )
+        texts = [r.text for r in hc.get_rules()]
+        assert "Prefer httpx over requests" in texts
+        assert "Call progress() before long API calls" in texts
+
+    def test_encode_rule_keeps_entries_under_an_unknown_heading(self, hc, mem_dir):
+        (mem_dir / "rules.md").write_text(
+            "# Rules\n\n## Always\n"
+            f"- Call progress() before long API calls {self.META}\n"
+            f"\n## Notes\n- Project uses uv, not pip {self.META}\n",
+            encoding="utf-8",
+        )
+        hc.encode_rule("Never use time.sleep() in scratchpad cells", kind="never")
+        content = (mem_dir / "rules.md").read_text(encoding="utf-8")
+        assert "Project uses uv, not pip" in content
+        assert "Call progress() before long API calls" in content
+        assert "Never use time.sleep() in scratchpad cells" in content
+
+    def test_relocated_entries_stay_readable(self, hc, mem_dir):
+        (mem_dir / "rules.md").write_text(
+            f"# Rules\n\n## Notes\n- Project uses uv, not pip {self.META}\n",
+            encoding="utf-8",
+        )
+        hc.encode_rule("Never hardcode credentials", kind="never")
+        texts = [r.text for r in hc.get_rules()]
+        assert "Project uses uv, not pip" in texts
+        assert "Never hardcode credentials" in texts
