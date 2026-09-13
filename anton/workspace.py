@@ -28,6 +28,30 @@ Created: {date}
 _SECRET_FILE_MODE = 0o600
 
 
+def vault_key(env_path: Path, key: str = "ANTON_MINDS_API_KEY") -> str | None:
+    """Read a key from a .env file with the SAME parser that resolved settings.
+
+    `load_env` below only `.strip()`s the value, while pydantic-settings goes
+    through python-dotenv, which also unquotes and drops inline comments. The
+    two disagree on ordinary hand-edited lines::
+
+        ANTON_MINDS_API_KEY="abc"       load_env -> '"abc"'      dotenv -> 'abc'
+        ANTON_MINDS_API_KEY=abc # note  load_env -> 'abc # note' dotenv -> 'abc'
+
+    Anywhere a decision compares a file's contents against a RESOLVED setting,
+    the file has to be read the way the setting was, or a quoted vault silently
+    takes the "this is not our key" branch.
+    """
+    from dotenv import dotenv_values
+
+    if not env_path.is_file():
+        return None
+    try:
+        return dotenv_values(env_path).get(key)
+    except OSError:
+        return None
+
+
 def _write_private(path: Path, text: str) -> None:
     """Write `text` to `path`, readable and writable only by its owner.
 
@@ -229,7 +253,25 @@ class Workspace:
 
         The value is written directly to the .env file, and the
         environment variable is set in the current process.
+
+        The value must be single-line. Every caller writes user-supplied input
+        straight through — a pasted "API key" containing a newline would append
+        arbitrary further ``ANTON_*`` settings to the file, which is a config
+        injection with no legitimate use (no key, URL or model name contains a
+        newline). Rejected rather than escaped: silently persisting half a
+        credential, or the injected lines, is worse than failing.
+
+        Raises rather than returning a flag because most callers write literals
+        (provider names, model ids, booleans) that cannot contain one, so this
+        is unreachable for them. The callers that DO pass pasted input are the
+        provider-setup prompts in ``cli.py`` and ``chat.py``; of those only
+        ``_persist_key_best_effort`` currently catches it, so a newline pasted
+        at first-run onboarding still surfaces as a traceback. Handling it at
+        each prompt is worth doing and is not part of this change.
         """
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"{key} must not contain a newline")
+
         self._anton_dir.mkdir(parents=True, exist_ok=True)
 
         # Read existing lines

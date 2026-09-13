@@ -106,19 +106,6 @@ _DISCOVERY_MAX_PADS = 10
 _DISCOVERY_MAX_ROOT_ENTRIES = 30
 
 
-def _age_label(mtime: float | None) -> str:
-    if mtime is None:
-        return ""
-    import time
-
-    mins = max(0, int((time.time() - mtime) / 60))
-    if mins < 60:
-        return f" (snapshot {mins}m old)"
-    if mins < 60 * 48:
-        return f" (snapshot {mins // 60}h old)"
-    return f" (snapshot {mins // (60 * 24)}d old)"
-
-
 def build_workspace_discovery_context(manager) -> str:
     """Compact turn-start block: known pads + project-root names (ENG-578).
 
@@ -135,13 +122,10 @@ def build_workspace_discovery_context(manager) -> str:
             shown = known[:_DISCOVERY_MAX_PADS]
             live = set(manager.pads)
             parts = []
+            # Names and the active flag only. A snapshot age would tick every
+            # minute and change the prompt bytes on every turn.
             for name in shown:
-                label = (
-                    " (active)"
-                    if name in live
-                    else _age_label(manager.pad_snapshot_mtime(name))
-                )
-                parts.append(f"{name}{label}")
+                parts.append(f"{name} (active)" if name in live else name)
             more = (
                 f" … and {len(known) - len(shown)} more"
                 if len(known) > len(shown)

@@ -197,10 +197,6 @@ class DataVault(Protocol):
         """Remove all DS_* variables from os.environ."""
         ...
 
-    def next_connection_number(self, engine: str) -> int:
-        """Return the next auto-increment number for an engine (1-based)."""
-        ...
-
 
 class LocalDataVault:
     """File-based credential store in ~/.anton/data_vault/."""
@@ -375,26 +371,6 @@ class LocalDataVault:
         """Remove all DS_* variables from os.environ."""
         _sweep_ds_env_vars()
 
-    def next_connection_number(self, engine: str) -> int:
-        """Return the next auto-increment number for an engine (1-based).
-
-        Used when naming partial connections: postgresql-1, postgresql-2, etc.
-        """
-        prefix = _sanitize(engine) + "-"
-        if not self._dir.is_dir():
-            return 1
-        existing = [
-            p.name
-            for p in self._dir.iterdir()
-            if p.is_file() and p.name.startswith(prefix)
-        ]
-        max_n = 0
-        for fname in existing:
-            suffix = fname[len(prefix):]
-            if suffix.isdigit():
-                max_n = max(max_n, int(suffix))
-        return max_n + 1
-
 
 #: Deployment-side override for auth's base URL (never taken from the wire
 #: request — same trust posture as ANTON_CLOUD_WORKSPACE_PATH etc. in
@@ -481,9 +457,6 @@ class TurnKeyDataVault:
 
     def delete(self, engine: str, name: str) -> bool:
         return False
-
-    def next_connection_number(self, engine: str) -> int:
-        return 1
 
     def env_for(self, engine: str, name: str, *, flat: bool = False) -> dict[str, str] | None:
         """Same contract as LocalDataVault.env_for() — see its docstring."""

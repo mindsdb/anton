@@ -52,6 +52,19 @@ jobs:
       version: ${{ needs.auto-release.outputs.version }}
     secrets: inherit
 
+  # The worker image prod scratchpad-controller pulls as
+  # minds-anton-scratchpad:production (ENG-2129). Gated on verify-wheel like
+  # the PyPI publish: pods pull the moving tag on their next start, so a bad
+  # image reaches users as fast as a bad wheel would.
+  scratchpad-image:
+    needs: [auto-release, verify-wheel]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/scratchpad-dev-build.yml
+    with:
+      environment: production
+      version: ${{ needs.auto-release.outputs.version }}
+
   publish:
     name: Publish to PyPI
     # Gated on verify-wheel: a PyPI upload cannot be withdrawn.
@@ -84,7 +97,7 @@ jobs:
     # One job covers both outcomes: a `uses:` job cannot branch on status, so
     # the aggregate result picks the failed or recovered message, and a
     # cancelled run stays silent.
-    needs: [unit-tests, auto-release, verify-wheel, publish]
+    needs: [unit-tests, auto-release, verify-wheel, scratchpad-image, publish]
     if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
     permissions:
       contents: read

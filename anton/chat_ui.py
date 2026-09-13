@@ -24,12 +24,9 @@ class _ToolActivity:
     name: str
     json_parts: list[str] = field(default_factory=list)
     description: str = ""
-    current_progress: str = ""
-    step_count: int = 0
     eta_str: str = ""
     printed: bool = False  # whether the activity line has been printed
     done: bool = False  # whether execution is complete
-    start_time: float = 0.0  # monotonic timestamp when execution began
     work_elapsed: float = 0.0  # actual execution seconds (filled on done)
     reasoning_elapsed: float = 0.0  # LLM thinking seconds after this step
     done_line_printed: bool = False  # whether the combined ✔ line was printed
@@ -150,15 +147,6 @@ WORKING_FOOTER_MESSAGES = [
     "chewing on this one carefully",
     "cooking up a solid answer",
     "wiring together a solution",
-]
-
-TOOL_MESSAGES = [
-    "Rolling up sleeves...",
-    "Firing up the agent...",
-    "Handing off to the crew...",
-    "Dispatching the task...",
-    "Engaging autopilot...",
-    "Letting the tools cook...",
 ]
 
 ANALYZING_MESSAGES = [
@@ -376,10 +364,6 @@ class StreamDisplay:
         if request.select == "many":
             self._console.print("  [dim]Pick one or more.[/]")
 
-    def show_tool_execution(self, task: str) -> None:
-        """Backward-compatible wrapper — delegates to on_tool_use_start."""
-        self.on_tool_use_start(f"_compat_{id(task)}", task)
-
     def on_tool_use_start(self, tool_id: str, name: str) -> None:
         """Track a new tool use.
 
@@ -388,8 +372,6 @@ class StreamDisplay:
         accumulator, so it is visually separated from other rounds'
         preambles and from the final answer.
         """
-        import time as _time
-
         if not self._active:
             return
         preamble = self._pending.rstrip()
@@ -400,9 +382,7 @@ class StreamDisplay:
         self._pending = ""
         self._line3_peek = ""
         self._update_spinner()  # refresh footer even when preamble was empty
-        activity = _ToolActivity(
-            tool_id=tool_id, name=name, start_time=_time.monotonic()
-        )
+        activity = _ToolActivity(tool_id=tool_id, name=name)
         self._activities.append(activity)
 
     def on_tool_use_delta(self, tool_id: str, json_delta: str) -> None:
@@ -436,7 +416,15 @@ class StreamDisplay:
         if not self._active:
             return
 
-        if phase == "analyzing":
+        # A forced continuation is told its reply replaces the previous one, so
+        # the buffer that would otherwise print both has to let the earlier
+        # answer go. `finish` prints whatever remains as the final answer.
+        if phase == "continuation":
+            self._pending = ""
+
+        # These three render identically: the status line says the model is
+        # composing, and the raw phase would otherwise leak into it.
+        if phase in ("analyzing", "continuation", "handback"):
             self._line1_fun = random.choice(ANALYZING_MESSAGES)  # noqa: S311
             self._line2_status = "Composing response..."
             self._line3_peek = ""
@@ -472,10 +460,6 @@ class StreamDisplay:
             return
 
         if phase == "scratchpad" and self._activities:
-            for act in reversed(self._activities):
-                if act.name == "scratchpad":
-                    act.current_progress = message
-                    break
             self._line3_peek = message
             self._update_spinner()
             return

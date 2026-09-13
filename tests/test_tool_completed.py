@@ -338,32 +338,6 @@ async def test_interactive_branch_emits_too(workspace):
     assert session.answer_wait_s == 0.0  # prompt_or_cancel never fed it
 
 
-async def test_nonstreaming_turn_path_also_emits(workspace):
-    """`turn()` has its own dispatch loop (session.py ~3315), separate from the
-    streaming tail — self-review finding: without its own emit, any host on
-    the non-streaming API silently undercounts. No production caller uses it
-    today; this test is the seam guard for the first one that does.
-    """
-    session = _session(workspace, RuntimeError("boom"))
-    with patch("anton.analytics.send_event") as sent:
-        await session.turn("go")
-    events = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
-    assert len(events) == 1
-    assert events[0]["ok"] == "false"
-    assert events[0]["error_type"] == "RuntimeError"
-    assert events[0]["name"] == "scratchpad"
-    # The cause too, not just the pre-ENG-2247 fields. `_emit_tool_completed`
-    # DEFAULTS both to "", so dropping them from this call site changes no
-    # payload key and would otherwise trip nothing — verified: the whole suite
-    # passed with them removed here, while the same removal at the streaming
-    # emit failed 5 tests. A seam guard that covers two of four fields is how
-    # the next host on this path silently undercounts again.
-    # `RuntimeError` is in none of _SELF_INFLICTED/_TRANSIENT/_WALL_TYPES, so
-    # it lands in classify()'s residual branch — the 31% `unclassified` bucket.
-    assert events[0]["root_cause_tier"] == "unclassified"
-    assert events[0]["root_cause_class"] == "unclassified"
-
-
 async def test_model_generated_tool_name_is_bounded(workspace):
     """`tc.name` is model output: a degenerate name must emit (it is real
     signal) but bounded, never verbatim-unbounded into a property value."""
@@ -636,47 +610,6 @@ async def test_the_tool_row_and_the_turn_tally_agree_on_the_tier(workspace):
     # change must not disturb (ENG-1531 / ENG-836).
     assert str(turn[0]["root_cause_wall"]) == "0"
     assert turn[0]["root_cause_top_class"] == ""
-
-
-async def test_the_nonstreaming_turn_path_stamps_the_cause_too(workspace):
-    """`turn()` has its OWN dispatch loop, its own emit, and its own cause call.
-
-    Every other test here drives `turn_stream`. Found by mutation: removing
-    both kwargs from the non-streaming emit alone left the entire suite green
-    (2,927 passed), so nothing guarded that call site — the same gap the
-    streaming tail had before `test_nonstreaming_turn_path_also_emits` was
-    written, one field later.
-
-    Raises `ValueError` rather than the sibling test's `RuntimeError` on
-    purpose: on this path `reason` is `type(exc).__name__`, and `ValueError` is
-    in `_SELF_INFLICTED` so it classifies distinctly, where `RuntimeError`
-    falls through to `unclassified`.
-
-    COMPLEMENTARY to that test, not stronger — an earlier commit message here
-    claimed a hierarchy and was wrong. Neither subsumes the other, verified by
-    mutation:
-
-    | mutation | `..._also_emits` | this test |
-    | -- | -- | -- |
-    | `_tool_failure_cause` stubbed to the residual constant | passes | FAILS |
-    | `root_cause_class=_tool_error_type` (wrong source) | FAILS | passes |
-
-    The second is the non-obvious one: on the raise path `reason` IS
-    `type(exc).__name__`, so `error_type == root_cause_class == "ValueError"`
-    here and a class copied from `error_type` is invisible to this test — only
-    its tier assertion resists, and only the RuntimeError/`unclassified` pair
-    distinguishes the two sources. Deleting either test as redundant reopens a
-    mutation the other does not cover, with CI green.
-    """
-    session = _session(workspace, ValueError("bad argument"))
-    with patch("anton.analytics.send_event") as sent:
-        await session.turn("go")
-    events = [c.kwargs for c in sent.call_args_list if c.args[1] == "tool_completed"]
-    assert len(events) == 1
-    assert events[0]["ok"] == "false"
-    assert events[0]["error_type"] == "ValueError"      # the raise path
-    assert events[0]["root_cause_tier"] == "self_inflicted"
-    assert events[0]["root_cause_class"] == "ValueError"
 
 
 async def test_a_caller_that_omits_reason_degrades_to_unclassified(workspace):

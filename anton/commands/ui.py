@@ -50,7 +50,7 @@ COMMANDS = [
     None,
     "General",
     Command("/help", "Show this help menu"),
-    Command("exit",  "Exit the chat"),
+    Command("/exit", "Exit the chat"),
 ]
 
 THEME_COMMANDS = [

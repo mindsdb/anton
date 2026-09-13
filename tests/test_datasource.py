@@ -34,7 +34,7 @@ from anton.utils.datasources import (
     parse_connection_slug,
 )
 from anton.cli import app as cli_app
-from anton.core.datasources.data_vault import DataVault, LocalDataVault, _slug_env_prefix
+from anton.core.datasources.data_vault import LocalDataVault, _slug_env_prefix
 from anton.core.datasources.datasource_registry import (
     DatasourceEngine,
     DatasourceField,
@@ -408,26 +408,6 @@ class TestDataVaultEnvInjection:
         vault.save("postgres", "prod-db.eu", {"host": "eu.pg.com"})
         vault.inject_env("postgres", "prod-db.eu")
         assert os.environ.get("DS_POSTGRES_PROD_DB_EU__HOST") == "eu.pg.com"
-
-
-class TestDataVaultNextConnectionNumber:
-    def test_returns_one_when_empty(self, vault):
-        assert vault.next_connection_number("postgresql") == 1
-
-    def test_increments_past_existing(self, vault):
-        vault.save("postgresql", "1", {"host": "a"})
-        vault.save("postgresql", "2", {"host": "b"})
-        assert vault.next_connection_number("postgresql") == 3
-
-    def test_ignores_named_connections(self, vault):
-        # "prod_db" is not a digit — should not affect numbering
-        vault.save("postgresql", "prod_db", {"host": "a"})
-        assert vault.next_connection_number("postgresql") == 1
-
-    def test_does_not_confuse_engines(self, vault):
-        vault.save("hubspot", "1", {"access_token": "x"})
-        vault.save("hubspot", "2", {"access_token": "y"})
-        assert vault.next_connection_number("postgresql") == 1
 
 
 class TestDatasourceRegistry:

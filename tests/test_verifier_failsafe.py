@@ -26,6 +26,7 @@ from anton.core.llm.provider import (
     ModelUnavailableError,
     StreamComplete,
     StreamTaskProgress,
+    StreamTextDelta,
     TokenLimitExceeded,
     ToolCall,
     Usage,
@@ -640,6 +641,240 @@ async def test_text_only_continuation_answer_is_not_dropped(workspace):
         assert "FINAL_ANSWER_USER_READ" in texts[-1]
     finally:
         await session.close()
+
+
+async def test_a_forced_continuation_marks_its_own_boundary(workspace):
+    """Where a superseded answer ends and its replacement begins.
+
+    Consumers accumulate every text delta of a turn into one bubble, so a
+    replacement needs a signal to replace instead of append. `analyzing`
+    cannot carry it: seven other sites emit that phase for unrelated
+    situations, told apart only by free text.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [_VerifierVerdict(status="INCOMPLETE", reason="not done yet")]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamTextDelta(text="SUPERSEDED"),
+                StreamComplete(response=_text_response("SUPERSEDED")),
+            ])
+        return _FakeAsyncIter([
+            StreamTextDelta(text="REPLACEMENT"),
+            StreamComplete(response=_text_response("REPLACEMENT")),
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        events = [event async for event in session.turn_stream("write me a summary")]
+    finally:
+        await session.close()
+
+    boundaries = [
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTaskProgress) and event.phase == "continuation"
+    ]
+    assert len(boundaries) == 1, (
+        "the boundary must be announced exactly once; progress phases seen: "
+        f"{[e.phase for e in events if isinstance(e, StreamTaskProgress)]}"
+    )
+
+    superseded = next(
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTextDelta) and event.text == "SUPERSEDED"
+    )
+    replacement = next(
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTextDelta) and event.text == "REPLACEMENT"
+    )
+    assert superseded < boundaries[0] < replacement, (
+        "the boundary must land after the superseded text and before its "
+        "replacement, or a consumer cannot tell which text to drop"
+    )
+
+
+async def test_the_continuation_instruction_asks_for_a_standalone_answer(workspace):
+    """The injected instruction has to match what the client does with the reply.
+
+    Consumers replace the answer on a continuation boundary, so a model that
+    obeys an increment-shaped instruction and writes only the new findings
+    leaves the user holding a fragment, with the earlier findings unrecoverable.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [_VerifierVerdict(status="INCOMPLETE", reason="not done yet")]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("DRAFT"))])
+        return _FakeAsyncIter([StreamComplete(response=_text_response("FINAL"))])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        async for _ in session.turn_stream("write me a summary"):
+            pass
+
+        injected = [
+            m["content"] for m in session.history
+            if m.get("role") == "user" and str(m.get("content", "")).startswith("SYSTEM:")
+        ]
+        assert injected, "the continuation instruction was never injected"
+        instruction = injected[-1]
+        assert "replaces the previous one" in instruction, (
+            f"the instruction does not tell the model its reply replaces the "
+            f"earlier one: {instruction!r}"
+        )
+        assert "Do not repeat work already done" not in instruction, (
+            "the increment-shaped guard is back; a model obeying it writes only "
+            "the new part, which is all the user would then see"
+        )
+    finally:
+        await session.close()
+
+
+async def test_a_handback_after_a_continuation_announces_itself(workspace):
+    """The marker cancels the boundary the continuation left pending.
+
+    A continuation that fails to satisfy the verifier still reaches a
+    hand-back, and without this marker the diagnosis streamed there is read as
+    the replacement answer — discarding the one the user had already read. It
+    has to arrive before the diagnosis text, not with it.
+    """
+    mock_llm = make_mock_llm()
+    verdicts = [
+        _VerifierVerdict(status="INCOMPLETE", reason="not done yet"),
+        _VerifierVerdict(status="STUCK", reason="missing credentials"),
+    ]
+
+    async def verdict(_schema, *, system, messages, max_tokens):
+        return verdicts.pop(0) if verdicts else _VerifierVerdict(
+            status="COMPLETE", reason="done"
+        )
+
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Working.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([
+                StreamTextDelta(text="THE ANSWER THE USER READ"),
+                StreamComplete(response=_text_response("THE ANSWER THE USER READ")),
+            ])
+        if call_count == 3:
+            # The continuation must spend a tool round, or the loop breaks at
+            # the verify_min_tool_rounds gate and never verifies a second time.
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Retrying.", "exec", "main", "print(2)"))
+            ])
+        if call_count == 4:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("CONTINUED"))])
+        return _FakeAsyncIter([
+            StreamTextDelta(text="DIAGNOSIS"),
+            StreamComplete(response=_text_response("DIAGNOSIS")),
+        ])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        events = [event async for event in session.turn_stream("query my database")]
+    finally:
+        await session.close()
+
+    phases = [
+        (i, e.phase) for i, e in enumerate(events) if isinstance(e, StreamTaskProgress)
+    ]
+    markers = [i for i, phase in phases if phase == "handback"]
+    assert len(markers) == 1, (
+        f"the hand-back must be announced exactly once; phases seen: {phases}"
+    )
+    diagnosis = next(
+        i for i, event in enumerate(events)
+        if isinstance(event, StreamTextDelta) and event.text == "DIAGNOSIS"
+    )
+    assert markers[0] < diagnosis, (
+        "the marker must precede the diagnosis text, or a pending boundary is "
+        "already spent by the time it arrives"
+    )
+
+
+async def test_a_handback_with_no_continuation_announces_nothing(workspace):
+    """No boundary was emitted, so there is none to cancel.
+
+    Most hand-backs are reached without any continuation, and a turn that never
+    continued has to look exactly as it did before this marker existed.
+    """
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="STUCK", reason="missing credentials")
+    )
+
+    call_count = 0
+
+    def fake_plan_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeAsyncIter([
+                StreamComplete(response=_scratchpad_response("Running.", "exec", "main", "print(1)"))
+            ])
+        if call_count == 2:
+            return _FakeAsyncIter([StreamComplete(response=_text_response("REPLY"))])
+        return _FakeAsyncIter([StreamComplete(response=_text_response("DIAGNOSIS"))])
+
+    mock_llm.plan_stream = fake_plan_stream
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        events = [event async for event in session.turn_stream("query my database")]
+    finally:
+        await session.close()
+
+    phases = [e.phase for e in events if isinstance(e, StreamTaskProgress)]
+    assert "handback" not in phases, (
+        f"a turn with no continuation gained a wire event; phases: {phases}"
+    )
 
 
 async def test_latched_verifier_reprobes_and_can_recover(workspace):
