@@ -360,6 +360,11 @@ def _no_real_home(_suite_home, monkeypatch):
     return fallback
 
 
+# The live e2e harness (tests/e2e/harness.py) snapshots these at import, before
+# the fixture below strips them, so a real key set by CI still reaches the wheel.
+CREDENTIAL_ENV_VARS = ("ANTON_MINDS_API_KEY", "ANTON_OPENAI_API_KEY", "ANTON_ANTHROPIC_API_KEY")
+
+
 @pytest.fixture(autouse=True)
 def _no_leaked_credentials(monkeypatch):
     """No test may leave a credential in `os.environ` for the next one.
@@ -372,7 +377,7 @@ def _no_leaked_credentials(monkeypatch):
     becomes order-dependent. Touching the name first puts it on monkeypatch's
     undo list, whatever the test does with it afterwards.
     """
-    for name in ("ANTON_MINDS_API_KEY", "ANTON_OPENAI_API_KEY", "ANTON_ANTHROPIC_API_KEY"):
+    for name in CREDENTIAL_ENV_VARS:
         monkeypatch.setenv(name, "__sentinel__")
         monkeypatch.delenv(name, raising=False)
 

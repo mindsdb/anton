@@ -20,7 +20,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tests.conftest import CREDENTIAL_ENV_VARS
 from tests.e2e.stub_server import StubServer
+
+# Captured at import, which is collection time, before any test's fixtures run.
+# `_no_leaked_credentials` (tests/conftest.py, autouse) deletes these from
+# os.environ for every test, and a live run builds its env from os.environ, so
+# reading them at call time hands the wheel no key at all (release e2e, Sep 2026).
+_LIVE_CREDENTIALS = {name: os.environ[name] for name in CREDENTIAL_ENV_VARS if name in os.environ}
 
 @dataclass
 class RunResult:
@@ -233,6 +240,7 @@ def base_env(
 
     if isinstance(provider, LiveProvider):
         env = dict(os.environ)
+        env.update(_LIVE_CREDENTIALS)
         env.update(common)
         if wheel_python():
             env.pop("PYTHONPATH", None)
