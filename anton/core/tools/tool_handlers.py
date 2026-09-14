@@ -186,19 +186,30 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
     def _xlsx_linter(path: Path) -> list[str] | None:
-        # LibreOffice recalculates and catches any formula error; the
-        # structural lint is the fallback when it isn't installed/usable.
-        # Both can return None (couldn't check at all) — e.g. no office AND
-        # the file doesn't even parse with openpyxl — which cascades to
-        # this function returning None too, same as either check alone.
-        findings = check_xlsx_via_office(path)
+        # Both always run — LibreOffice recalculates and catches any
+        # formula error; the structural lint runs regardless (not only as
+        # a fallback), because it names the actual fix ("missing cross-
+        # sheet prefix") where the oracle only names the symptom
+        # ("#VALUE!"), and some cells only the oracle catches at all
+        # (a genuine #REF!/#DIV/0! unrelated to same-sheet circularity).
+        office_findings = check_xlsx_via_office(path)
+        structural_findings = lint_xlsx(path)
 
-        if findings is None:
-            findings = lint_xlsx(path)
+        if office_findings is None and structural_findings is None:
+            # Neither could even check this file (no office AND it doesn't
+            # parse with openpyxl either) — nothing to report.
+            return None
 
-        if findings is not None:
-            return [f.message() for f in findings]
-        return None
+        # A cell both catch gets the structural message only: it's the more
+        # actionable one, and reporting the same cell twice would just be
+        # noise. A cell only the oracle catches still gets through.
+        structural_cells = {(f.sheet, f.cell) for f in (structural_findings or [])}
+        messages = [f.message() for f in (structural_findings or [])]
+        messages += [
+            f.message() for f in (office_findings or [])
+            if (f.sheet, f.cell) not in structural_cells
+        ]
+        return messages
 
     def _html_linter(path: Path) -> list[str] | None:
         findings = lint_html(path)
