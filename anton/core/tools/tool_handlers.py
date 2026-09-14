@@ -396,39 +396,13 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
         session._tracked_backends = tracked
 
     # A subprocess, so its credentials go in its own env — and only for the
-    # datasources the artifact declared.
-    vault = getattr(session, "_data_vault", None)
-    ds_env: dict[str, str] = {}
-    for ref in artifact.datasources:
-        if vault is None:
-            _log.warning("Artifact %s declares datasources but the session has no vault", slug)
-            break
-        # Per-ref so one unreadable connection cannot deny the others, and
-        # env_for is the resolver a pad's own DS_* are built from.
-        try:
-            env = vault.env_for(ref.engine, ref.name)
-        except Exception:
-            _log.warning(
-                "Could not resolve %s/%s for backend %s", ref.engine, ref.name, slug,
-                exc_info=True,
-            )
-            continue
-        if env is None:
-            # Declared in metadata but gone from the vault: the backend would
-            # fail on its first query with nothing saying why.
-            _log.warning(
-                "Artifact %s declares %s/%s, which is not in the vault",
-                slug, ref.engine, ref.name,
-            )
-            continue
-        # Enforced here, not left to the vault: TurnKeyDataVault.env_for does
-        # not drop `_`-prefixed bookkeeping though its contract says it does.
-        field_prefix = f"{ref.env_prefix}__"
-        for key, value in env.items():
-            field = key[len(field_prefix):] if key.startswith(field_prefix) else key
-            if field.startswith("_"):
-                continue
-            ds_env[key] = value
+    # datasources the artifact declared. Shared with the generator's own launch
+    # (generate_artifact/orchestrator.py), which never reaches this handler.
+    from anton.core.artifacts.backend_launcher import build_datasource_env
+
+    ds_env = build_datasource_env(
+        getattr(session, "_data_vault", None), artifact.datasources, slug=slug
+    )
 
     # Only-if-unset, like the scratchpad, so a project .env cannot override
     # PATH or a key this process already has.

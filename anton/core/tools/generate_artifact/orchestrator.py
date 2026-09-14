@@ -759,6 +759,43 @@ async def _tail_log(state: GenState, limit: int = 2000) -> str:
     return text[-limit:]
 
 
+def _launch_datasource_env(state: GenState) -> dict[str, str]:
+    """The `DS_*` set this artifact's backend is entitled to (ENG-1382).
+
+    The pipeline launches the backend itself and never passes through
+    `handle_launch_backend`, so without this the generator's own launch would
+    be the one path that still hands the subprocess every credential in the
+    process — the same artifact would be more exposed when the generator
+    started it than when the agent did.
+
+    Readable by here: `_declare_datasources` writes the list into metadata
+    during backend generation, which finishes before this node runs. A session
+    with no vault, or an artifact that declared nothing, yields `{}` — and `{}`
+    is passed rather than None on purpose, so an artifact that needs no
+    datasource gets the inherited `DS_*` stripped instead of inheriting them.
+    """
+    from anton.core.artifacts.backend_launcher import build_datasource_env
+    from anton.core.tools.tool_handlers import _artifact_store
+
+    store = _artifact_store(state.session)
+    if store is None:
+        return {}
+    try:
+        artifact = store.open(state.slug)
+    except Exception:  # noqa: BLE001 — a metadata read must not fail the launch
+        return {}
+    if artifact is None:
+        return {}
+    # `_data_vault` and not the module's `_vault()` helper: this must resolve
+    # exactly the way `handle_launch_backend` does, or the two launch paths
+    # drift again through a different door.
+    return build_datasource_env(
+        getattr(state.session, "_data_vault", None),
+        getattr(artifact, "datasources", None),
+        slug=state.slug,
+    )
+
+
 async def _run_and_verify_app(state: GenState) -> str | None:
     # `_tracked_backends` is initialised on ChatSession (session.py), but use the
     # same defensive getattr-or-create as handle_launch_backend for parity with
@@ -767,6 +804,7 @@ async def _run_and_verify_app(state: GenState) -> str | None:
     if not isinstance(tracked, dict):
         tracked = {}
         state.session._tracked_backends = tracked
+    ds_env = _launch_datasource_env(state)
     problem = ""
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
         state.step_started("run_app", attempt=attempt)
@@ -775,6 +813,7 @@ async def _run_and_verify_app(state: GenState) -> str | None:
             artifact_folder=state.artifact_path,
             scratchpad_pool=state.session._scratchpads,
             tracked_backends=tracked,
+            ds_env=ds_env,
             health_path="/api/health",
         )
         if isinstance(launch, str):  # launcher error (install / readiness)
