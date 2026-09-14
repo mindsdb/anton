@@ -416,7 +416,15 @@ class StreamDisplay:
         if not self._active:
             return
 
-        if phase == "analyzing":
+        # A forced continuation is told its reply replaces the previous one, so
+        # the buffer that would otherwise print both has to let the earlier
+        # answer go. `finish` prints whatever remains as the final answer.
+        if phase == "continuation":
+            self._pending = ""
+
+        # These three render identically: the status line says the model is
+        # composing, and the raw phase would otherwise leak into it.
+        if phase in ("analyzing", "continuation", "handback"):
             self._line1_fun = random.choice(ANALYZING_MESSAGES)  # noqa: S311
             self._line2_status = "Composing response..."
             self._line3_peek = ""

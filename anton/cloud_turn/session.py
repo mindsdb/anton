@@ -25,6 +25,7 @@ import hashlib
 import logging
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_CLOUD_WORKSPACE_PATH = "/workspace"
 #: Operator/CI override for the mount path (pod-side env var, not request data).
 _WORKSPACE_PATH_ENV = "ANTON_CLOUD_WORKSPACE_PATH"
+
+#: Pod-side mount of the PROJECT's shared artifacts directory (ENG-2056). The
+#: workspace mount is per-CONVERSATION, so the derived
+#: ``<workspace>/.anton/artifacts`` only ever shows a task its own artifacts.
+#: The scratchpad controller mounts the project-level artifacts dir as a second
+#: mount OUTSIDE the workspace (so it can never land on sys.path) and sets this
+#: env var to tell anton where it is. When set, it replaces the derived default
+#: so sibling tasks in one project share a single artifacts tree. Same trust
+#: posture as _WORKSPACE_PATH_ENV: pod-side config, never from the wire request.
+_ARTIFACTS_ROOT_ENV = "ANTON_CLOUD_ARTIFACTS_ROOT"
 
 #: The only tools exposed in a cloud turn: scratchpad + the workspace-scoped
 #: artifact tools. Everything else core registers is dropped.
@@ -425,6 +436,32 @@ def resolve_trusted_workspace_path() -> Path:
     return resolved
 
 
+def resolve_trusted_artifacts_root() -> Path | None:
+    """Resolve the project-artifacts mount (ENG-2056), or None when not set.
+
+    Reads :data:`_ARTIFACTS_ROOT_ENV`, set by the same scratchpad controller
+    that sets :data:`_WORKSPACE_PATH_ENV` (pod-side config, never from the wire
+    request), so it gets the same validation: absolute, no ``..``, then
+    canonicalised and created. None — desktop, CI, older controllers — leaves
+    the derived ``<workspace>/.anton/artifacts`` default untouched.
+    """
+    raw = (os.environ.get(_ARTIFACTS_ROOT_ENV) or "").strip()
+    if not raw:
+        return None
+    if not os.path.isabs(raw):
+        raise ValueError(
+            f"trusted artifacts root must be absolute, got {raw!r} "
+            f"(set {_ARTIFACTS_ROOT_ENV} to an absolute path)"
+        )
+    if ".." in Path(raw).parts:
+        raise ValueError(f"trusted artifacts root must not contain '..': {raw!r}")
+    resolved = Path(raw).resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    if not resolved.is_dir():
+        raise ValueError(f"trusted artifacts root is not a directory: {resolved}")
+    return resolved
+
+
 #: Attachments cowork-server stages into the workspace for this conversation.
 _ATTACHMENTS_DIRNAME = "attachments"
 
@@ -519,6 +556,51 @@ def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
     return [*image_blocks, {"type": "text", "text": text}]
 
 
+# What the web UI does with a finished file, told to the model because the pod
+# cannot see that UI (ENG-2421). The desktop harness has carried the equivalent
+# guidance since ENG-1636 (cowork-server `_turn_style_context`) — but that
+# harness refuses to run org turns, so the web population never received it and
+# kept handing users pod paths and loopback URLs as "download links" for weeks
+# after every card-side fix shipped. Every claim below is provable from the
+# product: artifact cards carry a Download control on web (ENG-2044), HTML and
+# Markdown artifacts are auto-shared at turn end (ENG-1680) with the link
+# surfaced on the card, and the chat renderer neutralises local-path links into
+# inert text. The base ARTIFACTS prompt (anton/core/llm/prompts.py, workflow
+# step 4) instructs the OPPOSITE for the CLI case — "include the primary
+# file's path … so it is clickable/openable in a plain CLI", and for
+# fullstack apps to prefer launch_backend's (loopback) url — so this block
+# overrides both BY NAME rather than merely contradicting them; suffix order
+# gives it the last word, and naming the overridden rule is what makes the
+# model treat it as a deployment exception instead of a conflict (review
+# note from pnewsam on #461). When the pod is driven outside cowork (dev, CI) the panel it
+# names does not exist; that run has no end user reading prose, so the wrong
+# half of the trade is the one where a real user is told to click a dead path.
+CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
+    "Files you create as artifacts appear automatically in the Live Artifacts "
+    "panel beside the chat, where the user previews them and uses the Download "
+    "control. When a file is ready, tell the user it is in the Live Artifacts "
+    "panel and can be downloaded there — do NOT hand them its location on "
+    "disk. You are running in a sandboxed cloud workspace: filesystem paths "
+    "(for example /mnt/...) and loopback URLs (for example "
+    "http://127.0.0.1:PORT or http://localhost:PORT) exist only inside this "
+    "workspace and can never be opened from the user's browser. Never put "
+    "such a path or URL into your reply as a markdown link or as text, and "
+    "never invent a download URL such as sandbox:/mnt/data/...; no link of "
+    "that form works. This OVERRIDES the ARTIFACTS workflow instruction to "
+    "include the primary file's path in your final message: here, point to "
+    "the artifact by name only — the panel is the pointer. It also overrides "
+    "the fullstack-app instruction to prefer the launch_backend url as the "
+    "pointer: that url is loopback inside this workspace and dead in the "
+    "user's browser; the artifact card's preview is how the user opens the "
+    "app. HTML and Markdown artifacts are shared to a live URL "
+    "automatically at the end of the turn and that link appears on the "
+    "artifact card — you do not know the link, so point at the card rather "
+    "than guessing one. If the user says they cannot find, open, or download "
+    "a file, point them again at the Live Artifacts panel's Download control "
+    "— never repeat a path."
+)
+
+
 def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
 
@@ -557,6 +639,16 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         if llm.get("coding_model"):
             settings_kwargs["coding_model"] = llm["coding_model"]
     settings = AntonSettings(**settings_kwargs)
+    # ENG-2056: the workspace mount is per-conversation, so deriving
+    # `<workspace>/.anton/artifacts` hides sibling tasks' artifacts. When the
+    # controller mounts the PROJECT's shared artifacts dir (outside the
+    # workspace, so it can't land on sys.path) and points _ARTIFACTS_ROOT_ENV
+    # at it, use that instead. Must be set BEFORE resolve_workspace, which only
+    # derives artifacts_dir when the value is relative and leaves an absolute
+    # one alone; unset env var keeps today's derivation byte-identical.
+    artifacts_root = resolve_trusted_artifacts_root()
+    if artifacts_root is not None:
+        settings.artifacts_dir = str(artifacts_root)
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
@@ -603,11 +695,29 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
 
         clear_ds_env()
 
+    # When the conversation began, so the prompt dates it from the conversation
+    # rather than from this pod, which is new every turn.
+    started_at = None
+    if request.started_at:
+        try:
+            started_at = datetime.fromisoformat(request.started_at)
+        except ValueError:
+            # Degrades to today rather than failing a turn over a prompt line,
+            # but logs the value: silence makes a shape anton cannot read look
+            # exactly like a controller that sends nothing.
+            logger.warning(
+                "cloud session ignoring unparsable started_at=%r conversation=%s",
+                request.started_at, request.conversation_id,
+            )
+
     config = ChatSessionConfig(
         llm_client=llm_client,
         settings=settings,
         workspace=workspace,
         session_id=request.conversation_id,
+        # None falls back to today, which is what every cloud turn did before
+        # the server started sending this.
+        started_at=started_at,
         # WHICH AGENT: this pod image is "anton + boot" — the agent running here
         # IS anton, so "cloud" was factually wrong, not merely overloaded
         # (ENG-1694). Where it ran comes from `surface` below, which cowork
@@ -621,6 +731,11 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(settings),
+            # The delivery half of the prompt context (ENG-2421) — the desktop
+            # harness injects its own via `_turn_style_context`; this is the
+            # web-worded equivalent, which the pod owns because only it runs
+            # web turns.
+            suffix=CLOUD_ARTIFACT_DELIVERY_GUIDANCE,
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
