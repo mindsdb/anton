@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anton.core.tools.skill_format import SKILL_FILE, normalize_name
+from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 
 if TYPE_CHECKING:
@@ -88,36 +89,55 @@ def _seed_from_store(folder: Path, slug: str, store) -> None:
         logger.warning("skill draft %r: could not seed from the store", slug, exc_info=True)
 
 
-async def handle_create_skill_draft(session: "ChatSession", tc_input: dict) -> str:
+async def handle_create_skill_draft(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
     """Claim `<skill_drafts_root>/<slug>`; return `{slug, path, skill_file}`."""
     root = getattr(session, "_skill_drafts_root", None)
     if root is None:
-        return json.dumps({"error": "Skill drafts are unavailable in this session."})
+        # Tier 2 (ENG-2248): the host wired no draft store; no input can work.
+        return ToolOutcome(
+            content=json.dumps({"error": "Skill drafts are unavailable in this session."}),
+            ok=False, reason="store_unavailable",
+        )
 
     name = str(tc_input.get("name") or "").strip()
     if not name:
-        return json.dumps({"error": "`name` is required."})
+        # Tier 2: malformed call.
+        return ToolOutcome(
+            content=json.dumps({"error": "`name` is required."}),
+            ok=False, reason="missing_name",
+        )
     slug = normalize_name(name)
     if not slug:
-        return json.dumps({"error": "`name` must contain at least one letter or digit."})
+        # Tier 2: malformed call.
+        return ToolOutcome(
+            content=json.dumps({"error": "`name` must contain at least one letter or digit."}),
+            ok=False, reason="invalid_type",
+        )
 
     folder = Path(root) / slug
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         logger.warning("skill draft %r: could not claim a folder", slug, exc_info=True)
-        return json.dumps({"error": f"Could not claim a folder for {slug!r}: {exc}"})
+        # Tier 2: the filesystem refused; the draft does not exist.
+        return ToolOutcome(
+            content=json.dumps({"error": f"Could not claim a folder for {slug!r}: {exc}"}),
+            ok=False, reason="store_unavailable",
+        )
 
     # Only seed an unclaimed folder: a second call in the same turn must not
     # overwrite what the agent has already written into it.
     if not (folder / SKILL_FILE).is_file():
         _seed_from_store(folder, slug, getattr(session, "_skill_store", None))
 
-    return json.dumps({
+    # Tier 1: a draft folder was claimed and its descriptor returned.
+    return ToolOutcome(content=json.dumps({
         "slug": slug,
         "path": str(folder),
         "skill_file": str(folder / SKILL_FILE),
-    })
+    }), ok=True)
 
 
 CREATE_SKILL_DRAFT_TOOL = ToolDef(

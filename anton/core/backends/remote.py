@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import AsyncIterator
 
+import httpx2 as httpx
+
 from anton.core.backends.base import Cell, ScratchpadRuntime
 
 
@@ -56,47 +58,24 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
 
     async def _post(self, path: str, body: dict | None = None) -> dict:
         """POST to the remote service and return parsed JSON."""
-        import aiohttp
-
         url = f"{self._endpoint_url}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=body or {}, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=300)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Remote scratchpad error ({resp.status}): {text}")
-                return await resp.json()
-
-    async def _get(self, path: str, params: dict | None = None) -> dict:
-        """GET from the remote service and return parsed JSON."""
-        import aiohttp
-
-        url = f"{self._endpoint_url}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, params=params, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Remote scratchpad error ({resp.status}): {text}")
-                return await resp.json()
+        async with httpx.AsyncClient(timeout=300) as client:
+            resp = await client.post(url, json=body or {}, headers=self._headers())
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Remote scratchpad error ({resp.status_code}): {resp.text}")
+            return resp.json()
 
     async def _sse(self, path: str, body: dict) -> AsyncIterator[dict]:
         """POST to an SSE endpoint and yield parsed events."""
-        import aiohttp
-
         url = f"{self._endpoint_url}{path}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=body, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=600)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Remote scratchpad error ({resp.status}): {text}")
+        async with httpx.AsyncClient(timeout=600) as client:
+            async with client.stream("POST", url, json=body, headers=self._headers()) as resp:
+                if resp.status_code >= 400:
+                    text = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Remote scratchpad error ({resp.status_code}): {text}")
 
                 buffer = ""
-                async for chunk in resp.content:
+                async for chunk in resp.aiter_bytes():
                     buffer += chunk.decode("utf-8", errors="replace")
                     while "\n\n" in buffer:
                         event_str, buffer = buffer.split("\n\n", 1)
@@ -196,65 +175,6 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
             pass
 
 
-class RemoteLightsailScratchpadRuntime(RemoteScratchpadRuntime):
-    def __init__(
-        self,
-        name: str,
-        *,
-        endpoint_url: str,
-        api_key: str,
-        coding_provider: str = "",
-        coding_model: str = "",
-        coding_api_key: str = "",
-        coding_base_url: str = "",
-        cells: list[Cell] | None = None,
-        workspace_path: Path | None = None,
-    ) -> None:
-        super().__init__(
-            name,
-            endpoint_url=endpoint_url,
-            api_key=api_key,
-            coding_provider=coding_provider,
-            coding_model=coding_model,
-            coding_api_key=coding_api_key,
-            coding_base_url=coding_base_url,
-            cells=cells,
-            workspace_path=workspace_path,
-        )
-        self._lightsail_endpoint_resolved = False
-
-    async def start(self) -> None:
-        """Resolve worker URL to a direct instance endpoint, then start the scratchpad."""
-        if not self._lightsail_endpoint_resolved:
-            self._endpoint_url = await self._resolve_endpoint(self._endpoint_url.rstrip("/"))
-            self._lightsail_endpoint_resolved = True
-        await super().start()
-
-    async def _resolve_endpoint(self, endpoint_url: str) -> str:
-        """Resolve the Cloudflare endpoint to a direct IP endpoint.
-
-        Calls /resolve on the Cloudflare Worker which returns the instance's
-        direct IP. Caches the result for subsequent calls.
-        """
-        import aiohttp
-
-        url = f"{endpoint_url}/resolve"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, headers=self._headers(), timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"Failed to resolve remote scratchpad ({resp.status}): {text}")
-                data = await resp.json()
-
-        endpoint = data.get("endpoint", "")
-        if not endpoint:
-            raise RuntimeError(f"No endpoint returned from /resolve: {data}")
-
-        return endpoint.rstrip("/")
-
-
 def remote_scratchpad_runtime_factory(
     *,
     name: str,
@@ -286,26 +206,3 @@ def remote_scratchpad_runtime_factory(
     )
 
 
-def remote_lightsail_scratchpad_runtime_factory(
-    *,
-    name: str,
-    coding_provider: str,
-    coding_model: str,
-    coding_api_key: str,
-    coding_base_url: str,
-    cells: list[Cell] | None,
-    workspace_path: Path | None,
-    endpoint_url: str = "",
-    api_key: str = "",
-) -> ScratchpadRuntime:
-    return RemoteLightsailScratchpadRuntime(
-        name=name,
-        endpoint_url=endpoint_url,
-        api_key=api_key,
-        coding_provider=coding_provider,
-        coding_model=coding_model,
-        coding_api_key=coding_api_key,
-        coding_base_url=coding_base_url,
-        cells=cells,
-        workspace_path=workspace_path,
-    )

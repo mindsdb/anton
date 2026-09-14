@@ -156,7 +156,7 @@ async def _do_import(
         return mgr_self._pads[name]
 
     with patch.object(ScratchpadManager, "get_or_create", _mock_get_or_create):
-        with patch("anton.commands.session.rebuild_session", side_effect=_fake_rebuild):
+        with patch("anton.commands.session.rebuild_session", new=AsyncMock(side_effect=_fake_rebuild)):
             new_session = await handle_share_import(
                 console,
                 current_session,

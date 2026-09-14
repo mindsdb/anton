@@ -25,6 +25,48 @@ Created: {date}
 """
 
 
+_SECRET_FILE_MODE = 0o600
+
+
+def vault_key(env_path: Path, key: str = "ANTON_MINDS_API_KEY") -> str | None:
+    """Read a key from a .env file with the SAME parser that resolved settings.
+
+    `load_env` below only `.strip()`s the value, while pydantic-settings goes
+    through python-dotenv, which also unquotes and drops inline comments. The
+    two disagree on ordinary hand-edited lines::
+
+        ANTON_MINDS_API_KEY="abc"       load_env -> '"abc"'      dotenv -> 'abc'
+        ANTON_MINDS_API_KEY=abc # note  load_env -> 'abc # note' dotenv -> 'abc'
+
+    Anywhere a decision compares a file's contents against a RESOLVED setting,
+    the file has to be read the way the setting was, or a quoted vault silently
+    takes the "this is not our key" branch.
+    """
+    from dotenv import dotenv_values
+
+    if not env_path.is_file():
+        return None
+    try:
+        return dotenv_values(env_path).get(key)
+    except OSError:
+        return None
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` to `path`, readable and writable only by its owner.
+
+    The file holds secrets, so it is created 0600 rather than under the
+    process umask. An existing file is tightened before the write, so a
+    mode an earlier version left behind does not outlive the next secret.
+    UTF-8, not the host locale, to match how the file is read back.
+    """
+    if path.exists():
+        os.chmod(path, _SECRET_FILE_MODE)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 class Workspace:
     """Manages the .anton/ workspace directory and its files."""
 
@@ -120,13 +162,14 @@ class Workspace:
         # Create anton.md if it doesn't exist
         if create_anton_md and not self._anton_md.is_file():
             self._anton_md.write_text(
-                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d"))
+                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d")),
+                encoding="utf-8",
             )
             actions.append(f"Created {self._anton_md}")
 
         # Create .env if it doesn't exist
         if not self._env_file.is_file():
-            self._env_file.write_text("# Anton environment variables\n")
+            _write_private(self._env_file, "# Anton environment variables\n")
             actions.append(f"Created {self._env_file}")
 
         # Visible artifacts directory at the workspace root. Replaces
@@ -150,7 +193,7 @@ class Workspace:
         """Read anton.md content. Returns None if it doesn't exist."""
         if not self._anton_md.is_file():
             return None
-        return self._anton_md.read_text()
+        return self._anton_md.read_text(encoding="utf-8")
 
     def anton_md_modified_since_last_read(self) -> bool:
         """Check if anton.md has been modified since last read_anton_md_tracked()."""
@@ -187,7 +230,7 @@ class Workspace:
         result: dict[str, str] = {}
         if not self._env_file.is_file():
             return result
-        for line in self._env_file.read_text().splitlines():
+        for line in self._env_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -210,14 +253,32 @@ class Workspace:
 
         The value is written directly to the .env file, and the
         environment variable is set in the current process.
+
+        The value must be single-line. Every caller writes user-supplied input
+        straight through — a pasted "API key" containing a newline would append
+        arbitrary further ``ANTON_*`` settings to the file, which is a config
+        injection with no legitimate use (no key, URL or model name contains a
+        newline). Rejected rather than escaped: silently persisting half a
+        credential, or the injected lines, is worse than failing.
+
+        Raises rather than returning a flag because most callers write literals
+        (provider names, model ids, booleans) that cannot contain one, so this
+        is unreachable for them. The callers that DO pass pasted input are the
+        provider-setup prompts in ``cli.py`` and ``chat.py``; of those only
+        ``_persist_key_best_effort`` currently catches it, so a newline pasted
+        at first-run onboarding still surfaces as a traceback. Handling it at
+        each prompt is worth doing and is not part of this change.
         """
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"{key} must not contain a newline")
+
         self._anton_dir.mkdir(parents=True, exist_ok=True)
 
         # Read existing lines
         lines: list[str] = []
         replaced = False
         if self._env_file.is_file():
-            for line in self._env_file.read_text().splitlines():
+            for line in self._env_file.read_text(encoding="utf-8").splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith("#") and "=" in stripped:
                     existing_key = stripped.partition("=")[0].strip()
@@ -230,7 +291,7 @@ class Workspace:
         if not replaced:
             lines.append(f"{key}={value}")
 
-        self._env_file.write_text("\n".join(lines) + "\n")
+        _write_private(self._env_file, "\n".join(lines) + "\n")
 
         # Also set in current process environment
         os.environ[key] = value
@@ -245,7 +306,7 @@ class Workspace:
 
         lines: list[str] = []
         found = False
-        for line in self._env_file.read_text().splitlines():
+        for line in self._env_file.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and "=" in stripped:
                 existing_key = stripped.partition("=")[0].strip()
@@ -255,7 +316,7 @@ class Workspace:
             lines.append(line)
 
         if found:
-            self._env_file.write_text("\n".join(lines) + "\n")
+            _write_private(self._env_file, "\n".join(lines) + "\n")
             os.environ.pop(key, None)
 
         return found

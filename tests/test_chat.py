@@ -6,7 +6,7 @@ import pytest
 
 from anton.chat import ChatSession
 from anton.core.session import ChatSessionConfig
-from tests.conftest import make_mock_llm
+from tests.conftest import make_mock_llm, run_turn
 from anton.core.llm.provider import (
     ContextOverflowError,
     LLMResponse,
@@ -34,10 +34,76 @@ class TestChatSession:
         mock_llm.plan = AsyncMock(return_value=_text_response("Hey! How can I help?"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
+        reply = await run_turn(session, "hi")
+
+        assert reply == "Hey! How can I help?"
+        assert len(session.history) == 2  # user + assistant
+
+    async def test_non_streaming_turn_wraps_turn_stream(self):
+        """`turn()` is a compatibility wrapper for external anton-agent
+        consumers: it must return the final reply and route through the
+        streaming path (there is no parallel non-streaming loop anymore)."""
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(return_value=_text_response("Hey! How can I help?"))
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
         reply = await session.turn("hi")
 
         assert reply == "Hey! How can I help?"
         assert len(session.history) == 2  # user + assistant
+        # Routed through the streaming path, not a separate implementation.
+        assert mock_llm.plan.await_count == 1
+
+    async def test_non_streaming_turn_ignores_tool_call_preamble(self):
+        """turn() must return the final answer, not every round's preamble."""
+        from anton.core.tools.registry import ToolOutcome
+
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(
+            side_effect=[
+                LLMResponse(
+                    content="Let me look at the DB.",
+                    tool_calls=[ToolCall(id="t1", name="scratchpad", input={"action": "exec"})],
+                    usage=Usage(input_tokens=10, output_tokens=20),
+                    stop_reason="tool_use",
+                ),
+                LLMResponse(
+                    content="Now checking the second table.",
+                    tool_calls=[ToolCall(id="t2", name="scratchpad", input={"action": "exec"})],
+                    usage=Usage(input_tokens=10, output_tokens=20),
+                    stop_reason="tool_use",
+                ),
+                _text_response(""),
+            ]
+        )
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
+        session.tool_registry.dispatch_tool = AsyncMock(
+            return_value=ToolOutcome(content="tool ran fine", ok=True)
+        )
+
+        reply = await session.turn("do the DB analysis")
+
+        assert reply == ""
+
+    async def test_non_streaming_turn_keeps_ask_user_unavailable(self):
+        """turn() must keep session.emitter None so ask_user stays unavailable."""
+        mock_llm = make_mock_llm()
+        mock_llm.plan = AsyncMock(return_value=_text_response("done"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
+
+        emitter_during_turn = []
+        real_plan = mock_llm.plan
+
+        async def _plan_and_sample(**kwargs):
+            emitter_during_turn.append(session.emitter)
+            return await real_plan(**kwargs)
+
+        mock_llm.plan = _plan_and_sample
+
+        await session.turn("hi")
+
+        assert emitter_during_turn == [None]
+        assert session.emitter is None
 
     async def test_history_grows_across_turns(self):
         """Multiple turns accumulate in history."""
@@ -51,9 +117,9 @@ class TestChatSession:
         )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
-        await session.turn("hello")
-        await session.turn("can you check something")
-        await session.turn("the anton repo")
+        await run_turn(session, "hello")
+        await run_turn(session, "can you check something")
+        await run_turn(session, "the anton repo")
 
         # 3 user messages + 3 assistant messages
         assert len(session.history) == 6

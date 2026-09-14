@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import uuid
 from typing import TYPE_CHECKING
@@ -73,21 +74,41 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     from rich.console import Console
     console = session._console or Console(quiet=True)
 
-    dropped_scrubbed = [
-        k for k, v in known_variables.items() if SCRUBBED_VALUE_RE.match(v)
-    ]
+    from anton.core.datasources.data_vault import LocalDataVault
+    vault = session._data_vault or LocalDataVault()
+
+    # Resolve markers naming a field already saved in THIS vault (reused
+    # password); drop the rest. Scoped to `vault`, not global os.environ —
+    # see unscrub_marker's docstring.
+    from anton.utils.datasources import unscrub_marker
+
+    resolved_from_vault = []
+    dropped_scrubbed = []
+    for k, v in list(known_variables.items()):
+        if not SCRUBBED_VALUE_RE.match(v):
+            continue
+        resolved = unscrub_marker(vault, v)
+        if resolved:
+            known_variables[k] = resolved
+            resolved_from_vault.append(k)
+        else:
+            dropped_scrubbed.append(k)
+
     if dropped_scrubbed:
-        known_variables = {
-            k: v
-            for k, v in known_variables.items()
-            if not SCRUBBED_VALUE_RE.match(v)
-        }
+        for k in dropped_scrubbed:
+            del known_variables[k]
         console.print()
         console.print(
             f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
             f"for {', '.join(dropped_scrubbed)} — those bracketed strings are "
             f"scrub-markers, not real credentials. Pass the actual secret "
             f"values instead."
+        )
+    if resolved_from_vault:
+        console.print()
+        console.print(
+            f"[anton.muted](anton)[/] Reusing the existing vaulted value for "
+            f"{', '.join(sorted(resolved_from_vault))}."
         )
 
     # ── Telemetry: connection attempt ────────────────────────────────
@@ -102,9 +123,6 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     if _settings:
         from anton.analytics import send_event
         send_event(_settings, "ds_connect_attempt", engine=engine)
-
-    from anton.core.datasources.data_vault import LocalDataVault
-    vault = session._data_vault or LocalDataVault()
 
     if known_variables:
         from anton.core.datasources.datasource_registry import (
@@ -391,6 +409,13 @@ _CONNECT_DATASOURCE_DESCRIPTION_TAIL = (
     "vars like any other connection.\n\n"
     "Partial credentials are fine — save what the user provided. Ask for missing "
     "pieces in a later turn only if needed. Never invent values.\n\n"
+    "If a value in chat appears as a bracketed placeholder like [DS_POSTGRES_ABC12__PASSWORD] "
+    "instead of a real value, that means it was already masked before reaching you — the user "
+    "is referencing a credential already saved from an earlier connection (e.g. reusing the "
+    "same password for a second database). Pass that placeholder string through as-is in "
+    "known_variables; it resolves server-side to the real value without you ever seeing it. "
+    "Never invent a bracketed placeholder yourself — only pass one exactly as it appeared in "
+    "the conversation.\n\n"
     "Do NOT print any message before calling this tool — it handles the user-facing output."
 )
 
@@ -495,7 +520,6 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     artifact type is read from its ``metadata.json`` via
     ``resolve_publish_target`` — fullstack apps publish the whole folder, static
     reports publish the primary file — so callers never need to know the type."""
-    import os
     import webbrowser
     from pathlib import Path
 
@@ -512,7 +536,35 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     title = tc_input.get("title", "Dashboard")
     action = tc_input.get("action", "ask")
 
-    settings = AntonSettings()
+    # Use the SESSION's settings, never a fresh resolve (ENG-1424). Building a
+    # new AntonSettings() here re-reads config after `apply_env_to_process`
+    # (cli.py, `_ensure_workspace`) has copied the project `.anton/.env` into
+    # os.environ — and pydantic-settings ranks os.environ above every
+    # `env_file`. So a second object resolves a DIFFERENT key than the one the
+    # LLM client, /publish and /unpublish were built with, and the session
+    # publishes as one account while `/unpublish` lists another's reports.
+    #
+    # Same getattr+capability shape as `core/session.py` (`_emit_turn_cost`):
+    # `ChatSessionConfig.settings` is typed `CoreSettings | None`, and
+    # `CoreSettings` carries none of the publish fields, so a host that passed
+    # a bare CoreSettings (or no settings) must still fall back.
+    # Check every publish field, not just one: a host passing a partial object
+    # that happens to carry `minds_api_key` would skip the fallback and then
+    # AttributeError further down on `artifacts_dir` / `publish_url` /
+    # `minds_ssl_verify`, mid-publish rather than here.
+    _PUBLISH_FIELDS = ("minds_api_key", "artifacts_dir", "publish_url", "minds_ssl_verify")
+    settings = getattr(session, "_settings", None)
+    if settings is None or not all(hasattr(settings, f) for f in _PUBLISH_FIELDS):
+        settings = AntonSettings()
+        # A bare AntonSettings() leaves `artifacts_dir` at its RELATIVE default,
+        # so `Path(settings.artifacts_dir)` below would resolve against cwd
+        # while the session's resolves to <workspace>/.anton/artifacts. That
+        # feeds `resolve_publish_target` the wrong roots, so `published_key`
+        # differs from what /publish and cowork-server compute and the next
+        # publish creates a duplicate report instead of updating this one.
+        # Anchor it on the session's own workspace when the host gave us one.
+        base = getattr(session, "_workspace", None)
+        settings.resolve_workspace(str(base.base) if base is not None else None)
     artifacts_root = Path(settings.artifacts_dir)
 
     # Accept the artifact folder (preferred) or any file inside it. Resolve a

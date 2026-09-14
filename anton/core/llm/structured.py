@@ -37,12 +37,15 @@ from .provider import StructuredOutputError
 
 # Default output-budget ladder for forced-schema calls: first attempt, then
 # one retry used only when the first came back truncated. Sized by the same
-# measurement as the completion verifier's (ENG-1081): narrating models
-# (`mindshub_air`/kimi, `deepseek`) spend 245–1,654+ tokens on prose before
-# reaching the forced tool call — and the narration scales with the input, so
-# a consolidation pass over a whole scratchpad session was observed filling
-# 2,048 exactly (ENG-1084). Non-narrating models answer these calls in tens
-# of tokens and never pay for the headroom.
+# measurement as the completion verifier's (ENG-1081): as measured in 2026-07,
+# narrating models (`mindshub_air` — then Kimi K2.6 — `kimi`, `deepseek`) spent
+# 245–1,654+ tokens on prose before reaching the forced tool call, and the
+# narration scaled with the input, so a consolidation pass over a whole
+# scratchpad session was observed filling 2,048 exactly (ENG-1084).
+# `mindshub_air` was repointed to a GPT model around 2026-08-10 and no MindsHub
+# alias narrates today (ENG-1687) — the ladder is kept for the unmeasured BYOK
+# and local models anton also runs on. Non-narrating models answer these calls
+# in tens of tokens and never pay for the headroom.
 DEFAULT_STRUCTURED_BUDGETS: tuple[int, ...] = (2048, 4096)
 
 

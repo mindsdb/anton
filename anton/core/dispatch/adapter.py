@@ -192,9 +192,8 @@ class ChannelSetup:
 class ChannelAdapter(Protocol):
     """Structural interface every channel adapter must satisfy.
 
-    Adapters are instantiated by :mod:`anton.core.dispatch.registry` at
-    startup and given a :class:`ChannelSetup` to wire up callbacks. They
-    run for the lifetime of the dispatch process.
+    Adapters are given a :class:`ChannelSetup` to wire up callbacks and run
+    for the lifetime of the dispatch process.
     """
 
     @property

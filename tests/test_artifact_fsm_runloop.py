@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
-import httpx
+# Must be the SAME module the engine catches against. A plain `httpx` here
+# builds its error from a different class tree, the engine's except clause
+# never matches, and this file would assert a retry while actually proving
+# that a dropped stream is fatal.
+import httpx2 as httpx
 import pytest
 
 from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage

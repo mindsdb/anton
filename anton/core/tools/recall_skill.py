@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 
 if TYPE_CHECKING:
@@ -115,20 +116,50 @@ def _already_in_history(session, label: str) -> bool:
         return False
 
 
-async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
-    """Look up a skill by label and return its declarative procedure."""
+async def handle_recall_skill(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
+    """Look up a skill by label and return its declarative procedure.
+
+    Verdicts (ENG-2248). `ok` drives the per-tool error streak, so it fires the
+    resilience nudge at 2 consecutive failures and the circuit breaker at 5 —
+    a verdict here is a behaviour decision, not a label. This tool ran 1,150
+    times across 452 installs in 30 days, so a wrong `ok=False` reaches
+    everyone.
+
+    * `ok=True`  — a procedure was returned, INCLUDING the already-recalled
+      stub: that is a success with a deliberately short body, not a failure.
+    * `ok=False` — the call could not be served at all: no label, or no store.
+      Repeating either cannot help, so it SHOULD reach the streak. This is the
+      intended, accepted behaviour change.
+    * `ok=None`  — the NO MATCH family, left unmigrated ON PURPOSE. See the
+      comments at those returns.
+    """
     label_in = (tc_input.get("label") or "").strip()
     if not label_in:
-        return (
-            "ERROR: recall_skill requires a non-empty 'label' parameter. "
-            "Pick one from the procedural memory list in your system prompt."
+        # Tier 2 (ENG-2248): a malformed call. Retrying it unchanged cannot
+        # work, so repetition IS thrash and belongs in the streak.
+        return ToolOutcome(
+            content=(
+                "ERROR: recall_skill requires a non-empty 'label' parameter. "
+                "Pick one from the procedural memory list in your system prompt."
+            ),
+            ok=False,
+            reason="missing_name",
         )
 
     store = getattr(session, "_skill_store", None)
     if store is None:
-        return (
-            "ERROR: no skill store is wired into this session. "
-            "Procedural memory is unavailable right now."
+        # Tier 2: the host wired no store, so no label can ever work.
+        # `store_unavailable` is an existing `_SENTINEL_REASONS` key mapping to
+        # external_wall/service_unavailable — reused, not invented.
+        return ToolOutcome(
+            content=(
+                "ERROR: no skill store is wired into this session. "
+                "Procedural memory is unavailable right now."
+            ),
+            ok=False,
+            reason="store_unavailable",
         )
 
     skill = store.load(label_in)
@@ -137,6 +168,13 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
         closest = store.closest_match(label_in)
         if closest is None:
             available = [s["label"] for s in store.list_summaries()]
+            # Tier 3 (ENG-2248): deliberately ok=None, NOT a failure. The tool
+            # worked — it looked, found nothing, and told the model to proceed.
+            # This is the most common non-success on the highest-volume tool, so
+            # ok=False here would push normal exploration into the error streak
+            # and trip the breaker on correct behaviour. If it should ever
+            # count, that needs its own ticket and its own before/after on the
+            # nudge rate.
             if not available:
                 return (
                     f"NO MATCH: no skill named '{label_in}', and the procedural "
@@ -148,7 +186,11 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
             )
         skill = store.load(closest)
         if skill is None:
-            # Race or filesystem flake — be defensive
+            # Race or filesystem flake — be defensive.
+            # Tier 3: left ok=None with the rest of the NO MATCH family.
+            # Arguably a real failure (a load that should have worked), but it
+            # is indistinguishable from a plain miss without a store-level
+            # signal, and guessing wrong costs a breaker trip.
             return (
                 f"NO MATCH: '{label_in}' was not found and the closest "
                 f"candidate '{closest}' could not be loaded."
@@ -171,18 +213,29 @@ async def handle_recall_skill(session: "ChatSession", tc_input: dict) -> str:
         # procedure header — otherwise a stub surviving compaction would
         # satisfy _already_in_history forever and the full contract would
         # never be re-sent.
-        return (
-            f"Skill '{skill.label}' was already recalled in this conversation "
-            "— its full procedure is in your context above, under the "
-            f"'# Skill: {skill.name}' heading, and still applies. Not "
-            "re-sending the body."
+        # Tier 1 (ENG-2248): a SUCCESS with a deliberately short body. The
+        # procedure is already in context and still applies, so the tool did
+        # its job. Behaviourally identical to today — a bare-string return
+        # already resets the streak, since the legacy matcher finds none of its
+        # five markers in this text.
+        return ToolOutcome(
+            content=(
+                f"Skill '{skill.label}' was already recalled in this conversation "
+                "— its full procedure is in your context above, under the "
+                f"'# Skill: {skill.name}' heading, and still applies. Not "
+                "re-sending the body."
+            ),
+            ok=True,
         )
 
     # Increment the recommended counter for the *resolved* label, not the
     # input. If the LLM typo'd 'csv-sumary', we credit 'csv-summary'.
     store.increment_recommended(skill.label, stage=1)
 
-    return _format_skill_response(skill, warning=warning)
+    # Tier 1: the procedure was returned. Also covers the closest-match path,
+    # where `warning` explains the substitution — a substitution is still a
+    # served request.
+    return ToolOutcome(content=_format_skill_response(skill, warning=warning), ok=True)
 
 
 RECALL_SKILL_TOOL = ToolDef(

@@ -22,7 +22,11 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import httpx
+# Same alias the rest of the codebase uses since the httpx2 migration: the
+# transport errors caught below must be the ones the LLM client's own HTTP
+# stack raises, and a second httpx install would give us a different class
+# tree that silently never matches.
+import httpx2 as httpx
 
 from anton.core.artifacts.internal_files import PRD_FILENAME
 

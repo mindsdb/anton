@@ -8,11 +8,12 @@ import anthropic
 
 from anton.utils.datasources import scrub_credentials
 
-from .provider import safe_parse_tool_input
+from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
     LLMProvider,
     LLMResponse,
+    ProviderAuthError,
     ProviderConnectionInfo,
     StreamComplete,
     StreamEvent,
@@ -47,7 +48,7 @@ def _raise_for_status_error(
     failures are classified first; only what's left is offered to the transient
     classifier, and the generic "unavailable" copy is the last resort.
 
-    - 401 → ConnectionError (invalid-key copy; cowork-server keys on this phrase).
+    - 401 → ProviderAuthError (canonical provider-credential refusal).
     - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
     - 402/429 with an M3 gate wallet code (``wallet_empty`` /
       ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
@@ -60,7 +61,7 @@ def _raise_for_status_error(
     - anything else → the generic "temporarily unavailable" ConnectionError.
     """
     if exc.status_code == 401:
-        raise ConnectionError(
+        raise ProviderAuthError(
             "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
         ) from exc
 
@@ -192,6 +193,12 @@ def _build_native_web_tools(
 class AnthropicProvider(LLMProvider):
     name: str = "anthropic"
 
+    async def aclose(self) -> None:
+        client = getattr(self, "_client", None)
+        if client is not None:
+            await client.close()
+        unregister_provider(self)
+
     def native_web_tools(self) -> set[str]:
         # Anthropic's Messages API ships both server-side web_search and
         # web_fetch tools; we route both through the provider when enabled.
@@ -212,6 +219,7 @@ class AnthropicProvider(LLMProvider):
         if api_key:
             kwargs["api_key"] = api_key
         self._client = anthropic.AsyncAnthropic(**kwargs)
+        register_provider(self)
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(provider=self.name, api_key=self._api_key)

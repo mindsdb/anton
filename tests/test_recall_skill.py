@@ -88,10 +88,12 @@ class TestExactMatch:
     async def test_returns_procedure(self, store: SkillStore):
         session = _session_with(store)
         result = await handle_recall_skill(session, {"label": "csv_summary"})
-        assert "CSV Summary" in result
-        assert "Load the CSV" in result
-        assert "Infer types" in result
-        assert "Print summary" in result
+        # ENG-2248 tier 1: a served procedure is an explicit success.
+        assert result.ok is True
+        assert "CSV Summary" in result.content
+        assert "Load the CSV" in result.content
+        assert "Infer types" in result.content
+        assert "Print summary" in result.content
 
     @pytest.mark.asyncio
     async def test_increments_recommended_counter(self, store: SkillStore):
@@ -135,10 +137,13 @@ class TestTypoFallback:
     async def test_typo_returns_closest_match(self, store: SkillStore):
         session = _session_with(store)
         result = await handle_recall_skill(session, {"label": "csv_sumary"})
-        assert "⚠" in result
-        assert "csv-summary" in result
+        # ENG-2248 tier 1: a SUBSTITUTION is still a served request, so the
+        # closest-match path is ok=True, warning and all.
+        assert result.ok is True
+        assert "⚠" in result.content
+        assert "csv-summary" in result.content
         # The full procedure is still included after the warning
-        assert "Load the CSV" in result
+        assert "Load the CSV" in result.content
 
     @pytest.mark.asyncio
     async def test_typo_credits_resolved_label_not_input(self, store: SkillStore):
@@ -152,10 +157,11 @@ class TestTypoFallback:
     async def test_dash_to_underscore_recovered(self, store: SkillStore):
         session = _session_with(store)
         result = await handle_recall_skill(session, {"label": "web__scraping"})
-        assert "web-scraping" in result
+        assert result.ok is True
+        assert "web-scraping" in result.content
         # Could match exactly via slugify, in which case there's no warning,
         # or via fuzzy match. Either way the procedure should be returned.
-        assert "BeautifulSoup" in result
+        assert "BeautifulSoup" in result.content
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -192,19 +198,31 @@ class TestUnknownSlug:
     async def test_empty_label_returns_error(self, store: SkillStore):
         session = _session_with(store)
         result = await handle_recall_skill(session, {"label": ""})
-        assert "ERROR" in result
+        # ENG-2248 tier 2, and this is the accepted BEHAVIOUR CHANGE: ok=False
+        # feeds the per-tool error streak, so two of these in a row now nudge
+        # the model and five trip the breaker. Deliberate — a call with no
+        # label cannot succeed on retry, so repeating it is thrash.
+        assert result.ok is False
+        assert result.reason == "missing_name"
+        assert "ERROR" in result.content
 
     @pytest.mark.asyncio
     async def test_missing_label_returns_error(self, store: SkillStore):
         session = _session_with(store)
         result = await handle_recall_skill(session, {})
-        assert "ERROR" in result
+        assert result.ok is False
+        assert result.reason == "missing_name"
+        assert "ERROR" in result.content
 
     @pytest.mark.asyncio
     async def test_no_store_on_session_returns_error(self):
         session = SimpleNamespace()  # no _skill_store
         result = await handle_recall_skill(session, {"label": "csv_summary"})
-        assert "ERROR" in result
+        # `store_unavailable` is an existing sentinel key (external_wall /
+        # service_unavailable), reused rather than invented.
+        assert result.ok is False
+        assert result.reason == "store_unavailable"
+        assert "ERROR" in result.content
 
     @pytest.mark.asyncio
     async def test_empty_store_unrelated_label(self, tmp_path: Path):

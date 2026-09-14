@@ -205,6 +205,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         workspace_path: Path | None = None,
         session_id: str | None = None,
         scratchpad_ds_env: dict[str, str] | None = None,
+        workspace_env_overlay: dict[str, str] | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -230,6 +231,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._session_id: str | None = session_id
         # DS_* overlay for this pad's subprocess; None keeps legacy full-copy behaviour.
         self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
+        self._workspace_env_overlay: dict[str, str] | None = workspace_env_overlay
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -435,20 +437,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return self._venv_python
         return None
 
-    def ensure_venv(self) -> str | None:
-        """Provision the venv on disk (recycle if present, create if not) and
-        return its python interpreter path.
-
-        Public counterpart to the internal `_ensure_venv` used by `start()`
-        and `install_packages`. Exposed for callers that need only the venv
-        — not the full runtime sidecar — to spawn auxiliary processes
-        (e.g. cowork's artifact backend relaunch). Cheap when the venv
-        already exists; falls back to a fresh `uv venv` / `python -m venv`
-        otherwise.
-        """
-        self._ensure_venv()
-        return self.venv_python()
-
     def _verify_venv_python(self) -> bool:
         self._last_verify_error = None
         if self._venv_python is None:
@@ -606,6 +594,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
+        # Only-if-unset, as apply_env_to_process was, and before the DS_* strip
+        # so a project .env can neither replace PATH nor smuggle a credential.
+        for key, value in (self._workspace_env_overlay or {}).items():
+            env.setdefault(key, value)
         if self._scratchpad_ds_env is not None:
             # Never trust inherited DS_* values — strip them, then overlay
             # exactly what this pad should see.
@@ -1358,6 +1350,7 @@ def local_scratchpad_runtime_factory(
     workspace_path: Path | None,
     session_id: str | None = None,
     scratchpad_ds_env: dict[str, str] | None = None,
+    workspace_env_overlay: dict[str, str] | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1369,4 +1362,5 @@ def local_scratchpad_runtime_factory(
         workspace_path=workspace_path,
         session_id=session_id,
         scratchpad_ds_env=scratchpad_ds_env,
+        workspace_env_overlay=workspace_env_overlay,
     )

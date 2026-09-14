@@ -11,7 +11,20 @@ def _build_env_files() -> list[str]:
     """Build .env loading chain: cwd/.env -> .anton/.env -> ~/.anton/.env
     -> ~/.cowork/.env. Later files win, so the consolidated ~/.cowork/.env
     takes precedence; ~/.anton/.env stays as a fallback for installs that
-    haven't migrated yet."""
+    haven't migrated yet.
+
+    That ordering holds only AMONG THESE FILES. pydantic-settings ranks
+    `os.environ` above every `env_file`, so anything promoted into the process
+    environment outranks all four — including `Workspace.apply_env_to_process`,
+    which copies a project's `.anton/.env` into `os.environ` at boot, and
+    `Workspace.set_secret`, which sets the variable as a side effect of writing.
+    Reading only the list below therefore predicts the wrong key whenever a
+    promotion has happened (ENG-1424).
+
+    The list is also built ONCE at import, from the files that existed then and
+    against the then-current `Path.cwd()`. A file created later is not in the
+    chain until something rebuilds it, and `--folder` does not re-evaluate it.
+    """
     files: list[str] = [".env"]
     local_env = Path.cwd() / ".anton" / ".env"
     if local_env.is_file():
@@ -136,8 +149,6 @@ class AntonSettings(CoreSettings):
     # inline instead of stopping to ask. False = cautious ask-first discipline.
     act_first: bool = True
 
-    theme: str = "auto"
-
     disable_autoupdates: bool = False
 
     terms_consent: bool = False
@@ -167,7 +178,6 @@ class AntonSettings(CoreSettings):
     posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
 
     # Minds datasource integration
-    minds_enabled: bool = True  # use Minds server as LLM provider
     minds_api_key: str | None = None
     minds_url: str = "https://mdb.ai"
     minds_mind_name: str | None = None

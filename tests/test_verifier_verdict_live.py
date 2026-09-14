@@ -20,11 +20,27 @@ key into a hard collection error. ``.github/workflows/verifier-eval.yml`` sets
 that for first-party PRs, so the gate can no longer report success without
 executing (ENG-1334). Fork PRs cannot receive the secret, so they still skip.
 
-Model matrix: one first-party alias (``haiku`` — enforces the forced
-``tool_choice`` structurally) and one narrating alias (``mindshub_air`` —
-narrates into ``content`` before the tool call). ENG-1081 measured a clean
-9-vs-3 split between those populations; an eval that only ran on haiku would
-have missed the entire ENG-1081 incident class.
+Model matrix: two aliases, ``haiku`` (Anthropic-native) and ``mindshub_air``
+(OpenAI-native — it resolves to a GPT model). Two provider shapes, which is what
+the matrix actually covers today.
+
+It used to cover two *behavioural* populations — one alias that enforced the
+forced ``tool_choice`` structurally, one that narrated into ``content`` first, a
+clean 9-vs-3 split when ENG-1081 measured it. **That population is gone.**
+``mindshub_air`` was repointed off Kimi to ``gpt-5.6-luna`` around 2026-08-10,
+and re-measured 2026-09-03 no reachable alias narrates at all: 0 narration
+characters on eight of them (air, haiku, kimi, deepseek, qwen, glm, grok,
+gpt-luna), identically 0 with the anti-preamble suffix *stripped*, so it is the
+models that changed rather than the prompt suppressing them. Anton retired the
+failure mode from its own side too — the budget went 256 → ``(2048, 4096)`` and
+``_VERIFIER_NO_PREAMBLE`` entered the verifier system prompt. Production agrees:
+``turn_completed.verifier_failure = 'truncated'`` is 0 over 30 days.
+
+So there is no narrating alias to re-pin the second slot to, and the honest
+description of this matrix is two provider shapes. Do not restore the old
+wording without re-measuring; if a narrating model ever returns (an open-weights
+Air backend is the likely route), ``_EXPECTED_SERVED`` is what will tell you, in
+the first run after the swap. ENG-1687.
 
 Non-determinism policy (decided up front, per the ticket): every run of a case
 must land inside that case's acceptable set — for the four single-valued cases
@@ -64,6 +80,7 @@ except Exception:
 
 from anton.config.settings import AntonSettings
 from anton.core.llm.client import LLMClient
+from anton.core.llm.identity import sanitize_model_name
 from anton.core.llm.provider import StructuredOutputError, TokenLimitExceeded
 from anton.core.session import (
     _VERIFIER_TOKEN_BUDGETS,
@@ -205,12 +222,104 @@ def _throttle_pause(retry_after: float | None) -> float:
         return _THROTTLE_RETRY_SLEEP_S
     return max(0.0, min(retry_after, _THROTTLE_RETRY_CAP_S))
 
-# One structural-tool_choice alias and one narrating alias — the two behaviour
-# populations ENG-1081 measured. Overridable for one-off runs against other
-# aliases without editing the file.
+# Two provider shapes: Anthropic-native (`haiku`) and OpenAI-native
+# (`mindshub_air`, which resolves to a GPT model). Overridable for one-off runs
+# against other aliases without editing the file.
+#
+# These are NOT two narration populations, whatever the git history says. That
+# was the original rationale, it was true when ENG-1081 measured a 9-vs-3 split,
+# and it is dead — see the module docstring and `_EXPECTED_SERVED` (ENG-1687).
 _FIRST_PARTY_MODEL = os.environ.get("VERIFIER_EVAL_FIRST_PARTY_MODEL", "haiku")
 _NARRATING_MODEL = os.environ.get("VERIFIER_EVAL_NARRATING_MODEL", "mindshub_air")
 _MODELS = [_FIRST_PARTY_MODEL, _NARRATING_MODEL]
+
+# The model each alias resolved to when its slot was last justified. Measured
+# 2026-09-03 against prod through this file's own call path.
+#
+# An alias is a CATALOG POINTER, not a model and not a behaviour. The auth
+# catalog can repoint one with no PR in this repo and no drift detection
+# (`mindshub_inference/.../providers/registry.py` says so in its own ⚠️
+# comment), and it does: `mindshub_air` moved off Kimi K2.6 to `gpt-5.6-luna`
+# around 2026-08-10, and `kimi` moved Moonshot → Fireworks after that. The first
+# repoint went unnoticed for a week and cost this eval half its matrix — 11 green
+# cases covering one population twice while the docstring claimed two (ENG-1687).
+#
+# So the eval states what it expects to be served and checks it on every call.
+# This is an IDENTITY check, deliberately not a behavioural one:
+#
+#   - It is free. `LLMResponse.model` is on every response already (ENG-1638),
+#     so nothing extra is called, and there is nothing to flake.
+#   - It catches repoints whose consequence nobody predicted. A probe only finds
+#     drift in the property you thought to probe; kimi's provider move changed no
+#     narration at all but flips its `tool_choice` failure mode (ENG-1095).
+#   - Behaviour is already guarded. `test_verdict` asserts the verdicts
+#     themselves, so a model that starts judging the fixtures differently reds
+#     with or without a repoint. Identity was the missing half, not behaviour.
+#
+# WHEN THIS FIRES: update the pin and re-read the slot's rationale in the SAME
+# commit. A repoint that only moves the pin leaves the slot undocumented again,
+# which is exactly how the last one hid. An exact id is intended: a
+# family-preserving bump still deserves a human glance, and a prefix match would
+# have stayed green through kimi's move.
+_EXPECTED_SERVED: dict[str, str] = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "mindshub_air": "gpt-5.6-luna",
+}
+
+#: alias -> the id the gateway reported serving, filled as calls happen. Printed
+#: at session end so a repoint is visible in the run that first sees it, not
+#: three weeks later while validating something else.
+_SERVED: dict[str, str] = {}
+
+
+class AliasRepointed(Exception):
+    """An alias no longer serves the model its matrix slot was measured on.
+
+    Not an `AssertionError`, and deliberately not one of the types `_verdict`
+    handles: a repoint is neither a rubric regression nor a transient, and it
+    must not be absorbed by the truncation-retry or throttle-skip paths.
+    """
+
+
+def _check_served_model(alias: str, served: object) -> None:
+    """Record what `alias` actually served, and reject a silent repoint.
+
+    Pure so the gate suite can test it without a key or a network
+    (`tests/test_verifier_eval_gate.py`).
+
+    The id is put through `identity.sanitize_model_name` first — the same
+    treatment anton already gives this same field before it reaches a prompt
+    (`identity.py`: "untrusted text ... cap it and keep it on one line"). Here it
+    lands in an exception message and in `GITHUB_STEP_SUMMARY`, so a value
+    carrying newlines would inject lines into a CI artifact. It also folds in the
+    non-string and empty checks. Known cost: an id longer than the sanitizer's
+    80-char cap would be truncated and then mismatch its pin — the longest id
+    this catalog serves is 46 (`accounts/fireworks/models/deepseek-v4-pro-0813`).
+
+    Silent on two cases, both on purpose:
+
+    - **An alias not in the pin map.** The `VERIFIER_EVAL_*_MODEL` env vars exist
+      for one-off runs against another alias; failing those would make the
+      escape hatch unusable. Such a run is recorded and printed, never asserted.
+    - **No served id.** `None` means the provider omitted the field, which is a
+      property of the provider, not evidence about the model. Refusing to run
+      would turn a missing echo into a fake repoint.
+    """
+    served = sanitize_model_name(served)
+    if served is None:
+        return
+    _SERVED[alias] = served
+    expected = _EXPECTED_SERVED.get(alias)
+    if expected is None or served == expected:
+        return
+    raise AliasRepointed(
+        f"alias {alias!r} now serves {served!r}, but this eval's matrix slot "
+        f"was measured on {expected!r}. The catalog repointed it. Nothing here "
+        f"is broken and no verdict below can be trusted as evidence about "
+        f"{expected!r}: re-read why this slot exists, decide whether "
+        f"{served!r} still covers it, then update _EXPECTED_SERVED and the "
+        f"module docstring in the same commit. See ENG-1687."
+    )
 
 _RUNS = int(os.environ.get("VERIFIER_EVAL_RUNS", "3"))
 _STUCK_RUNS = int(os.environ.get("VERIFIER_EVAL_STUCK_RUNS", "6"))
@@ -238,7 +347,81 @@ def _client(model: str) -> LLMClient:
         planning_reasoning_effort=None,
         coding_reasoning_effort=None,
     )
-    return LLMClient.from_settings(settings)
+    return _pinned(LLMClient.from_settings(settings), model)
+
+
+def _pinned(llm: LLMClient, alias: str) -> LLMClient:
+    """Check `_EXPECTED_SERVED` on every response this client returns.
+
+    `generate_object_code` — the verdict call — returns the parsed schema object,
+    so the served id is not reachable from the caller; the shim is how it is
+    read. One shim covers every call the eval makes at no extra cost, whereas a
+    separate probe call per alias would cost more and check less, leaving the
+    matrix's own calls unverified.
+
+    BOTH providers are wrapped, deduplicated by identity. `from_settings` builds
+    the planning and coding providers as separate objects even when both roles
+    name the same alias, so wrapping only the coding one leaves any future
+    `generate_object` or `chat` call in this file silently unpinned — the same
+    quiet-gap class this pin exists to close (self-review of #434).
+    """
+    providers = {
+        id(provider): provider
+        for provider in (llm._coding_provider, llm._planning_provider)
+        if provider is not None
+    }
+    for provider in providers.values():
+        inner = provider.complete
+
+        async def complete(_inner=inner, **kwargs):
+            response = await _inner(**kwargs)
+            _check_served_model(alias, getattr(response, "model", None))
+            return response
+
+        provider.complete = complete
+    return llm
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _report_served_models(request):
+    """Print alias → served model once the module's calls are done.
+
+    ENG-1687's second half: the pin makes a repoint *fail*, this makes one
+    *visible*. Without it the run says nothing about which models produced the
+    verdicts, which is how a repoint stayed invisible for three weeks — the
+    evidence was in every response body and nothing wrote it down.
+
+    Yields first: the map is empty until calls have happened.
+    """
+    yield
+    if not _SERVED:
+        return
+    lines = [f"{alias} -> {served}" for alias, served in sorted(_SERVED.items())]
+    # Through the terminal reporter, not `print`: pytest captures and DISCARDS
+    # stdout from a passing test, so a plain print showed this only on a red run
+    # — the run that needs it least. Falls back to print if the plugin is gone.
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    body = "verifier eval served models:\n  " + "\n  ".join(lines)
+    if reporter is not None:
+        reporter.write_line("")
+        reporter.write_line(body)
+    else:
+        print("\n" + body)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary:
+        return
+    # Best-effort: a report that cannot be written must not fail a green eval.
+    try:
+        with open(summary, "a") as fh:
+            fh.write("### Verifier eval — models actually served\n\n")
+            for alias, served in sorted(_SERVED.items()):
+                pin = _EXPECTED_SERVED.get(alias)
+                note = "" if pin is None else (" ✅" if served == pin else " ⚠️ repointed")
+                fh.write(f"- `{alias}` → `{served}`{note}\n")
+            fh.write("\nAliases are catalog pointers; these are the models the "
+                     "gateway reported serving (ENG-1687).\n")
+    except OSError:
+        pass
 
 
 async def _verdict(llm: LLMClient, case: Case) -> _VerifierVerdict:

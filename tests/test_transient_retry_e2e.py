@@ -19,7 +19,7 @@ canned SSE bytes.
 from __future__ import annotations
 
 import anthropic
-import httpx
+import httpx2 as httpx
 import openai
 import pytest
 

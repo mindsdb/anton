@@ -13,7 +13,15 @@ from anton.core.tools.skill_draft import handle_create_skill_draft
 
 
 def _call(session, **args) -> dict:
-    return json.loads(asyncio.run(handle_create_skill_draft(session, args)))
+    """Unwrap the handler's ToolOutcome the way the tool loop does (ENG-2248).
+
+    `.content` is what reaches the model and lands in history; `.ok` is the
+    verdict the streak reads. These tests assert on the content, so they read
+    exactly what they read before the migration — see
+    `test_tool_verdict_migration.py` for the `.ok` half.
+    """
+    outcome = asyncio.run(handle_create_skill_draft(session, args))
+    return json.loads(getattr(outcome, "content", outcome))
 
 
 def _session(drafts_root, store=None):
