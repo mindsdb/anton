@@ -8,6 +8,7 @@ standalone `lint_html` (see `test_html_lint.py` for that).
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -55,13 +56,19 @@ def test_no_browser_configured_produces_no_messages(monkeypatch, store: _FakeSto
     assert lint_changed_artifact_files(store, before) == []
 
 
+@pytest.mark.skipif(shutil.which("true") is None, reason="no 'true' binary on PATH")
 def test_a_configured_browser_that_fails_to_produce_output_is_silent(
     monkeypatch, store: _FakeStore
 ):
     """A browser IS configured here — the run itself just didn't produce a
     usable result (stands in for a crash/timeout/malformed output). Still
-    no message: a checker that couldn't run has nothing to report."""
-    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/bin/true")  # exits 0, no output
+    no message: a checker that couldn't run has nothing to report.
+
+    `shutil.which`, not a hardcoded `/bin/true` — that path doesn't exist on
+    macOS (`/usr/bin/true` there), which silently degenerated this into the
+    no-browser-at-all case above instead of what it claims to test.
+    """
+    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", shutil.which("true"))  # exits 0, no output
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
