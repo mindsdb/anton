@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.tools.tool_handlers import LINT_STATUS_NOT_VALIDATED, lint_changed_artifact_files
+from anton.core.tools.tool_handlers import lint_changed_artifact_files
 
 requires_browser = pytest.mark.skipif(
     not os.environ.get("ANTON_HTML_LINT_BROWSER"),
@@ -44,42 +44,29 @@ def _make_artifact(store: _FakeStore, slug: str) -> Path:
     return folder
 
 
-def test_no_browser_configured_sets_no_status_at_all(monkeypatch, store: _FakeStore):
-    """No browser configured for this deployment (cloud/web) is a
-    capability fact, not a finding about any one artifact — `.html` isn't
-    registered as a checker here at all, the same as an unregistered
-    extension, so it never contributes `not_validated` either. Without
-    this, every html artifact on a browser-less host would carry a
-    permanent, uncloseable 'Not validated' badge."""
+def test_no_browser_configured_produces_no_messages(monkeypatch, store: _FakeStore):
+    """No browser configured (cloud/web) means the checker can't run at
+    all — silent, same as an unregistered extension, not a finding."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
-    status: dict[str, str] = {}
 
-    messages = lint_changed_artifact_files(store, before, status_by_slug=status)
-
-    assert messages == []
-    assert status == {}
+    assert lint_changed_artifact_files(store, before) == []
 
 
-def test_a_configured_browser_that_fails_to_produce_output_sets_not_validated(
+def test_a_configured_browser_that_fails_to_produce_output_is_silent(
     monkeypatch, store: _FakeStore
 ):
-    """Unlike no browser at all, a browser IS configured here — the run
-    itself just didn't produce a usable result (stands in for a crash/
-    timeout/malformed output). That is a real, worth-surfacing signal, so
-    `not_validated` is still correct."""
+    """A browser IS configured here — the run itself just didn't produce a
+    usable result (stands in for a crash/timeout/malformed output). Still
+    no message: a checker that couldn't run has nothing to report."""
     monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/bin/true")  # exits 0, no output
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
-    status: dict[str, str] = {}
 
-    messages = lint_changed_artifact_files(store, before, status_by_slug=status)
-
-    assert messages == []
-    assert status == {"dash-abc12345": LINT_STATUS_NOT_VALIDATED}
+    assert lint_changed_artifact_files(store, before) == []
 
 
 @requires_browser

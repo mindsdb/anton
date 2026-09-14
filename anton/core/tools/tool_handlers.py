@@ -171,33 +171,17 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
 
-# Per-artifact status ChatSession.artifact_lint_status surfaces to a host.
-# "has_errors" outranks "not_validated": one file with a real finding makes
-# the whole artifact worth flagging even if a sibling file merely couldn't
-# be checked.
-LINT_STATUS_HAS_ERRORS = "has_errors"
-LINT_STATUS_NOT_VALIDATED = "not_validated"
-
-
 def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
-    """suffix -> checker. `None` means it could not run at all (e.g. a
-    configured browser crashed or timed out this time); `[]` means it ran
-    and found nothing; a non-empty list is real findings.
-    `lint_changed_artifact_files` turns `None` into `LINT_STATUS_NOT_VALIDATED`
-    on `status_by_slug` — nothing is appended to the returned message list
-    for it, so a checker that never ran is silent in the agent's own
-    tool-result text (only the end-of-turn status sees it).
+    """suffix -> checker. `None` means it could not run at all (e.g. no
+    headless browser); `[]` means it ran and found nothing; a non-empty
+    list is real findings — only that last case is ever appended to the
+    agent-facing message list.
 
-    Add a format by adding one entry here. `.xlsx` is always registered;
-    every other extension not listed is silently unchecked, which is honest
-    as-is: nothing ever claimed to validate a `.csv`. `.html` follows the
-    same rule rather than being a special case: with no browser configured
-    for this deployment at all (cloud/web has none to find), there is no
-    checker for it here — registering it anyway would report every html
-    artifact `not_validated` forever, which is a deployment fact, not a
-    finding about any one artifact.
+    Add a format by adding one entry here. Only `.xlsx`/`.html` are
+    registered — every other extension is silently unchecked, which is
+    honest as-is: nothing ever claimed to validate a `.csv`.
     """
-    from anton.core.artifacts.html_lint import is_browser_configured, lint_html
+    from anton.core.artifacts.html_lint import lint_html
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
@@ -216,33 +200,19 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             return [f.message() for f in findings]
         return None
 
-    linters: dict[str, Callable[[Path], list[str] | None]] = {".xlsx": _xlsx_linter}
+    def _html_linter(path: Path) -> list[str] | None:
+        findings = lint_html(path)
+        if findings is not None:
+            return [f.message() for f in findings]
+        return None
 
-    if is_browser_configured():
-        def _html_linter(path: Path) -> list[str] | None:
-            findings = lint_html(path)
-            if findings is not None:
-                return [f.message() for f in findings]
-            return None
-
-        linters[".html"] = _html_linter
-
-    return linters
+    return {".xlsx": _xlsx_linter, ".html": _html_linter}
 
 
-def lint_changed_artifact_files(
-    store, before: dict[str, float], *, status_by_slug: dict[str, str] | None = None
-) -> list[str]:
+def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
     """Run the format-appropriate checker on artifact folders this cell
     edited (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list()
-
-    `status_by_slug`, when given, is updated in place with this call's
-    aggregate verdict per touched slug (`LINT_STATUS_HAS_ERRORS` /
-    `LINT_STATUS_NOT_VALIDATED`), or has the slug's entry cleared when every
-    checked file in it now comes back clean — in-memory, per turn, this is
-    the end-of-turn still-invalid signal (`ChatSession.artifact_lint_status`),
-    not persisted anywhere past the turn.
+    tool-result text right away, not only via a later open()/list().
     """
     linters = _artifact_linters()
     if not linters:
@@ -254,8 +224,6 @@ def lint_changed_artifact_files(
         if current is None or current <= prev_mtime:
             continue
 
-        has_errors = False
-        not_validated = False
         for path in (store.root / slug).rglob("*"):
             linter = linters.get(path.suffix.lower())
             if linter is None or not path.is_file():
@@ -266,24 +234,12 @@ def lint_changed_artifact_files(
             except OSError:
                 continue
             file_messages = linter(path)
-            if file_messages is None:
-                # Checker could not run at all (e.g. no headless browser) —
-                # distinct from an empty list, which means it ran and found
-                # nothing.
-                not_validated = True
+            if not file_messages:
+                # None (couldn't check) or [] (checked, clean) — either way,
+                # nothing worth telling the agent about this file.
                 continue
-            if file_messages:
-                has_errors = True
             for message in file_messages:
                 messages.append(f"{slug}/{path.name} — {message}")
-
-        if status_by_slug is not None:
-            if has_errors:
-                status_by_slug[slug] = LINT_STATUS_HAS_ERRORS
-            elif not_validated:
-                status_by_slug[slug] = LINT_STATUS_NOT_VALIDATED
-            else:
-                status_by_slug.pop(slug, None)
 
     return messages
 
@@ -884,7 +840,6 @@ async def handle_scratchpad(
                     lint_messages = await asyncio.to_thread(
                         lint_changed_artifact_files,
                         artifact_store, before_artifact_mtimes,
-                        status_by_slug=getattr(session, "_artifact_lint_status", None),
                     )
                 except Exception:
                     # Best-effort: a lint crash must never fail

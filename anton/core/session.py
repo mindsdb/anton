@@ -1440,14 +1440,6 @@ class ChatSession:
         # writing into the same (shared, project-wide) directory can never be
         # mistaken for this turn's work. Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
-        # slug -> "has_errors" | "not_validated" for this turn's lint checks
-        # In-memory only, per turn — not persisted to metadata.json,
-        # since the only consumers are: (a) this turn's own model-facing
-        # signal (already carried by result_text) and (b) an end-of-turn
-        # user-facing notice a host builds from this property. Overwritten
-        # (not merged) each time a slug is re-linted, so a later clean re-lint
-        # in the same turn correctly clears an earlier finding.
-        self._artifact_lint_status: dict[str, str] = {}
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode().
@@ -1552,16 +1544,6 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
-
-    @property
-    def artifact_lint_status(self) -> dict[str, str]:
-        """slug -> "has_errors" | "not_validated" for artifacts this turn's
-        lint checks found still invalid at the point each check last ran
-        A copy, same reason as `artifacts_touched`: a host reads
-        this after the turn to decide whether to warn the user, and must not
-        be able to mutate the session's own record.
-        """
-        return dict(self._artifact_lint_status)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -4050,7 +4032,6 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
-        self._artifact_lint_status = {}
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -5147,7 +5128,6 @@ class ChatSession:
                                         lint_messages = await asyncio.to_thread(
                                             lint_changed_artifact_files,
                                             artifact_store, before_artifact_mtimes,
-                                            status_by_slug=self._artifact_lint_status,
                                         )
                                     except Exception:
                                         lint_messages = []

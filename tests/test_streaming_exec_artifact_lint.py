@@ -133,15 +133,11 @@ async def test_turn_stream_surfaces_a_lint_finding_from_inline_exec(workspace):
         ]
         assert tool_result_msgs, "the exec call must produce a tool_result"
         result_content = tool_result_msgs[0]["content"][0]["content"]
-        # In-memory, per-turn status a host reads to decide whether to warn
-        # the user at end of turn — not persisted anywhere past the turn.
-        lint_status = session.artifact_lint_status
     finally:
         await session.close()
 
     assert "[artifact lint]" in result_content
     assert "E6" in result_content
-    assert lint_status == {artifact.slug: "has_errors"}
 
 
 async def test_lint_call_is_routed_through_asyncio_to_thread(workspace, monkeypatch):
