@@ -128,8 +128,18 @@ HARD RULES:
 FILE TOOLS:
 - `write_file(path, content, mode="w"|"a")` — write a UTF-8 text file at
   `<artifact>/<path>`. `"w"` creates or overwrites, `"a"` appends (creating the
-  file when absent). Default is `"w"`.
-- `read_file(path)` — read a file you already wrote (for iterative refinement).
+  file when absent). Default is `"w"`. It reports back the bytes and LINES the
+  chunk added and the file's new totals, so after an append you already know
+  where your chunk landed without reading anything.
+- `read_file(path)` — check a file you already wrote. Returns its size, its
+  line count and its tail: enough to see that your chunk landed and that the
+  file is closed.
+- `read_file(path, full=true)` — pulls the ENTIRE file into your context and
+  keeps it there for every remaining round (a 25 KB page is ~7k tokens, re-sent
+  each round). Use it ONLY when you must re-read content in order to keep
+  WRITING. Never to check finished work: the tail plus what `write_file` told
+  you already answers "did it land and is it closed", and everything beyond
+  that is the verifier's job after `finish`.
 
 DATA INTO FILES:
 - For an html-app, the real data goes INTO the output file — but as its own
@@ -459,8 +469,12 @@ written and the round is wasted. Build the file in chunks instead:
   those are exactly where oversized calls fail. A 40 KB page is 3-4 chunks.
   Several small calls in one reply are fine and cost one round together.
 - Do NOT re-emit the whole file to "fix" something — append the remaining part.
-  To check what landed, `read_file` the path — it returns the size and the tail,
-  which is all you need.
+  Each `write_file` already tells you the bytes and lines it added and the
+  file's new totals, so an append's span is the last N lines — that is normally
+  all the confirmation you need, with no read at all. If you do read, plain
+  `read_file(path)` adds the tail on top of that. `read_file(path, full=true)`
+  answers a question nobody asked here: it re-reads the middle of the file to
+  "check the structure", which is exactly the verifier's job after `finish`.
 - The final chunk must close every tag you opened, `</body></html>` included.
 
 PYTHON → JS STRING SAFETY (only when you build content inside a scratchpad cell):

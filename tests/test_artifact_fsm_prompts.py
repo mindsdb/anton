@@ -452,3 +452,58 @@ def test_chunk_limit_is_quoted_identically_everywhere_it_is_stated():
     recovery = f"{engine._RECOVERY_CHUNK:,} characters"
     assert recovery in engine._TRUNCATED_MSG
     assert recovery in engine._NO_CONTENT_MSG
+
+
+# ── `read_file`'s surfaces must agree about `full` ──────────────────────────
+#
+# The 2026-09-14 run found them disagreeing in the way that costs the most:
+# the only place stating that `full=true` is expensive and must not be used to
+# check finished work was the tool schema's `description`, while the system
+# prompt showed `read_file(path)` as a one-argument call and separately
+# promised the tail was "all you need". The model read all of them, believed
+# the promise, discovered the tail says nothing about the middle of a file,
+# and escalated to `full=true` anyway.
+
+def _write_loop_prompts() -> dict[str, str]:
+    """Every system prompt a `_run_loop` write round can be sent.
+
+    All three, not just the html-app one: they share the FILE TOOLS and chunk
+    sections, so a fix applied to one surface and not the others is exactly the
+    divergence these tests exist to catch.
+    """
+    return {
+        "html-app": prompts.build_subagent_system_prompt(
+            "html-app", Path("/tmp/a"), primary="index.html"
+        ),
+        "frontend": prompts.build_frontend_system_prompt(Path("/tmp/a")),
+        "backend": prompts.build_backend_system_prompt(Path("/tmp/a")),
+    }
+
+
+def test_the_system_prompt_names_the_full_parameter_at_all():
+    """It did not, which is why the only warning about it lived in the tool
+    schema — which the model reads as a listing, not as rules."""
+    for name, text in _write_loop_prompts().items():
+        assert "full=true" in text, name
+
+
+def test_the_system_prompt_says_what_full_costs_and_when_not_to_use_it():
+    for name, text in _write_loop_prompts().items():
+        assert "ENTIRE file" in text, name
+        assert "finish" in text, name
+
+
+def test_no_surface_still_claims_the_tail_is_all_you_need():
+    """Falsified by the run: the tail says nothing about the middle of a file,
+    so promising it is sufficient is what sends the model looking for a way
+    around it."""
+    for name, text in _write_loop_prompts().items():
+        assert "which is all you need" not in text, name
+
+
+def test_the_write_result_is_advertised_as_the_cheaper_answer():
+    """`write_file` reports lines now; the prompt has to say so, or the model
+    spends a round re-learning what it was already told."""
+    for name, text in _write_loop_prompts().items():
+        assert "LINES" in text, name
+        assert "without reading" in text, name

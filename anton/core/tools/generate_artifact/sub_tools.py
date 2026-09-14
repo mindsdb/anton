@@ -193,7 +193,25 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
     rel_written = str(target.relative_to(root.resolve()))
     size = target.stat().st_size
     verb = "Appended to" if mode == "a" else "Wrote"
-    message = f"{verb} {rel_written} (+{len(content)} bytes, file now {size} bytes)."
+    # Lines beside bytes: the model's next question after a chunk lands is
+    # "where did it land, and is the file closed" — a byte count answers
+    # neither, and the round it spends re-learning the size this message
+    # already reported is pure loss (measured 2026-09-14). With the chunk's
+    # line count and the file's, an append's span is the last N lines, which
+    # is the map a targeted re-read needs instead of pulling the whole file
+    # back through the context.
+    chunk_lines = content.count("\n") + 1 if content else 0
+    try:
+        total_lines = target.read_text(encoding="utf-8").count("\n") + 1
+    except OSError:
+        # The write succeeded; only the count is unavailable. Reporting the
+        # write as failed here would be a lie about what is on disk.
+        total_lines = None
+    tail = f" / {total_lines} lines" if total_lines is not None else ""
+    message = (
+        f"{verb} {rel_written} (+{len(content)} bytes / {chunk_lines} lines, "
+        f"file now {size} bytes{tail})."
+    )
     if len(content) > CHUNK_SOFT_LIMIT:
         # The write itself succeeded — this call landed. The warning is about
         # the NEXT one: a model that got away with an oversized chunk keeps

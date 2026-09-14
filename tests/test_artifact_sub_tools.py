@@ -109,3 +109,26 @@ def test_read_file_small_file_is_returned_whole(tmp_path: Path):
 def test_read_file_schema_advertises_full():
     props = sub_tools.READ_FILE_SCHEMA["input_schema"]["properties"]
     assert "full" in props
+
+
+# ── The line map: what removes the "let me verify" round ────────────────────
+#
+# Measured 2026-09-14 on the `найди пару` run: after a successful append the
+# model spent a whole round on `read_file` whose only new information over the
+# write result was the tail, then escalated to `full=true` — 26 006 characters,
+# 31% of the final round's context. The write result reporting bytes only is
+# what made the first of those rounds look worth spending.
+
+def test_write_file_reports_lines_beside_bytes(tmp_path: Path):
+    res = write_file(tmp_path, "a.html", "one\ntwo\nthree", mode="w")
+    assert "3 lines" in res["message"]
+    assert "file now" in res["message"]
+
+
+def test_an_append_reports_both_its_own_lines_and_the_new_total(tmp_path: Path):
+    """Together these give the chunk's span — the last N of M lines — which is
+    the map a targeted re-read needs, without reading anything."""
+    write_file(tmp_path, "a.html", "1\n2\n3\n4\n5\n6", mode="w")
+    res = write_file(tmp_path, "a.html", "\n7\n8", mode="a")
+    assert "/ 3 lines" in res["message"], res["message"]      # the chunk
+    assert "/ 8 lines)" in res["message"], res["message"]     # the file
