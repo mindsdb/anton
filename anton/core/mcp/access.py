@@ -29,6 +29,22 @@ doc. Confirmed the fail-closed default works as intended: 5 tools this
 account's server advertised that weren't yet in this table (AEO/intent
 features added since the table was first drafted) were correctly excluded
 from a read-mode connection's registered tools until classified here.
+
+Two verification passes, same day: the first grant only carried read-level
+CRM scopes, so `manage_crm_objects` (the primary "write a CRM record" tool)
+was entirely absent from `tools/list()` — `get_user_details` showed
+`CONTACT`/`DEAL`/`COMPANY`/etc. as `"write": "REQUIRES_REAUTHORIZATION"`.
+After enabling the `crm.objects.{contacts,companies,deals}.write` scopes on
+the app (HubSpot gates optional scopes per-app before they're even
+selectable at consent time) and re-authorizing with those three checked,
+`manage_crm_objects` appeared live, correctly write-tier, and
+`get_user_details` confirmed `CONTACT`/`COMPANY`/`DEAL` all flipped to
+`"write": "AVAILABLE"`. The live tool list now matches this table exactly
+in both directions (no unclassified extras, no stale entries).
+
+`query_crm_data` (SQL-shaped) and `manage_onboarding` (its own description
+contradicts its write-shaped name) are the two the original source doc left
+ambiguous; both are kept on the safe side of the line they're closest to.
 """
 
 from __future__ import annotations
@@ -38,29 +54,12 @@ from typing import Literal
 AccessMode = Literal["read", "write", "none"]
 
 #: engine -> {tool_name: "read" | "write"}. Live-verified 2026-09-15 against
-#: a real HubSpot MCP Auth App (see module docstring) — not just doc-derived
-#: anymore, though two things from that live run are still worth tracking:
-#:
-#: 1. `render_landing_page_ui`, `render_asset`, and `manage_blog_post` (all
-#:    in the original doc-derived table) did not appear in the live
-#:    `tools/list()` response at all — removed here as stale. If a future
-#:    live check shows them again (e.g. under a different scope grant),
-#:    re-add with their original classification (read/read/write).
-#: 2. `manage_crm_objects` — the primary "write a CRM record" tool — also
-#:    did not appear live. `get_user_details`'s own response showed most
-#:    write-capable CRM object types (CONTACT, DEAL, COMPANY, TICKET, ...)
-#:    as `"write": "REQUIRES_REAUTHORIZATION"`, so this reads as: the test
-#:    OAuth grant only requested read-level access, and the server omits
-#:    write tools from `tools/list()` entirely until a broader grant exists
-#:    — not a permanent removal. Kept in the table (harmless: a tool the
-#:    server never returns is never filtered, it's just absent), but
-#:    **before Stage 2 assumes write mode can create/update basic CRM
-#:    records, re-verify with a re-auth that actually grants write scope.**
-#:
-#: `query_crm_data` (SQL-shaped) and `manage_onboarding` (its own
-#: description contradicts its write-shaped name) are the two the original
-#: source doc left ambiguous; both are kept on the safe side of the line
-#: they're closest to.
+#: a real HubSpot MCP Auth App with both read- and write-scoped grants (see
+#: module docstring) — not doc-derived anymore. `render_landing_page_ui`,
+#: `render_asset`, and `manage_blog_post` (all in the original doc-derived
+#: table) never appeared in either live `tools/list()` run — removed here as
+#: stale. If a future live check shows them again, re-add with their
+#: original classification (read/read/write).
 TOOL_ACCESS: dict[str, dict[str, str]] = {
     "hubspot": {
         # READ
@@ -85,7 +84,7 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         "get_aeo_metrics": "read",
         "search_intent_signals": "read",
         # WRITE
-        "manage_crm_objects": "write",  # not seen live yet — see note above
+        "manage_crm_objects": "write",  # confirmed live 2026-09-15 with a write-scoped grant
         "manage_campaign_objects": "write",
         "manage_marketing_email": "write",
         "manage_landing_page": "write",
