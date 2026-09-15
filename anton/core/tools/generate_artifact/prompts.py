@@ -151,9 +151,9 @@ HARD RULES:
 FILE TOOLS:
 - `write_file(path, mode="w"|"a")` — write the body from THIS reply to
   `<artifact>/<path>`. `"w"` creates or overwrites, `"a"` appends (creating the
-  file when absent). Default is `"w"`. It reports back the bytes and LINES the
-  body added and the file's new totals, so after an append you already know
-  where your part landed without reading anything.
+  file when absent). Default is `"w"`. It reports back the CHARACTERS and
+  LINES the body added and the file's new totals, so after an append you
+  already know where your part landed without reading anything.
 - `read_file(path)` — check a file you already wrote. Returns its size, its
   line count and its tail: enough to see that your chunk landed and that the
   file is closed.
@@ -493,8 +493,8 @@ Split ONLY a file that will clearly exceed it:
 - If a reply is cut off before the closing marker, nothing from it is written —
   send that part again, shorter, and append the remainder next.
 - Do NOT re-emit the whole file to "fix" something — append the remaining part.
-  Each `write_file` already tells you the bytes and lines it added and the
-  file's new totals, so an append's span is the last N lines — that is normally
+  Each `write_file` already tells you the characters and lines it added and
+  the file's new totals, so an append's span is the last N lines — that is normally
   all the confirmation you need, with no read at all. If you do read, plain
   `read_file(path)` adds the tail on top of that. `read_file(path, full=true)`
   answers a question nobody asked here: it re-reads the middle of the file to

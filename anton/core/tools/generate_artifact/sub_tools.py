@@ -313,26 +313,38 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
     with open(target, mode, encoding="utf-8") as f:
         f.write(content)
     rel_written = str(target.relative_to(root.resolve()))
-    size = target.stat().st_size
     verb = "Appended to" if mode == "a" else "Wrote"
-    # Lines beside bytes: the model's next question after a chunk lands is
-    # "where did it land, and is the file closed" — a byte count answers
-    # neither, and the round it spends re-learning the size this message
-    # already reported is pure loss (measured 2026-09-14). With the chunk's
-    # line count and the file's, an append's span is the last N lines, which
-    # is the map a targeted re-read needs instead of pulling the whole file
-    # back through the context.
+    # Lines beside the size: the model's next question after a chunk lands is
+    # "where did it land, and is the file closed" — a size alone answers
+    # neither, and the round it spends re-learning what this message already
+    # reported is pure loss (measured 2026-09-14). With the chunk's line count
+    # and the file's, an append's span is the last N lines, which is the map a
+    # targeted re-read needs instead of pulling the whole file back through the
+    # context.
+    #
+    # Both figures are CHARACTERS, and that is a correction: the delta used to
+    # be len(content) labelled "bytes" while the total came from stat(), so a
+    # `mode="w"` write of Cyrillic reported "+28114 bytes ... file now 29004
+    # bytes" — the two disagreeing by the UTF-8 overhead alone, implying 890
+    # bytes had been there before. The model is told to reason about sizes in
+    # characters (REPLY_BODY_CHARS), `read_file` answers in characters, and it
+    # counts what it writes in characters; a second unit here bought nothing
+    # and contradicted the rest.
     chunk_lines = content.count("\n") + 1 if content else 0
     try:
-        total_lines = target.read_text(encoding="utf-8").count("\n") + 1
+        whole = target.read_text(encoding="utf-8")
     except OSError:
-        # The write succeeded; only the count is unavailable. Reporting the
+        # The write succeeded; only the read-back is unavailable. Reporting the
         # write as failed here would be a lie about what is on disk.
-        total_lines = None
-    tail = f" / {total_lines} lines" if total_lines is not None else ""
+        tail = ""
+    else:
+        tail = (
+            f", file now {len(whole)} characters"
+            f" / {whole.count(chr(10)) + 1} lines"
+        )
     message = (
-        f"{verb} {rel_written} (+{len(content)} bytes / {chunk_lines} lines, "
-        f"file now {size} bytes{tail})."
+        f"{verb} {rel_written} "
+        f"(+{len(content)} characters / {chunk_lines} lines{tail})."
     )
     # A reminder about the NEXT part, delivered at the only moment it is needed.
     #

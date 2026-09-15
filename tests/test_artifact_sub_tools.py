@@ -139,13 +139,41 @@ def test_read_file_schema_advertises_full():
 # Measured 2026-09-14 on the `найди пару` run: after a successful append the
 # model spent a whole round on `read_file` whose only new information over the
 # write result was the tail, then escalated to `full=true` — 26 006 characters,
-# 31% of the final round's context. The write result reporting bytes only is
+# 31% of the final round's context. The write result reporting a size only is
 # what made the first of those rounds look worth spending.
 
-def test_write_file_reports_lines_beside_bytes(tmp_path: Path):
+def test_write_file_reports_lines_beside_the_size(tmp_path: Path):
     res = write_file(tmp_path, "a.html", "one\ntwo\nthree", mode="w")
     assert "3 lines" in res["message"]
     assert "file now" in res["message"]
+
+
+# Both figures in one unit, and that unit the one the model counts in.
+#
+# Measured 2026-09-15 on the `найди пару` run: an overwrite of 28 114 Cyrillic
+# characters reported "+28114 bytes ... file now 29004 bytes", because the
+# delta was len(str) mislabelled while the total came from stat(). For mode="w"
+# those two describe the same thing and must agree; the 890 they differed by
+# said 890 bytes had been in the file before, which was false. The model
+# reasons about REPLY_BODY_CHARS in characters and read_file answers in
+# characters, so characters it is.
+def test_an_overwrite_reports_the_same_figure_for_the_chunk_and_the_file(
+    tmp_path: Path,
+):
+    body = "Привет\nмир\n"  # 12 characters, 22 bytes in UTF-8
+    res = write_file(tmp_path, "a.html", body, mode="w")
+    assert f"+{len(body)} characters" in res["message"], res["message"]
+    assert f"file now {len(body)} characters" in res["message"], res["message"]
+    assert "bytes" not in res["message"], res["message"]
+
+
+def test_the_reported_size_is_characters_not_bytes(tmp_path: Path):
+    """Locked separately from the agreement above: a delta and a total that
+    agree could still both be bytes."""
+    body = "Ы" * 10  # 10 characters, 20 bytes
+    res = write_file(tmp_path, "a.html", body, mode="w")
+    assert "10 characters" in res["message"], res["message"]
+    assert "20" not in res["message"], res["message"]
 
 
 def test_an_append_reports_both_its_own_lines_and_the_new_total(tmp_path: Path):
