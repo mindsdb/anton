@@ -309,6 +309,19 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
             emit({"kind": "skill", "entries": drafts})
+        # Pre-terminal like memory and skills. Without this the pod compacts
+        # every turn and throws the result away: the host owns history, so it
+        # must be told which seeded messages the summary now covers.
+        #
+        # `getattr`: cowork and anton deploy independently, and a session double
+        # (or a build predating `last_compaction`) must no-op here, not raise.
+        compaction = getattr(session, "last_compaction", None)
+        if compaction:
+            logger.info("emitting compaction covering %d seeded message(s)",
+                        compaction["covered_through"])
+            emit({"kind": "compaction",
+                  "summary": compaction["summary"],
+                  "covered_through": compaction["covered_through"]})
         # Pre-terminal for the same reason as memory and skills: cowork stops
         # reading the stream at the terminal event.
         #

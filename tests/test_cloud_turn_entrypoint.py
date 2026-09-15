@@ -566,6 +566,55 @@ def test_a_session_without_history_still_completes():
     assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
 
 
+# ── compaction result (ENG-1827) ─────────────────────────────────────────────
+
+
+class _CompactingSession(_HistorySession):
+    """Reports a compaction the way ChatSession.last_compaction does."""
+
+    def __init__(self, covered_through=3, summary="EARLIER: the user asked X.", **kw):
+        super().__init__(seed=[], appended=_HISTORY_TURN, compact=True, **kw)
+        self.last_compaction = {"summary": summary, "covered_through": covered_through}
+
+
+def _compaction_events(events):
+    return [e for e in events if e.get("kind") == "compaction"]
+
+
+def test_compaction_is_emitted_before_the_terminal_event():
+    """Without this the pod compacts every turn and the host never learns of
+    it, so the next turn resends — and re-summarizes — the whole history."""
+    events = _drive(_CompactingSession())
+    assert _compaction_events(events) == [
+        {"kind": "compaction", "summary": "EARLIER: the user asked X.",
+         "covered_through": 3},
+    ]
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_no_compaction_event_when_the_turn_did_not_compact():
+    session = _HistorySession(seed=[], appended=_HISTORY_TURN)
+    session.last_compaction = None
+    assert _compaction_events(_drive(session)) == []
+
+
+def test_a_session_without_last_compaction_still_completes():
+    """cowork-server and anton deploy independently: a build predating
+    `last_compaction` must no-op, not fail the turn."""
+    events = _drive(_FakeSession(deltas=["ok"]))
+    assert _compaction_events(events) == []
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_compaction_not_emitted_when_the_turn_fails():
+    """A failed turn's summary covers messages whose turn never landed; the
+    failure paths skip the pre-terminal emits entirely."""
+    session = _CompactingSession(raise_on_stream=RuntimeError("boom"))
+    events = _drive(session)
+    assert _compaction_events(events) == []
+    assert events[-1]["kind"] == "turn_failed"
+
+
 # ── build attribution rides the turn (ENG-1459 / ENG-1279) ───────────────────
 
 
