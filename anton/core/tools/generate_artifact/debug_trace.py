@@ -29,7 +29,7 @@ class NullTrace:
     def llm_call(self, **_: Any) -> None: ...
     def verdict(self, **_: Any) -> None: ...
     def tool_rejected(self, **_: Any) -> None: ...
-    def protocol_violation(self, **_: Any) -> None: ...
+    def protocol_note(self, **_: Any) -> None: ...
     def scratchpad(self, **_: Any) -> None: ...
     def file_written(self, **_: Any) -> None: ...
     def verifier(self, **_: Any) -> None: ...
@@ -83,15 +83,18 @@ class GenTrace:
         """
         self._emit("tool_rejected", {"node": node, "tool": tool, "reason": reason})
 
-    def protocol_violation(self, *, node: str, kind: str) -> None:
-        """A file-body protocol slip that was TOLERATED, not refused.
+    def protocol_note(self, *, node: str, kind: str) -> None:
+        """Prose around a file body — an observation, not a failure.
 
-        Separate from `tool_rejected` on purpose: a rejection costs the model a
-        round, a tolerated violation costs nothing and the body was still
-        written. The protocol's acceptance thresholds are stated per class, so
-        the two have to be countable apart.
+        Separate from `tool_rejected`, and separate in name too: a rejection
+        costs the model a round, this costs nothing and the file was written.
+        Calling it a violation made a healthy run read as a failing one (and
+        put it in an acceptance threshold it had no business being in).
+
+        Kept because it is the only way a CHANGE in the model's formatting
+        shows up at all.
         """
-        self._emit("protocol_violation", {"node": node, "kind": kind})
+        self._emit("protocol_note", {"node": node, "kind": kind})
 
     def llm_call(self, *, node, method, system, messages,
                  response=None, value=None, attempt=None, round=None) -> None:

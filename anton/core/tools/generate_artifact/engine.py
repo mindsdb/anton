@@ -708,13 +708,13 @@ async def _run_loop(
         # end marker, which is a fact rather than the estimate
         # `_response_is_truncated` makes from `stop_reason` and the budget.
         attempted_body = sub_tools.FILE_BEGIN_MARKER in (response.content or "")
-        body, body_error, violations = sub_tools.extract_file_body(
+        body, body_error, notes = sub_tools.extract_file_body(
             response.content or "",
             looks_truncated=_response_is_truncated(response, cap),
         )
         if trace is not None:
-            for kind in violations:
-                trace.protocol_violation(node=node_label, kind=kind)
+            for kind in notes:
+                trace.protocol_note(node=node_label, kind=kind)
         if body is None and not attempted_body and pending_body is not None:
             # The previous round produced a body and forgot the call; this is
             # the retry that supplies the call.

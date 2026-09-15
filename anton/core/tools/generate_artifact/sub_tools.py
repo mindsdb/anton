@@ -59,13 +59,18 @@ READ_TAIL_CHARS = 500
 FILE_BEGIN_MARKER = "<<<ANTON_FILE_BEGIN>>>"
 FILE_END_MARKER = "<<<ANTON_FILE_END>>>"
 
-#: Protocol slips that do NOT corrupt the body. Recorded rather than rejected:
-#: the interleaving of text and tool_use blocks is lost by the time a response
-#: reaches us (`LLMResponse.content` is one joined string), so a plain "Done."
-#: after the tool call is indistinguishable from prose after the end marker.
-#: Failing the round on that would break on the model's most ordinary habit.
-VIOLATION_TEXT_BEFORE = "text before the begin marker"
-VIOLATION_TEXT_AFTER = "text after the end marker"
+#: Prose around the body. NOT a failure, and deliberately not named as one: the
+#: body was complete, the file was written, nothing was retried. A preamble
+#: before the body is the model's ordinary habit, and the interleaving of text
+#: and tool_use blocks is lost by the time a response reaches us
+#: (`LLMResponse.content` is one joined string), so a plain "Done." after the
+#: tool call is indistinguishable from prose after the end marker.
+#:
+#: Recorded anyway, and only for this: it is how a CHANGE in the model's
+#: formatting becomes visible. It must NOT count toward the protocol's
+#: acceptance thresholds — those are about rounds lost, and this costs none.
+NOTE_TEXT_BEFORE = "text before the begin marker"
+NOTE_TEXT_AFTER = "text after the end marker"
 
 
 def extract_file_body(
@@ -73,9 +78,9 @@ def extract_file_body(
 ) -> tuple[str | None, str | None, list[str]]:
     """Pull one file body out of the assistant's text.
 
-    Returns ``(body, error, violations)``: exactly one of ``body``/``error`` is
-    not None. ``violations`` lists tolerated slips (see the constants above)
-    and is only ever non-empty alongside a body.
+    Returns ``(body, error, notes)``: exactly one of ``body``/``error`` is not
+    None. ``notes`` carries the formatting remarks above and is only ever
+    non-empty alongside a body — observations, not failures.
 
     Strictness is deliberately asymmetric. A duplicated marker or an empty body
     could make us write the WRONG bytes, so those refuse; stray prose cannot,
@@ -152,12 +157,12 @@ def extract_file_body(
             "them. Nothing was written."
         ), []
 
-    violations: list[str] = []
+    notes: list[str] = []
     if text[:start_at].strip():
-        violations.append(VIOLATION_TEXT_BEFORE)
+        notes.append(NOTE_TEXT_BEFORE)
     if text[end_at + len(FILE_END_MARKER):].strip():
-        violations.append(VIOLATION_TEXT_AFTER)
-    return body, None, violations
+        notes.append(NOTE_TEXT_AFTER)
+    return body, None, notes
 
 
 WRITE_FILE_SCHEMA: dict = {

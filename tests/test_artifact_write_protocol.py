@@ -20,8 +20,8 @@ from anton.core.tools.generate_artifact.engine import _run_loop
 from anton.core.tools.generate_artifact.sub_tools import (
     FILE_BEGIN_MARKER,
     FILE_END_MARKER,
-    VIOLATION_TEXT_AFTER,
-    VIOLATION_TEXT_BEFORE,
+    NOTE_TEXT_AFTER,
+    NOTE_TEXT_BEFORE,
     extract_file_body,
 )
 
@@ -61,10 +61,10 @@ class _Trace:
     """Records only what these tests ask about; everything else is a no-op."""
 
     def __init__(self) -> None:
-        self.violations: list[str] = []
+        self.notes: list[str] = []
 
-    def protocol_violation(self, *, node, kind):
-        self.violations.append(kind)
+    def protocol_note(self, *, node, kind):
+        self.notes.append(kind)
 
     def __getattr__(self, _name):
         return lambda *a, **k: None
@@ -73,8 +73,8 @@ class _Trace:
 # ── The parser ──────────────────────────────────────────────────────────────
 
 def test_a_well_formed_body_comes_back_verbatim():
-    body, err, violations = extract_file_body(_wrap("<html>\n  <p>hi</p>\n</html>"))
-    assert err is None and violations == []
+    body, err, notes = extract_file_body(_wrap("<html>\n  <p>hi</p>\n</html>"))
+    assert err is None and notes == []
     # Interior newlines and indentation survive; only the two newlines that
     # belong to the marker lines are removed.
     assert body == "<html>\n  <p>hi</p>\n</html>"
@@ -111,15 +111,19 @@ def test_markers_in_the_wrong_order_are_an_error():
     assert "before" in err
 
 
-def test_prose_around_the_body_is_tolerated_and_recorded():
-    """The interleaving of text and tool_use blocks is lost by the time the
-    response reaches us, so a trailing "Done." is indistinguishable from prose
-    after the end marker. Refusing it would break on the model's most ordinary
-    habit; ignoring it entirely would leave the protocol unmeasurable."""
-    body, err, violations = extract_file_body("Sure!\n" + _wrap("x") + "\nDone.")
+def test_prose_around_the_body_is_accepted_and_noted():
+    """Not a failure — an observation.
+
+    A live run (2026-09-15) opened a continuation round with "Let me append the
+    JavaScript section." before the body. Under the plan's first draft that was
+    an error and would have cost a round; it costs nothing, because the body was
+    complete and the file was written. The note exists so a CHANGE in the
+    model's formatting is visible, not so anything acts on it.
+    """
+    body, err, notes = extract_file_body("Sure!\n" + _wrap("x") + "\nDone.")
     assert err is None
     assert body == "x"
-    assert violations == [VIOLATION_TEXT_BEFORE, VIOLATION_TEXT_AFTER]
+    assert notes == [NOTE_TEXT_BEFORE, NOTE_TEXT_AFTER]
 
 
 # ── The loop ────────────────────────────────────────────────────────────────
@@ -191,14 +195,18 @@ async def test_a_reply_with_neither_body_nor_calls_still_ends_the_loop(tmp_path:
     assert "without writing files" in result
 
 
-async def test_tolerated_slips_are_recorded_on_the_trace(tmp_path: Path):
-    """Phase-5 acceptance is stated as a rate, so the slips have to be
-    countable — and countable apart from refusals, which cost a round."""
+async def test_prose_around_the_body_reaches_the_trace(tmp_path: Path):
+    """Countable, and countable APART from refusals.
+
+    A refusal costs a round and belongs in the acceptance thresholds; this does
+    not and must stay out of them — lumping the two made a healthy run read as
+    50% failing.
+    """
     trace = _Trace()
     await _drive(tmp_path, [
         _resp([("write_file", {"path": "i.html"})],
               body="Here you go:\n" + _wrap("<html></html>") + "\nAll set."),
         _resp([("finish", {"summary": "ok"})]),
     ], trace=trace)
-    assert trace.violations == [VIOLATION_TEXT_BEFORE, VIOLATION_TEXT_AFTER]
+    assert trace.notes == [NOTE_TEXT_BEFORE, NOTE_TEXT_AFTER]
     assert (tmp_path / "i.html").read_text(encoding="utf-8") == "<html></html>"
