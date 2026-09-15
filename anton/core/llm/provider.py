@@ -455,6 +455,105 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     return parsed, None, False
 
 
+#: Name given to a replayed tool call the provider never named (ENG-2420).
+#: History items must carry one — the Responses API declares ``name`` required
+#: — and a name outside the CURRENT tool list already replays fine: anton
+#: rebuilds its tool list every round (``_build_tools()`` in the session's tool
+#: loop, so `recall_skill` can add tools mid-turn), which means a call to a
+#: tool that is no longer offered is an ordinary, working shape in history.
+UNNAMED_REPLAYED_TOOL = "unavailable_tool_call"
+
+
+def usable_call_id(value: object) -> bool:
+    """True when `value` can be replayed as a tool-call handle.
+
+    Non-empty *string*, not merely truthy: a dict or list id is valid JSON and
+    passes a truthiness check, then fails much later and much less legibly.
+    Both provider APIs use string ids, so the strictness costs nothing. Same
+    test cowork-server's `sanitize_turn_history_rows` applies to pod rows.
+    """
+    return isinstance(value, str) and bool(value)
+
+
+def ensure_replayable_tool_call(tc: ToolCall) -> ToolCall:
+    """Return `tc` with anything that cannot be replayed made replayable.
+
+    ENG-2420: the readers can build a call with an empty `id`. Three provider
+    shapes reach it, and only the first is the one the bug was filed for — a
+    `function_call_arguments.delta` with no preceding `output_item.added`; an
+    `output_item.added` that DOES arrive carrying a blank `call_id`; and an
+    item labelled as something other than `function_call`. The last two never
+    touch the buffer path, so guarding that path alone would miss them.
+
+    Every *yield* in the readers was already guarded on a truthy id. Only the
+    append that builds the turn's result was not, so an id-less call escaped
+    into `session.history`, and the next request serialised it back out
+    verbatim (``"call_id": block["id"]``). The provider then rejects the whole
+    request — ``400 Invalid 'input[N].call_id': empty string`` — on that turn
+    and on every later turn of the conversation, which never recovers on its
+    own: the only trimming path anton has runs on a caught
+    `ContextOverflowError` or on pressure computed from a successful
+    response's usage, and a 400 produces neither.
+
+    **Salvage, never drop**, and both halves matter:
+
+    - An unusable **id** is replaced with a minted one. The call then
+      dispatches normally and its `tool_result` pairs with the minted id.
+    - An unusable **name** is replaced with `UNNAMED_REPLAYED_TOOL`, which
+      restores the pre-fix behaviour for that shape: the registry raises
+      ``Tool ... not found``, the dispatcher turns that into an ordinary
+      ``Tool 'x' failed`` tool_result, and the model re-emits the call inside
+      the same turn. Dropping it instead looked tidier and was worse — the
+      three non-streaming paths call `raise_on_empty_response`
+      (`anthropic.py`, and both OpenAI ones) but the streaming paths do not,
+      so a dropped sole call ends a streaming turn silently with no error at
+      all. That is the failure this function exists to avoid, so it must not
+      introduce it through the name (review: pnewsam on #471).
+
+    Returning unconditionally is deliberate: it is what keeps this layer, the
+    read-time repair in `repair_replayed_tool_ids`, and the session/boot belts
+    agreeing about the same two fields. They disagreed in the first revision
+    and a stored ``{"id": "call_x", "name": ""}`` block slipped through all
+    three.
+
+    The minted id is random (`call_anton_*`) because it is minted ONCE, at
+    generation, and then persisted with the rest of this turn's rows. The
+    read-time repair uses a different prefix (`call_repaired_*`) and a
+    deterministic id, because it re-runs on every load and is never written
+    back — a random id there would change the replayed prefix every turn and
+    miss the prompt cache. The two prefixes also make it obvious in a log
+    which layer fixed a given call.
+    """
+    import logging as _logging
+    import uuid as _uuid
+
+    log = _logging.getLogger(__name__)
+
+    if not usable_call_id(tc.id):
+        was = tc.id
+        # Mutated in place: every caller constructs the ToolCall immediately
+        # before this call, and the readers already mutate one after the fact
+        # (`tool_calls[-1].repaired = True` on the Anthropic max_tokens path).
+        tc.id = f"call_anton_{_uuid.uuid4().hex}"
+        log.warning(
+            "ENG-2420: tool call %r arrived with an unusable id (%r); minted %s "
+            "so the call can still run and replay.",
+            tc.name, was, tc.id,
+        )
+
+    if not usable_call_id(tc.name):
+        was = tc.name
+        tc.name = UNNAMED_REPLAYED_TOOL
+        log.warning(
+            "ENG-2420: tool call %s arrived with an unusable name (%r); renamed "
+            "to %r so it fails as a normal tool_result the model can recover "
+            "from, instead of vanishing from the turn.",
+            tc.id, was, tc.name,
+        )
+
+    return tc
+
+
 def damaged_tool_call_result(tc: ToolCall) -> dict | None:
     """The `tool_result` to answer an unfinished tool call with, or None.
 
