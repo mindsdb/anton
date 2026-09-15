@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 from anton.core.mcp.access import AccessMode
@@ -94,40 +95,81 @@ async def discover_mcp_tools_async(
     failing to connect or list tools is logged and skipped; it never fails
     the whole turn over one bad connector.
     """
-    tool_defs: list["ToolDef"] = []
-    sessions: list[McpSession] = []
+    # Vault reads (_method_of/_access_mode_of, below) block on a synchronous
+    # HTTP call for the cloud vault (TurnKeyDataVault._fetch) — a pre-existing
+    # limitation shared by every vault caller today (e.g.
+    # restore_namespaced_env), not something introduced or fixable here.
+    # This first pass over `connections` is cheap and sequential regardless;
+    # only the per-connection MCP round-trips below are worth parallelizing.
+    mcp_connections: list[tuple[str, str]] = []
     for connection in connections:
         engine, name = connection.get("engine"), connection.get("name")
         if not engine or not name:
             continue
-        if _method_of(vault, engine, name) != "mcp":
-            continue
-        url = mcp_server_url(engine)
-        if url is None:
-            logger.warning("discover_mcp_tools: no known MCP server URL for engine %s", engine)
-            continue
-        access_token = (vault.load(engine, name) or {}).get("access_token")
-        if not access_token:
-            logger.warning("discover_mcp_tools: no access token for %s/%s", engine, name)
-            continue
+        if _method_of(vault, engine, name) == "mcp":
+            mcp_connections.append((engine, name))
+    if not mcp_connections:
+        return [], []
 
-        mcp_session = McpSession(url=url, access_token=access_token)
-        try:
-            await mcp_session.__aenter__()
-        except Exception:
-            logger.exception("discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
-            continue
-        try:
-            access_mode = _access_mode_of(vault, engine, name)
-            tool_defs.extend(
-                await discover_tool_defs(mcp_session, engine=engine, access_mode=access_mode)
-            )
-        except Exception:
-            logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
-            await mcp_session.__aexit__(None, None, None)
-            continue
-        sessions.append(mcp_session)
+    # A turn with two connections for the same engine (the vault explicitly
+    # supports this — see registry.py's module docstring) needs its tool
+    # names disambiguated by connection, or the second connection's tools
+    # silently collide with the first's under ToolRegistry's
+    # skip-duplicate-by-name behavior. Left out for the common single-
+    # connection case so its tool names stay exactly what they've always been.
+    engine_counts = Counter(engine for engine, _ in mcp_connections)
+
+    results = await asyncio.gather(
+        *(
+            _discover_one(vault, engine, name, disambiguate=engine_counts[engine] > 1)
+            for engine, name in mcp_connections
+        )
+    )
+
+    tool_defs: list["ToolDef"] = []
+    sessions: list[McpSession] = []
+    for defs, session in results:
+        tool_defs.extend(defs)
+        if session is not None:
+            sessions.append(session)
     return tool_defs, sessions
+
+
+async def _discover_one(
+    vault: "DataVault", engine: str, name: str, *, disambiguate: bool
+) -> tuple[list["ToolDef"], McpSession | None]:
+    """One connection's open-session-then-discover step, isolated so
+    `discover_mcp_tools_async` can run every connection concurrently via
+    `asyncio.gather` — a bad connector never fails the whole turn over it,
+    it just contributes `([], None)`."""
+    url = mcp_server_url(engine)
+    if url is None:
+        logger.warning("discover_mcp_tools: no known MCP server URL for engine %s", engine)
+        return [], None
+    access_token = (vault.load(engine, name) or {}).get("access_token")
+    if not access_token:
+        logger.warning("discover_mcp_tools: no access token for %s/%s", engine, name)
+        return [], None
+
+    mcp_session = McpSession(url=url, access_token=access_token)
+    try:
+        await mcp_session.__aenter__()
+    except Exception:
+        logger.exception("discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
+        return [], None
+    try:
+        access_mode = _access_mode_of(vault, engine, name)
+        tool_defs = await discover_tool_defs(
+            mcp_session,
+            engine=engine,
+            access_mode=access_mode,
+            connection_name=name if disambiguate else None,
+        )
+    except Exception:
+        logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
+        await mcp_session.__aexit__(None, None, None)
+        return [], None
+    return tool_defs, mcp_session
 
 
 def discover_mcp_tools(

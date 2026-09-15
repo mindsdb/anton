@@ -2304,15 +2304,23 @@ class ChatSession:
         try:
             await self._reap_tracked_backends()
             await self._scratchpads.close_all()
-            if self._mcp_sessions:
-                from anton.core.mcp.wiring import close_mcp_sessions
-
-                await close_mcp_sessions(self._mcp_sessions)
         finally:
-            # Provider clients own an HTTP pool. This runs even if the steps
-            # above raise, or the pool outlives the process.
-            if self._llm is not None:
-                await self._llm.aclose()
+            # Guaranteed even if either step above raises — ScratchpadManager
+            # has no internal try/except around each pad's own close(), so
+            # without this, one bad scratchpad close would leak every open
+            # MCP session's transport (httpx2.AsyncClient + SDK task group)
+            # for the rest of this turn, same reasoning as the LLM client
+            # cleanup below it already gets.
+            try:
+                if self._mcp_sessions:
+                    from anton.core.mcp.wiring import close_mcp_sessions
+
+                    await close_mcp_sessions(self._mcp_sessions)
+            finally:
+                # Provider clients own an HTTP pool. This runs even if the
+                # steps above raise, or the pool outlives the process.
+                if self._llm is not None:
+                    await self._llm.aclose()
 
     async def emit(self, event) -> None:
         """Push an out-of-band event to the host, if one is listening.

@@ -777,7 +777,23 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         web_fetch_enabled=False,
     )
 
-    session = ChatSession(config)
+    try:
+        session = ChatSession(config)
+    except Exception:
+        # discover_mcp_tools() above already opened these — if construction
+        # itself raises, there's no ChatSession yet to hang them on, so
+        # nothing else would ever close them (ChatSession.close() is the
+        # only other place that does). Synchronous cleanup: this whole
+        # function is a plain `def`, not async (see discover_mcp_tools's own
+        # sync wrapper for why asyncio.run() is safe here — no event loop of
+        # this function's own, it always runs inside run_in_executor).
+        if mcp_sessions:
+            import asyncio
+
+            from anton.core.mcp.wiring import close_mcp_sessions
+
+            asyncio.run(close_mcp_sessions(mcp_sessions))
+        raise
     # Baseline for `drain_pending_skills`, taken before the turn runs. Drafts
     # from earlier turns are already on the workspace, so without this every
     # turn would re-report all of them.

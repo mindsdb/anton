@@ -92,6 +92,32 @@ async def test_access_mode_defaults_to_read_when_unset(patch_mcp_session_to_stub
     await wiring.close_mcp_sessions(sessions)
 
 
+async def test_two_connections_for_the_same_engine_get_disambiguated_names(patch_mcp_session_to_stub):
+    """The vault explicitly supports more than one connection per engine
+    (data_vault.py: `name` "disambiguates when an org has more than one
+    connection for this engine"). Without disambiguation both connections'
+    tools would collide under `{engine}__{tool_name}` and
+    ToolRegistry.register_tool would silently drop the second connection's
+    tools as duplicates."""
+    vault = FakeDataVault(
+        {
+            ("hubspot", "acme"): {"_method": "mcp", "_access_mode": "write", "access_token": "tok-1"},
+            ("hubspot", "other-org"): {"_method": "mcp", "_access_mode": "write", "access_token": "tok-2"},
+        }
+    )
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault,
+        [{"engine": "hubspot", "name": "acme"}, {"engine": "hubspot", "name": "other-org"}],
+    )
+
+    assert {d.name for d in tool_defs} == {
+        "hubspot__acme__add", "hubspot__acme__boom",
+        "hubspot__other-org__add", "hubspot__other-org__boom",
+    }
+    assert len(sessions) == 2
+    await wiring.close_mcp_sessions(sessions)
+
+
 async def test_call_mcp_tool_opens_calls_and_closes_without_registering_anything(
     monkeypatch, stub_mcp_server
 ):

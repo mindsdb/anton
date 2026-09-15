@@ -135,3 +135,32 @@ async def test_call_tool_reraises_the_original_error_when_a_non_exception_failur
     async with McpSession(server=stub_mcp_server) as session:
         with pytest.raises(asyncio.CancelledError):
             await session.call_tool("add", {"a": 1, "b": 1})
+
+
+async def test_call_tool_never_retries_a_real_task_cancellation(stub_mcp_server, monkeypatch):
+    """A CancelledError delivered because THIS task's own cancellation was
+    requested (Task.cancelling() > 0) must propagate immediately, with no
+    reconnect/retry attempted — retrying would silently swallow real
+    cancellation, exactly what call_tool's docstring promises never happens.
+    Distinguishes this from a CancelledError merely leaking up from the
+    transport's own internal task group (cancelling() == 0 there — see
+    test_call_tool_reconnects_on_a_non_exception_transport_failure, which
+    still retries because nothing called .cancel() on the test's own task)."""
+    calls = {"n": 0}
+
+    async def always_cancelled(self, name, arguments):
+        calls["n"] += 1
+        raise asyncio.CancelledError()
+
+    class _FakeCancelledTask:
+        def cancelling(self) -> int:
+            return 1
+
+    monkeypatch.setattr(mcp.Client, "call_tool", always_cancelled)
+    monkeypatch.setattr(asyncio, "current_task", lambda: _FakeCancelledTask())
+
+    async with McpSession(server=stub_mcp_server) as session:
+        with pytest.raises(asyncio.CancelledError):
+            await session.call_tool("add", {"a": 1, "b": 1})
+
+    assert calls["n"] == 1  # no retry attempted

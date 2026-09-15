@@ -18,6 +18,7 @@ SDK's own test pattern — no sockets, no threads, no subprocess).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -177,6 +178,21 @@ class McpSession:
         rather than being disguised as `McpTransientError` — real task
         cancellation (e.g. the whole turn being cancelled) must never be
         silently swallowed into a business-logic failure.
+
+        That last guarantee only covers the case where retrying doesn't
+        help. A `CancelledError` can also mean the *caller's own* task was
+        actually cancelled (a real timeout or shutdown) rather than a
+        `CancelledError` merely leaking up from a sibling task inside the
+        SDK's own transport task group dying for an unrelated reason — and
+        those two cases must never be handled the same way: retrying after
+        real cancellation would silently absorb it, so the retry appears to
+        just "run a bit longer" instead of stopping, exactly the failure
+        mode this method's own docstring promises never happens.
+        `asyncio.Task.cancelling()` (3.11+) is the sanctioned way to tell
+        them apart — it counts actual `cancel()` calls against the current
+        task, 0 for a leaked child-task `CancelledError`, >=1 for a real
+        one — verified empirically both ways before relying on it. A real
+        cancellation is re-raised immediately, no retry attempted.
         """
         last_error: BaseException | None = None
         for attempt in (1, 2):
@@ -192,6 +208,9 @@ class McpSession:
                         raise classified from exc
                     last_error = classified
                 else:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling() > 0:
+                        raise
                     last_error = exc
                 if attempt == 2:
                     break

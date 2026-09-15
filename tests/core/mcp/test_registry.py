@@ -11,6 +11,21 @@ def test_namespaced_tool_name():
     assert namespaced_tool_name("hubspot", "search_crm_objects") == "hubspot__search_crm_objects"
 
 
+def test_namespaced_tool_name_disambiguates_by_connection_when_given():
+    """Two connections for the same engine in one turn (the vault explicitly
+    supports this) must not produce identical tool names, or the second
+    connection's tools silently collide with the first's under
+    ToolRegistry's skip-duplicate-by-name behavior."""
+    assert (
+        namespaced_tool_name("hubspot", "search_crm_objects", connection_name="acme")
+        == "hubspot__acme__search_crm_objects"
+    )
+    assert (
+        namespaced_tool_name("hubspot", "search_crm_objects", connection_name="acme")
+        != namespaced_tool_name("hubspot", "search_crm_objects", connection_name="other-org")
+    )
+
+
 async def test_discover_tool_defs_namespaces_and_filters_by_access_mode(stub_mcp_server):
     """`add`/`boom` aren't in HubSpot's table, so under the fail-closed
     default they're write-tier — read mode should see neither."""
@@ -78,3 +93,11 @@ async def test_handler_reports_permanent_failure_as_reconnect_message(stub_mcp_s
     assert outcome.ok is False
     assert outcome.reason == "mcp_permanent_error"
     assert "reconnect" in outcome.content.lower() or "hubspot" in outcome.content.lower()
+
+
+async def test_discover_tool_defs_threads_connection_name_into_namespacing(stub_mcp_server):
+    async with McpSession(server=stub_mcp_server) as session:
+        defs = await discover_tool_defs(
+            session, engine="hubspot", access_mode="write", connection_name="acme"
+        )
+    assert {d.name for d in defs} == {"hubspot__acme__add", "hubspot__acme__boom"}
