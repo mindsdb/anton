@@ -329,12 +329,23 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
         f"{verb} {rel_written} (+{len(content)} bytes / {chunk_lines} lines, "
         f"file now {size} bytes{tail})."
     )
-    # No size warning here any more. It told the model a chunk over
-    # CHUNK_SOFT_LIMIT risked "losing its connection" — true while the body
-    # rode in the tool argument, false now that it arrives as streamed text.
-    # Leaving it would hand the model a stale instruction on every write round.
-    # The ceiling that remains is the reply's own output budget, and a body cut
-    # off by it is caught by the missing end marker in `extract_file_body`.
+    # A reminder about the NEXT part, delivered at the only moment it is needed.
+    #
+    # Measured twice, 2026-09-15: after a successful first part the model
+    # replied "Now I'll append the JavaScript logic:" and called `write_file`
+    # with no body — costing a round each time. It is not a misread rule. In
+    # the tool-use format the normal shape of a reply is a short preamble
+    # followed by the call, with the payload inside the call; this protocol
+    # puts the payload outside it, and at the start of a continuation round the
+    # model is answering a tool result, which is exactly when a preamble feels
+    # natural. The system prompt is thousands of tokens behind by then. This
+    # line is not.
+    message += (
+        f" If this file needs another part, put that part's content between "
+        f"`{FILE_BEGIN_MARKER}` and `{FILE_END_MARKER}` in the SAME reply as "
+        f"its `write_file` call — a reply that only announces the next part "
+        f"writes nothing."
+    )
     return {
         "ok": True,
         "written": rel_written,

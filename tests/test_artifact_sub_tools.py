@@ -65,6 +65,28 @@ def test_schema_advertises_mode():
     assert "mode" not in WRITE_FILE_SCHEMA["input_schema"]["required"]
 
 
+def test_a_successful_write_reminds_where_the_next_part_goes(tmp_path: Path):
+    """The reminder lands at the one moment the model gets this wrong.
+
+    Measured twice (2026-09-15): after a successful first part it replied
+    "Now I'll append the JavaScript logic:" and called `write_file` with no
+    body, costing a round. A continuation round begins by answering a tool
+    result, which is where a preamble feels natural, and the system prompt is
+    thousands of tokens behind by then — so the correction rides on the result
+    itself.
+    """
+    res = sub_tools.write_file(tmp_path, "d.html", "<head>", mode="w")
+    assert res["ok"]
+    assert sub_tools.FILE_BEGIN_MARKER in res["message"]
+    assert "SAME reply" in res["message"]
+    assert "announces the next part" in res["message"]
+
+    # On an append too: the failure was observed after the FIRST part, but the
+    # second is no different — every continuation starts the same way.
+    res = sub_tools.write_file(tmp_path, "d.html", "<body>", mode="a")
+    assert "SAME reply" in res["message"]
+
+
 def test_a_large_body_is_written_without_a_size_warning(tmp_path: Path):
     """The warning told the model an oversized chunk risked "losing its
     connection" — true while the body rode in the tool argument, false now that
