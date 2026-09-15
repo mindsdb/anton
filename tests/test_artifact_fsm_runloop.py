@@ -195,9 +195,15 @@ async def test_a_cut_off_body_and_a_forgotten_marker_get_different_advice(tmp_pa
     _, cut_off, _ = extract_file_body(_body("x", closed=False), looks_truncated=True)
     _, forgot, _ = extract_file_body(_body("x", closed=False), looks_truncated=False)
 
-    # Cut off: the fix is less content, so the advice is to split.
+    # Cut off: the fix is less content, so the advice is to split — and it must
+    # say the shorter part goes in the NEXT REPLY, body included. A live run
+    # (2026-09-15) answered the earlier wording, "emit the first part now, then
+    # append the rest on the next turn", by announcing the part and calling
+    # write_file with no body at all: it read the sentence as a two-turn plan.
     assert "was cut off" in cut_off
-    assert "smaller pieces" in cut_off
+    assert "SHORTER" in cut_off
+    assert "NEXT REPLY" in cut_off
+    assert "announce" in cut_off
 
     # Forgot the line: the fix is one line, and the message says so plainly —
     # including that the reply was NOT cut off, so the model does not start
@@ -465,21 +471,27 @@ async def test_read_file_full_flag_is_passed_through(tmp_path: Path, monkeypatch
 # ── Output budget per round, and surviving a dropped stream (2026-08-28) ──────
 
 
-async def test_write_rounds_get_the_raised_budget_and_round_zero_does_not(
+async def test_every_round_gets_the_raised_budget_including_round_zero(
     tmp_path: Path,
 ):
-    """Round 0 runs on the slower planning model, so it keeps the client default.
+    """Round 0 used to be held at the client default, and that is worth
+    remembering rather than silently reversing.
 
-    Measured 2026-08-28: at the raised budget a planning-model write runs long
-    enough to have its connection dropped (4 failures out of 4), while the same
-    budget on the coding model delivered 50k characters in one call. The split
-    is the whole point — asserting only "a budget is passed" would not catch a
-    regression that passes it to both.
+    The reason was real while the body rode in a tool argument: round 0 runs on
+    the slower planning model, a tool argument is not streamed, and at the
+    raised budget such a call stayed silent long enough to be dropped — 4
+    failures out of 4, measured 2026-08-28. At 8192 the same write merely
+    truncated, which the loop survives.
+
+    The body is streamed text now, so there is no silence to survive, and the
+    cap only cost rounds: measured 2026-09-15, round 0 hit exactly 8192 output
+    tokens mid-body and bought nothing. If a future change puts bulk content
+    back into a tool argument, this lock is the one to revisit first.
     """
     session = AsyncMock()
     session._llm.plan_stream = _stream_mock(
-        _resp([ToolCall(id="1", name="write_file",
-                        input={"path": "index.html", "content": "<html>"})])
+        _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})],
+              body=_body("<html></html>"))
     )
     session._llm.code_stream = _stream_mock(
         _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
@@ -488,7 +500,7 @@ async def test_write_rounds_get_the_raised_budget_and_round_zero_does_not(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
         node_label="generate_frontend",
     )
-    assert session._llm.plan_stream.call_args.kwargs["max_tokens"] is None
+    assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
     assert session._llm.code_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
 
 

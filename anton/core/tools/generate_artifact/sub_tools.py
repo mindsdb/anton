@@ -109,9 +109,15 @@ def extract_file_body(
         if looks_truncated:
             return None, (
                 "Error: your reply was cut off before the end marker, so the "
-                "body is incomplete and nothing was written. Send it again in "
-                "smaller pieces: emit the first part now, then append the rest "
-                "with `mode=\"a\"` on the next turn."
+                "body is incomplete and nothing was written.\n\n"
+                "In your NEXT REPLY send a SHORTER first part: the content "
+                f"itself between `{FILE_BEGIN_MARKER}` and `{FILE_END_MARKER}`, "
+                "plus the `write_file` call for it. Both in that one reply. "
+                "Append the remainder with `mode=\"a\"` in the reply after "
+                "that.\n\n"
+                "Do NOT announce the part instead of sending it: a reply whose "
+                "text has no body between the markers writes nothing, however "
+                "it is introduced."
             ), []
         return None, (
             f"Error: the body has no `{FILE_END_MARKER}` line, so nothing was "

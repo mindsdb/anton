@@ -57,13 +57,19 @@ SPEC_MAX_TOKENS_RETRY: int = 20480
 # 16 063 tokens, i.e. the default 8192 was a quarter of what the gateway holds
 # and forced the file into ~8 chunks.
 #
-# NOT applied to round 0. That round runs on the planning model, which is
-# ~2.3x slower per token (75 vs 170 tok/s measured), and a long generation is
-# silent on the wire for its whole duration (see sub_tools.CHUNK_SOFT_LIMIT).
-# Round 0 therefore keeps the client default: at 8192 an over-long write is
-# merely truncated, which the loop recovers from, whereas at 20480 the same
-# call runs long enough to have its connection dropped — measured 4 failures
-# out of 4 at 131-143s.
+# Applied to EVERY round, including round 0. It was withheld there while the
+# file body rode in a tool argument: round 0 runs on the planning model (~2.3x
+# slower per token, 75 vs 170 measured), a tool argument is not streamed, and
+# at this budget such a call stayed silent long enough to be dropped — 4
+# failures out of 4 at 131-143s, measured 2026-08-28. The client default of
+# 8192 turned that into a plain truncation, which the loop survives.
+#
+# The body is streamed text since the text-then-tool protocol, so there is no
+# silence left to survive and the low cap only cost rounds: measured
+# 2026-09-15, round 0 hit exactly 8192 output tokens in the middle of a body.
+# The planning model is also less token-efficient on this content (1.57
+# characters per token against the coding model's 2.62), so 8192 bought it
+# ~12 800 characters — under the size of an average artifact.
 GEN_WRITE_MAX_TOKENS: int = 20480
 
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one

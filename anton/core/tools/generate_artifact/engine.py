@@ -660,10 +660,21 @@ async def _run_loop(
         # Subsequent rounds (retries, read_file refinements) use the coding model.
         first_round = round_idx == 0
         llm_call = session._llm.plan_stream if first_round else session._llm.code_stream
-        # Only the write rounds get the raised budget; round 0 keeps the client
-        # default because it runs on the slower planning model. See
-        # GEN_WRITE_MAX_TOKENS for the measurements behind the split.
-        budget = None if first_round else GEN_WRITE_MAX_TOKENS
+        # Every round gets the raised budget, round 0 included.
+        #
+        # It used to be withheld from round 0: that round runs on the slower
+        # planning model, and while the file body rode in a tool argument a long
+        # generation meant a silent connection (4 dropped connections out of 4
+        # at this budget, measured 2026-08-28). The default 8192 turned that
+        # drop into a mere truncation, which the loop survives.
+        #
+        # The body is streamed text now, so there is no silence to survive, and
+        # the low cap only did harm: measured 2026-09-15, round 0 hit exactly
+        # 8192 output tokens mid-body and cost a round to nothing. The planning
+        # model is also less token-efficient on this content (1.57 characters
+        # per token against the coding model's 2.62), so 8192 bought it barely
+        # 12 800 characters — less than an average artifact.
+        budget = GEN_WRITE_MAX_TOKENS
         # Truncation must be judged against the budget THIS round ran on.
         # Against the client default instead, every reply over 8192 tokens
         # would be called truncated and its last tool call rejected — exactly
