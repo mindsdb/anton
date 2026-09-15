@@ -183,7 +183,10 @@ _ROLE = _ROLE_COMMON + "\n\n" + _ROLE_WRITE
 # Visual design rules (used in every type that has a frontend)
 # ---------------------------------------------------------------------------
 
-_VISUAL_RULES = """\
+# Two halves, quoted separately by the html-app builder (which gives each its
+# own heading) and joined as `_VISUAL_RULES` for the fullstack frontend builder
+# and the tests that read the joined constant.
+_DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
@@ -211,29 +214,32 @@ VISUAL DESIGN (for every HTML file you produce):
   - Use ECharts `markLine` for thresholds, `markPoint` for outliers,
     `markArea` for highlighted regions.
 - Responsive:
-  - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`
   - Multi-card grid: `grid-template-columns: repeat(auto-fit, minmax(360px, 1fr))`
   - Chart containers: `width: 100%; height: min(420px, 60vh)`
   - Register `window.addEventListener('resize', () => chart.resize())` on every ECharts instance.
   - Tables wrapped in `<div style="overflow-x: auto;">` — never fixed widths.
 - SECURITY: NEVER embed API keys, tokens, passwords, or connection strings in HTML/JS.
-  Credentials were already used server-side; serialise only the resulting data.
-
-HARD OUTPUT CONTRACT (a static verifier checks each of these; a violation
-fails the step and costs a regeneration):
-- Emit a complete HTML document with an explicit `<body>`...`</body>`.
-- Include `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
-- NEVER put an absolute URL in a `fetch()` call. Use relative paths only.
-- NEVER use the global name `window.__antonCommentsLayer`; it is reserved by the
-  host app.
-- Write script tags as plain `<script>` and `</script>` — never any underscore
-  variant, and every opened script block must be closed with `</script>`.
-- NEVER write a universal `* { ... !important }` rule.
-- Keep every `z-index` at 1000 or below.
-- Give significant block containers (`div`, `section`, `table`, `main`,
-  `article`) stable `id` attributes — they are anchors the host app attaches
-  comments to.\
+  Credentials were already used server-side; serialise only the resulting data.\
 """
+
+_VERIFIER_CONTRACT = """\
+A static verifier checks each of these after `finish`; a violation fails the
+step and costs a regeneration:
+- A complete HTML document with an explicit `<body>`...`</body>`.
+- `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
+- No absolute URL in any `fetch()` call — relative paths only.
+- The global name `window.__antonCommentsLayer` is never used; the host app
+  reserves it.
+- Script tags are plain `<script>` and `</script>` — never an underscore
+  variant — and every opened script block must be closed with `</script>`.
+- No universal `* { ... !important }` rule.
+- Every `z-index` is 1000 or below.
+- Significant block containers (`div`, `section`, `table`, `main`,
+  `article`) carry stable `id` attributes — the host app attaches comments
+  to them.\
+"""
+
+_VISUAL_RULES = _DESIGN_RULES + "\n\nHARD OUTPUT CONTRACT: " + _VERIFIER_CONTRACT
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +518,137 @@ prefer that.\
 HTML_APP_DEFAULT_PRIMARY = "dashboard.html"
 
 
+# ---------------------------------------------------------------------------
+# html-app generator prompt (`generate_frontend`, non-fullstack branch)
+#
+# Ordered the way the model needs it: the task and its done-criterion first,
+# then what the kickoff message carries, then the workflow, and only then the
+# mechanics. Each rule is stated once. The section names below quote the
+# headings `_spec_context` actually renders, so the model is never pointed at
+# a section that does not exist in its input.
+# ---------------------------------------------------------------------------
+
+_GEN_HTML_INPUTS = """\
+## What you receive
+The user message carries these sections, in this order (some may be absent):
+- `## Brief` — the request as the calling agent understood it.
+- `## Product requirements` (prd.md) — reviewed and accepted by the user.
+  This is the authoritative source; where anything else disagrees with it,
+  the PRD wins. It ends at `{prd_footer}`.
+- `## Data` — scratchpad cells already run earlier in this pipeline: pad
+  name, code, printed output. The schema and samples you need are here.
+- `### Sources read from the web` — notes and quotes from web pages, when the
+  task used any.
+- `## Technical specification` — `spec.md`: insights and implementation notes
+  that complement the PRD rather than repeat it.
+- `## Progress journal` — one line per pipeline step done so far.\
+"""
+
+
+def _gen_html_task(target: str) -> str:
+    return f"""\
+You are a single-purpose worker inside an artifact-generation pipeline. This
+step is `generate_frontend`.
+
+## Your task
+Produce ONE self-contained HTML file named exactly `{target}`, at the root
+of the artifact folder. Inline all CSS and JS and embed all data in the file.
+Do not reference any other file of the artifact; the only external resource
+allowed is the ECharts `<script>` from the CDN named in the design rules.
+
+UI text and the `<html lang>` attribute follow the language of the PRD.
+
+You are done when the file is written and closed (`</body></html>`) and you
+have called `finish(summary="<one line>")`. A deterministic verifier then
+checks the file; on failure you get another attempt with the exact errors.
+Checking your own output is NOT part of the job.\
+"""
+
+
+def _gen_html_workflow(target: str) -> str:
+    return f"""\
+## Workflow
+A typical run takes one or two rounds.
+1. Read the PRD, `## Data` and the specification. Plan the page.
+2. Data, only if needed: when the dataset to embed is not already printed
+   under `## Data` in a usable shape, run ONE scratchpad cell that
+   aggregates it and prints it as JSON (a dashboard almost never needs raw
+   rows). Skip this step when the data is already visible or the artifact
+   needs none.
+3. Write the whole file in one reply: the body between the markers plus one
+   `write_file(path="{target}")` call — see Output protocol.
+4. Call `finish`. Do not read the file back and do not run checks.\
+"""
+
+
+def _gen_html_output_protocol(target: str) -> str:
+    return f"""\
+## Output protocol
+A file is written in TWO parts of the SAME reply:
+  1. the file content, as plain text between two marker lines;
+  2. a `write_file` call naming the path — with NO content argument.
+
+{BEGIN}
+<!DOCTYPE html>
+<html lang="…">
+…the entire file…
+</html>
+{END}
+
+…and in the same reply: `write_file(path="{target}")`.
+
+Rules:
+- The body is TEXT between the markers. `write_file` takes `path` and `mode`
+  only; there is no `content` argument.
+- One body per reply, so one `write_file` per reply.
+- Nothing but the file goes between the markers; the closing marker ends the
+  file. A reply without the closing marker writes nothing.
+- All paths are relative to the artifact root. Never write outside it.\
+"""
+
+
+_GEN_SIZE_RULES = f"""\
+### Size and splitting
+One reply holds about {REPLY_BODY_CHARS:,} characters of file content. Almost
+every artifact fits, so the default is the whole file in a single body with
+`write_file(path, mode="w")`. Split ONLY a file that will clearly exceed it:
+- Each part costs a round; splitting a file that would have fit wastes it.
+- Continue exactly where the file now ends and append with `mode="a"`.
+  The `write_file` result reports the CHARACTERS and LINES added and the
+  file's new totals, so you know where the part landed without reading.
+- If a reply is cut off before the closing marker, nothing is written and
+  the tool result tells you what to send next. Follow it; never re-emit the
+  whole file to "fix" something.
+- The last part must close every open tag, `</body></html>` included.\
+"""
+
+
+_GEN_TOOLS = """\
+## Tools
+- `scratchpad(action="exec", name="<pad>", code=...)` — a persistent Python
+  pad; needed only for step 2 of the workflow. Reuse the pad named in
+  `## Data`; NEVER create a scratchpad with a new name — it is an empty,
+  isolated environment and the call may be rejected. Provide
+  `one_line_description` and `estimated_execution_time_seconds` on every
+  `exec`. The namespace starts clean: put every import at the top of the
+  cell. A cell has a hard 120-second timeout; on timeout all state is lost,
+  so keep cells small. Always `print(...)` what you want to see. Data-source
+  credentials are environment variables `DS_<ENGINE>_<NAME>__<FIELD>`; read
+  them from `os.environ`, never from `data_vault` files. If a cell fails the
+  same way twice, change strategy instead of re-running it.
+- `write_file(path, mode="w"|"a")` — writes the body of THIS reply.
+- `read_file(path)` — size, line count and tail of a file you wrote.
+  `read_file(path, full=true)` pulls the ENTIRE file into your context and
+  keeps it there for every remaining round. Use either only when you must
+  re-read content in order to keep WRITING — never to check finished work.
+- `finish(summary)` — call exactly once, after the file is written.
+
+Python → JS: if you ever build file text inside a scratchpad cell, escape
+sequences resolve in Python first, so `'\\n'` breaks a JS string literal; use
+raw strings. Writing the text directly between the markers avoids this.\
+"""
+
+
 def build_subagent_system_prompt(
     artifact_type: str,
     artifact_path: Path,
@@ -542,29 +679,31 @@ def build_subagent_system_prompt(
         return "\n\n".join(parts)
 
     target = primary or HTML_APP_DEFAULT_PRIMARY
-    parts.append(
-        "## Your task\n"
-        f"Produce ONE self-contained HTML file named exactly `{target}`. "
-        "Inline all CSS and JS. All data must be embedded — no external local "
-        "file references."
+    # `artifact_path` is deliberately not quoted: every path the model writes
+    # is relative to the artifact root, and an absolute path in the prompt is
+    # only something to misuse. The parameter stays for signature stability.
+    return "\n\n".join(
+        [
+            _gen_html_task(target),
+            _GEN_HTML_INPUTS.format(prd_footer=PRD_SECTION_FOOTER),
+            _gen_html_workflow(target),
+            _gen_html_output_protocol(target),
+            _GEN_SIZE_RULES,
+            "## Verifier contract\n" + _VERIFIER_CONTRACT,
+            "## Design rules\n" + _DESIGN_RULES,
+            _GEN_TOOLS,
+        ]
     )
-    parts.append(_VISUAL_RULES)
-    parts.append(_WRITE_DISCIPLINE)
-    parts.append(
-        "## Output folder\n"
-        f"All `write_file` paths are relative to: `{artifact_path}`\n"
-        "Do NOT write outside that folder."
-    )
-    return "\n\n".join(parts)
 
 
 def build_user_kickoff(context: str) -> str:
     parts: list[str] = ["## Brief", context.strip()]
     parts.append(
-        "Use the `scratchpad` tool to reach any data described under `## Data`. "
-        "Then write each file the way the rules describe — its content as text "
-        f"between `{BEGIN}` and `{END}`, plus a `write_file` call for the path "
-        "— and call `finish`."
+        "Read the sections above, then follow the workflow from your "
+        "instructions: run a scratchpad cell only if the data to embed is not "
+        "already usable under `## Data`; write the file as text between "
+        f"`{BEGIN}` and `{END}` plus one `write_file` call in the same reply; "
+        "then call `finish`."
     )
     return "\n\n".join(parts)
 

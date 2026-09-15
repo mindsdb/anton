@@ -261,14 +261,17 @@ def test_html_prompt_falls_back_to_dashboard_html():
 
 
 def test_write_discipline_block_is_present_in_both_frontend_prompts():
-    """Chunked writing is needed by html-app and the fullstack frontend alike."""
+    """Split writing is needed by html-app and the fullstack frontend alike.
+
+    The html-app prompt has its own size block (`_GEN_SIZE_RULES`), so the
+    shared marker is the rule itself, not the constant."""
     assert "mode=\"a\"" in prompts._WRITE_DISCIPLINE
     for system in (
         prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
         assert "mode=\"a\"" in system
-        assert "chunk" in system.lower()
+        assert "Split ONLY" in system
 
 
 def test_role_no_longer_forbids_splitting_a_file():
@@ -548,3 +551,82 @@ def test_the_write_result_is_advertised_as_the_cheaper_answer():
     for name, text in _write_loop_prompts().items():
         assert "LINES" in text, name
         assert "without reading" in text, name
+
+
+# ── html-app generator prompt: structure (2026-09-15 rewrite) ───────────────
+#
+# The prompt was reordered so the model reads the task and its done-criterion
+# first, then what its input carries, then the workflow, and only then the
+# mechanics. Each rule is stated once. These locks hold the order, the input
+# headings (which must match what `_spec_context` renders) and the removals.
+
+def _html_prompt(primary: str = "index.html") -> str:
+    return prompts.build_subagent_system_prompt(
+        "html-app", Path("/tmp/artifact-prompt-probe"), primary=primary
+    )
+
+
+def test_html_prompt_states_the_task_before_the_mechanics():
+    s = _html_prompt()
+    order = ["## Your task", "## What you receive", "## Workflow",
+             "## Output protocol", "## Verifier contract", "## Tools"]
+    positions = [s.index(h) for h in order]
+    assert positions == sorted(positions), order
+
+
+def test_html_prompt_names_the_input_sections_spec_context_renders():
+    """The old text pointed at `## Data gathered so far`, a heading only the
+    data-phase nodes ever see; the generator's kickoff renders `## Data`."""
+    s = _html_prompt()
+    for heading in (
+        "`## Brief`",
+        "`## Data`",
+        "`### Sources read from the web`",
+        "`## Technical specification`",
+        "`## Progress journal`",
+        prompts.PRD_SECTION_FOOTER,
+    ):
+        assert heading in s, heading
+    assert "Data gathered so far" not in s
+
+
+def test_html_prompt_carries_no_leftovers_from_other_builders():
+    """Absolute folder path, fullstack wording and the two-tool-era 'main
+    agent' all came from shared constants the html-app prompt no longer uses."""
+    s = _html_prompt()
+    assert "/tmp/artifact-prompt-probe" not in s
+    assert "fullstack" not in s.lower()
+    assert "main agent" not in s
+    # The old DATA INTO FILES block told the model to append the data as its
+    # own part — contradicting the whole-file-in-one-body default.
+    assert "DATA INTO FILES" not in s
+    assert "as its own\n  part" not in s
+
+
+def test_html_prompt_states_each_rule_once():
+    s = _html_prompt()
+    assert s.count('name="viewport"') == 1
+    assert s.count("VERIFICATION IS NOT YOUR JOB") == 0
+    assert "NOT part of the job" in s
+
+
+def test_html_prompt_pins_ui_language_to_the_prd():
+    assert "language of the PRD" in _html_prompt()
+
+
+def test_html_prompt_quotes_the_markers_and_the_size_from_the_constants():
+    from anton.core.tools.generate_artifact import sub_tools
+    from anton.core.tools.generate_artifact.state import REPLY_BODY_CHARS
+
+    s = _html_prompt()
+    assert sub_tools.FILE_BEGIN_MARKER in s and sub_tools.FILE_END_MARKER in s
+    assert f"{REPLY_BODY_CHARS:,} characters" in s
+    assert s.index("single body") < s.index("Split ONLY")
+
+
+def test_visual_rules_still_join_design_and_contract_for_the_fullstack_frontend():
+    """`build_frontend_system_prompt` keeps the joined constant; the html-app
+    builder quotes the two halves under their own headings."""
+    assert prompts._DESIGN_RULES in prompts._VISUAL_RULES
+    assert prompts._VERIFIER_CONTRACT in prompts._VISUAL_RULES
+    assert 'name="viewport"' not in prompts._DESIGN_RULES
