@@ -10,12 +10,15 @@ import json
 import base64
 import hashlib
 import secrets
+import time
+import urllib.error
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
-from anton.minds_client import minds_request
+from anton.minds_client import minds_request, minds_request_with_status
 from anton.utils.datasources import scrub_credentials
 
 # LLM API key env vars whose values must be stripped from published files.
@@ -65,6 +68,103 @@ class StatePublishBlocked(Exception):
 
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
+
+# Async publish (ENG-1580). The server answers 202 for a fullstack upload
+# when asked; the client then polls. 180s: pandas-class installs finish in
+# 1–2 minutes; anything longer is reported with the job id so the artifact
+# can still be found (the server keeps building).
+PUBLISH_JOB_BUDGET_S = 180.0
+PUBLISH_JOB_POLL_TIMEOUT_S = 15
+_DEFAULT_POLL_AFTER_S = 3.0
+# Indirection so tests can drive the poll clock without patching the global
+# `time` module (pytest and asyncio read it too).
+_monotonic = time.monotonic
+
+
+class PublishJobFailed(RuntimeError):
+    """The server accepted the publish (202) and the job then failed.
+
+    `status_code`/`message` are what the synchronous /upload would have
+    answered for the same failure, so callers can map them the same way.
+    """
+
+    def __init__(self, status_code: int, message: str, *, job_id: str, report_id: str | None = None):
+        self.status_code = status_code
+        self.message = message
+        self.job_id = job_id
+        self.report_id = report_id
+        super().__init__(f"Publish failed (HTTP {status_code}): {message} [job {job_id}]")
+
+
+class PublishJobTimeout(RuntimeError):
+    """The client's wait budget ran out while the job was still queued/running.
+
+    The server keeps working: the artifact may well publish a minute later
+    under `report_id`. Nothing local records that — see design §7.
+    """
+
+    def __init__(self, *, job_id: str, report_id: str | None, waited_s: float):
+        self.job_id = job_id
+        self.report_id = report_id
+        self.waited_s = waited_s
+        super().__init__(
+            f"Publish is still running on the server after {int(waited_s)}s "
+            f"[job {job_id}, report {report_id or '?'}]"
+        )
+
+
+def _wait_for_publish_job(
+    publish_url: str,
+    job_id: str,
+    api_key: str,
+    *,
+    budget_s: float,
+    ssl_verify: bool,
+    poll_after_s: float = _DEFAULT_POLL_AFTER_S,
+    report_id: str | None = None,
+) -> dict:
+    """Poll GET {publish_url}/upload/jobs/{job_id} until done/failed or budget.
+
+    The URL is built from publish_url, not from the server's status_url, so
+    the poll goes to the same host the POST went to (in non-prod the minted
+    VIEW_HOST differs from the API host). Transient poll errors are retried
+    within the budget: a lost GET must not fail a publish that is succeeding.
+    """
+    url = f"{publish_url.rstrip('/')}/upload/jobs/{job_id}"
+    started = _monotonic()
+    while True:
+        time.sleep(poll_after_s)
+        try:
+            _status, raw = minds_request_with_status(
+                url, api_key, verify=ssl_verify, timeout=PUBLISH_JOB_POLL_TIMEOUT_S,
+            )
+            job = json.loads(raw)
+        except urllib.error.HTTPError as e:
+            # 4xx is final: the job record is gone (404, lifecycle or wrong
+            # publish_url) or this key is no longer allowed to read it (401/403).
+            # Waiting the budget out would only hide the real reason.
+            if e.code < 500:
+                raise PublishJobFailed(
+                    e.code, f"job status request rejected: {e.reason}",
+                    job_id=job_id, report_id=report_id,
+                ) from e
+            job = None
+        except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+            job = None
+        if job is not None:
+            state = job.get("status")
+            if state == "done":
+                return job.get("result") or {}
+            if state == "failed":
+                err = job.get("error") or {}
+                raise PublishJobFailed(
+                    int(err.get("status_code") or 500), str(err.get("message") or "unknown error"),
+                    job_id=job_id, report_id=job.get("report_id") or report_id,
+                )
+        waited = _monotonic() - started
+        if waited >= budget_s:
+            raise PublishJobTimeout(job_id=job_id, report_id=report_id, waited_s=waited)
+
 
 # Owner-side housekeeping files that must never enter the published
 # bundle. `.published.json` in particular holds the artifact's plaintext
@@ -391,6 +491,8 @@ def publish(
     access_version: int = 1,
     artifact_key: str | None = None,
     vault: DataVault | None = None,
+    job_budget_s: float = PUBLISH_JOB_BUDGET_S,
+    on_job_accepted: Callable[[dict], None] | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
 
@@ -422,6 +524,10 @@ def publish(
                   to anton's local vault (`~/.anton/data_vault`); cowork-server
                   passes its own vault so published secrets match where the
                   connection credentials were actually saved.
+        job_budget_s: How long to wait for an asynchronously accepted (202)
+                  publish before raising PublishJobTimeout.
+        on_job_accepted: Called with the 202 body as soon as the server
+                  accepts the job, before polling starts.
 
     Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
     """
@@ -439,6 +545,11 @@ def publish(
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
         payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
+        # Ask the server to build in the background (ENG-1580): pip install
+        # for heavy dependencies exceeds API Gateway's 29s limit. Static
+        # reports stay synchronous — one request, sub-second. An older server
+        # ignores the flag and answers 200, handled below.
+        payload_dict["async"] = True
         state_manifest = _read_state_manifest(file_path)
         if state_manifest is not None:
             _warn_state_schema_change(file_path, state_manifest)  # before upload
@@ -490,12 +601,25 @@ def publish(
     payload = json.dumps(payload_dict).encode()
 
     url = f"{publish_url.rstrip('/')}/upload"
-    raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
-    # Upload succeeded (minds_request raises on failure): record the published
-    # key schema so the next publish can warn on an incompatible change.
+    status, raw = minds_request_with_status(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    if status == 202:
+        accepted = json.loads(raw)
+        if on_job_accepted is not None:
+            on_job_accepted(accepted)
+        result = _wait_for_publish_job(
+            publish_url, accepted["job_id"], api_key,
+            budget_s=job_budget_s, ssl_verify=ssl_verify,
+            poll_after_s=float(accepted.get("poll_after_s") or _DEFAULT_POLL_AFTER_S),
+            report_id=accepted.get("report_id"),
+        )
+    else:
+        result = json.loads(raw)
+    # Upload succeeded (minds_request raises on HTTP errors, the job poll
+    # raises on a failed job): record the published key schema so the next
+    # publish can warn on an incompatible change.
     if state_manifest is not None:
         _save_state_snapshot(file_path, state_manifest)
-    return json.loads(raw)
+    return result
 
 
 def list_published(

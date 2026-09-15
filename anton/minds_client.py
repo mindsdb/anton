@@ -56,7 +56,7 @@ def minds_v1_base(base_url: str) -> str:
     return f"{base}/v1"
 
 
-def minds_request(
+def minds_request_with_status(
     url: str,
     api_key: str,
     *,
@@ -64,8 +64,8 @@ def minds_request(
     payload: bytes | None = None,
     verify: bool = True,
     timeout: int = 30,
-) -> bytes:
-    """HTTP transport for all Minds API calls.
+) -> tuple[int, bytes]:
+    """HTTP transport for all Minds API calls; returns (status, body).
 
     Sets browser-like headers to pass through Cloudflare bot detection.
     This is why we use raw urllib instead of the minds-sdk (which uses
@@ -95,7 +95,22 @@ def minds_request(
         ctx.verify_mode = ssl.CERT_NONE
 
     with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-        return resp.read()
+        return resp.status, resp.read()
+
+
+def minds_request(
+    url: str,
+    api_key: str,
+    *,
+    method: str = "GET",
+    payload: bytes | None = None,
+    verify: bool = True,
+    timeout: int = 30,
+) -> bytes:
+    """Body-only wrapper over minds_request_with_status (the historical API)."""
+    return minds_request_with_status(
+        url, api_key, method=method, payload=payload, verify=verify, timeout=timeout,
+    )[1]
 
 
 def normalize_minds_url(url: str) -> str:
