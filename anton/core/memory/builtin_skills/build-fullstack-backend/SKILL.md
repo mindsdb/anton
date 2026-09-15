@@ -1,12 +1,13 @@
 ---
 name: build-fullstack-backend
-description: 'MANDATORY reading before writing ANY backend, API, server, or fullstack
-  application code (create_artifact types fullstack-stateless-app / fullstack-stateful-app,
-  or anything that will be launched with launch_backend). Contains the complete hard
-  contract: the canonical FastAPI+Mangum backend.py template, SECRETS handling, /api/*
-  route prefix rules, static/ frontend layout, requirements.txt, and the launch/preview
-  workflow. Building a backend without recalling this skill first WILL break launch
-  and deployment. When in doubt, recall it.'
+description: 'ONLY for writing backend or fullstack code BY HAND. NOT needed on the
+  normal path — create_artifact(fullstack-stateless-app or fullstack-stateful-app)
+  followed by generate_artifact writes the backend, verifies it by importing it and
+  launches it. Recall this when editing an existing fullstack artifact, or when
+  generate_artifact failed and the user asked you to continue manually: it is the hard
+  contract — canonical FastAPI+Mangum backend.py template, SECRETS handling, /api/*
+  route prefix rules, static/ frontend layout, requirements.txt, launch and preview.
+  Covers backend, API and server code.'
 metadata:
   display_name: Backend & fullstack app generation
   provenance: builtin

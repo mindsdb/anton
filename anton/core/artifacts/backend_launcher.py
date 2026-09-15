@@ -16,6 +16,7 @@ build their own launcher).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,57 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Protocol
+
+
+_log = logging.getLogger(__name__)
+
+
+def build_datasource_env(vault, datasources, *, slug: str = "") -> dict[str, str]:
+    """The complete `DS_*` set a backend is entitled to: its declared sources only.
+
+    Shared by both launch paths on purpose (ENG-1382). `handle_launch_backend`
+    is what the agent calls; `generate_artifact` launches the backend itself at
+    the end of its pipeline and never goes through that handler. Building this
+    in only one of them means an artifact's credential exposure depends on WHO
+    started it — the generator's own launch would hand the subprocess every
+    `DS_*` in the process, which is the inheritance ENG-1382 removed.
+
+    Returns `{}` when nothing is declared or resolvable. That is still a
+    meaningful answer: passed as `ds_env` it strips the inherited `DS_*`, which
+    is the point for a backend that declared no datasource.
+    """
+    ds_env: dict[str, str] = {}
+    for ref in datasources or []:
+        if vault is None:
+            _log.warning("Artifact %s declares datasources but there is no vault", slug)
+            break
+        # Per-ref so one unreadable connection cannot deny the others, and
+        # env_for is the resolver a pad's own DS_* are built from.
+        try:
+            env = vault.env_for(ref.engine, ref.name)
+        except Exception:
+            _log.warning(
+                "Could not resolve %s/%s for backend %s", ref.engine, ref.name, slug,
+                exc_info=True,
+            )
+            continue
+        if env is None:
+            # Declared in metadata but gone from the vault: the backend would
+            # fail on its first query with nothing saying why.
+            _log.warning(
+                "Artifact %s declares %s/%s, which is not in the vault",
+                slug, ref.engine, ref.name,
+            )
+            continue
+        # Enforced here, not left to the vault: TurnKeyDataVault.env_for does
+        # not drop `_`-prefixed bookkeeping though its contract says it does.
+        field_prefix = f"{ref.env_prefix}__"
+        for key, value in env.items():
+            field = key[len(field_prefix):] if key.startswith(field_prefix) else key
+            if field.startswith("_"):
+                continue
+            ds_env[key] = value
+    return ds_env
 
 
 def _anton_state_pythonpath_dir() -> str:
@@ -57,14 +109,18 @@ def _anton_state_pythonpath_dir() -> str:
     return str(root)
 
 
-def _build_backend_env(
+def build_backend_env(
     extra_env: dict[str, str] | None,
     ds_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Subprocess env: inherited environ + extra_env, with anton_state on PYTHONPATH.
 
+    Public: `generate_artifact.verifiers.verify_backend` imports the artifact
+    backend in the same venv (introspection subprocess) and must see the same
+    `anton_state` injection, or a correct stateful backend fails its import.
+
     A non-None `ds_env` replaces the inherited DS_* entirely, so the backend
-    sees only the datasources it declared.
+    sees only the datasources it declared (ENG-1382).
     """
     env = {**os.environ}
     # Before the strip, so a caller's DS_* survive only when ds_env is None;
@@ -78,6 +134,11 @@ def _build_backend_env(
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")
     return env
+
+
+# Backwards-compatible name: pre-existing callers/tests import the underscored
+# form; the function went public when verify_backend became its second caller.
+_build_backend_env = build_backend_env
 
 
 class ScratchpadPoolLike(Protocol):

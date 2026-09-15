@@ -565,8 +565,10 @@ def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
 # product: artifact cards carry a Download control on web (ENG-2044), HTML and
 # Markdown artifacts are auto-shared at turn end (ENG-1680) with the link
 # surfaced on the card, and the chat renderer neutralises local-path links into
-# inert text. The base ARTIFACTS prompt (anton/core/llm/prompts.py, workflow
-# step 4) instructs the OPPOSITE for the CLI case — "include the primary
+# inert text. The base ARTIFACTS prompt (anton/core/llm/prompts.py, the
+# "AFTER FINISHING" workflow step — numbered 4 when this shipped, 6 since the
+# artifact pipeline became a single tool) instructs the OPPOSITE for the CLI
+# case — "include the primary
 # file's path … so it is clickable/openable in a plain CLI", and for
 # fullstack apps to prefer launch_backend's (loopback) url — so this block
 # overrides both BY NAME rather than merely contradicting them; suffix order

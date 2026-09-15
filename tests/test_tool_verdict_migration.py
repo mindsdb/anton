@@ -430,6 +430,7 @@ _ALL_HANDLERS = frozenset({
     "handle_ask_user",
     "handle_create_artifact",
     "handle_create_skill_draft",
+    "handle_generate_artifact",
     "handle_launch_backend",
     "handle_list_artifacts",
     "handle_memorize",
@@ -448,6 +449,12 @@ _ALL_HANDLERS = frozenset({
 #: verdict. Not a wish list — a lock.
 _VERDICT_DECLARING_HANDLERS = frozenset({
     "handle_create_skill_draft",
+    # Streaming handler: it YIELDS its verdicts rather than returning them.
+    # Tier 1 on success (every listed file was statically verified by the
+    # pipeline), tier 2 on a pipeline failure — `ok=False, reason="pipeline"`,
+    # deliberately mapped to `unclassified` in root_cause.py because the string
+    # the FSM returns names the node it stopped at, not the cause.
+    "handle_generate_artifact",
     "handle_list_artifacts",
     "handle_memorize",
     "handle_open_artifact",
@@ -496,8 +503,15 @@ def test_the_set_of_verdict_declaring_handlers_is_pinned():
                 continue
             seen.add(node.name)
             for ret in ast.walk(node):
-                if (isinstance(ret, ast.Return)
-                        and isinstance(ret.value, ast.Call)
+                # `return ToolOutcome(...)`, or `yield ToolOutcome(...)` for a
+                # streaming handler (ENG-970). Without the yield arm a
+                # streaming handler is counted by the census below and then
+                # looks permanently unverdicted to the subset check — the lock
+                # would report full coverage for a handler it cannot see, which
+                # is the exact silence it exists to break.
+                if not isinstance(ret, (ast.Return, ast.Yield)):
+                    continue
+                if (isinstance(ret.value, ast.Call)
                         and getattr(ret.value.func, "id", "") == "ToolOutcome"):
                     declaring.add(node.name)
                     break

@@ -169,6 +169,12 @@ _SENTINEL_REASONS = {
     # Could be environment or config and the sentinel does not say which, so it
     # stays out of every trip rung until something distinguishes them.
     "launch_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `generate_artifact` stopped somewhere inside its own pipeline. The
+    # single string it returns names the node, but the causes behind that
+    # node span everything from a truncated spec to a missing data source, so
+    # one sentinel cannot pick a tier honestly. Unclassified until the
+    # pipeline reports a cause rather than a location.
+    "pipeline": (TIER_UNCLASSIFIED, "unclassified"),
     # `read_image`'s catch-all read failure wraps a bare `except Exception`, so
     # one sentinel covers a permissions wall, a corrupt file the agent itself
     # wrote, and a decode bug. Nothing here distinguishes them, so it stays out

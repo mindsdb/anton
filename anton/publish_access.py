@@ -18,12 +18,26 @@ logger = logging.getLogger(__name__)
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _EMAIL_SPLIT_RE = re.compile(r"[\s,;]+")
 
-# Keep in sync with anton.publisher._FULLSTACK_EXCLUDED: backend.log is the
-# running backend's runtime log — excluded from the published bundle there, so
-# it must not count as user content here either.
-# Matched against the artifact-relative path's FIRST component, so reserved
-# directories belong here too (`.revisions`, the private revision journal).
-_HOUSEKEEPING_FILES = {"metadata.json", "README.md", "backend.log", ".published.json", ".revisions"}
+# Keep in sync with anton.publisher._FULLSTACK_EXCLUDED (publisher.py:42):
+# backend.log is the running backend's runtime log — excluded from the
+# published bundle there, so it must not count as user content here either.
+# The `.anton_state.db*` trio (local STATE driver's SQLite files) and
+# `.state_manifest.published.json` (publisher's schema snapshot) are stateful
+# runtime/publish bookkeeping, same story. `state_manifest.json` itself is a
+# deliverable and stays visible.
+_HOUSEKEEPING_FILES = {
+    "metadata.json", "README.md", "backend.log", ".published.json",
+    ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
+    ".state_manifest.published.json",
+}
+
+# Reserved directories (`.revisions` — the private revision journal). Matching
+# here is against the path's first component, so folding these into the set
+# above would work — but that set is locked to the store's copy by
+# `test_housekeeping_set_matches_publish_access_copy`, and the store, which
+# matches whole paths, has to keep directories separate. Same split on both
+# sides keeps that lock meaningful rather than one more thing to update twice.
+_HOUSEKEEPING_DIRS = {".revisions"}
 
 
 def normalize_emails(values) -> list[str]:
@@ -196,7 +210,7 @@ def _user_files(folder: Path) -> list[Path]:
                 continue
             rel = p.relative_to(folder)
             top = rel.parts[0] if rel.parts else ""
-            if top in _HOUSEKEEPING_FILES:
+            if top in _HOUSEKEEPING_FILES or top in _HOUSEKEEPING_DIRS:
                 continue
             out.append(p)
     except OSError:

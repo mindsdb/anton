@@ -24,6 +24,7 @@ from pathlib import Path
 
 from anton.core.artifacts.models import (
     ARTIFACT_ID_SLUG_PREFIX_LEN,
+    ARTIFACT_TYPES,
     METADATA_SCHEMA_VERSION,
     Artifact,
     ArtifactType,
@@ -32,6 +33,7 @@ from anton.core.artifacts.models import (
     ProvenanceEntry,
     TurnEntry,
 )
+from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
 
 
 logger = logging.getLogger(__name__)
@@ -40,12 +42,39 @@ logger = logging.getLogger(__name__)
 METADATA_FILENAME = "metadata.json"
 README_FILENAME = "README.md"
 PUBLISHED_FILENAME = ".published.json"
+BACKEND_LOG_FILENAME = "backend.log"
 
-# Files the store owns or that hold publish-state — not artifact content the
-# agent authored — so they're excluded from `files[]`. Mirrors cowork-server's
-# artifacts-service housekeeping set so the agent's view and the UI agree on
-# what counts as an artifact file.
-_HOUSEKEEPING_FILES = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
+# Files the store owns, hold publish-state, or belong to a running backend —
+# not artifact content the agent authored. Mirrors cowork-server's
+# artifacts-service housekeeping set (`cowork/services/artifacts.py:132`) so the
+# agent's view and the UI agree on what counts as an artifact file; the same set
+# appears in `anton/publish_access.py` and `publisher._FULLSTACK_EXCLUDED`.
+# `backend.log` is here for that agreement: it is the launched backend's runtime
+# log, written into the artifact folder by `launch_artifact_backend`, and every
+# other copy of this set already excluded it.
+# The `.anton_state.db*` trio is the local STATE driver's SQLite database (the
+# -wal/-shm side files carry the freshest writes) and
+# `.state_manifest.published.json` is the publisher's schema snapshot — all
+# runtime/publish bookkeeping of a stateful backend, never authored content.
+# `state_manifest.json` itself is NOT here: it is a deliverable the publisher
+# bundles. NOTE: cowork-server's copy of this set does not know these names yet.
+_HOUSEKEEPING_FILES = {
+    METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME, BACKEND_LOG_FILENAME,
+    ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
+    ".state_manifest.published.json",
+}
+
+# Kept separate from the housekeeping set rather than merged into it: these are
+# authored by the generation tools, not owned by the store, and the set above
+# mirrors cowork-server's — folding these in would quietly make that claim
+# false. Both are excluded from `files[]`; only the reason differs.
+_EXCLUDED_FROM_FILES = _HOUSEKEEPING_FILES | set(GENERATION_INPUT_FILES)
+
+# Reserved DIRECTORIES, matched on the artifact-relative path's first component
+# rather than by exact name (`.revisions` is the private revision journal).
+# Separate from the sets above because those are matched whole-path: a
+# directory name folded in there would only ever match a file literally called
+# `.revisions`.
 _HOUSEKEEPING_DIRS = {".revisions"}
 
 # Same character whitelist projects_store uses — keeps slug shapes
@@ -245,6 +274,7 @@ class ArtifactStore:
         primary: str | None = _UNSET,  # type: ignore[assignment]
         port: int | None = _UNSET,  # type: ignore[assignment]
         datasources: list[DatasourceRef] | None = _UNSET,  # type: ignore[assignment]
+        type: ArtifactType | None = _UNSET,  # type: ignore[assignment]  # noqa: A002 (shadows builtin `type` — matches `create()`'s existing param name below)
     ) -> Artifact | None:
         """Update mutable agent-supplied fields on an existing artifact.
 
@@ -252,11 +282,26 @@ class ArtifactStore:
         left unchanged. Pass `primary=None` or `primary=""` to clear
         the entry-point pointer. Pass `port=None` to clear the port.
         Pass `datasources=[]` to clear the datasource list.
+
+        `type` is validated against `ARTIFACT_TYPES` after the slug is
+        confirmed to exist, but before anything is mutated — Pydantic's
+        `Artifact` model has no `validate_assignment`, so an invalid value
+        assigned directly would write corrupt JSON that only fails on the
+        *next* load. A missing slug always returns `None` regardless of
+        `type`'s validity (checked first): `None` already means "slug not
+        found", so a bad `type` on top of a missing slug must not escalate
+        that into a `ValueError` — the two causes stay distinguishable by
+        checking existence before validity.
+
         Returns the updated artifact, or None when the slug is missing.
         """
         artifact = self._load_silent(slug)
         if artifact is None:
             return None
+        if type is not _UNSET and type not in ARTIFACT_TYPES:
+            raise ValueError(
+                f"`type` must be one of {ARTIFACT_TYPES}. Got: {type!r}."
+            )
         if primary is not _UNSET:
             artifact.primary = (
                 primary.strip() if isinstance(primary, str) and primary.strip() else None
@@ -265,6 +310,8 @@ class ArtifactStore:
             artifact.port = int(port) if port is not None else None
         if datasources is not _UNSET:
             artifact.datasources = list(datasources or [])
+        if type is not _UNSET:
+            artifact.type = type
         artifact.updatedAt = _utc_now()
         self._save(artifact)
         return artifact
@@ -380,8 +427,11 @@ class ArtifactStore:
         Persists (and bumps ``updatedAt``) ONLY when the on-disk file set
         actually changed, so this is safe and cheap to call on every read —
         no metadata/README churn and no spurious ``updatedAt`` bumps when
-        nothing moved. Skips housekeeping files (`metadata.json` /
-        `README.md` / `.published.json`).
+        nothing moved. Skips everything in ``_EXCLUDED_FROM_FILES``: the
+        store's own files, the backend log, and the generation pipeline's
+        inputs (`prd.md` / `spec.md` / `openapi.json`) — the last group sits
+        in the folder but is not what the user asked to be built, and listing
+        it invites the agent to present a spec as a deliverable.
         """
         folder = self.folder_for(artifact.slug)
         entries: list[FileEntry] = []
@@ -393,7 +443,7 @@ class ArtifactStore:
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
             rel = p.relative_to(folder).as_posix()
-            if rel in _HOUSEKEEPING_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
+            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
                 continue
             try:
                 stat = p.stat()

@@ -1,11 +1,11 @@
 ---
 name: build-html-dashboard
-description: 'MANDATORY reading before building ANY HTML dashboard, chart, plot, interactive
-  report, or browser-based visualization (create_artifact type="html-app", or the
-  frontend of a fullstack app). Contains the full HTML output contract: self-contained
-  file rules, Apache ECharts setup, dark theme, layout/design standards, and large-dataset
-  handling. Recall it BEFORE writing the first line of dashboard HTML. When in doubt,
-  recall it.'
+description: 'ONLY for writing dashboard or chart HTML BY HAND. NOT needed on the normal
+  path — create_artifact(type="html-app") followed by generate_artifact writes the
+  dashboard itself and carries this contract internally. Recall this when editing an
+  existing html-app, or when generate_artifact failed and the user asked you to continue
+  manually: it is the output contract — self-contained file rules, Apache ECharts setup,
+  dark theme, layout/design standards, large-dataset handling.'
 metadata:
   display_name: HTML dashboard & visualization output format
   provenance: builtin

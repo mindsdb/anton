@@ -107,7 +107,10 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
         output_dir=str(tmp_path),
     )
     assert CLOUD_ARTIFACT_DELIVERY_GUIDANCE.strip() in prompt
-    # Tripwire: the override sentence targets the base ARTIFACTS step-4 text.
+    # Tripwire: the override sentence targets the base ARTIFACTS "AFTER
+    # FINISHING" text. Locked by phrase, not by step number — the number moved
+    # from 4 to 6 when the artifact pipeline became one tool, and a lock on the
+    # numbering would have failed for a reason that does not matter.
     # If the durable fix lands (web-specific assembly REMOVES that base
     # instruction), this assertion fails on purpose — the override sentence in
     # CLOUD_ARTIFACT_DELIVERY_GUIDANCE is then stale and must be cleaned up
