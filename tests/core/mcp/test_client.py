@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+
+import mcp
 import pytest
 
 from anton.core.mcp.client import McpSession
@@ -44,18 +47,22 @@ def test_requires_exactly_one_of_url_or_server(stub_mcp_server):
 
 async def test_call_tool_retries_once_on_transient_failure(stub_mcp_server, monkeypatch):
     """A transport/protocol-level failure (not a tool-reported is_error) gets
-    exactly one retry with a fresh call before raising."""
+    exactly one retry against a FRESH session (a dead transport's task group
+    can't serve a second call — see McpSession._reconnect) before raising.
+    Patched at the class level, not the instance: reconnecting builds a new
+    `mcp.Client` object, so an instance-level patch would only ever see the
+    first attempt."""
+    calls = {"n": 0}
+    real_call_tool = mcp.Client.call_tool
+
+    async def flaky(self, name, arguments):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("transport hiccup")
+        return await real_call_tool(self, name, arguments)
+
+    monkeypatch.setattr(mcp.Client, "call_tool", flaky)
     async with McpSession(server=stub_mcp_server) as session:
-        real_call_tool = session._client.call_tool
-        calls = {"n": 0}
-
-        async def flaky(name, arguments):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise ConnectionError("transport hiccup")
-            return await real_call_tool(name, arguments)
-
-        monkeypatch.setattr(session._client, "call_tool", flaky)
         content, is_error = await session.call_tool("add", {"a": 2, "b": 2})
 
     assert calls["n"] == 2
@@ -64,13 +71,11 @@ async def test_call_tool_retries_once_on_transient_failure(stub_mcp_server, monk
 
 
 async def test_call_tool_raises_transient_error_after_exhausting_the_retry(stub_mcp_server, monkeypatch):
+    async def always_fails(self, name, arguments):
+        raise ConnectionError("still down")
+
+    monkeypatch.setattr(mcp.Client, "call_tool", always_fails)
     async with McpSession(server=stub_mcp_server) as session:
-
-        async def always_fails(name, arguments):
-            raise ConnectionError("still down")
-
-        monkeypatch.setattr(session._client, "call_tool", always_fails)
-
         with pytest.raises(McpTransientError):
             await session.call_tool("add", {"a": 1, "b": 1})
 
@@ -89,3 +94,44 @@ async def test_call_tool_never_retries_a_permanent_failure(stub_mcp_server, monk
             await session.call_tool("add", {"a": 1, "b": 1})
 
     assert calls["n"] == 1
+
+
+async def test_call_tool_reconnects_on_a_non_exception_transport_failure(stub_mcp_server, monkeypatch):
+    """Killing a server mid-session can surface as asyncio.CancelledError or
+    an (Base)ExceptionGroup rather than a plain Exception, depending on which
+    background task of the transport noticed first (verified by hand,
+    ENG-1816) — `except Exception` alone would miss it. This still gets one
+    reconnect-and-retry, same as a plain exception."""
+    calls = {"n": 0}
+    real_call_tool = mcp.Client.call_tool
+
+    async def flaky(self, name, arguments):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise asyncio.CancelledError("simulated transport-task-group teardown")
+        return await real_call_tool(self, name, arguments)
+
+    monkeypatch.setattr(mcp.Client, "call_tool", flaky)
+    async with McpSession(server=stub_mcp_server) as session:
+        content, is_error = await session.call_tool("add", {"a": 5, "b": 5})
+
+    assert calls["n"] == 2
+    assert content == "10"
+    assert is_error is False
+
+
+async def test_call_tool_reraises_the_original_error_when_a_non_exception_failure_persists(
+    stub_mcp_server, monkeypatch
+):
+    """If reconnecting doesn't help, the ORIGINAL exception propagates as-is
+    — never disguised as McpTransientError, since that could be real task
+    cancellation (e.g. the whole turn being cancelled) rather than a
+    business-logic failure a ToolOutcome should swallow."""
+
+    async def always_cancelled(self, name, arguments):
+        raise asyncio.CancelledError("still gone")
+
+    monkeypatch.setattr(mcp.Client, "call_tool", always_cancelled)
+    async with McpSession(server=stub_mcp_server) as session:
+        with pytest.raises(asyncio.CancelledError):
+            await session.call_tool("add", {"a": 1, "b": 1})

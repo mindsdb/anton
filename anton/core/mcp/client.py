@@ -71,6 +71,10 @@ class McpSession:
         self._client: mcp.Client | None = None
 
     async def __aenter__(self) -> "McpSession":
+        await self._connect()
+        return self
+
+    async def _connect(self) -> None:
         if self._server is not None:
             target: Any = self._server
         else:
@@ -92,7 +96,27 @@ class McpSession:
             raise
         self._log_round_trip("initialize()", started)
         self._client = client
-        return self
+
+    async def _reconnect(self) -> None:
+        """Close the dead client (best-effort) and open a fresh one against
+        the same target/token. Required, not optional, for `call_tool`'s
+        retry: once one task in a session's transport task group has failed,
+        the whole group — and the `Client` built on it — is unusable, so
+        simply calling `call_tool()` again on the same object cannot
+        succeed."""
+        if self._client is not None:
+            try:
+                await self._client.__aexit__(None, None, None)
+            except Exception:
+                logger.exception("McpSession: error closing the dead client before reconnecting")
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                logger.exception("McpSession: error closing the dead http client before reconnecting")
+        self._client = None
+        self._http_client = None
+        await self._connect()
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         """Tear down the session. A cleanup failure here must never replace
@@ -133,27 +157,52 @@ class McpSession:
         caller decides what that means for its own retry/resilience
         bookkeeping (see registry.py's handler wrapper).
 
-        A transport/protocol-level failure gets one retry with a fresh call
-        on the same open session and stored token — mirrors the OAuth
-        refresh path's own permanent-vs-transient split (see errors.py) —
-        before a `McpPermanentError`/`McpTransientError` reaches the caller.
-        A permanent failure (rejected/expired token) is never retried.
+        A transport/protocol-level failure gets one retry against a FRESH
+        session (same stored token) before a `McpPermanentError`/
+        `McpTransientError` reaches the caller — mirrors the OAuth refresh
+        path's own permanent-vs-transient split (see errors.py). A fresh
+        session, not just a fresh call on the same one, is required: once
+        one task in the transport's task group has failed, the whole group —
+        and the `Client` built on it — is unusable. A permanent failure
+        (rejected/expired token) is never retried.
+
+        Verified by hand (ENG-1816): killing the server mid-session surfaces
+        here as anything from a plain `httpx2.ConnectError` to an
+        `asyncio.CancelledError`/`ExceptionGroup`, depending on which of the
+        transport's own background tasks (the streamable-HTTP transport
+        holds a long-lived background reader) noticed the failure first —
+        both shapes were reproduced across otherwise-identical runs. The
+        non-`Exception` shapes are still retried once the same way, but if
+        the retry also fails, the ORIGINAL exception is re-raised as-is
+        rather than being disguised as `McpTransientError` — real task
+        cancellation (e.g. the whole turn being cancelled) must never be
+        silently swallowed into a business-logic failure.
         """
-        client = self._require_client()
-        last_exc: Exception | None = None
+        last_error: BaseException | None = None
         for attempt in (1, 2):
             try:
-                result = await client.call_tool(name, arguments)
+                result = await self._require_client().call_tool(name, arguments)
                 return _flatten_content(result.content), result.is_error
-            except Exception as exc:  # noqa: BLE001 - reclassified immediately
-                classified = classify_mcp_error(exc)
-                last_exc = classified
-                if isinstance(classified, McpPermanentError):
-                    raise classified from exc
-                if attempt == 1:
-                    logger.info("MCP tool %s: transient failure, retrying once: %s", name, classified)
-        assert last_exc is not None
-        raise last_exc
+            except (KeyboardInterrupt, SystemExit, GeneratorExit):
+                raise
+            except BaseException as exc:  # noqa: BLE001 - reclassified/reraised below
+                if isinstance(exc, Exception):
+                    classified = classify_mcp_error(exc)
+                    if isinstance(classified, McpPermanentError):
+                        raise classified from exc
+                    last_error = classified
+                else:
+                    last_error = exc
+                if attempt == 2:
+                    break
+                logger.info("MCP tool %s: transport failure, reconnecting and retrying once: %s", name, last_error)
+                try:
+                    await self._reconnect()
+                except Exception:
+                    logger.exception("MCP tool %s: reconnect failed after a transport failure", name)
+                    break
+        assert last_error is not None
+        raise last_error
 
     def _require_client(self) -> mcp.Client:
         if self._client is None:
