@@ -99,6 +99,15 @@ from anton.core.utils.scratchpad import (
     format_cell_result,
     observe_scratchpad_cell,
 )
+# Artifact-edit tracking + lint: shared with handle_scratchpad's
+# own exec branch (tool_handlers.py) rather than duplicated here, since this
+# inline streaming exec bypasses that handler entirely.
+from anton.core.tools.tool_handlers import (
+    resolve_artifact_store,
+    snapshot_existing_artifact_mtimes,
+    track_edits_since,
+    lint_changed_artifact_files,
+)
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
@@ -5090,6 +5099,16 @@ class ChatSession:
                                 _sp_t0 = _time.monotonic()
                                 from anton.core.backends.base import Cell
 
+                                # Snapshot before execute so a post-cell lint
+                                # (below) can tell which artifact this cell
+                                # actually touched
+                                artifact_store = resolve_artifact_store(self)
+                                before_artifact_mtimes = (
+                                    snapshot_existing_artifact_mtimes(artifact_store)
+                                    if artifact_store is not None
+                                    else {}
+                                )
+
                                 cell = None
                                 async for item in pad.execute_streaming(
                                     code,
@@ -5118,6 +5137,30 @@ class ChatSession:
                                     if cell
                                     else "No result produced."
                                 )
+                                if cell is not None and artifact_store is not None:
+                                    # handle_scratchpad's exec branch runs
+                                    # this same pair; this inline path is the
+                                    # one the streaming product actually
+                                    # takes, so it needs its own call.
+                                    track_edits_since(
+                                        self, artifact_store, before_artifact_mtimes
+                                    )
+                                    try:
+                                        lint_messages = await asyncio.to_thread(
+                                            lint_changed_artifact_files,
+                                            artifact_store, before_artifact_mtimes,
+                                        )
+                                    except Exception:
+                                        lint_messages = []
+                                        logger.warning(
+                                            "artifact lint failed for this cell",
+                                            exc_info=True,
+                                        )
+                                    if lint_messages:
+                                        result_text += (
+                                            "\n\n[artifact lint]\n"
+                                            + "\n".join(lint_messages)
+                                        )
                                 # The runtime's verdict, not a text guess: a
                                 # cell with a raised error/timeout/kill failed;
                                 # stderr-only output (warnings) is not a
