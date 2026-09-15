@@ -37,7 +37,8 @@ IDENTITY
   "© MINDSDB, INC." notice and is confused, explain the relationship plainly.
   MindsDB is not a different or competing product.
 - The agent that runs the turns is called Anton. Users normally see "Cowork";
-  "Anton" is the agent inside it. Hermes is an alternative agent (see SURFACES).
+  "Anton" is the agent inside it. Anton is the supported agent — see HERMES
+  before answering anything about a second agent.
 
 WHERE IT RUNS
 - A desktop app for macOS, Windows and Linux.
@@ -70,19 +71,36 @@ This is the section to check before telling a user where to click. A feature
 that exists on the surface you know about may simply not be present on theirs,
 and troubleshooting a missing feature as if it were broken wastes their time.
 
-- Choosing the agent (Anton or Hermes), account-wide: **browser only**, under
-  Settings → Agent Harness. There is no such setting in the desktop app. A
-  desktop user who cannot find it is not misconfigured — it is not there.
+- The account-wide agent setting is **browser only**, under
+  Settings → Agent Harness. There is no such setting in the desktop app. A desktop user
+  who cannot find it is not misconfigured — it is not there. What that setting
+  can still select is changing: see HERMES.
 - Coding Mode: **desktop only**. It launches an external CLI in a terminal,
-  which the browser cannot do. Harness choice on desktop exists only inside
-  Coding Mode, where the composer offers Anton, Hermes or Claude Code for
-  coding tasks — which is a different, per-task control from the account-wide
-  browser setting above.
+  which the browser cannot do. Agent choice on desktop exists only inside
+  Coding Mode — a different, per-task control from the account-wide browser
+  setting above. Which agents it offers is changing: see HERMES.
 - Opening a file or folder in the OS ("reveal in Finder/Explorer", opening a
   produced file in a local app): **desktop only**. In the browser, files are
   downloaded or previewed in the page instead.
 - Local workspace switching and the local-server status indicator: **desktop
   only**; the browser has no local server to report on.
+
+HERMES — being removed, and the UI has not caught up
+Do not state whether Hermes works. As of 2026-09-14 the two halves disagree:
+cowork-server deleted the Hermes harness (ENG-2608), while the Cowork UI still
+renders an "Agent Harness" setting and Hermes options. So a user can select
+something the server can no longer run.
+
+If a user asks about Hermes, or has selected it and something is not working:
+- Say the supported agent is Anton, and that Hermes is being removed.
+- Do not troubleshoot Hermes, and do not tell them it is fine to keep using.
+- Do not describe it as a third-party or external tool. It was ours.
+- Point them at https://docs.mindshub.ai if they need more.
+
+This entry is deliberately about the disagreement rather than the outcome,
+because the UI half may be removed at any time. The file's usual rule — if the
+app and this file disagree, the app is right — cannot settle a case where the
+app disagrees with itself.
 
 WHEN A USER REPORTS A MISSING FEATURE
 Ask which one they are on (or read it from the PRODUCT block in your system
@@ -105,6 +123,9 @@ automatically when that code changes, so re-check these when touching:
   call sites in `ComingSoonModal`, `ConnectorPicker`, `useAppUpdates`
 - account-wide harness toggle — the `host.isWeb` gate on the `Agent Harness`
   group in `src/renderer/cowork/views/settings/SettingsView.jsx`
+- whether Hermes still exists — `cowork/harnesses/` in cowork-server (the
+  directory is the answer) against the UI references above; when they agree
+  again, replace the HERMES section with the settled fact
 - Coding Mode being desktop-only — `codeModeAvailable` in
   `src/renderer/platform/host.ts`, and `renderCodingModeSection`
 If the app and this file disagree, the app is right and this file is stale.

@@ -354,3 +354,28 @@ class TestPromptAndSkillAgree:
         ):
             assert "Cowork" in source
             assert "MindsHub" in source
+
+
+class TestHermesIsNotStatedAsFact:
+    """ENG-2608 removed the Hermes harness from cowork-server while the Cowork
+    UI still renders its setting, so the two halves disagree. The fact sheet
+    must not assert either outcome — it is the highest-authority place a wrong
+    answer can sit, and this is the ticket's own fourth user case.
+    """
+
+    def test_no_claim_that_hermes_is_selectable_or_working(self, store):
+        body = store.load("cowork-product").declarative_md
+        assert "Do not state whether Hermes works" in body
+        assert "the supported agent is Anton" in body
+
+    def test_hermes_is_never_described_as_third_party(self, store):
+        """The user in the ticket had his logs troubleshot as if Hermes were a
+        Nous Research binary. Being wrong in the other direction is no better."""
+        body = store.load("cowork-product").declarative_md.lower()
+        for wrong in ("nous research", "third-party harness", "external agent"):
+            assert wrong not in body
+
+    def test_the_maintenance_note_says_how_to_settle_it(self, store):
+        """So the next reader resolves the disagreement instead of guessing."""
+        body = store.load("cowork-product").declarative_md
+        assert "cowork/harnesses/" in body

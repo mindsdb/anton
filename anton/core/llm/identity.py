@@ -153,10 +153,13 @@ _IDENTITY_RULE_LINE = (
 _PRODUCT_HEADER = "PRODUCT (what you are — not what model is serving you):"
 
 _PRODUCT_LINES = [
-    # "MindsHub", not "MindsDB, Inc.", deliberately. The user-visible strings in
-    # the app run 129 MindsHub to 24 MindsDB, and the journey that reaches this
-    # agent is MindsHub-branded throughout — naming the legal entity here would
-    # introduce a third brand into an answer that is meant to reduce confusion.
+    # "MindsHub", not "MindsDB, Inc.", deliberately. The journey that reaches
+    # this agent is MindsHub-branded throughout, and the app's user-visible
+    # strings overwhelmingly say MindsHub — naming the legal entity here would
+    # introduce a third brand into an answer meant to reduce confusion. (An
+    # earlier version of this comment quoted a 129:24 count; it named no scope,
+    # was not reproducible from an obvious one, and the argument does not need
+    # digits.)
     # The company relationship stays in the `cowork-product` skill for the user
     # who asks, or who sees the "© MINDSDB, INC." copyright line in the app.
     "- You are Cowork, an AI agent made by MindsHub. Never identify as, or as "
