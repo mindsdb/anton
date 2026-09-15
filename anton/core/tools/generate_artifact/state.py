@@ -72,6 +72,21 @@ SPEC_MAX_TOKENS_RETRY: int = 20480
 # ~12 800 characters — under the size of an average artifact.
 GEN_WRITE_MAX_TOKENS: int = 20480
 
+# The same budget restated in CHARACTERS, because that is the unit the model
+# can actually compare against what it is about to write. It has no view of its
+# remaining tokens, so "write the whole file when it fits in your output budget"
+# is a condition it cannot evaluate — and measured 2026-09-15, it answered that
+# condition by following the concrete splitting recipe underneath it instead,
+# cutting a 33 687-character file that would have fit.
+#
+# Derived from the ratios measured on real bodies: the planning model, which
+# writes round 0, ran 1.57 / 1.78 / 1.99 characters per token across three runs;
+# the coding model 2.62 and 2.91. Taken at the planning model's worst,
+# 20480 * 1.57 is about 32 100, rounded down for the preamble and the tool call.
+# Deliberately conservative: overshooting costs the whole part (a body with no
+# end marker writes nothing), undershooting costs one extra round.
+REPLY_BODY_CHARS: int = 30_000
+
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
 # `show_and_confirm` call plus up to two "revise brief, show again" cycles.
 # Not a separate hard cap — the shared budget itself is what eventually stops

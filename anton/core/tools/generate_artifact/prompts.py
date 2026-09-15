@@ -19,6 +19,11 @@ from pathlib import Path
 # literal that drifts breaks the protocol silently.
 from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 
+# How much file content fits in one reply, in characters — the unit the model
+# can compare against what it is about to write. Derived from the output budget
+# in state.py; quoted from the constant so the two cannot drift.
+from .state import REPLY_BODY_CHARS
+
 
 # ---------------------------------------------------------------------------
 # Canonical FSM graph — embedded in decision/generation prompts so every LLM
@@ -473,17 +478,18 @@ FRONTEND — `static/index.html`:
 # by the fullstack frontend alike. It cannot live in _FRONTEND_RULES — that block
 # only goes to the fullstack branch.
 _WRITE_DISCIPLINE = f"""\
-WRITING A LARGE FILE:
-Write the whole file in ONE reply when it fits in your output budget — that is
-the normal case and it costs one round. Split it only when the file is too long
-for a single reply:
-- First part: body between the markers + `write_file(path, mode="w")` — head,
-  `<style>`, opening `<body>`.
-- Every next part: body + `write_file(path, mode="a")`, one reply each,
-  continuing exactly where the file now ends: the data block, then the markup,
-  then the scripts, then the closing tags.
-- One body per reply, so one part per reply. Splitting a file that would have
-  fit costs you a whole extra round for nothing.
+HOW MUCH GOES IN ONE REPLY:
+One reply holds roughly {REPLY_BODY_CHARS:,} characters of file content. Almost
+every artifact is smaller than that, so the normal case is the whole file in a
+single body, written with one `write_file(path, mode="w")` — one round, and
+done. Compare the file you are about to write against that figure before you
+decide anything else.
+
+Split ONLY a file that will clearly exceed it:
+- One body per reply, so one part per reply. Each part costs a full round, and
+  splitting a file that would have fit costs that round for nothing.
+- Continue each part exactly where the file now ends, and append it with
+  `write_file(path, mode="a")`.
 - If a reply is cut off before the closing marker, nothing from it is written —
   send that part again, shorter, and append the remainder next.
 - Do NOT re-emit the whole file to "fix" something — append the remaining part.

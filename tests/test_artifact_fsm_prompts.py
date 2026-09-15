@@ -434,7 +434,40 @@ def test_the_write_discipline_no_longer_states_a_character_limit():
     # as "where oversized calls fail" had the model keep exactly those small
     # and then send 19 819 characters in the one right after.
     assert "oversized calls fail" not in d
-    assert "in ONE reply when it fits" in d
+    assert "in a\nsingle body" in d
+
+
+def test_the_size_guidance_is_a_number_the_model_can_check():
+    """"When it fits in your output budget" is a condition the model cannot
+    evaluate — it has no view of its remaining tokens.
+
+    Measured 2026-09-15: asked that way, it followed the concrete splitting
+    recipe underneath instead and cut a 33 687-character file that would have
+    fit, costing a round. The figure is in CHARACTERS because that is what the
+    model can compare against the file it is about to write, and it is quoted
+    from the constant so the prompt and the budget cannot drift apart.
+    """
+    from anton.core.tools.generate_artifact.state import REPLY_BODY_CHARS
+
+    d = prompts._WRITE_DISCIPLINE
+    assert f"{REPLY_BODY_CHARS:,} characters" in d
+    assert "output budget" not in d
+
+
+def test_splitting_is_described_as_the_exception_not_the_recipe():
+    """The old text prescribed WHERE to split — head/style/body, then the data
+    block, then the markup, then the scripts. That is a procedure the model can
+    execute without ever weighing whether to split at all, and the one live
+    split we measured fell exactly on the boundary it named.
+    """
+    d = prompts._WRITE_DISCIPLINE
+
+    # No structural recipe left.
+    for gone in ("opening `<body>`", "then the scripts", "First part:"):
+        assert gone not in d, gone
+
+    # The whole-file case is stated before the split case.
+    assert d.index("single body") < d.index("Split ONLY")
 
 
 def test_the_markers_are_quoted_identically_on_every_surface():
