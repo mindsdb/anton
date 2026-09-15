@@ -38,3 +38,25 @@ def test_the_two_doc_ambiguous_tools_are_classified_on_the_safe_side():
     # closed to write.
     assert allowed_for_mode("hubspot", "manage_onboarding", "read") is False
     assert allowed_for_mode("hubspot", "manage_onboarding", "write") is True
+
+
+def test_tools_added_since_the_original_table_was_drafted_are_classified():
+    """Confirmed live 2026-09-15 against a real HubSpot MCP server — these 5
+    tools weren't in the original doc-derived table at all."""
+    # Pure-query tools confirmed live: no create/mutate operation in their schema.
+    assert allowed_for_mode("hubspot", "get_aeo_metrics", "read") is True
+    assert allowed_for_mode("hubspot", "search_intent_signals", "read") is True
+    # Tools with an explicit create/mutate operation confirmed live.
+    for write_tool in ("manage_segment", "manage_aeo_prompts", "manage_aeo_recommendations"):
+        assert allowed_for_mode("hubspot", write_tool, "read") is False
+        assert allowed_for_mode("hubspot", write_tool, "write") is True
+
+
+def test_tools_no_longer_seen_live_are_not_in_the_table():
+    """render_landing_page_ui/render_asset/manage_blog_post were in the
+    original doc-derived table but didn't appear in a real tools/list() call
+    (2026-09-15) — removed as stale. An unrecognized name still fails closed
+    to write-tier (see test_unrecognized_tool_name_fails_closed_to_write_only),
+    it's just no longer specifically classified read."""
+    for removed_tool in ("render_landing_page_ui", "render_asset", "manage_blog_post"):
+        assert allowed_for_mode("hubspot", removed_tool, "read") is False
