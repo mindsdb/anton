@@ -59,35 +59,35 @@ logger = logging.getLogger(__name__)
 MAX_ROUNDS = 20
 
 
-# Two distinct rejections, because the causes differ and the model must react
-# differently. Both wordings point at the only working way out — chunked writing
-# (see _WRITE_DISCIPLINE in prompts.py and the design spec, 3.1).
+# Rejections specific to the file-body protocol (see sub_tools.extract_file_body).
+# Every one of them says "nothing was written": the model's next move depends on
+# whether the file moved, and leaving that to inference is how `mode="a"`
+# duplicates content.
 #
-# CRITICAL in _TRUNCATED_MSG: state that the EARLIER calls in the same reply did
-# land. Truncation is streaming — only the last block is incomplete, the rest
-# arrived in full. Without saying so, the model re-sends the chunks it already
-# wrote and mode="a" duplicates them in the file.
-#
-# The recovery size is derived from the chunk limit rather than written out:
-# the call that just failed was already too big, so naming the same limit again
-# is no instruction at all. Half the limit is the "definitely smaller than what
-# just failed" number, and it moves automatically when the limit is re-measured.
-_RECOVERY_CHUNK = sub_tools.CHUNK_SOFT_LIMIT // 2
+# The truncation wording lives in `extract_file_body` instead of here, because
+# only the parser knows whether the end marker is missing because the reply was
+# cut off or because the model forgot the line — and those need opposite
+# instructions (re-send smaller vs. add one line).
 
-_TRUNCATED_MSG = (
-    "Error: THIS tool call was cut off by the output limit and wrote nothing. "
-    "The earlier tool calls in this same reply DID take effect — do NOT re-send "
-    "them, or `mode=\"a\"` will duplicate their content. Continue from where the "
-    "file now ends, appending with `mode=\"a\"`. Your next chunk must be at most "
-    f"{_RECOVERY_CHUNK:,} characters of `content`; split the remaining work "
-    "into as many chunks as it takes."
+_BODY_WITHOUT_CALL_MSG = (
+    "Your reply contained a file body but no `write_file` call, so nothing was "
+    "written. Both halves are required: the body as text between the markers, "
+    "and the call naming the path. The body you just produced is still in the "
+    "conversation above — do NOT repeat it. Just make the `write_file` call "
+    "for it now."
 )
 
-_NO_CONTENT_MSG = (
-    "Error: `content` was not delivered, so nothing was written. Re-emit this "
-    f"chunk with a non-empty `content` of at most {_RECOVERY_CHUNK:,} "
-    "characters, appending with `mode=\"a\"` if the file already has earlier "
-    "chunks."
+_ONE_WRITE_PER_REPLY_MSG = (
+    "Error: more than one `write_file` in this reply, and a reply carries only "
+    "one file body, so nothing was written. Write one file (or one appended "
+    "part) per reply."
+)
+
+_CONTENT_ARG_MSG = (
+    "Error: `write_file` takes no `content` argument, so nothing was written. "
+    f"Put the file content in your reply as text between "
+    f"`{sub_tools.FILE_BEGIN_MARKER}` and `{sub_tools.FILE_END_MARKER}`, and "
+    "call `write_file` with the path only."
 )
 
 
@@ -240,9 +240,10 @@ def _response_is_truncated(response, cap: int | None) -> bool:
 
 
 _WIND_DOWN_MSG = (
-    "This turn is out of budget. Close the file you are writing NOW: emit the "
-    "final `write_file` chunk if one is needed, then call `finish`. Do not "
-    "start anything new and do not verify what you wrote."
+    "This turn is out of budget. Close the file you are writing NOW: if a final "
+    "part is still needed, send it as one more body plus its `write_file` call, "
+    "then call `finish`. Do not start anything new and do not verify what you "
+    "wrote."
 )
 
 _SPEC_NO_TOOLS_NUDGE = (
@@ -635,6 +636,10 @@ async def _run_loop(
     injected: set[str] = set()
     closing_rounds_left = WIND_DOWN_ROUNDS
     wind_down_announced = False
+    # A body generated in a reply that forgot its `write_file`. Kept so the
+    # retry only has to produce the call: re-generating 20 KB of markup to
+    # recover a missing tool call would pay twice for the same file.
+    pending_body: str | None = None
 
     for round_idx in range(MAX_ROUNDS):
         if spend is not None and spend.should_wind_down():
@@ -686,27 +691,27 @@ async def _run_loop(
                 round=round_idx,
             )
 
-        # Truncation is streaming: only the LAST block of the reply is
-        # incomplete, the earlier ones arrived in full. Rejecting them all would
-        # throw away finished work every round, and if the model consistently
-        # spends its whole output budget (measured: output_tokens at the cap in
-        # roughly 20 of 32 rounds) nothing would ever be written across all
-        # rounds. That would be the same failure this work fixes, only with a
-        # clearer error text.
-        truncated_tc_id = (
-            response.tool_calls[-1].id
-            if _response_is_truncated(response, cap) and response.tool_calls
-            else None
+        # The file body rides in the reply's TEXT now, so it is parsed once per
+        # round and every `write_file` in the round reads the same result.
+        # Truncation is judged here too: a body cut off by the output cap has no
+        # end marker, which is a fact rather than the estimate
+        # `_response_is_truncated` makes from `stop_reason` and the budget.
+        attempted_body = sub_tools.FILE_BEGIN_MARKER in (response.content or "")
+        body, body_error, violations = sub_tools.extract_file_body(
+            response.content or "",
+            looks_truncated=_response_is_truncated(response, cap),
         )
+        if trace is not None:
+            for kind in violations:
+                trace.protocol_violation(node=node_label, kind=kind)
+        if body is None and not attempted_body and pending_body is not None:
+            # The previous round produced a body and forgot the call; this is
+            # the retry that supplies the call.
+            body, body_error = pending_body, None
 
-        if not response.tool_calls:
-            tail = (response.content or "").strip()
-            return (
-                f"generator stopped without writing files "
-                f"(round {round_idx + 1}/{MAX_ROUNDS}). "
-                f"Last output: {tail[:300]!r}"
-            )
-
+        # The turn goes into the history BEFORE any early exit below. A retry
+        # has to see the body the model already produced, otherwise telling it
+        # "do not repeat it" asks for something it cannot do.
         assistant_blocks: list[dict] = []
         if response.content:
             assistant_blocks.append({"type": "text", "text": response.content})
@@ -720,6 +725,32 @@ async def _run_loop(
                 }
             )
         messages.append({"role": "assistant", "content": assistant_blocks})
+
+        write_calls = [tc for tc in response.tool_calls if tc.name == "write_file"]
+
+        if attempted_body and not write_calls:
+            # A body with nothing to write it. Ask for the missing half instead
+            # of dropping what was generated — and skip the dispatch below,
+            # which would otherwise accept a `finish` in this same reply.
+            #
+            # That is not a hypothetical: "final chunk plus finish in one reply"
+            # is how the model normally ends. With files already written by
+            # earlier rounds, `require_files` at the bottom would pass, and the
+            # artifact would ship missing its last section, reported as success.
+            pending_body = body
+            messages.append({
+                "role": "user",
+                "content": _BODY_WITHOUT_CALL_MSG if body is not None else body_error,
+            })
+            continue
+
+        if not response.tool_calls:
+            tail = (response.content or "").strip()
+            return (
+                f"generator stopped without writing files "
+                f"(round {round_idx + 1}/{MAX_ROUNDS}). "
+                f"Last output: {tail[:300]!r}"
+            )
 
         result_blocks: list[dict] = []
         for tc in response.tool_calls:
@@ -746,37 +777,44 @@ async def _run_loop(
                     {"type": "tool_result", "tool_use_id": tc.id, "content": "ok"}
                 )
             elif name == "write_file":
-                # `inp.get("content")` without a "" default: a missing key must
-                # be distinguishable from a deliberately empty string, or the
-                # error text is guessing. Both forms are rejected either way, but
-                # with different messages — their causes differ.
-                content = inp.get("content")
-                if tc.id == truncated_tc_id:
+                if len(write_calls) > 1:
+                    # One reply carries one body, so a second call has nothing
+                    # to write. Refuse both rather than guess which one meant it.
                     result_blocks.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": tc.id,
-                            "content": _TRUNCATED_MSG,
+                            "content": _ONE_WRITE_PER_REPLY_MSG,
                         }
                     )
                     continue
-                if not content:
+                if "content" in inp:
                     result_blocks.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": tc.id,
-                            "content": _NO_CONTENT_MSG,
+                            "content": _CONTENT_ARG_MSG,
+                        }
+                    )
+                    continue
+                if body is None:
+                    result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": body_error,
                         }
                     )
                     continue
                 res = sub_tools.write_file(
                     artifact_path,
                     inp.get("path", ""),
-                    content,
+                    body,
                     mode=inp.get("mode", "w"),
                 )
                 msg = res["message"]
                 if res.get("ok"):
+                    pending_body = None
                     written = res["written"]
                     if written not in files_written:
                         files_written.append(written)

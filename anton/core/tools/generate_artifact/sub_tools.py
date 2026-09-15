@@ -41,19 +41,134 @@ CHUNK_SOFT_LIMIT = 16_000
 READ_TAIL_CHARS = 500
 
 
+# ── The file-body protocol ──────────────────────────────────────────────────
+#
+# The body of a generated file travels as PLAIN TEXT in the assistant's reply,
+# between these two markers, and `write_file` carries only `path` and `mode`.
+#
+# Why, in one line: the Anthropic API buffers and validates a tool parameter in
+# full before streaming it, so a body sent as a tool argument means a silent
+# connection for the whole generation (measured 2026-08-28: 112s of dead air
+# for a 59 000-character argument, reproduced against api.anthropic.com). Plain
+# text streams evenly through the same channel. The full analysis, including
+# the supported `eager_input_streaming` flag the gateway does not forward yet,
+# is in docs/artifact-generation-tools/2026-09-15-tool-call-argument-not-streamed.md.
+#
+# Both values are quoted to the model in several places; every one of them
+# reads these constants, because a literal on any surface drifts silently.
+FILE_BEGIN_MARKER = "<<<ANTON_FILE_BEGIN>>>"
+FILE_END_MARKER = "<<<ANTON_FILE_END>>>"
+
+#: Protocol slips that do NOT corrupt the body. Recorded rather than rejected:
+#: the interleaving of text and tool_use blocks is lost by the time a response
+#: reaches us (`LLMResponse.content` is one joined string), so a plain "Done."
+#: after the tool call is indistinguishable from prose after the end marker.
+#: Failing the round on that would break on the model's most ordinary habit.
+VIOLATION_TEXT_BEFORE = "text before the begin marker"
+VIOLATION_TEXT_AFTER = "text after the end marker"
+
+
+def extract_file_body(
+    text: str, *, looks_truncated: bool = False
+) -> tuple[str | None, str | None, list[str]]:
+    """Pull one file body out of the assistant's text.
+
+    Returns ``(body, error, violations)``: exactly one of ``body``/``error`` is
+    not None. ``violations`` lists tolerated slips (see the constants above)
+    and is only ever non-empty alongside a body.
+
+    Strictness is deliberately asymmetric. A duplicated marker or an empty body
+    could make us write the WRONG bytes, so those refuse; stray prose cannot,
+    so it is recorded and the body is used. Silently writing a truncated file
+    is the failure this whole protocol exists to make impossible.
+    """
+    text = text or ""
+    begins = text.count(FILE_BEGIN_MARKER)
+    ends = text.count(FILE_END_MARKER)
+
+    if begins > 1 or ends > 1:
+        # Never "take the first pair": if the content itself contains a marker,
+        # every guess about which pair is real is a guess about where the file
+        # ends, and guessing wrong truncates it without a sign.
+        return None, (
+            f"Error: the body markers must appear exactly once each, but this "
+            f"reply has {begins} `{FILE_BEGIN_MARKER}` and {ends} "
+            f"`{FILE_END_MARKER}`. Nothing was written. Re-send the body with "
+            f"exactly one of each."
+        ), []
+
+    if begins == 0:
+        return None, (
+            f"Error: no file body found in your reply. Put the complete file "
+            f"content between a line `{FILE_BEGIN_MARKER}` and a line "
+            f"`{FILE_END_MARKER}`, then call `write_file` with the path. "
+            f"Nothing was written."
+        ), []
+
+    if ends == 0:
+        if looks_truncated:
+            return None, (
+                "Error: your reply was cut off before the end marker, so the "
+                "body is incomplete and nothing was written. Send it again in "
+                "smaller pieces: emit the first part now, then append the rest "
+                "with `mode=\"a\"` on the next turn."
+            ), []
+        return None, (
+            f"Error: the body has no `{FILE_END_MARKER}` line, so nothing was "
+            f"written. Your reply was not cut off, so re-send the body with "
+            f"the closing marker in place."
+        ), []
+
+    start_at = text.index(FILE_BEGIN_MARKER)
+    end_at = text.index(FILE_END_MARKER)
+    if end_at < start_at:
+        return None, (
+            f"Error: `{FILE_END_MARKER}` appears before `{FILE_BEGIN_MARKER}`. "
+            f"Nothing was written."
+        ), []
+
+    body = text[start_at + len(FILE_BEGIN_MARKER):end_at]
+    # Exactly one newline on each side — the markers sit on their own lines, so
+    # those two newlines belong to the protocol, not to the file. Everything
+    # else is kept byte for byte: trailing blank lines can be significant.
+    for nl in ("\r\n", "\n"):
+        if body.startswith(nl):
+            body = body[len(nl):]
+            break
+    for nl in ("\r\n", "\n"):
+        if body.endswith(nl):
+            body = body[: -len(nl)]
+            break
+
+    if not body.strip():
+        return None, (
+            "Error: the body markers are empty. Put the file content between "
+            "them. Nothing was written."
+        ), []
+
+    violations: list[str] = []
+    if text[:start_at].strip():
+        violations.append(VIOLATION_TEXT_BEFORE)
+    if text[end_at + len(FILE_END_MARKER):].strip():
+        violations.append(VIOLATION_TEXT_AFTER)
+    return body, None, violations
+
+
 WRITE_FILE_SCHEMA: dict = {
     "name": "write_file",
     "description": (
-        "Write a UTF-8 text file at the given path inside the artifact folder. "
+        "Write a UTF-8 text file inside the artifact folder.\n\n"
+        "The file's CONTENT is NOT an argument of this call. Put it in your "
+        "reply as plain text, between a line "
+        f"`{FILE_BEGIN_MARKER}` and a line `{FILE_END_MARKER}`, and then make "
+        "this call with just the path. Everything between those two lines is "
+        "written verbatim.\n\n"
         "Path is relative to the artifact root (e.g. \"dashboard.html\", "
         "\"static/index.html\", \"backend.py\"). Parent directories are "
         "created automatically.\n\n"
-        "`mode=\"w\"` (default) creates or overwrites the file. `mode=\"a\"` "
-        "appends to it, creating it first if needed — use append to build a "
-        "large file in several calls instead of one huge one. A single call "
-        "whose `content` is too large either gets cut off by the output limit "
-        "or takes long enough to lose its connection, and is lost either way, "
-        f"so keep each call's `content` at most {CHUNK_SOFT_LIMIT:,} characters."
+        "`mode=\"w\"` (default) creates or overwrites the file; `mode=\"a\"` "
+        "appends to it, creating it first if needed. ONE call per reply: a "
+        "reply carries one body, so one file (or one appended part) at a time."
     ),
     "input_schema": {
         "type": "object",
@@ -62,17 +177,13 @@ WRITE_FILE_SCHEMA: dict = {
                 "type": "string",
                 "description": "Relative path inside the artifact folder.",
             },
-            "content": {
-                "type": "string",
-                "description": "Full UTF-8 contents to write (or the chunk to append).",
-            },
             "mode": {
                 "type": "string",
                 "enum": ["w", "a"],
                 "description": "\"w\" overwrite (default), \"a\" append.",
             },
         },
-        "required": ["path", "content"],
+        "required": ["path"],
     },
 }
 
@@ -212,19 +323,12 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
         f"{verb} {rel_written} (+{len(content)} bytes / {chunk_lines} lines, "
         f"file now {size} bytes{tail})."
     )
-    if len(content) > CHUNK_SOFT_LIMIT:
-        # The write itself succeeded — this call landed. The warning is about
-        # the NEXT one: a model that got away with an oversized chunk keeps
-        # growing them, and the failure at the top of that slope is no longer
-        # only truncation. A chunk large enough to take ~2 minutes to generate
-        # holds a silent connection for that whole time and can simply be
-        # dropped (see CHUNK_SOFT_LIMIT), which costs the round outright.
-        message += (
-            f" WARNING: this chunk was {len(content)} characters — over the "
-            f"{CHUNK_SOFT_LIMIT:,}-character chunk limit. Keep every following "
-            "chunk under the limit: a larger one risks being cut off by the "
-            "output cap or losing its connection before it arrives."
-        )
+    # No size warning here any more. It told the model a chunk over
+    # CHUNK_SOFT_LIMIT risked "losing its connection" — true while the body
+    # rode in the tool argument, false now that it arrives as streamed text.
+    # Leaving it would hand the model a stale instruction on every write round.
+    # The ceiling that remains is the reply's own output budget, and a body cut
+    # off by it is caught by the missing end marker in `extract_file_body`.
     return {
         "ok": True,
         "written": rel_written,

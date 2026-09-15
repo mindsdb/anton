@@ -13,10 +13,25 @@ import pytest
 from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
 from anton.core.tools.generate_artifact.engine import _run_loop
 from anton.core.tools.generate_artifact.state import GEN_WRITE_MAX_TOKENS
+from anton.core.tools.generate_artifact.sub_tools import (
+    FILE_BEGIN_MARKER,
+    FILE_END_MARKER,
+)
 
 
-def _resp(tool_calls):
-    return LLMResponse(content="", tool_calls=tool_calls,
+def _body(text: str, *, closed: bool = True) -> str:
+    """A file body the way the model sends it: plain text between the markers.
+
+    `closed=False` reproduces a reply cut off before the end marker — the only
+    signal that a body is incomplete, and the reason the protocol can tell a
+    truncated file from a finished one at all.
+    """
+    tail = f"\n{FILE_END_MARKER}" if closed else ""
+    return f"{FILE_BEGIN_MARKER}\n{text}{tail}"
+
+
+def _resp(tool_calls, body: str | None = None):
+    return LLMResponse(content=body or "", tool_calls=tool_calls,
                        usage=Usage(input_tokens=1, output_tokens=1), stop_reason="tool_use")
 
 
@@ -96,9 +111,9 @@ async def test_run_loop_records_scratchpad_execs(tmp_path: Path, monkeypatch):
     ]
 
 
-def _resp_capped(tool_calls, *, output_tokens: int):
+def _resp_capped(tool_calls, *, output_tokens: int, body: str | None = None):
     """A reply whose output hit the cap — the truncation signal."""
-    return LLMResponse(content="", tool_calls=tool_calls,
+    return LLMResponse(content=body or "", tool_calls=tool_calls,
                        usage=Usage(input_tokens=1, output_tokens=output_tokens),
                        stop_reason="stop")
 
@@ -138,47 +153,63 @@ async def test_run_loop_rejects_write_file_with_empty_content(tmp_path: Path):
     assert not (tmp_path / "index.html").exists()
 
 
-async def test_run_loop_rejects_only_the_last_call_of_a_truncated_response(tmp_path: Path):
-    """The main form: the reply is truncated, but only the LAST call is incomplete.
+async def test_a_truncated_body_writes_nothing(tmp_path: Path):
+    """Replaces the old "reject only the LAST tool call of a truncated reply".
 
-    The JSON repair in provider.py stitches a valid-looking call and leaves
-    parse_error unset, so the only signal is output_tokens hitting the client cap.
-    Rejecting every call of the reply is not an option: if the model consistently
-    spends its whole output budget (as the measurement shows), nothing would ever
-    be written.
+    That rule existed because truncation cut a tool argument and the earlier
+    calls of the same reply had still landed. With the body in the text there is
+    one body per reply, so there is no "earlier call" to preserve: a reply cut
+    off before the end marker carries a half-file and must write nothing at all.
+    Writing it would put a truncated file on disk with nothing saying so, which
+    is the failure this protocol exists to prevent.
     """
     session = AsyncMock()
     session._llm.max_tokens = 100
     session._llm.plan_stream = _stream_mock(
         _resp_capped(
-            [
-                ToolCall(id="1", name="write_file",
-                         input={"path": "d.html", "content": "<head></head>", "mode": "w"}),
-                ToolCall(id="2", name="write_file",
-                         input={"path": "d.html", "content": "<body><div", "mode": "a"}),
-            ],
+            [ToolCall(id="1", name="write_file", input={"path": "d.html"})],
             output_tokens=100,
+            body=_body("<head></head><body><div", closed=False),
         )
     )
     session._llm.code_stream = _stream_mock(
-        _resp([ToolCall(id="3", name="finish", input={"summary": "stopped"})])
+        _resp([ToolCall(id="2", name="finish", input={"summary": "stopped"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
         require_files=False, node_label="generate_frontend",
     )
     assert isinstance(result, dict)
-    # The first chunk arrived in full and must survive.
-    assert (tmp_path / "d.html").read_text(encoding="utf-8") == "<head></head>"
-    assert result["files_written"] == ["d.html"]
+    assert result["files_written"] == []
+    assert not (tmp_path / "d.html").exists()
 
 
-async def test_truncation_message_says_earlier_calls_landed(tmp_path: Path):
-    """Otherwise the model re-sends written chunks and mode="a" duplicates them."""
-    from anton.core.tools.generate_artifact.engine import _TRUNCATED_MSG
+async def test_a_cut_off_body_and_a_forgotten_marker_get_different_advice(tmp_path: Path):
+    """Same symptom, opposite fixes: re-send it smaller vs. add one line.
 
-    assert "did take effect" in _TRUNCATED_MSG.lower()
-    assert "do not re-send" in _TRUNCATED_MSG.lower()
+    Telling a model that merely forgot the marker that its reply was "cut off"
+    makes it regenerate the whole file to recover a single missing line.
+    """
+    from anton.core.tools.generate_artifact.sub_tools import extract_file_body
+
+    _, cut_off, _ = extract_file_body(_body("x", closed=False), looks_truncated=True)
+    _, forgot, _ = extract_file_body(_body("x", closed=False), looks_truncated=False)
+
+    # Cut off: the fix is less content, so the advice is to split.
+    assert "was cut off" in cut_off
+    assert "smaller pieces" in cut_off
+
+    # Forgot the line: the fix is one line, and the message says so plainly —
+    # including that the reply was NOT cut off, so the model does not start
+    # regenerating a file that is already complete.
+    assert "not cut off" in forgot
+    assert "smaller" not in forgot
+    assert FILE_END_MARKER in forgot
+
+    # Both must state the outcome: what the model does next depends on whether
+    # the file moved, and leaving that to inference is how `mode="a"` doubles.
+    assert "nothing was written" in cut_off.lower()
+    assert "nothing was written" in forgot.lower()
 
 
 async def test_run_loop_writes_when_response_is_not_capped(tmp_path: Path):
@@ -187,9 +218,9 @@ async def test_run_loop_writes_when_response_is_not_capped(tmp_path: Path):
     session._llm.max_tokens = 100
     session._llm.plan_stream = _stream_mock(
         _resp_capped(
-            [ToolCall(id="1", name="write_file",
-                      input={"path": "index.html", "content": "<html></html>"})],
+            [ToolCall(id="1", name="write_file", input={"path": "index.html"})],
             output_tokens=42,
+            body=_body("<html></html>"),
         )
     )
     session._llm.code_stream = _stream_mock(
@@ -212,8 +243,8 @@ async def test_run_loop_ignores_unknown_token_cap(tmp_path: Path):
     """
     session = AsyncMock()  # max_tokens will be a mock, not a number
     session._llm.plan_stream = _stream_mock(
-        _resp([ToolCall(id="1", name="write_file",
-                        input={"path": "index.html", "content": "<html></html>"})])
+        _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})],
+              body=_body("<html></html>"))
     )
     session._llm.code_stream = _stream_mock(
         _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])
@@ -226,17 +257,23 @@ async def test_run_loop_ignores_unknown_token_cap(tmp_path: Path):
     assert result["files_written"] == ["index.html"]
 
 
-async def test_run_loop_passes_append_mode_through(tmp_path: Path):
-    """Chunked assembly: two calls in one round build the file."""
+async def test_append_mode_builds_a_file_across_rounds(tmp_path: Path):
+    """Chunked assembly, one part per round.
+
+    Both parts used to ride in a single reply ("several small calls in one reply
+    cost one round together"). A reply now carries one body, so each part is its
+    own round — and the measured habit that rule encouraged, splitting a file
+    that would have fit, goes away with it.
+    """
     session = AsyncMock()
     session._llm.plan_stream = _stream_mock(
-        _resp([
-            ToolCall(id="1", name="write_file",
-                     input={"path": "d.html", "content": "<head>", "mode": "w"}),
-            ToolCall(id="2", name="write_file",
-                     input={"path": "d.html", "content": "<body></body>", "mode": "a"}),
-            ToolCall(id="3", name="finish", input={"summary": "chunked"}),
-        ])
+        _resp([ToolCall(id="1", name="write_file", input={"path": "d.html", "mode": "w"})],
+              body=_body("<head>"))
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="2", name="write_file", input={"path": "d.html", "mode": "a"})],
+              body=_body("<body></body>")),
+        _resp([ToolCall(id="3", name="finish", input={"summary": "chunked"})]),
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -245,6 +282,32 @@ async def test_run_loop_passes_append_mode_through(tmp_path: Path):
     assert isinstance(result, dict)
     assert result["files_written"] == ["d.html"]
     assert (tmp_path / "d.html").read_text(encoding="utf-8") == "<head><body></body>"
+
+
+async def test_a_second_write_in_one_reply_is_refused(tmp_path: Path):
+    """One body per reply, so the second call has nothing to write.
+
+    Refuse both rather than pick one: guessing which call the body belonged to
+    is guessing what lands on disk.
+    """
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _resp([
+            ToolCall(id="1", name="write_file", input={"path": "a.html"}),
+            ToolCall(id="2", name="write_file", input={"path": "b.html"}),
+        ], body=_body("<html></html>"))
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="3", name="finish", input={"summary": "gave up"})])
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        require_files=False, node_label="generate_frontend",
+    )
+    assert isinstance(result, dict)
+    assert result["files_written"] == []
+    assert not (tmp_path / "a.html").exists()
+    assert not (tmp_path / "b.html").exists()
 
 
 def test_round_budget_leaves_headroom_for_chunked_writes():
@@ -258,33 +321,30 @@ def test_round_budget_leaves_headroom_for_chunked_writes():
     assert MAX_ROUNDS == 20
 
 
-async def test_run_loop_flags_truncation_by_stop_reason_alone(tmp_path: Path):
-    """`stop_reason: "length"` must reject the last call even with no readable cap.
+async def test_truncation_is_caught_by_stop_reason_when_no_cap_is_readable(tmp_path: Path):
+    """`stop_reason: "length"` with no readable cap still has to be recognised.
 
-    The gateway reports it correctly since 2026-08-03, and a cut that stopped
-    just under the cap is invisible to the token count.
+    The body is unclosed either way, so nothing is written regardless; what
+    `stop_reason` decides is WHICH advice the model gets back — see
+    `test_a_cut_off_body_and_a_forgotten_marker_get_different_advice`.
     """
     session = AsyncMock()  # max_tokens is a mock → cap is unknown
     session._llm.plan_stream = _stream_mock(
         LLMResponse(
-            content="", tool_calls=[
-                ToolCall(id="1", name="write_file",
-                         input={"path": "d.html", "content": "<head></head>", "mode": "w"}),
-                ToolCall(id="2", name="write_file",
-                         input={"path": "d.html", "content": "<body><div", "mode": "a"}),
-            ],
+            content=_body("<head></head><body><div", closed=False),
+            tool_calls=[ToolCall(id="1", name="write_file", input={"path": "d.html"})],
             usage=Usage(input_tokens=1, output_tokens=50), stop_reason="length",
         )
     )
     session._llm.code_stream = _stream_mock(
-        _resp([ToolCall(id="3", name="finish", input={"summary": "stopped"})])
+        _resp([ToolCall(id="2", name="finish", input={"summary": "stopped"})])
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
         require_files=False, node_label="generate_frontend",
     )
     assert isinstance(result, dict)
-    assert (tmp_path / "d.html").read_text(encoding="utf-8") == "<head></head>"
+    assert not (tmp_path / "d.html").exists()
 
 
 async def test_round_budget_with_files_hands_them_to_the_caller(tmp_path: Path):
@@ -296,7 +356,8 @@ async def test_round_budget_with_files_hands_them_to_the_caller(tmp_path: Path):
     """
     session = AsyncMock()
     write_resp = _resp([ToolCall(id="1", name="write_file",
-                                 input={"path": "d.html", "content": "x", "mode": "a"})])
+                                 input={"path": "d.html", "mode": "a"})],
+                       body=_body("x"))
     session._llm.plan_stream = _stream_mock(write_resp)
     session._llm.code_stream = Mock(side_effect=lambda **kw: _one_event_stream(write_resp))
 
@@ -332,10 +393,9 @@ async def test_finished_flag_is_true_on_a_clean_finish(tmp_path: Path):
     session = AsyncMock()
     session._llm.plan_stream = _stream_mock(
         _resp([
-            ToolCall(id="1", name="write_file",
-                     input={"path": "d.html", "content": "<html></html>"}),
+            ToolCall(id="1", name="write_file", input={"path": "d.html"}),
             ToolCall(id="2", name="finish", input={"summary": "ok"}),
-        ])
+        ], body=_body("<html></html>"))
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
@@ -451,9 +511,9 @@ async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
     )
     session._llm.code_stream = _stream_mock(
         _resp_capped(
-            [ToolCall(id="1", name="write_file",
-                      input={"path": "index.html", "content": "<html></html>"})],
+            [ToolCall(id="1", name="write_file", input={"path": "index.html"})],
             output_tokens=12_000,           # > default, < GEN_WRITE_MAX_TOKENS
+            body=_body("<html></html>"),
         ),
         _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})]),
     )
@@ -493,8 +553,8 @@ async def test_dropped_stream_is_retried_once_with_a_halved_budget(tmp_path: Pat
         _resp([ToolCall(id="0", name="read_file", input={"path": "absent.html"})])
     )
     good = _one_event_stream(
-        _resp([ToolCall(id="1", name="write_file",
-                        input={"path": "index.html", "content": "<html></html>"})])
+        _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})],
+              body=_body("<html></html>"))
     )
     finish = _one_event_stream(
         _resp([ToolCall(id="2", name="finish", input={"summary": "ok"})])

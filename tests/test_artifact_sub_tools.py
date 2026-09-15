@@ -65,19 +65,20 @@ def test_schema_advertises_mode():
     assert "mode" not in WRITE_FILE_SCHEMA["input_schema"]["required"]
 
 
-def test_oversized_chunk_is_written_but_warned_about(tmp_path: Path):
+def test_a_large_body_is_written_without_a_size_warning(tmp_path: Path):
+    """The warning told the model an oversized chunk risked "losing its
+    connection" — true while the body rode in the tool argument, false now that
+    it arrives as streamed text.
+
+    Leaving it in place would hand the model a stale instruction on every write
+    round, and under one-body-per-reply acting on it costs a round each time.
+    """
     big = "x" * (sub_tools.CHUNK_SOFT_LIMIT + 1)
     res = sub_tools.write_file(tmp_path, "d.html", big)
     assert res["ok"]
     assert (tmp_path / "d.html").read_text(encoding="utf-8") == big
-    assert "WARNING" in res["message"]
-    assert "chunk limit" in res["message"]
-
-
-def test_chunk_within_limit_gets_no_warning(tmp_path: Path):
-    res = sub_tools.write_file(tmp_path, "d.html", "x" * 100)
-    assert res["ok"]
     assert "WARNING" not in res["message"]
+    assert "chunk limit" not in res["message"]
 
 
 def test_read_file_returns_size_and_tail_by_default(tmp_path: Path):

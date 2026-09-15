@@ -14,9 +14,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# The chunk limit is quoted to the model here and enforced in `write_file`;
-# reading it from the one constant keeps the two from drifting apart.
-from .sub_tools import CHUNK_SOFT_LIMIT
+# The body markers are quoted to the model in several places here and parsed in
+# `sub_tools.extract_file_body`; every surface reads the one constant, because a
+# literal that drifts breaks the protocol silently.
+from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 
 
 # ---------------------------------------------------------------------------
@@ -110,13 +111,30 @@ USING DATA:
 # Write half: only for nodes that actually produce files. NOT mixed into the
 # fetch node — there the role is immediately followed by "Do NOT write any
 # artifact files", and the full _ROLE would contradict that instruction.
-_ROLE_WRITE = """\
-YOUR OUTPUT IS FILES: produce them by calling `write_file`, then call `finish`.
+_ROLE_WRITE = f"""\
+YOUR OUTPUT IS FILES. A file is written in TWO parts of the SAME reply:
+
+  1. the file's content, as plain text between two marker lines;
+  2. a `write_file` call naming the path — with NO content argument.
+
+Like this, in one reply:
+
+{BEGIN}
+<!DOCTYPE html>
+<html lang="en">
+…the entire file…
+</html>
+{END}
+
+…and in the same reply, the tool call `write_file(path="index.html")`.
 
 HARD RULES:
-- Build every file with `write_file`. A large file MUST be written in several
-  chunks — one `mode="w"` call followed by `mode="a"` calls. A single call
-  carrying a whole file is cut off by the output limit and rejected.
+- Write the content as TEXT between the markers. `write_file` takes `path` and
+  `mode` only; there is no `content` argument.
+- ONE file per reply. A reply carries one body, so a second `write_file` in the
+  same reply has nothing to write and is refused.
+- Nothing but the file goes between the markers, and the closing marker ends
+  the file. If your reply has no closing marker, nothing is written.
 - All `path` values are RELATIVE to the artifact folder — never write outside it.
 - Call `finish(summary="<one line>")` exactly once when all files are written.
 - VERIFICATION IS NOT YOUR JOB. After you call `finish`, a deterministic
@@ -126,11 +144,11 @@ HARD RULES:
   last chunk closes every open tag, call `finish`.
 
 FILE TOOLS:
-- `write_file(path, content, mode="w"|"a")` — write a UTF-8 text file at
+- `write_file(path, mode="w"|"a")` — write the body from THIS reply to
   `<artifact>/<path>`. `"w"` creates or overwrites, `"a"` appends (creating the
   file when absent). Default is `"w"`. It reports back the bytes and LINES the
-  chunk added and the file's new totals, so after an append you already know
-  where your chunk landed without reading anything.
+  body added and the file's new totals, so after an append you already know
+  where your part landed without reading anything.
 - `read_file(path)` — check a file you already wrote. Returns its size, its
   line count and its tail: enough to see that your chunk landed and that the
   file is closed.
@@ -143,9 +161,9 @@ FILE TOOLS:
 
 DATA INTO FILES:
 - For an html-app, the real data goes INTO the output file — but as its own
-  chunk: print the serialised data in a scratchpad cell, then append it with
-  `write_file(path, content, mode="a")` as a single `<script>` block, separate
-  from the markup chunks. For a large dataset, aggregate it in the scratchpad
+  part: print the serialised data in a scratchpad cell, then send it as its own
+  body with `write_file(path, mode="a")` — a single `<script>` block, separate
+  from the markup parts. For a large dataset, aggregate it in the scratchpad
   first; a dashboard almost never needs raw rows.
 - For a fullstack app, the generated backend queries the live source itself —
   use the scratchpad mainly to confirm the schema and a sample.\
@@ -455,19 +473,19 @@ FRONTEND — `static/index.html`:
 # by the fullstack frontend alike. It cannot live in _FRONTEND_RULES — that block
 # only goes to the fullstack branch.
 _WRITE_DISCIPLINE = f"""\
-WRITING A LARGE FILE (mandatory — a single big call cannot succeed):
-Your reply has a hard output limit. A `write_file` call carrying a whole
-dashboard exceeds it, gets cut off mid-argument, and is REJECTED — nothing is
-written and the round is wasted. Build the file in chunks instead:
-- First chunk: `write_file(path, content, mode="w")` — head, `<style>`, opening
-  `<body>`.
-- Every next chunk: `write_file(path, content, mode="a")` — one section per call:
-  the data block, then each chart's markup, then the scripts, then the closing
-  tags.
-- HARD CHUNK LIMIT: at most {CHUNK_SOFT_LIMIT:,} characters of `content` per
-  call — the FIRST `mode="w"` chunk and the first `mode="a"` chunk included;
-  those are exactly where oversized calls fail. A 40 KB page is 3-4 chunks.
-  Several small calls in one reply are fine and cost one round together.
+WRITING A LARGE FILE:
+Write the whole file in ONE reply when it fits in your output budget — that is
+the normal case and it costs one round. Split it only when the file is too long
+for a single reply:
+- First part: body between the markers + `write_file(path, mode="w")` — head,
+  `<style>`, opening `<body>`.
+- Every next part: body + `write_file(path, mode="a")`, one reply each,
+  continuing exactly where the file now ends: the data block, then the markup,
+  then the scripts, then the closing tags.
+- One body per reply, so one part per reply. Splitting a file that would have
+  fit costs you a whole extra round for nothing.
+- If a reply is cut off before the closing marker, nothing from it is written —
+  send that part again, shorter, and append the remainder next.
 - Do NOT re-emit the whole file to "fix" something — append the remaining part.
   Each `write_file` already tells you the bytes and lines it added and the
   file's new totals, so an append's span is the last N lines — that is normally
@@ -481,7 +499,8 @@ PYTHON → JS STRING SAFETY (only when you build content inside a scratchpad cel
 Escape sequences resolve in Python BEFORE the text reaches the file, so `'\\n'`
 inside a Python string becomes a real newline and breaks a JS string literal.
 Use raw strings (`r"..."`) for JS blocks, or double-escape. Writing the text
-directly through `write_file` avoids the problem entirely — prefer that.\
+straight into your reply between the markers avoids the problem entirely —
+prefer that.\
 """
 
 HTML_APP_DEFAULT_PRIMARY = "dashboard.html"
@@ -537,7 +556,9 @@ def build_user_kickoff(context: str) -> str:
     parts: list[str] = ["## Brief", context.strip()]
     parts.append(
         "Use the `scratchpad` tool to reach any data described under `## Data`. "
-        "Then write every file using `write_file`, and call `finish`."
+        "Then write each file the way the rules describe — its content as text "
+        f"between `{BEGIN}` and `{END}`, plus a `write_file` call for the path "
+        "— and call `finish`."
     )
     return "\n\n".join(parts)
 
@@ -658,8 +679,10 @@ def build_backend_kickoff(
     parts.append("## API Specification\n" + api_spec)
     parts.append(
         "Use the `scratchpad` tool to confirm the schema/sample of any data "
-        "described under `## Data`. Then write `backend.py` first using "
-        "`write_file`. You will receive the next instruction after it is written."
+        "described under `## Data`. Then write `backend.py` first: its content "
+        f"as text between `{BEGIN}` and `{END}`, plus `write_file(path=\"backend.py\")` "
+        "in the same reply. You will receive the next instruction after it is "
+        "written."
     )
     return "\n\n".join(parts)
 
@@ -701,8 +724,10 @@ def build_frontend_kickoff(
     )
     parts.append(
         "Use the `scratchpad` tool to inspect a data sample if you need it to "
-        "design charts and tables. Then write `static/index.html` using "
-        "`write_file`, and call `finish`."
+        "design charts and tables. Then write `static/index.html`: its content "
+        f"as text between `{BEGIN}` and `{END}`, plus "
+        "`write_file(path=\"static/index.html\")` in the same reply, and call "
+        "`finish`."
     )
     return "\n\n".join(parts)
 

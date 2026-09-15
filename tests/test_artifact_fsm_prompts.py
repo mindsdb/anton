@@ -279,7 +279,9 @@ def test_role_no_longer_forbids_splitting_a_file():
 
 
 def test_role_documents_the_mode_argument():
-    assert "write_file(path, content, mode" in prompts._ROLE
+    """`content` is gone from the signature — the body travels as text now."""
+    assert "write_file(path, mode" in prompts._ROLE
+    assert "write_file(path, content" not in prompts._ROLE
 
 
 def test_role_using_data_no_longer_demands_one_shot_embedding():
@@ -417,41 +419,47 @@ def test_role_forbids_new_scratchpad_names():
     assert "NEVER create a scratchpad with a new name" in prompts._ROLE_COMMON
 
 
-def test_write_discipline_names_a_hard_chunk_limit():
-    """"Well under ~6 KB" held neither the first chunk (24 KB) nor the first
-    append (cut at the output cap) in both live-run attempts.
+def test_the_write_discipline_no_longer_states_a_character_limit():
+    """The limit was derived from how long a silent connection survives, and
+    with the body in the text there is no silence to survive.
 
-    Asserted against the constant, not a literal. The literal form was not just
-    duplication: `"6,000 characters"` is a substring of `"16,000 characters"`,
-    so when the limit was re-measured the test kept passing while checking
-    nothing.
+    Keeping the number would make the model split files that fit — and under
+    one-body-per-reply every needless split costs a whole round. The ceiling
+    that remains is the reply's own output budget, which needs no number here.
     """
-    from anton.core.tools.generate_artifact.sub_tools import CHUNK_SOFT_LIMIT
-
     d = prompts._WRITE_DISCIPLINE
-    assert f"{CHUNK_SOFT_LIMIT:,} characters" in d
-    assert "mode=\"w\"` chunk and the first" in d
+    assert "characters of `content`" not in d
+    assert "HARD CHUNK LIMIT" not in d
+    # The phrase that produced the opposite error: naming the first two chunks
+    # as "where oversized calls fail" had the model keep exactly those small
+    # and then send 19 819 characters in the one right after.
+    assert "oversized calls fail" not in d
+    assert "in ONE reply when it fits" in d
 
 
-def test_chunk_limit_is_quoted_identically_everywhere_it_is_stated():
-    """One measurement, four surfaces the model reads — they must not drift.
+def test_the_markers_are_quoted_identically_on_every_surface():
+    """One pair of constants, several surfaces the model reads.
 
-    The limit is stated in the write_file schema, in the write discipline, and
-    (halved) in both post-failure recovery messages. Each used to carry its own
-    literal.
+    This replaces the chunk-limit lock for the same reason it existed: the
+    protocol breaks silently if any surface drifts. A body written against a
+    marker the parser does not recognise is a file that never lands.
     """
     from anton.core.tools.generate_artifact import engine, sub_tools
 
-    limit = f"{sub_tools.CHUNK_SOFT_LIMIT:,} characters"
-    assert limit in sub_tools.WRITE_FILE_SCHEMA["description"]
-    assert limit in prompts._WRITE_DISCIPLINE
+    begin, end = sub_tools.FILE_BEGIN_MARKER, sub_tools.FILE_END_MARKER
+    for surface in (
+        sub_tools.WRITE_FILE_SCHEMA["description"],
+        prompts._ROLE,
+        engine._CONTENT_ARG_MSG,
+    ):
+        assert begin in surface and end in surface
 
-    # Recovery asks for LESS than the limit — repeating the limit that was just
-    # exceeded is no instruction at all.
-    assert engine._RECOVERY_CHUNK < sub_tools.CHUNK_SOFT_LIMIT
-    recovery = f"{engine._RECOVERY_CHUNK:,} characters"
-    assert recovery in engine._TRUNCATED_MSG
-    assert recovery in engine._NO_CONTENT_MSG
+    # And the kickoffs, which are the last thing the model reads before writing.
+    for kickoff in (
+        prompts.build_user_kickoff("## Brief\nx"),
+        prompts.build_frontend_kickoff("ctx", "{}"),
+    ):
+        assert begin in kickoff and end in kickoff
 
 
 # ── `read_file`'s surfaces must agree about `full` ──────────────────────────

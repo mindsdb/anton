@@ -29,6 +29,7 @@ class NullTrace:
     def llm_call(self, **_: Any) -> None: ...
     def verdict(self, **_: Any) -> None: ...
     def tool_rejected(self, **_: Any) -> None: ...
+    def protocol_violation(self, **_: Any) -> None: ...
     def scratchpad(self, **_: Any) -> None: ...
     def file_written(self, **_: Any) -> None: ...
     def verifier(self, **_: Any) -> None: ...
@@ -81,6 +82,16 @@ class GenTrace:
         shared history.
         """
         self._emit("tool_rejected", {"node": node, "tool": tool, "reason": reason})
+
+    def protocol_violation(self, *, node: str, kind: str) -> None:
+        """A file-body protocol slip that was TOLERATED, not refused.
+
+        Separate from `tool_rejected` on purpose: a rejection costs the model a
+        round, a tolerated violation costs nothing and the body was still
+        written. The protocol's acceptance thresholds are stated per class, so
+        the two have to be countable apart.
+        """
+        self._emit("protocol_violation", {"node": node, "kind": kind})
 
     def llm_call(self, *, node, method, system, messages,
                  response=None, value=None, attempt=None, round=None) -> None:
