@@ -817,7 +817,7 @@ async def _handle_publish(
                         "ANTON_MINDS_API_KEY.[/]"
                     )
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
             console.print()
             return
 
