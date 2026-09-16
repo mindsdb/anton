@@ -5148,7 +5148,7 @@ class ChatSession:
                                     try:
                                         lint_messages = await asyncio.to_thread(
                                             lint_changed_artifact_files,
-                                            artifact_store, before_artifact_mtimes,
+                                            artifact_store, before_artifact_mtimes, self,
                                         )
                                     except Exception:
                                         lint_messages = []
