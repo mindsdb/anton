@@ -939,24 +939,6 @@ def _brief_and_notes(state) -> str:
     return "\n\n".join(parts)
 
 
-def build_data_enough_prompt(state) -> tuple[str, str]:
-    system = (
-        _DATA_CONTEXT_HEADER
-        + "You are the `is_data_enough` decision node. Decide whether there is "
-        "ALREADY enough data to build the artifact. If the task needs no external "
-        "data at all (e.g. 'show the current time'), that counts as ENOUGH. "
-        "Otherwise it is enough only when the source, schema, and a concrete "
-        "sample of every needed dataset are known.\n\n"
-        "Anything under `## Data gathered so far` counts as already available, "
-        "regardless of who obtained it — a scratchpad cell the main agent ran "
-        "before calling this tool is just as good as one you would run yourself. "
-        "Do NOT ask for a re-fetch of something already shown there.\n\n"
-        "Answer strictly."
-    )
-    user = _brief_and_notes(state) + "\n\nIs there enough data? Answer with the verdict."
-    return system, user
-
-
 def build_required_data_prompt(state) -> tuple[str, str]:
     system = (
         _DATA_CONTEXT_HEADER

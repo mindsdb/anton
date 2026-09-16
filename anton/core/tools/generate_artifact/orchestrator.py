@@ -6,16 +6,21 @@ reuse `engine._run_loop`; verification uses `verifiers`.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
+import json
 import re
+import urllib.error
+import urllib.request
 
 from anton.core.artifacts.internal_files import (
     API_SPEC_FILENAME,
     PRD_FILENAME,
     TECH_SPEC_FILENAME,
 )
+from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 
-from . import engine, prompts
+from . import engine, prompts, verifiers
 from .discovery import checkpoint as cp
 from .discovery.orchestrator import CANCELLED, run_discovery
 from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import them from here)
@@ -28,6 +33,9 @@ from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import 
 from .prompts import HTML_APP_DEFAULT_PRIMARY
 from .state import (
     DATA_LOOP_MAX,
+    GEN_LOOP_MAX_RETRIES,
+    GEN_VERIFY_MAX_RETRIES,
+    RUNAPP_MAX_RETRIES,
     FetchVerdict,
     GenState,
     RequiredData,
@@ -59,12 +67,14 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
 
 async def _fetch_data_sample(state: GenState) -> str:
     """Run a scratchpad loop that pulls a data sample; return its summary."""
+    if state.public_sources is None:
+        state.public_sources = _public_data_sources_skill(state.session)
     result = await engine._run_loop(
         session=state.session,
         system=prompts.build_fetch_data_system_prompt(
             state.artifact_path,
-            datasource_context=_datasource_context(state.session),
-            public_sources=_public_data_sources_skill(state.session),
+            datasource_context=state.datasource_context,
+            public_sources=state.public_sources,
         ),
         kickoff=prompts.build_fetch_data_kickoff(state),
         artifact_path=state.artifact_path,
@@ -206,10 +216,6 @@ async def _data_phase(state: GenState) -> str | None:
         f"iterations. Last assessment: {last_reasoning}"
     )
     return state.error
-
-
-from . import verifiers
-from .state import GEN_LOOP_MAX_RETRIES, GEN_VERIFY_MAX_RETRIES
 
 
 async def _write_tech_spec(state: GenState) -> str | None:
@@ -408,9 +414,9 @@ def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
     session attribute is `_data_vault`, falling back to `LocalDataVault()`.
     """
     from anton.core.artifacts.models import DatasourceRef
-    from anton.core.datasources.data_vault import LocalDataVault, _slug_env_prefix
+    from anton.core.datasources.data_vault import _slug_env_prefix
 
-    vault = getattr(session, "_data_vault", None) or LocalDataVault()
+    vault = _vault(session)
     conns = [
         (c["engine"], c["name"])
         for c in vault.list_connections()
@@ -444,12 +450,46 @@ async def _declare_datasources(state: GenState, refs: list) -> None:
         state.record("declare_datasources", "done", ", ".join(r.slug for r in refs))
 
 
+def _absorb_files_written(state: GenState, result: dict) -> None:
+    for f in result["files_written"]:
+        if f not in state.files_written:
+            state.files_written.append(f)
+
+
+def _verification_feedback(verdict: VerifyResult) -> str:
+    """The verifier's findings as the next attempt's kickoff context."""
+    return (
+        "\n\n## Verification failed — fix these\n"
+        + "\n".join(f"- {e}" for e in verdict.errors)
+        + ("\nWarnings:\n" + "\n".join(f"- {w}" for w in verdict.warnings) if verdict.warnings else "")
+    )
+
+
+def _terminal_error(
+    side: str, *, verify_failures: int, verdict: VerifyResult | None, last_loop_error: str | None,
+) -> str:
+    """Name the cause that actually exhausted its budget.
+
+    "verification failed" only when the verifier's own retry budget ran out.
+    The old single wording claimed a verification retry that, on the
+    loop-failure path, never happened.
+    """
+    if verify_failures > GEN_VERIFY_MAX_RETRIES and verdict is not None:
+        return (
+            f"{side.capitalize()} verification failed after {verify_failures} attempt(s): "
+            + "; ".join(verdict.errors)
+        )
+    return f"{side.capitalize()} generation failed: " + (
+        last_loop_error or f"generation did not produce a verifiable {side}"
+    )
+
+
 async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str | None:
     stateless = state.artifact_type == "fullstack-stateless-app"
     system = prompts.build_backend_system_prompt(
         state.artifact_path,
         stateless=stateless,
-        datasource_context=_datasource_context(state.session),
+        datasource_context=state.datasource_context,
     )
     verdict = None  # guards the terminal message when no attempt ever verified
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend
@@ -499,9 +539,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                 break
             extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             continue
-        for f in result["files_written"]:
-            if f not in state.files_written:
-                state.files_written.append(f)
+        _absorb_files_written(state, result)
         state.record("generate_backend", "done", result.get("summary", ""))
 
         state.step_started("verify_backend", attempt=attempt)
@@ -531,7 +569,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                 verify_failures += 1
                 if verify_failures > GEN_VERIFY_MAX_RETRIES:
                     break
-                extra = "\n\n## Verification failed — fix these\n- " + msg
+                extra = _verification_feedback(verdict)
                 continue
             state.record("verify_backend", "ok", "; ".join(verdict.warnings))
             await _declare_datasources(state, refs)
@@ -540,21 +578,11 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         verify_failures += 1
         if verify_failures > GEN_VERIFY_MAX_RETRIES:
             break
-        extra = (
-            "\n\n## Verification failed — fix these\n"
-            + "\n".join(f"- {e}" for e in verdict.errors)
-            + ("\nWarnings:\n" + "\n".join(f"- {w}" for w in verdict.warnings) if verdict.warnings else "")
-        )
-    # See the twin comment in _gen_verify_frontend.
-    if verify_failures > GEN_VERIFY_MAX_RETRIES and verdict is not None:
-        state.error = (
-            f"Backend verification failed after {verify_failures} attempt(s): "
-            + "; ".join(verdict.errors)
-        )
-    else:
-        state.error = "Backend generation failed: " + (
-            last_loop_error or "generation did not produce a verifiable backend"
-        )
+        extra = _verification_feedback(verdict)
+    state.error = _terminal_error(
+        "backend", verify_failures=verify_failures, verdict=verdict,
+        last_loop_error=last_loop_error,
+    )
     return state.error
 
 
@@ -632,9 +660,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                 break
             extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             continue
-        for f in result["files_written"]:
-            if f not in state.files_written:
-                state.files_written.append(f)
+        _absorb_files_written(state, result)
         state.record("generate_frontend", "done", result.get("summary", ""))
 
         state.step_started("verify_frontend", attempt=attempt)
@@ -675,37 +701,17 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
         verify_failures += 1
         if verify_failures > GEN_VERIFY_MAX_RETRIES:
             break
-        extra = (
-            "\n\n## Verification failed — fix these\n"
-            + "\n".join(f"- {e}" for e in verdict.errors)
-            + ("\nWarnings:\n" + "\n".join(f"- {w}" for w in verdict.warnings) if verdict.warnings else "")
-        )
-    # Name the cause that actually exhausted its budget: "verification failed"
-    # only when the verifier's own retry budget ran out. The old single wording
-    # claimed a verification retry that, on the loop-failure path, never
-    # happened.
-    if verify_failures > GEN_VERIFY_MAX_RETRIES and verdict is not None:
-        state.error = (
-            f"Frontend verification failed after {verify_failures} attempt(s): "
-            + "; ".join(verdict.errors)
-        )
-    else:
-        state.error = "Frontend generation failed: " + (
-            last_loop_error or "generation did not produce a verifiable frontend"
-        )
+        extra = _verification_feedback(verdict)
+    state.error = _terminal_error(
+        "frontend", verify_failures=verify_failures, verdict=verdict,
+        last_loop_error=last_loop_error,
+    )
     return state.error
 
 
 # ---------------------------------------------------------------------------
 # run_app / verify_fullstack + run() assembly
 # ---------------------------------------------------------------------------
-
-import asyncio
-import json
-import urllib.error
-import urllib.request
-
-from .state import RUNAPP_MAX_RETRIES
 
 
 async def _launch_backend(**kwargs):
@@ -753,15 +759,18 @@ async def _probe_app(state: GenState, port: int) -> str | None:
     status, _ = await asyncio.to_thread(_get, base + "/api/health")
     if status != 200:
         return f"health check GET /api/health returned {status} (expected 200)."
-    for path in _safe_get_paths(state.api_spec):
-        status, _ = await asyncio.to_thread(_get, base + path)
+    # The routes are independent, so they are probed at once: the wait is the
+    # slowest route's latency, not the sum. Reported in spec order.
+    paths = _safe_get_paths(state.api_spec)
+    results = await asyncio.gather(*(asyncio.to_thread(_get, base + p) for p in paths))
+    for path, (status, _) in zip(paths, results):
         if status == 0 or status >= 500:
             return f"endpoint GET {path} failed with status {status}."
     return None
 
 
 async def _tail_log(state: GenState, limit: int = 2000) -> str:
-    log = state.artifact_path / "backend.log"
+    log = state.artifact_path / BACKEND_LOG_FILENAME
     if not log.is_file():
         return ""
     text = log.read_text(encoding="utf-8", errors="replace")

@@ -12,7 +12,6 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from . import sub_tools
-from . import prompts
 from .notes import string_list
 from .state import PrdState
 
@@ -81,40 +80,9 @@ async def draft_brief(state: PrdState) -> None:
     """Phase 2 step 1: draft the short brief. Continues `state.messages` —
     this is NOT a fresh conversation, so the model sees everything phase 1
     found."""
-    state.step_started(sub_tools.STEP_DRAFT_BRIEF)
-    state.messages.append({
-        "role": "user",
-        "content": prompts.step_message(sub_tools.STEP_DRAFT_BRIEF, state),
-    })
-    await sub_tools.signal_thinking(state.session)
-    system = state.pipeline_system
-    response = await state.session._llm.plan(
-        system=system,
-        messages=state.messages,
-        tools=state.pipeline_tools,
+    state.brief, _ = await sub_tools.plan_step(
+        state, sub_tools.STEP_DRAFT_BRIEF, doing="drafting the brief"
     )
-    state.trace_log.llm_call(
-        node="draft_brief", method="plan", system=system,
-        messages=state.messages, response=response,
-    )
-    brief = (response.content or "").strip()
-    if not brief:
-        state.trace_log.node("draft_brief", "fail", detail="model replied with no text")
-        # The model called a tool instead of replying with text (tools stay
-        # defined in this call for the Anthropic API's sake — see
-        # `_phase2_tools`), despite the system prompt's explicit
-        # instruction not to. Raising here — rather than silently
-        # continuing with an empty brief — means `orchestrator.run`'s
-        # caller chain surfaces it as a normal generator crash: it
-        # propagates up through `discovery.generate()` into
-        # `handle_generate_artifact`'s `except Exception`, which already
-        # wraps it with `_generation_failed`. No new error-reporting path
-        # needed.
-        raise RuntimeError(
-            "draft_brief: the model replied with no text — it may have "
-            "called a tool instead of drafting the brief."
-        )
-    state.brief = brief
     state.messages.append({"role": "assistant", "content": state.brief})
     state.trace_log.node("draft_brief", "done", detail=state.brief[:200])
 
@@ -227,21 +195,8 @@ async def redraw_brief(state: PrdState) -> None:
     """
     from anton.core.artifacts.models import ARTIFACT_TYPES
 
-    state.step_started(sub_tools.STEP_REDRAW_BRIEF)
-    state.messages.append({
-        "role": "user",
-        "content": prompts.step_message(sub_tools.STEP_REDRAW_BRIEF, state),
-    })
-    await sub_tools.signal_thinking(state.session)
-    system = state.pipeline_system
-    response = await state.session._llm.plan(
-        system=system,
-        messages=state.messages,
-        tools=state.pipeline_tools,
-    )
-    state.trace_log.llm_call(
-        node="redraw_brief", method="plan", system=system,
-        messages=state.messages, response=response,
+    brief, response = await sub_tools.plan_step(
+        state, sub_tools.STEP_REDRAW_BRIEF, doing="redrawing the brief"
     )
 
     declared = None
@@ -251,8 +206,7 @@ async def redraw_brief(state: PrdState) -> None:
             continue
         inp = tc.input or {}
         new_type = str(inp.get("artifact_type") or "")
-        raw = inp.get("data_sources")
-        declared = [str(s) for s in raw] if isinstance(raw, list) else []
+        declared = string_list(inp.get("data_sources"))
         # A correction can retract an assumption or settle an open point;
         # the re-stated lists replace the old ones only when the model sent
         # them, so a call without the fields keeps what gathering recorded.
@@ -279,13 +233,6 @@ async def redraw_brief(state: PrdState) -> None:
             detail="artifact type and declared sources kept from the previous call",
         )
 
-    brief = (response.content or "").strip()
-    if not brief:
-        state.trace_log.node("redraw_brief", "fail", detail="model replied with no text")
-        raise RuntimeError(
-            "redraw_brief: the model replied with no text — it may have "
-            "called a tool instead of redrawing the brief."
-        )
     state.brief = brief
     state.messages.append({"role": "assistant", "content": state.brief})
     state.trace_log.node("redraw_brief", "done", detail=state.brief[:200])

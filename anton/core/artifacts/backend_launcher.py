@@ -29,6 +29,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Protocol
 
+from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+
 
 _log = logging.getLogger(__name__)
 
@@ -138,7 +140,28 @@ def build_backend_env(
 
 # Backwards-compatible name: pre-existing callers/tests import the underscored
 # form; the function went public when verify_backend became its second caller.
-_build_backend_env = build_backend_env
+
+def parse_requirements(text: str) -> list[str]:
+    """The installable lines of a requirements.txt.
+
+    Comments, blanks and pip options (`-r`, `--index-url`) are dropped, and so
+    is `anton_state`: the internal STATE SDK reaches the backend at runtime via
+    PYTHONPATH (see `_anton_state_pythonpath_dir`) and is published to no
+    registry, so a model that listed it would otherwise fail the install with
+    "anton-state was not found in the package registry". Shared with the
+    generator's `verify_backend`, so the verifier installs exactly what the
+    launch will.
+    """
+    packages: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        pkg_name = re.split(r"[<>=!~ \[]", line, maxsplit=1)[0].strip()
+        if pkg_name.replace("-", "_").lower() == "anton_state":
+            continue
+        packages.append(line)
+    return packages
 
 
 class ScratchpadPoolLike(Protocol):
@@ -217,20 +240,7 @@ async def launch_artifact_backend(
 
     req_path = folder / "requirements.txt"
     if req_path.is_file():
-        packages: list[str] = []
-        for raw_line in req_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.split("#", 1)[0].strip()
-            if not line or line.startswith("-"):
-                continue
-            # `anton_state` is the internal STATE SDK — it is provided to the
-            # backend at runtime via PYTHONPATH (see _anton_state_pythonpath_dir),
-            # not published to any package registry. Drop it if the model listed
-            # it in requirements.txt, otherwise the install step fails with
-            # "anton-state was not found in the package registry".
-            pkg_name = re.split(r"[<>=!~ \[]", line, maxsplit=1)[0].strip()
-            if pkg_name.replace("-", "_").lower() == "anton_state":
-                continue
-            packages.append(line)
+        packages = parse_requirements(req_path.read_text(encoding="utf-8"))
         if packages:
             from datetime import datetime, timezone
 
@@ -240,7 +250,7 @@ async def launch_artifact_backend(
                 f"\n=== requirements.txt install "
                 f"({datetime.now(timezone.utc).isoformat(timespec='seconds')}) ===\n"
             )
-            with open(folder / "backend.log", "ab", buffering=0) as install_log:
+            with open(folder / BACKEND_LOG_FILENAME, "ab", buffering=0) as install_log:
                 install_log.write(banner.encode("utf-8"))
                 install_log.write(install_result.encode("utf-8"))
                 install_log.write(b"\n")
@@ -275,7 +285,7 @@ async def launch_artifact_backend(
         port = s.getsockname()[1]
 
     cmd = [venv_python, str(script), "--port", str(port), *extra_args]
-    log_path = folder / "backend.log"
+    log_path = folder / BACKEND_LOG_FILENAME
     log_fd = open(log_path, "ab", buffering=0)
 
     # PR_SET_PDEATHSIG so the backend dies with the parent on Linux. macOS
@@ -302,7 +312,7 @@ async def launch_artifact_backend(
             stderr=log_fd,
             stdin=asyncio.subprocess.DEVNULL,
             preexec_fn=preexec_fn,
-            env=_build_backend_env(extra_env, ds_env),
+            env=build_backend_env(extra_env, ds_env),
         )
     except OSError as exc:
         log_fd.close()

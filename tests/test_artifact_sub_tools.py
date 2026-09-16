@@ -95,7 +95,7 @@ def test_a_large_body_is_written_without_a_size_warning(tmp_path: Path):
     Leaving it in place would hand the model a stale instruction on every write
     round, and under one-body-per-reply acting on it costs a round each time.
     """
-    big = "x" * (sub_tools.CHUNK_SOFT_LIMIT + 1)
+    big = "x" * 16_001
     res = sub_tools.write_file(tmp_path, "d.html", big)
     assert res["ok"]
     assert (tmp_path / "d.html").read_text(encoding="utf-8") == big

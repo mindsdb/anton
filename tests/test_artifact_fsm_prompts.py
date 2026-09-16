@@ -32,7 +32,7 @@ def test_backend_rules_require_health_endpoint():
 
 def test_decision_prompts_embed_the_graph_and_state():
     st = _state(data_notes="pad `a` cell 2 pulled 100 rows")
-    system, user = prompts.build_data_enough_prompt(st)
+    system, user = prompts.build_required_data_prompt(st)
     assert "digraph" in system
     assert "Build X" in user
     assert "pad `a`" in user
@@ -65,12 +65,12 @@ def test_fetch_data_prompts_exist():
 
 def test_prompts_include_progress_journal():
     st = _state()
-    _, user = prompts.build_data_enough_prompt(st)
+    _, user = prompts.build_required_data_prompt(st)
     assert "## Progress journal" not in user  # empty journal → no section
-    st.record("is_data_enough", "no", "need orders")
-    _, user = prompts.build_data_enough_prompt(st)
+    st.record("data_check", "no", "need orders")
+    _, user = prompts.build_required_data_prompt(st)
     assert "## Progress journal" in user
-    assert "- is_data_enough: no — need orders" in user
+    assert "- data_check: no — need orders" in user
 
 
 def test_backend_prompt_states_the_ds_env_var_convention():
@@ -309,17 +309,6 @@ def test_tech_spec_prompt_requires_an_insight_list_for_html_app():
     joined = system + user
     assert "insight" in joined.lower()
     assert "one line each" in joined.lower()
-
-
-def test_data_enough_prompt_counts_inspected_cells_as_data():
-    """Otherwise the inspection does not affect the verdict and task 1 is pointless."""
-    st = _state(data_notes="### Cells the main agent already ran in: orders")
-    system, _ = prompts.build_data_enough_prompt(st)
-    low = system.lower()
-    # `already` is unusable as an assert here — the current prompt already contains
-    # "ALREADY enough data", so the test would have been green before the change.
-    assert "already available" in low
-    assert "regardless of who obtained it" in low
 
 
 def test_fetch_prompt_tells_the_node_to_reuse_the_named_pad():

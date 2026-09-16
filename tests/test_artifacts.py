@@ -503,27 +503,13 @@ def test_housekeeping_set_still_mirrors_cowork_server():
     }
 
 
-def test_housekeeping_set_matches_publish_access_copy():
-    """anton's own two copies must never drift from each other."""
-    from anton.core.artifacts.store import _HOUSEKEEPING_FILES
-    from anton.publish_access import _HOUSEKEEPING_FILES as ACCESS_COPY
+def test_publisher_excludes_exactly_the_housekeeping_set():
+    """The bundle omits what the store hides: one definition, two consumers."""
+    from anton.core.artifacts.store import _HOUSEKEEPING_DIRS, _HOUSEKEEPING_FILES
+    from anton.publisher import _FULLSTACK_EXCLUDED
 
-    assert _HOUSEKEEPING_FILES == ACCESS_COPY
-
-
-def test_housekeeping_dirs_match_publish_access_copy():
-    """Reserved DIRECTORIES are a second set, and it drifts just as quietly.
-
-    `publish_access` matches on the path's first component, so a directory name
-    also "works" inside `_HOUSEKEEPING_FILES` there — which is how `.revisions`
-    arrived in the staging merge, breaking the lock above. The store matches
-    whole relative paths and cannot fold directories in, so both sides keep the
-    split and both sides are locked.
-    """
-    from anton.core.artifacts.store import _HOUSEKEEPING_DIRS
-    from anton.publish_access import _HOUSEKEEPING_DIRS as ACCESS_COPY
-
-    assert _HOUSEKEEPING_DIRS == ACCESS_COPY
+    assert _FULLSTACK_EXCLUDED == _HOUSEKEEPING_FILES | _HOUSEKEEPING_DIRS
+    assert ".revisions" in _HOUSEKEEPING_DIRS
 
 
 def test_reconcile_excludes_state_runtime_files(store: ArtifactStore):

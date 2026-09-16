@@ -664,6 +664,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     import asyncio
     import json
 
+    from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
     from anton.core.tools.registry import ToolOutcome
 
     store = resolve_artifact_store(session)
@@ -680,8 +681,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield f"Error: no artifact found for slug `{slug}`."
         return
 
-    supported = {"html-app", "fullstack-stateless-app", "fullstack-stateful-app"}
-    if artifact.type not in supported:
+    if artifact.type not in GENERATOR_ARTIFACT_TYPES:
         yield (
             "Error: generate_artifact only supports html-app / "
             "fullstack-stateless-app / fullstack-stateful-app. "

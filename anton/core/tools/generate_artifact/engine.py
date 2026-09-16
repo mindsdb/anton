@@ -29,8 +29,11 @@ from typing import TYPE_CHECKING
 import httpx2 as httpx
 
 from anton.core.artifacts.internal_files import PRD_FILENAME
+from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.llm.structured import looks_truncated
 
 from . import sub_tools
+from .debug_trace import NullTrace
 from .spend import WIND_DOWN_ROUNDS
 from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
 from .prompts import (
@@ -91,22 +94,6 @@ _CONTENT_ARG_MSG = (
 )
 
 
-def _unwrap_outcome(result):
-    """Flatten a handler result down to `tool_result`-ready content.
-
-    Since ENG-696 some handlers return a `ToolOutcome` (content + the
-    handler's own ok/reason verdict) instead of a bare string —
-    `handle_scratchpad`'s exec path is the one this loop hits. The verdict
-    drives the outer agent's error streak, which this sub-generator does
-    not participate in, so only `content` is meaningful here; passing the
-    dataclass straight into a tool_result block would ship its repr to the
-    model.
-    """
-    from anton.core.tools.registry import ToolOutcome
-
-    return result.content if isinstance(result, ToolOutcome) else result
-
-
 async def _drain_stream(events) -> "LLMResponse":
     """Consume a `plan_stream()`/`code_stream()` iterator, discarding the
     token-level deltas, and return the final assembled response.
@@ -133,8 +120,7 @@ async def _drain_stream(events) -> "LLMResponse":
 
     Consequence: a long tool-call generation IS a silent connection, and
     whether it survives is a race against the proxy's idle timeout. Hence
-    `_call_with_stream_retry` below, and the duration-derived chunk limit in
-    `sub_tools.CHUNK_SOFT_LIMIT`.
+    `_call_with_stream_retry` below.
     """
     from anton.core.llm.provider import StreamComplete
 
@@ -221,24 +207,6 @@ def _output_token_cap(session) -> int | None:
     return cap if isinstance(cap, int) and cap > 0 else None
 
 
-def _response_is_truncated(response, cap: int | None) -> bool:
-    """The reply hit the output cap, so its last tool call was not delivered.
-
-    Same semantics as the shared `looks_truncated` (`llm/structured.py`), which
-    honours both `stop_reason` and the token count — the gateway reports
-    `stop_reason` correctly since 2026-08-03. Kept local because mock sessions
-    make type strictness mandatory here: `usage.output_tokens` on an AsyncMock
-    is a truthy Mock, and comparing it against the cap would flag every test
-    round as truncated.
-    """
-    if getattr(response, "stop_reason", None) in ("length", "max_tokens"):
-        return True
-    if not cap:
-        return False
-    used = getattr(getattr(response, "usage", None), "output_tokens", None)
-    return isinstance(used, int) and used >= cap
-
-
 _WIND_DOWN_MSG = (
     "This turn is out of budget. Close the file you are writing NOW: if a final "
     "part is still needed, send it as one more body plus its `write_file` call, "
@@ -313,8 +281,7 @@ async def _plan_whole_document(
     ``stop_reason`` — the gateway reports it correctly since 2026-08-03, and a
     token count alone cannot see a cut that stopped just under the cap.
     """
-    from anton.core.llm.structured import looks_truncated
-
+    trace = trace or NullTrace()
     budgets = (SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)
     response = None
     extra = ""
@@ -331,18 +298,16 @@ async def _plan_whole_document(
         response = await _drain_stream(session._llm.plan_stream(
             system=system, messages=call_messages, max_tokens=budget, tools=tools,
         ))
-        if trace is not None:
-            trace.llm_call(
-                node=node_label, method="plan", system=system,
-                messages=call_messages, response=response, attempt=attempt,
-            )
+        trace.llm_call(
+            node=node_label, method="plan", system=system,
+            messages=call_messages, response=response, attempt=attempt,
+        )
 
         if getattr(response, "tool_calls", None):
-            if trace is not None:
-                for tc in response.tool_calls:
-                    trace.tool_rejected(
-                        node=node_label, tool=getattr(tc, "name", "?"),
-                        reason="tool calls are not available on a specification step",
+            for tc in response.tool_calls:
+                trace.tool_rejected(
+                    node=node_label, tool=getattr(tc, "name", "?"),
+                    reason="tool calls are not available on a specification step",
                     )
             if refused_once:
                 return "", (
@@ -437,9 +402,7 @@ async def generate(
     from .state import GenState
     from .debug_trace import make_trace
 
-    if artifact_type not in (
-        "html-app", "fullstack-stateless-app", "fullstack-stateful-app"
-    ):
+    if artifact_type not in GENERATOR_ARTIFACT_TYPES:
         return f"Error: unsupported artifact type: {artifact_type!r}"
 
     trace = make_trace()
@@ -629,6 +592,7 @@ async def _run_loop(
     leave each with about one round — not enough to both emit a final chunk
     and call `finish`.
     """
+    trace = trace or NullTrace()
     tools = sub_tools.tool_schemas()
     default_cap = _output_token_cap(session)
     messages: list[dict] = [{"role": "user", "content": kickoff}]
@@ -694,30 +658,28 @@ async def _run_loop(
         )
         cap = used_budget or default_cap
 
-        if trace is not None:
-            trace.llm_call(
-                node=node_label,
-                method="plan" if round_idx == 0 else "code",
-                system=system,
-                messages=messages,
-                response=response,
-                attempt=attempt,
-                round=round_idx,
-            )
+        trace.llm_call(
+            node=node_label,
+            method="plan" if round_idx == 0 else "code",
+            system=system,
+            messages=messages,
+            response=response,
+            attempt=attempt,
+            round=round_idx,
+        )
 
         # The file body rides in the reply's TEXT now, so it is parsed once per
         # round and every `write_file` in the round reads the same result.
         # Truncation is judged here too: a body cut off by the output cap has no
         # end marker, which is a fact rather than the estimate
-        # `_response_is_truncated` makes from `stop_reason` and the budget.
+        # `looks_truncated` makes from `stop_reason` and the budget.
         attempted_body = sub_tools.FILE_BEGIN_MARKER in (response.content or "")
         body, body_error, notes = sub_tools.extract_file_body(
             response.content or "",
-            looks_truncated=_response_is_truncated(response, cap),
+            looks_truncated=looks_truncated(response, cap or 0),
         )
-        if trace is not None:
-            for kind in notes:
-                trace.protocol_note(node=node_label, kind=kind)
+        for kind in notes:
+            trace.protocol_note(node=node_label, kind=kind)
         if body is None and not attempted_body and pending_body is not None:
             # The previous round produced a body and forgot the call; this is
             # the retry that supplies the call.
@@ -726,19 +688,9 @@ async def _run_loop(
         # The turn goes into the history BEFORE any early exit below. A retry
         # has to see the body the model already produced, otherwise telling it
         # "do not repeat it" asks for something it cannot do.
-        assistant_blocks: list[dict] = []
-        if response.content:
-            assistant_blocks.append({"type": "text", "text": response.content})
-        for tc in response.tool_calls:
-            assistant_blocks.append(
-                {
-                    "type": "tool_use",
-                    "id": tc.id,
-                    "name": tc.name,
-                    "input": tc.input,
-                }
-            )
-        messages.append({"role": "assistant", "content": assistant_blocks})
+        messages.append(
+            {"role": "assistant", "content": sub_tools.assistant_blocks(response)}
+        )
 
         write_calls = [tc for tc in response.tool_calls if tc.name == "write_file"]
 
@@ -769,16 +721,7 @@ async def _run_loop(
         result_blocks: list[dict] = []
         for tc in response.tool_calls:
             if tc.parse_error:
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": (
-                            "Error: malformed tool input — re-emit with valid "
-                            f"JSON. ({tc.parse_error})"
-                        ),
-                    }
-                )
+                result_blocks.append(sub_tools.malformed_input_result(tc))
                 continue
 
             name = tc.name
@@ -787,38 +730,18 @@ async def _run_loop(
             if name == "finish":
                 summary = str(inp.get("summary") or "").strip()
                 finished_summary = summary or "(no summary)"
-                result_blocks.append(
-                    {"type": "tool_result", "tool_use_id": tc.id, "content": "ok"}
-                )
+                result_blocks.append(sub_tools.tool_result(tc.id, "ok"))
             elif name == "write_file":
                 if len(write_calls) > 1:
                     # One reply carries one body, so a second call has nothing
                     # to write. Refuse both rather than guess which one meant it.
-                    result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": _ONE_WRITE_PER_REPLY_MSG,
-                        }
-                    )
+                    result_blocks.append(sub_tools.tool_result(tc.id, _ONE_WRITE_PER_REPLY_MSG))
                     continue
                 if "content" in inp:
-                    result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": _CONTENT_ARG_MSG,
-                        }
-                    )
+                    result_blocks.append(sub_tools.tool_result(tc.id, _CONTENT_ARG_MSG))
                     continue
                 if body is None:
-                    result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tc.id,
-                            "content": body_error,
-                        }
-                    )
+                    result_blocks.append(sub_tools.tool_result(tc.id, body_error))
                     continue
                 res = sub_tools.write_file(
                     artifact_path,
@@ -832,38 +755,25 @@ async def _run_loop(
                     written = res["written"]
                     if written not in files_written:
                         files_written.append(written)
-                    if trace is not None:
-                        trace.file_written(node=node_label, path=written)
+                    trace.file_written(node=node_label, path=written)
                     for trigger, inject_msg in (step_injections or []):
                         if written == trigger and inject_msg not in injected:
                             injected.add(inject_msg)
                             msg = f"{msg}\n\n{inject_msg}"
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": msg,
-                    }
-                )
+                result_blocks.append(sub_tools.tool_result(tc.id, msg))
             elif name == "read_file":
                 res = sub_tools.read_file(
                     artifact_path, inp.get("path", ""),
                     full=bool(inp.get("full", False)),
                 )
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": res["message"],
-                    }
-                )
+                result_blocks.append(sub_tools.tool_result(tc.id, res["message"]))
             elif name == "scratchpad":
                 # Full scratchpad access: the sub-generator pulls or rebuilds
                 # the data described in the brief's `## Data` section. Lazy
                 # import avoids a tool_handlers <-> generate_artifact cycle.
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = _unwrap_outcome(await handle_scratchpad(session, inp))
+                content = sub_tools.unwrap_outcome(await handle_scratchpad(session, inp))
                 if inp.get("action") == "exec":
                     scratchpad_execs.append(
                         {
@@ -872,26 +782,14 @@ async def _run_loop(
                             "output": content if isinstance(content, str) else str(content),
                         }
                     )
-                if trace is not None:
-                    trace.scratchpad(node=node_label, input=inp, output=content)
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": content,
-                    }
-                )
+                trace.scratchpad(node=node_label, input=inp, output=content)
+                result_blocks.append(sub_tools.tool_result(tc.id, content))
             else:
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": (
-                            f"Error: unknown sub-tool `{name}`. "
-                            "Use write_file, read_file, or finish."
-                        ),
-                    }
-                )
+                result_blocks.append(sub_tools.tool_result(
+                    tc.id,
+                    f"Error: unknown sub-tool `{name}`. "
+                    "Use write_file, read_file, or finish.",
+                ))
 
         # Round accounting rides on the same user message as the tool results.
         # The model has no other way to see the budget, and without it the

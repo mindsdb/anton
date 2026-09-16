@@ -17,28 +17,72 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Chunk size the write discipline asks for (see prompts._WRITE_DISCIPLINE).
-# Soft: an oversized chunk that made it through IS written — the warning in the
-# result is about the next call.
-#
-# The bound is DURATION, not the output-token budget, and that is the whole
-# reason it is not simply `GEN_WRITE_MAX_TOKENS` worth of text. Measured
-# 2026-08-28: a large `write_file` argument is not streamed incrementally —
-# the connection carries nothing for the entire generation and everything
-# arrives in one burst at the end (112s of silence for a 59 000-character
-# argument, reproduced identically against api.anthropic.com, so this is not
-# the gateway's doing). Whether such a call survives is a race against the
-# proxy's idle timeout: silences of 112-115s came back, 131-143s were dropped.
-#
-# So: coding model ~170 output tokens/s, ~2.59 characters per token on Cyrillic
-# prose (the token-hungriest content we generate) → ~440 chars/s → 16 000
-# characters is roughly 37s of silence, a ~3x margin against the shortest
-# observed drop. Raising this trades that margin for fewer rounds; re-measure
-# the drop threshold before doing so.
-CHUNK_SOFT_LIMIT = 16_000
-
 # Tail returned by read_file when `full` is not requested.
 READ_TAIL_CHARS = 500
+
+
+# ── Tool-call protocol helpers shared by both loops ─────────────────────────
+#
+# The generation loop (engine.py) and the gathering loop (discovery/engine.py)
+# speak the same Anthropic-style tool_use / tool_result block protocol. These
+# helpers are the one place that shape is written down.
+
+
+def tool_schema(tool, description: str | None = None) -> dict:
+    """The LLM-facing schema of a `ToolDef`, optionally with another description.
+
+    Reusing the main agent's `ToolDef` keeps a sub-tool's contract identical to
+    the top-level tool it forwards to; the description is the one thing a
+    pipeline may want to phrase for its own context.
+    """
+    return {
+        "name": tool.name,
+        "description": tool.description if description is None else description,
+        "input_schema": tool.input_schema,
+    }
+
+
+def tool_result(tool_use_id: str, content) -> dict:
+    """One `tool_result` block answering the tool call `tool_use_id`."""
+    return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+
+
+def assistant_blocks(response) -> list[dict]:
+    """The assistant turn `response` becomes in the history: its text, then
+    one `tool_use` block per tool call."""
+    blocks: list[dict] = []
+    if response.content:
+        blocks.append({"type": "text", "text": response.content})
+    for tc in response.tool_calls:
+        blocks.append(
+            {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input}
+        )
+    return blocks
+
+
+def malformed_input_result(tc) -> dict:
+    """The `tool_result` for a call whose JSON input did not parse."""
+    return tool_result(
+        tc.id,
+        "Error: malformed tool input — re-emit with valid JSON. "
+        f"({tc.parse_error})",
+    )
+
+
+def unwrap_outcome(result):
+    """Flatten a handler result down to `tool_result`-ready content.
+
+    Since ENG-696 some handlers return a `ToolOutcome` (content + the
+    handler's own ok/reason verdict) instead of a bare string —
+    `handle_scratchpad`'s exec path is the one both loops hit. The verdict
+    drives the outer agent's error streak, which the sub-loops do not
+    participate in, so only `content` is meaningful here; passing the
+    dataclass straight into a tool_result block would ship its repr to the
+    model.
+    """
+    from anton.core.tools.registry import ToolOutcome
+
+    return result.content if isinstance(result, ToolOutcome) else result
 
 
 # ── The file-body protocol ──────────────────────────────────────────────────
@@ -254,11 +298,7 @@ def _scratchpad_schema() -> dict:
     # lazily to avoid a tool_defs <-> generate_artifact import cycle.
     from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
 
-    return {
-        "name": SCRATCHPAD_TOOL.name,
-        "description": SCRATCHPAD_TOOL.description,
-        "input_schema": SCRATCHPAD_TOOL.input_schema,
-    }
+    return tool_schema(SCRATCHPAD_TOOL)
 
 
 def tool_schemas() -> list[dict]:

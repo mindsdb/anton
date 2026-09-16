@@ -200,6 +200,10 @@ class GenState:
     # connected. Filled by the entry point; rendered into the call kickoff so
     # the gathering step knows what it can query.
     datasource_context: str = ""
+    # Body of the built-in public-data-sources skill, read from disk on the
+    # data loop's first fetch and reused by its later iterations. None until
+    # then; "" when the skill is unavailable.
+    public_sources: str | None = None
     # THE shared message list for phases A-D. Dropped at the spec boundary:
     # generation nodes build their context from the fields on this state, not
     # from this list. One list, because phase B relies on seeing what phase

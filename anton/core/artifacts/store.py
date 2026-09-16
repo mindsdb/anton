@@ -47,8 +47,9 @@ BACKEND_LOG_FILENAME = "backend.log"
 # Files the store owns, hold publish-state, or belong to a running backend —
 # not artifact content the agent authored. Mirrors cowork-server's
 # artifacts-service housekeeping set (`cowork/services/artifacts.py:132`) so the
-# agent's view and the UI agree on what counts as an artifact file; the same set
-# appears in `anton/publish_access.py` and `publisher._FULLSTACK_EXCLUDED`.
+# agent's view and the UI agree on what counts as an artifact file; this is the
+# one definition — `anton/publish_access.py` and `publisher._FULLSTACK_EXCLUDED`
+# import it.
 # `backend.log` is here for that agreement: it is the launched backend's runtime
 # log, written into the artifact folder by `launch_artifact_backend`, and every
 # other copy of this set already excluded it.

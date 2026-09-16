@@ -7,7 +7,13 @@ with a timeout, and folds the result into `evaluate_backend`.
 """
 from __future__ import annotations
 
+import ast
+import asyncio
+import json
 import re
+from pathlib import Path
+
+from anton.core.utils.scratchpad import install_call_failed
 
 from .state import VerifyResult
 
@@ -132,8 +138,6 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
 # Backend evaluation — pure
 # ---------------------------------------------------------------------------
 
-import ast
-
 _DS_KEY = re.compile(r"DS_[A-Z0-9_]+__[A-Z0-9_]+")
 _CORE_REQS = ("fastapi", "mangum", "uvicorn")
 
@@ -141,6 +145,11 @@ _CORE_REQS = ("fastapi", "mangum", "uvicorn")
 # after it (extras like `[standard]`, version specifiers, spaces) is not part
 # of the name.
 _REQ_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _ds_keys(source: str) -> list[str]:
+    """Every distinct `DS_<PREFIX>__<FIELD>` name `source` reads, sorted."""
+    return sorted(set(_DS_KEY.findall(source)))
 
 
 def _requirement_names(requirements: str) -> set[str]:
@@ -263,8 +272,7 @@ def evaluate_backend(
             + (introspection.get("import_error") or "unknown error")
         )
         # Without a successful import, route/contract data is unreliable — stop here.
-        ds_keys = sorted(set(_DS_KEY.findall(source)))
-        return VerifyResult(errors=errors, warnings=warnings), ds_keys
+        return VerifyResult(errors=errors, warnings=warnings), _ds_keys(source)
 
     if not introspection.get("app_ok"):
         errors.append("backend.py must define `app` as a FastAPI instance.")
@@ -336,8 +344,7 @@ def evaluate_backend(
                 "to external data sources here."
             )
 
-    ds_keys = sorted(set(_DS_KEY.findall(source)))
-    return VerifyResult(errors=errors, warnings=warnings), ds_keys
+    return VerifyResult(errors=errors, warnings=warnings), _ds_keys(source)
 
 
 def _validate_state_manifest(text: str) -> str | None:
@@ -366,10 +373,6 @@ def _validate_state_manifest(text: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Backend verification — async scratchpad-venv glue
 # ---------------------------------------------------------------------------
-
-import asyncio
-import json
-from pathlib import Path
 
 # Runs inside the scratchpad venv. Imports the artifact backend, introspects
 # `app`, and prints one JSON line. Docs routes and the StaticFiles Mount are
@@ -408,24 +411,6 @@ print(json.dumps(result))
 '''
 
 
-def _parse_requirements(text: str) -> list[str]:
-    pkgs: list[str] = []
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line or line.startswith("-"):
-            continue
-        # `anton_state` is injected at runtime, never installable from a
-        # registry (same filter as backend_launcher). evaluate_backend flags
-        # the line as a contract error; skipping it here keeps the install
-        # step alive so that error actually reaches the retry loop instead of
-        # an opaque pip failure.
-        pkg_name = re.split(r"[<>=!~ \[]", line, maxsplit=1)[0].strip()
-        if pkg_name.replace("-", "_").lower() == "anton_state":
-            continue
-        pkgs.append(line)
-    return pkgs
-
-
 async def verify_backend(
     *,
     scratchpad_pool,
@@ -447,14 +432,18 @@ async def verify_backend(
     if manifest_path.is_file():
         state_manifest = manifest_path.read_text(encoding="utf-8")
 
-    # Provision venv and install deps.
+    # Provision venv and install deps. The launcher's parser, so the verifier
+    # installs exactly what the real launch will: `anton_state` is skipped
+    # (injected at runtime, never installable), which keeps the install step
+    # alive so `evaluate_backend`'s contract error about that line reaches the
+    # retry loop instead of an opaque pip failure.
+    from anton.core.artifacts.backend_launcher import build_backend_env, parse_requirements
+
     pad = await scratchpad_pool.get_or_create(slug)
-    pkgs = _parse_requirements(req_text)
+    pkgs = parse_requirements(req_text)
     if pkgs:
         install = await pad.install_packages(pkgs)
-        if isinstance(install, str) and (
-            install.startswith("Install failed") or install.startswith("Install timed out")
-        ):
+        if isinstance(install, str) and install_call_failed(install):
             return VerifyResult(errors=[f"Dependency install failed:\n{install}"]), []
 
     venv_python = await scratchpad_pool.venv_python(slug)
@@ -470,14 +459,12 @@ async def verify_backend(
     _, cerr = await proc.communicate()
     if proc.returncode != 0:
         return VerifyResult(errors=[f"backend.py failed to compile:\n{cerr.decode(errors='replace')}"]), \
-            sorted(set(_DS_KEY.findall(source)))
+            _ds_keys(source)
 
     # Import + introspect in a subprocess with a timeout. The env matters:
     # `build_backend_env` puts `anton_state` on PYTHONPATH exactly like the
     # launcher does for the real backend process — without it a correct
     # stateful backend fails right here on its own SDK import.
-    from anton.core.artifacts.backend_launcher import build_backend_env
-
     proc = await asyncio.create_subprocess_exec(
         venv_python, "-c", _INTROSPECT_SCRIPT,
         cwd=str(artifact_path),
@@ -490,7 +477,7 @@ async def verify_backend(
         proc.kill()
         await proc.wait()
         return VerifyResult(errors=[f"backend.py import timed out after {import_timeout}s."]), \
-            sorted(set(_DS_KEY.findall(source)))
+            _ds_keys(source)
 
     line = (out.decode(errors="replace").strip().splitlines() or [""])[-1]
     try:
@@ -498,7 +485,7 @@ async def verify_backend(
     except json.JSONDecodeError:
         return VerifyResult(
             errors=["backend introspection produced no JSON. stderr:\n" + err.decode(errors="replace")]
-        ), sorted(set(_DS_KEY.findall(source)))
+        ), _ds_keys(source)
 
     return evaluate_backend(
         introspection, source, req_text,

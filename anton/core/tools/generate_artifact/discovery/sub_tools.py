@@ -23,47 +23,30 @@ from typing import TYPE_CHECKING
 
 from anton.core.artifacts.models import ARTIFACT_TYPES
 
+from ..sub_tools import tool_schema
+
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.core.interaction.elicit import AskAnswer, AskRequest
 
 
-ASK_USER_SCHEMA: dict = {
-    "name": "ask_user",
-    "description": (
-        "Ask the user a clarifying or open question and get their answer "
-        "back within this same call. Interactive questions are scarce this "
-        "turn — use this only when you genuinely cannot proceed without an "
-        "answer. Give 2-10 options with unique `value`s; `allow_custom` "
-        "(default true) lets the user type their own answer instead."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": "One short line asking what to clarify.",
-            },
-            "options": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 10,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "string"},
-                        "label": {"type": "string"},
-                        "detail": {"type": "string"},
-                    },
-                    "required": ["value"],
-                },
-            },
-            "select": {"type": "string", "enum": ["one", "many"]},
-            "allow_custom": {"type": "boolean"},
-        },
-        "required": ["question", "options"],
-    },
-}
+# The pipeline's own phrasing: questions are budgeted here, which the main
+# agent's description has no reason to say. The input schema is the main
+# agent's — `dispatch_ask_user` parses with `build_ask_request`, which reads
+# exactly that shape.
+_ASK_USER_DESCRIPTION = (
+    "Ask the user a clarifying or open question and get their answer "
+    "back within this same call. Interactive questions are scarce this "
+    "turn — use this only when you genuinely cannot proceed without an "
+    "answer. Give 2-10 options with unique `value`s; `allow_custom` "
+    "(default true) lets the user type their own answer instead."
+)
+
+
+def _ask_user_schema() -> dict:
+    from anton.core.tools.tool_defs import ASK_USER_TOOL
+
+    return tool_schema(ASK_USER_TOOL, description=_ASK_USER_DESCRIPTION)
 
 
 FINISH_GATHERING_SCHEMA: dict = {
@@ -179,31 +162,55 @@ def _scratchpad_schema() -> dict:
     # own sub_tools.py).
     from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
 
-    return {
-        "name": SCRATCHPAD_TOOL.name,
-        "description": SCRATCHPAD_TOOL.description,
-        "input_schema": SCRATCHPAD_TOOL.input_schema,
-    }
+    return tool_schema(SCRATCHPAD_TOOL)
 
 
 def _web_search_schema() -> dict:
     from anton.core.tools.web_tools import WEB_SEARCH_FALLBACK_TOOL
 
-    return {
-        "name": WEB_SEARCH_FALLBACK_TOOL.name,
-        "description": WEB_SEARCH_FALLBACK_TOOL.description,
-        "input_schema": WEB_SEARCH_FALLBACK_TOOL.input_schema,
-    }
+    return tool_schema(WEB_SEARCH_FALLBACK_TOOL)
 
 
 def _web_fetch_schema() -> dict:
     from anton.core.tools.web_tools import WEB_FETCH_FALLBACK_TOOL
 
-    return {
-        "name": WEB_FETCH_FALLBACK_TOOL.name,
-        "description": WEB_FETCH_FALLBACK_TOOL.description,
-        "input_schema": WEB_FETCH_FALLBACK_TOOL.input_schema,
-    }
+    return tool_schema(WEB_FETCH_FALLBACK_TOOL)
+
+
+async def plan_step(state, step: str, *, doing: str) -> tuple[str, object]:
+    """One text-only step of phases B-C: announce it, append its instruction,
+    make the planning call on the shared history, log it, and return the
+    reply text with the response.
+
+    The step name doubles as the trace node. An empty reply is raised, not
+    returned: the model called a tool instead of writing (tools stay defined
+    in this call for the Anthropic API's sake), and continuing with an empty
+    brief or PRD would be a silent lie about what happened. The error
+    propagates up through `discovery.generate()` into
+    `handle_generate_artifact`'s `except Exception`, which already wraps it
+    with `_generation_failed` — no new error-reporting path needed.
+    """
+    from . import prompts
+
+    state.step_started(step)
+    state.messages.append({"role": "user", "content": prompts.step_message(step, state)})
+    await signal_thinking(state.session)
+    system = state.pipeline_system
+    response = await state.session._llm.plan(
+        system=system, messages=state.messages, tools=state.pipeline_tools,
+    )
+    state.trace_log.llm_call(
+        node=step, method="plan", system=system,
+        messages=state.messages, response=response,
+    )
+    text = (response.content or "").strip()
+    if not text:
+        state.trace_log.node(step, "fail", detail="model replied with no text")
+        raise RuntimeError(
+            f"{step}: the model replied with no text — it may have called a "
+            f"tool instead of {doing}."
+        )
+    return text, response
 
 
 async def signal_thinking(session: "ChatSession") -> None:
@@ -412,7 +419,7 @@ def pipeline_tool_schemas() -> list[dict]:
         _scratchpad_schema(),
         _web_search_schema(),
         _web_fetch_schema(),
-        ASK_USER_SCHEMA,
+        _ask_user_schema(),
         FINISH_GATHERING_SCHEMA,
     ]
 

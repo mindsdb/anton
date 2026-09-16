@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from anton.core.artifacts.models import ARTIFACT_TYPES
 
+from .. import sub_tools as protocol
 from . import prompts, sub_tools
 from .notes import render_gathering_notes, string_list
 from .state import PrdState, gathering_question_budget
@@ -27,18 +28,18 @@ if TYPE_CHECKING:
 MAX_ROUNDS = 20
 
 
-def _unwrap_outcome(result):
-    """Flatten a handler result down to `tool_result`-ready content.
+def _web_tools() -> dict[str, tuple]:
+    """`name -> (handler, input field recorded in `web_calls`)` for the two web
+    sub-tools. Both forward to the main agent's fallback handlers."""
+    from anton.core.tools.web_tools import (
+        handle_web_fetch_fallback,
+        handle_web_search_fallback,
+    )
 
-    Same reason as generate_artifact/engine.py's twin: since ENG-696
-    `handle_scratchpad`'s exec path returns a `ToolOutcome` rather than a
-    bare string, and only its `content` belongs in a tool_result block —
-    the ok/reason verdict feeds the outer agent's error streak, which this
-    loop is not part of.
-    """
-    from anton.core.tools.registry import ToolOutcome
-
-    return result.content if isinstance(result, ToolOutcome) else result
+    return {
+        "web_search": (handle_web_search_fallback, "query"),
+        "web_fetch": (handle_web_fetch_fallback, "url"),
+    }
 
 
 async def run_gathering_loop(state: "PrdState") -> None:
@@ -111,29 +112,15 @@ async def run_gathering_loop(state: "PrdState") -> None:
             state.trace_log.node("gathering", "done", detail=state.gathering_notes[:200])
             return
 
-        assistant_blocks: list[dict] = []
-        if response.content:
-            assistant_blocks.append({"type": "text", "text": response.content})
-        for tc in response.tool_calls:
-            assistant_blocks.append(
-                {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input}
-            )
-        state.messages.append({"role": "assistant", "content": assistant_blocks})
+        state.messages.append(
+            {"role": "assistant", "content": protocol.assistant_blocks(response)}
+        )
 
         result_blocks: list[dict] = []
         finished = False
         for tc in response.tool_calls:
             if tc.parse_error:
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": (
-                            "Error: malformed tool input — re-emit with "
-                            f"valid JSON. ({tc.parse_error})"
-                        ),
-                    }
-                )
+                result_blocks.append(protocol.malformed_input_result(tc))
                 continue
 
             name = tc.name
@@ -147,9 +134,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
             )
             if reason is not None:
                 state.trace_log.tool_rejected(node=step, tool=name, reason=reason)
-                result_blocks.append(
-                    {"type": "tool_result", "tool_use_id": tc.id, "content": reason}
-                )
+                result_blocks.append(protocol.tool_result(tc.id, reason))
                 continue
 
             if name == "finish_gathering":
@@ -167,10 +152,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 state.gathering_notes = render_gathering_notes(inp)
                 state.assumptions = string_list(inp.get("assumptions"))
                 state.open_points = string_list(inp.get("open_points"))
-                raw_sources = inp.get("data_sources")
-                state.declared_sources = (
-                    [str(s) for s in raw_sources] if isinstance(raw_sources, list) else []
-                )
+                state.declared_sources = string_list(inp.get("data_sources"))
                 # On the hot path the gathering loop had the data tools and
                 # used them, so a source it declares is one it worked with.
                 # `web_calls` counts as much as `scratchpad_execs`: a source
@@ -186,7 +168,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                     else list(state.declared_sources)
                 )
                 state.gathering_complete = True
-                result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": "ok"})
+                result_blocks.append(protocol.tool_result(tc.id, "ok"))
                 finished = True
             elif name == "ask_user":
                 # The exhausted-budget case is handled by the gate above, so
@@ -198,13 +180,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                     "ask_user", outcome["status"],
                     detail=f"{outcome['question']} -> {outcome['answer_summary']}",
                 )
-                result_blocks.append(
-                    {"type": "tool_result", "tool_use_id": tc.id, "content": outcome["tool_result"]}
-                )
+                result_blocks.append(protocol.tool_result(tc.id, outcome["tool_result"]))
             elif name == "scratchpad":
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = _unwrap_outcome(await handle_scratchpad(state.session, inp))
+                content = protocol.unwrap_outcome(await handle_scratchpad(state.session, inp))
                 state.trace_log.scratchpad(node="scratchpad", input=inp, output=content)
                 # Raw material for `notes.render_exec_notes`: the working
                 # data-access code is what phase E needs, and it must not
@@ -215,40 +195,21 @@ async def run_gathering_loop(state: "PrdState") -> None:
                         "code": inp.get("code"),
                         "output": content if isinstance(content, str) else str(content),
                     })
-                result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
-            elif name == "web_search":
-                from anton.core.tools.web_tools import handle_web_search_fallback
-
-                content = await handle_web_search_fallback(state.session, inp)
-                state.trace_log.scratchpad(node="web_search", input=inp, output=content)
-                state.web_calls.append({
-                    "kind": "web_search",
-                    "query": str(inp.get("query") or ""),
-                    "url": "",
-                    "title": "",
-                    "excerpt": content if isinstance(content, str) else str(content),
-                })
-                result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
-            elif name == "web_fetch":
-                from anton.core.tools.web_tools import handle_web_fetch_fallback
-
-                content = await handle_web_fetch_fallback(state.session, inp)
-                state.trace_log.scratchpad(node="web_fetch", input=inp, output=content)
-                state.web_calls.append({
-                    "kind": "web_fetch",
-                    "query": "",
-                    "url": str(inp.get("url") or ""),
-                    "title": "",
-                    "excerpt": content if isinstance(content, str) else str(content),
-                })
-                result_blocks.append({"type": "tool_result", "tool_use_id": tc.id, "content": content})
+                result_blocks.append(protocol.tool_result(tc.id, content))
+            elif name in ("web_search", "web_fetch"):
+                handler, field = _web_tools()[name]
+                content = await handler(state.session, inp)
+                state.trace_log.scratchpad(node=name, input=inp, output=content)
+                # Raw material for `notes.render_web_notes`; the field the
+                # call was made with (`query` or `url`) is what the notes cite.
+                call = {"kind": name, "query": "", "url": "", "title": ""}
+                call[field] = str(inp.get(field) or "")
+                call["excerpt"] = content if isinstance(content, str) else str(content)
+                state.web_calls.append(call)
+                result_blocks.append(protocol.tool_result(tc.id, content))
             else:
                 result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc.id,
-                        "content": f"Error: unknown sub-tool `{name}`.",
-                    }
+                    protocol.tool_result(tc.id, f"Error: unknown sub-tool `{name}`.")
                 )
 
         state.messages.append({"role": "user", "content": result_blocks})

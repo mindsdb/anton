@@ -85,7 +85,7 @@ def test_core_requirements_accept_extras_and_specifiers():
 
 # ── STATE contract (fullstack-stateful-app / fullstack-stateless-app) ────────
 
-from anton.core.tools.generate_artifact.verifiers import _parse_requirements
+from anton.core.artifacts.backend_launcher import parse_requirements
 
 STATEFUL = "fullstack-stateful-app"
 STATELESS = "fullstack-stateless-app"
@@ -228,7 +228,7 @@ def test_no_artifact_type_skips_state_checks():
 
 def test_parse_requirements_drops_anton_state_before_install():
     text = "fastapi\nanton_state\nanton-state==0.1\nAnton_State\nmangum\n"
-    assert _parse_requirements(text) == ["fastapi", "mangum"]
+    assert parse_requirements(text) == ["fastapi", "mangum"]
 
 
 # ── verify_backend (async subprocess glue) ───────────────────────────────────
