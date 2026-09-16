@@ -438,6 +438,10 @@ class TestRepairOfAnAlreadyPoisonedConversation:
         assert repaired == 1
         assert len(fixed) == 2 and len(fixed[1]["content"]) == 1
         assert fixed[1]["content"][0]["type"] == "text"
+        # The call it replaces is carried, not discarded: on the CLI both
+        # resume paths set `history_store`, so this rewrite is saved over the
+        # session file on the next turn (review: pnewsam on #471).
+        assert "scratchpad" in fixed[1]["content"][0]["text"]
 
 
 class TestABadNameIsRepairedToo:
@@ -755,3 +759,73 @@ class TestResumeRepairsToo:
             )
             out = out[0] if isinstance(out, tuple) else out
         assert out._turn_count == sum(1 for m in out.history if is_user_turn(m))
+
+
+class TestPlaceholdersCarryWhatTheyReplace:
+    """A repair that destroys the only record of what a tool did is a worse
+    trade than the unreplayable block it removes — and on the CLI the loss is
+    permanent, because both resume paths set `history_store` and
+    `_persist_history` saves the whole list on the next turn
+    (review: pnewsam on #471).
+    """
+
+    def test_an_unpairable_call_keeps_its_name_and_arguments(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "", "name": "scratchpad",
+                 "input": {"code": "print(df.head())"}}]},
+        ]
+        fixed, _ = repair_replayed_tool_ids(history)
+        text = fixed[1]["content"][0]["text"]
+        assert "scratchpad" in text and "print(df.head())" in text
+
+    def test_an_orphan_result_keeps_its_body(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "",
+                 "content": "ROWS: 1,2,3 important output"}]},
+        ]
+        fixed, _ = repair_replayed_tool_ids(history)
+        assert "ROWS: 1,2,3 important output" in fixed[1]["content"][0]["text"]
+
+    def test_a_list_shaped_result_body_is_rendered_not_dropped(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "", "content": [
+                    {"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}]},
+        ]
+        fixed, _ = repair_replayed_tool_ids(history)
+        text = fixed[1]["content"][0]["text"]
+        # Rendered as the readable text it was, NOT dumped as JSON: asserting
+        # only that the strings survive passes either way, because the JSON
+        # fallback contains them too.
+        assert text.endswith("first\nsecond"), text
+        assert '"type"' not in text, text
+
+    def test_a_rewritten_result_is_appended_after_its_good_siblings(self):
+        """The chat-completions translator emits text as a `user` message and
+        tool_results as `tool` messages, so a text block ahead of a good
+        sibling yields `[assistant, user, tool]` — which OpenAI rejects."""
+        from anton.core.llm.openai import _translate_messages
+
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_ok", "name": "scratchpad", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "", "content": "orphan"},
+                {"type": "tool_result", "tool_use_id": "call_ok", "content": "good"}]},
+        ]
+        fixed, _ = repair_replayed_tool_ids(history)
+        kinds = [b["type"] for b in fixed[2]["content"]]
+        assert kinds == ["tool_result", "text"], kinds
+        roles = [m["role"] for m in _translate_messages("sys", fixed)]
+        # The rejected shape is a `user` message BETWEEN the assistant and its
+        # tool reply. A user message after the tool block is just the next
+        # turn and is entirely normal.
+        first_tool = roles.index("tool")
+        last_assistant = max(i for i, r in enumerate(roles[:first_tool]) if r == "assistant")
+        assert "user" not in roles[last_assistant + 1:first_tool], roles

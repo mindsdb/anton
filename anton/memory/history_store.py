@@ -119,6 +119,30 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
         digest = hashlib.sha256(f"{basis}|{seen[basis]}".encode()).hexdigest()
         return f"call_repaired_{digest[:24]}"
 
+    def _render(value) -> str:
+        """The original payload as text, for a placeholder that replaces it.
+
+        Never raises and never truncates: the value was already in history at
+        this size, so carrying it costs nothing new, and a repair that throws
+        away the only record of what a tool did is a worse trade than the
+        unreplayable block it removes.
+        """
+        import json as _json
+
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = [
+                b.get("text", "") if isinstance(b, dict) and b.get("type") == "text"
+                else _json.dumps(b, default=str)
+                for b in value
+            ]
+            return "\n".join(p for p in parts if p)
+        try:
+            return _json.dumps(value, sort_keys=True, default=str)
+        except Exception:  # pragma: no cover - defensive; json is total with default=str
+            return repr(value)
+
     def _blocks(msg) -> list | None:
         content = msg.get("content") if isinstance(msg, dict) else None
         return content if isinstance(content, list) else None
@@ -182,9 +206,20 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
             # and the block COUNT, drop only the call.
             for pos, b in enumerate(new_blocks):
                 if isinstance(b, dict) and b.get("type") == "tool_use" and _bad(b, "id"):
+                    # The call's name and arguments ride into the placeholder
+                    # rather than being thrown away. On the CLI this is not a
+                    # transient rewrite: both resume paths set `history_store`,
+                    # so `_persist_history` saves the whole list on the next
+                    # turn and the original block is gone for good. Carrying it
+                    # also leaves the model the context of what that turn was
+                    # doing (review: pnewsam on #471).
                     new_blocks[pos] = {
                         "type": "text",
-                        "text": "[a tool call was recorded here without an id and has been removed]",
+                        "text": (
+                            f"[a tool call to {b.get('name') or 'an unnamed tool'!r} was "
+                            f"recorded without an id and could not be replayed: "
+                            f"{_render(b.get('input'))}]"
+                        ),
                     }
                     repaired += 1
             out[i] = {**msg, "content": new_blocks}
@@ -228,13 +263,30 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
                    and _bad(b, "tool_use_id") for b in blocks):
             continue
         new_blocks = []
+        rewritten = []
         for b in blocks:
             if isinstance(b, dict) and b.get("type") == "tool_result" and _bad(b, "tool_use_id"):
-                new_blocks.append({"type": "text",
-                                   "text": "[a tool result with no matching call was removed]"})
+                # Content preserved: a tool result is often the only record of
+                # what the data actually said, and on the CLI this rewrite is
+                # written back to the session file (review: pnewsam on #471).
+                #
+                # Appended AFTER the surviving blocks rather than rewritten in
+                # place: the chat-completions translator emits text blocks as a
+                # `user` message and tool_results as `tool` messages, so a text
+                # block ahead of a good sibling would produce
+                # `[assistant, user, tool]` — a shape OpenAI rejects. Block
+                # count is unchanged either way.
+                rewritten.append({
+                    "type": "text",
+                    "text": (
+                        "[a tool result with no matching call]\n"
+                        f"{_render(b.get('content'))}"
+                    ),
+                })
                 repaired += 1
             else:
                 new_blocks.append(b)
+        new_blocks.extend(rewritten)
         out[i] = {**msg, "content": new_blocks}
         _logging.getLogger(__name__).warning(
             "ENG-2420: replayed history had a tool_result with no pairable call "
