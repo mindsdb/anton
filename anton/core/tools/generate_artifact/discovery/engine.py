@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from anton.core.artifacts.models import ARTIFACT_TYPES
 
 from . import prompts, sub_tools
+from .notes import render_gathering_notes, string_list
 from .state import PrdState, gathering_question_budget
 
 if TYPE_CHECKING:
@@ -163,7 +164,9 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 state.final_artifact_type = (
                     claimed_type if claimed_type in ARTIFACT_TYPES else state.artifact_type
                 )
-                state.gathering_notes = str(inp.get("notes") or inp.get("summary") or "")
+                state.gathering_notes = render_gathering_notes(inp)
+                state.assumptions = string_list(inp.get("assumptions"))
+                state.open_points = string_list(inp.get("open_points"))
                 raw_sources = inp.get("data_sources")
                 state.declared_sources = (
                     [str(s) for s in raw_sources] if isinstance(raw_sources, list) else []

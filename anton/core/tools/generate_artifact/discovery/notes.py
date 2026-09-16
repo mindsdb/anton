@@ -93,3 +93,61 @@ def render_web_notes(calls: list[dict]) -> str:
     if dropped:
         header += f" (first {dropped} source(s) omitted for size)"
     return header + "\n" + "\n".join(blocks)
+
+
+def string_list(value) -> list[str]:
+    """A schema `array` of strings as the model actually sent it: anything
+    that is not a list becomes empty; items are stringified, `null` and
+    blanks dropped. The model's JSON is never trusted to match the schema."""
+    if not isinstance(value, list):
+        return []
+    return [str(v).strip() for v in value if v is not None and str(v).strip()]
+
+
+def render_gathering_notes(inp: dict) -> str:
+    """Markdown record of a `finish_gathering` call, built by code.
+
+    The structured fields (`data_findings`, `constraints`, `assumptions`,
+    `open_points`) replaced the free-form `notes` on 2026-09-16 so the
+    gathering step records facts and open decisions instead of drafting the
+    brief. A call that still carries `notes` — an older prompt, a model that
+    ignored the schema — falls back to it, then to `summary`, so nothing the
+    model wrote is dropped on the floor.
+    """
+    parts: list[str] = []
+    summary = str(inp.get("summary") or "").strip()
+    if summary:
+        parts.append(summary)
+    findings = inp.get("data_findings")
+    if isinstance(findings, list):
+        rows: list[str] = []
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            source = str(f.get("source") or "").strip()
+            if not source:
+                continue
+            row = f"- {source}"
+            for key, label in (
+                ("verified_by", "verified by"),
+                ("shape", "shape"),
+                ("sample", "sample"),
+            ):
+                value = " ".join(str(f.get(key) or "").split())
+                if value:
+                    row += f"\n  {label}: {value}"
+            rows.append(row)
+        if rows:
+            parts.append("### Data findings\n" + "\n".join(rows))
+    for key, header in (
+        ("constraints", "### Constraints"),
+        ("assumptions", "### Assumptions"),
+        ("open_points", "### Open points"),
+    ):
+        lines = string_list(inp.get(key))
+        if lines:
+            parts.append(header + "\n" + "\n".join(f"- {line}" for line in lines))
+    if len(parts) > 1:
+        return "\n\n".join(parts)
+    legacy = str(inp.get("notes") or "").strip()
+    return legacy or summary

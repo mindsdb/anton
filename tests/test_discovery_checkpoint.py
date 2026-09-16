@@ -20,6 +20,8 @@ def _cp(**over) -> cp.DiscoveryCheckpoint:
         brief_markdown="## Goal\nA dashboard.",
         data_notes="Scratchpad `dash`:\n```python\nx = 1\n```",
         web_notes="- https://habr.com/x — Title",
+        assumptions=["dark theme"],
+        open_points=["count cancelled orders?"],
     )
     base.update(over)
     return cp.DiscoveryCheckpoint(**base)
@@ -76,6 +78,16 @@ def test_load_ignores_unknown_keys_from_a_future_version(tmp_path: Path):
     loaded = cp.load(tmp_path)
     assert loaded is not None
     assert loaded.pipeline_stage == cp.STAGE_GENERATED
+
+
+def test_load_defaults_the_lists_a_pre_feature_file_lacks(tmp_path: Path):
+    """`assumptions` / `open_points` were added on 2026-09-16; a checkpoint
+    written before that must still load, with the lists empty."""
+    payload = {"pipeline_stage": cp.STAGE_PRD_WRITTEN, "brief_markdown": "## Goal"}
+    (tmp_path / DISCOVERY_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    loaded = cp.load(tmp_path)
+    assert loaded is not None
+    assert loaded.assumptions == [] and loaded.open_points == []
 
 
 # ── entry decision ──────────────────────────────────────────────────────────

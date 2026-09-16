@@ -71,7 +71,9 @@ FINISH_GATHERING_SCHEMA: dict = {
     "description": (
         "Call this once the artifact type is unambiguous and you have "
         "enough data (and samples, where relevant) to draft a PRD. Ends "
-        "phase 1 — a short brief will be drafted from your `notes` next."
+        "phase 1 — a short brief will be drafted from your findings next. "
+        "Record facts and open decisions only; requirements and design "
+        "belong to the brief."
     ),
     "input_schema": {
         "type": "object",
@@ -85,13 +87,6 @@ FINISH_GATHERING_SCHEMA: dict = {
                 "enum": list(ARTIFACT_TYPES),
                 "description": "The confirmed artifact type.",
             },
-            "notes": {
-                "type": "string",
-                "description": (
-                    "Everything the brief needs: goal, data sources found, "
-                    "sample rows, open assumptions, UI/UX hints."
-                ),
-            },
             "data_sources": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -102,6 +97,69 @@ FINISH_GATHERING_SCHEMA: dict = {
                     "named here that has had no code run against it is "
                     "fetched before generation starts, so naming one you "
                     "have not touched is how you ask for it."
+                ),
+            },
+            "data_findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "The same name as in `data_sources`.",
+                        },
+                        "verified_by": {
+                            "type": "string",
+                            "description": (
+                                "How the sample was obtained: scratchpad "
+                                "name and cell, or the URL fetched."
+                            ),
+                        },
+                        "shape": {
+                            "type": "string",
+                            "description": (
+                                "Fields with types, row count if known, or "
+                                "the structure of a page/document."
+                            ),
+                        },
+                        "sample": {
+                            "type": "string",
+                            "description": "One or two representative rows or lines.",
+                        },
+                    },
+                    "required": ["source", "verified_by"],
+                },
+                "description": (
+                    "One entry per source in `data_sources`: what was "
+                    "actually seen. Empty when the artifact needs no "
+                    "external data."
+                ),
+            },
+            "constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Facts the user stated or clearly implied (language, "
+                    "single file, offline, no dependencies), one line each, "
+                    "with the source of the fact in parentheses."
+                ),
+            },
+            "assumptions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Decisions made without the user — including anything "
+                    "`Agent's understanding` added to the request — one line "
+                    "each. The brief presents them as proposals."
+                ),
+            },
+            "open_points": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Decisions only the user can make that were not asked "
+                    "(question budget spent or not worth a question). The "
+                    "brief raises them with the user."
                 ),
             },
         },

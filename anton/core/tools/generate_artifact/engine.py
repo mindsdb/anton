@@ -432,7 +432,7 @@ async def generate(
     ``bench_generate.py``, tests — need no channel to drain.
     """
     from .discovery import checkpoint as cp
-    from .orchestrator import run
+    from .orchestrator import _datasource_context, run
     from .spend import SpendGuard
     from .state import GenState
     from .debug_trace import make_trace
@@ -462,6 +462,7 @@ async def generate(
         agent_understanding=agent_understanding,
         known_data=known_data,
         user_preferences=user_preferences,
+        datasource_context=_datasource_context(session),
         trace_log=trace,
         progress=progress,
         spend=SpendGuard(session=session),
@@ -516,6 +517,8 @@ def _restore(state, stored) -> None:
     state.web_notes = stored.web_notes
     state.declared_sources = list(stored.declared_sources)
     state.unverified_sources = list(stored.unverified_sources)
+    state.assumptions = list(stored.assumptions)
+    state.open_points = list(stored.open_points)
     state.gathering_complete = stored.gathering_complete
     state.final_artifact_type = stored.artifact_type
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(

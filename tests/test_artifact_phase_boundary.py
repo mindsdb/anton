@@ -204,3 +204,22 @@ async def test_no_phase_a_message_reaches_the_generation_context(tmp_path, monke
 
     assert "tool_use" not in context
     assert "tool_result" not in context
+
+
+async def test_the_checkpoint_carries_assumptions_and_open_points_across_the_process(tmp_path, monkeypatch):
+    """What gathering decided without the user has to come back as a
+    proposal on a cold start, not vanish into the previous process."""
+    from anton.core.tools.generate_artifact.engine import _restore
+
+    hot = _state(tmp_path)
+    hot.brief = "## Goal\nA dashboard."
+    hot.assumptions = ["last 30 days by default"]
+    hot.open_points = ["count cancelled orders?"]
+    orchestrator._save_checkpoint(hot, cp.STAGE_AWAITING_CONFIRMATION)
+
+    cold = _state(tmp_path)
+    stored = cp.load(tmp_path)
+    assert stored is not None
+    _restore(cold, stored)
+    assert cold.assumptions == ["last 30 days by default"]
+    assert cold.open_points == ["count cancelled orders?"]

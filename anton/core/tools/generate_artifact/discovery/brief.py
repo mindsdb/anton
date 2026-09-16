@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from . import sub_tools
 from . import prompts
+from .notes import string_list
 from .state import PrdState
 
 
@@ -246,6 +247,12 @@ async def redraw_brief(state: PrdState) -> None:
         new_type = str(inp.get("artifact_type") or "")
         raw = inp.get("data_sources")
         declared = [str(s) for s in raw] if isinstance(raw, list) else []
+        # A correction can retract an assumption or settle an open point;
+        # the re-stated lists replace the old ones only when the model sent
+        # them, so a call without the fields keeps what gathering recorded.
+        for key in ("assumptions", "open_points"):
+            if isinstance(inp.get(key), list):
+                setattr(state, key, string_list(inp.get(key)))
 
     if declared is not None:
         previous = set(state.declared_sources)

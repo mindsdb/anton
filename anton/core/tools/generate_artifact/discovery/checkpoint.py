@@ -105,6 +105,11 @@ class DiscoveryCheckpoint:
     brief_markdown: str = ""
     data_notes: str = ""
     web_notes: str = ""
+    # What the gathering step decided without the user and what it left to
+    # them. Persisted so a cold-start brief redraw still shows them as
+    # proposals instead of silently promoting them to facts.
+    assumptions: list[str] = field(default_factory=list)
+    open_points: list[str] = field(default_factory=list)
 
 
 def load(artifact_path: Path) -> DiscoveryCheckpoint | None:

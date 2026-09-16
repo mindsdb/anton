@@ -14,9 +14,11 @@ from types import SimpleNamespace
 from anton.core.artifacts.models import ARTIFACT_TYPES
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import (
+    DATASOURCES_HEADER,
     GATHERING_CONTINUE,
     build_call_kickoff,
     build_pipeline_system_prompt,
+    restored_context,
     step_message,
 )
 from anton.core.tools.generate_artifact.state import GenState
@@ -98,3 +100,67 @@ def test_the_redraw_step_requires_finish_gathering():
     assert sub_tools.rejection_for(
         sub_tools.STEP_REDRAW_BRIEF, "finish_gathering", questions_left=0
     ) is None
+
+
+# ── 2026-09-16: the gathering step records facts, not the brief ──────────────
+
+
+def test_pipeline_system_prompt_maps_each_step_to_its_output():
+    """The model used to learn about `draft_brief` only when it got there,
+    so it wrote the brief into `finish_gathering`'s notes. The map tells it
+    up front which step owns what."""
+    prompt = build_pipeline_system_prompt(_state())
+    assert "do not do the next step's work early" in prompt
+    for step in ("`gathering`", "`draft_brief`", "`write_prd`", "`tech_spec`"):
+        assert step in prompt
+    assert "No requirements, no feature lists, no design." in prompt
+
+
+def test_call_kickoff_says_when_nothing_is_connected():
+    kickoff = build_call_kickoff(_state())
+    assert f"{DATASOURCES_HEADER}\n(none)" in kickoff
+
+
+def test_call_kickoff_carries_the_connected_sources_section_once():
+    """`build_datasource_context` renders its own heading; the kickoff must
+    not add a second one on top of it."""
+    section = f"\n\n{DATASOURCES_HEADER}\n- postgres-7e8971c3 (prod-db)\n"
+    kickoff = build_call_kickoff(_state(datasource_context=section))
+    assert "postgres-7e8971c3" in kickoff
+    assert kickoff.count(DATASOURCES_HEADER) == 1
+    assert "(none)" not in kickoff
+
+
+def test_gathering_step_states_the_task_and_keeps_design_out():
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "## Your task" in message
+    assert "Not part of this step: functional requirements, UI, layout" in message
+    assert "another agent's reading of the request" in message
+    assert "## When there is no external data" in message
+    # The old wording that made the model draft the brief here.
+    assert "UI/UX hints" not in message
+    assert "Put everything the brief needs" not in message
+
+
+def test_gathering_step_names_the_structured_fields():
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    for field_name in ("`data_findings`", "`assumptions`", "`open_points`", "`constraints`"):
+        assert field_name in message
+
+
+def test_restored_context_carries_assumptions_and_open_points():
+    state = _state(
+        assumptions=["dark theme (agent's addition)"],
+        open_points=["count cancelled orders?"],
+    )
+    text = restored_context(state)
+    assert "## Assumptions recorded earlier" in text
+    assert "dark theme (agent's addition)" in text
+    assert "## Open points recorded earlier" in text
+    assert "count cancelled orders?" in text
+
+
+def test_restored_context_omits_empty_assumption_sections():
+    text = restored_context(_state())
+    assert "Assumptions recorded earlier" not in text
+    assert "Open points recorded earlier" not in text

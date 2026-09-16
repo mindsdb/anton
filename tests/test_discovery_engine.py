@@ -66,6 +66,55 @@ async def test_finish_gathering_sets_artifact_type_and_notes():
     assert state.gathering_notes == "use CoinGecko"
 
 
+async def test_finish_gathering_renders_the_structured_fields_into_notes():
+    """The typed fields replace free-form `notes`; what draft_brief reads
+    off the history is the rendered markdown, and the two lists the brief
+    presents differently are kept on the state as lists."""
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {
+            "summary": "Dashboard over the orders table.",
+            "artifact_type": "fullstack-stateless-app",
+            "data_sources": ["orders table"],
+            "data_findings": [{
+                "source": "orders table",
+                "verified_by": "scratchpad `g`, cell 2",
+                "shape": "id int, amount numeric",
+                "sample": "1 | 149.90",
+            }],
+            "constraints": ["reads an external DB only"],
+            "assumptions": ["last 30 days by default"],
+            "open_points": ["count cancelled orders?"],
+        })]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    notes = state.gathering_notes
+    assert notes.startswith("Dashboard over the orders table.")
+    assert "### Data findings" in notes and "scratchpad `g`, cell 2" in notes
+    assert "### Constraints" in notes and "reads an external DB only" in notes
+    assert "### Assumptions" in notes and "### Open points" in notes
+    assert state.assumptions == ["last 30 days by default"]
+    assert state.open_points == ["count cancelled orders?"]
+
+
+async def test_finish_gathering_tolerates_fields_of_the_wrong_shape():
+    """The schema is a hint; the model's JSON is not trusted to match it."""
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {
+            "summary": "ready",
+            "artifact_type": "html-app",
+            "assumptions": "a single string instead of a list",
+            "open_points": [None, "", 42],
+            "data_findings": "not a list",
+        })]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.assumptions == []
+    assert state.open_points == ["42"]
+    assert state.gathering_notes == "ready\n\n### Open points\n- 42"
+
+
 async def test_no_tool_calls_leaves_final_artifact_type_empty():
     """A model that stops with plain text (no finish_gathering) is the
     best-effort case the orchestrator falls back on — see Task 6."""

@@ -42,6 +42,23 @@ def test_finish_gathering_schema_constrains_artifact_type_to_the_closed_enum():
     assert schema["input_schema"]["properties"]["artifact_type"]["enum"] == list(ARTIFACT_TYPES)
 
 
+def test_finish_gathering_schema_replaced_free_form_notes_with_typed_fields():
+    """`notes` invited the model to write the brief on the gathering step
+    (its description literally asked for "UI/UX hints"). The typed fields
+    leave room for facts and open decisions only."""
+    schema = next(
+        t for t in sub_tools.pipeline_tool_schemas()
+        if t["name"] == "finish_gathering"
+    )
+    props = schema["input_schema"]["properties"]
+    assert "notes" not in props
+    for name in ("data_findings", "constraints", "assumptions", "open_points"):
+        assert name in props
+    finding = props["data_findings"]["items"]
+    assert set(finding["required"]) == {"source", "verified_by"}
+    assert "UI/UX" not in str(schema)
+
+
 class _FakeElicitor:
     supported_kinds = ("choice",)
     answer_hint = "hint"

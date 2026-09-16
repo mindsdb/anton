@@ -22,9 +22,18 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     """
     types_list = ", ".join(f"`{t}`" for t in ARTIFACT_TYPES)
     return (
-        "You are producing a web artifact end to end, in one pipeline: "
-        "gather what is needed, agree a short brief with the user, write the "
-        "full PRD, then the technical specification.\n\n"
+        "You are producing a web artifact end to end, in one pipeline of "
+        "steps. Each step has its own output — do not do the next step's "
+        "work early:\n"
+        "- `gathering` — facts only: the artifact type, the external data the "
+        "artifact reads (each source verified with a real sample), and the "
+        "points only the user can decide. No requirements, no feature lists, "
+        "no design.\n"
+        "- `draft_brief` — a short proposal shown to the user for "
+        "confirmation. Anything decided without the user appears there as a "
+        "proposal, not as a fact.\n"
+        "- `write_prd` — the requirements the user agreed to.\n"
+        "- `tech_spec` — the technical specification for the build.\n\n"
         f"Artifact slug: {state.slug}\n"
         f"Artifact folder: {state.artifact_path}\n"
         f"Valid artifact types: {types_list}\n\n"
@@ -49,6 +58,11 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     )
 
 
+# Same heading `anton.utils.datasources.build_datasource_context` renders, so
+# the kickoff reads the same whether or not anything is connected.
+DATASOURCES_HEADER = "## Connected Data Sources"
+
+
 def build_call_kickoff(state: PrdState) -> str:
     """The first user message of a run: what the tool was actually asked for.
 
@@ -58,11 +72,19 @@ def build_call_kickoff(state: PrdState) -> str:
     repeat calls for the same request. A model told to "gather what the
     artifact needs" without them gathers for a request it cannot see.
     """
+    # The connections section is the same text the fetch node and the
+    # backend generator receive (`build_datasource_context`): slugs and
+    # DS_* names, never values. Without it a request over "the orders table"
+    # sends the gathering model looking for connections blind.
+    connections = (state.datasource_context or "").strip() or (
+        f"{DATASOURCES_HEADER}\n(none)"
+    )
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
         f"## Known data\n{state.known_data or '(none provided)'}\n\n"
-        f"## User preferences\n{state.user_preferences or '(none known)'}\n"
+        f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
+        f"{connections}\n"
     )
 
 
@@ -87,6 +109,16 @@ def restored_context(state: PrdState) -> str:
         parts.append(f"## Data gathered earlier\n{state.data_notes.strip()}")
     if state.web_notes.strip():
         parts.append(state.web_notes.strip())
+    if state.assumptions:
+        parts.append(
+            "## Assumptions recorded earlier\n"
+            + "\n".join(f"- {a}" for a in state.assumptions)
+        )
+    if state.open_points:
+        parts.append(
+            "## Open points recorded earlier\n"
+            + "\n".join(f"- {o}" for o in state.open_points)
+        )
     return "\n\n".join(parts)
 
 
@@ -97,17 +129,36 @@ GATHERING_CONTINUE = (
 )
 
 _GATHERING_INSTRUCTION = (
-    "Make sure the artifact type is unambiguous, gather and verify any data "
-    "needed (fetch samples via scratchpad, web_search, web_fetch), and ask "
-    "the user clarifying or open questions ONLY when truly necessary — "
-    "interactive questions are scarce this turn, so prefer working from what "
-    "you already know.\n\n"
-    "Call `finish_gathering` once you are confident about the artifact type "
-    "and have enough data (and samples, where relevant) to draft a PRD. Put "
-    "everything the brief needs — goal, data sources found, sample rows, "
-    "open assumptions, UI/UX hints, and (for a stateful app) what the app "
-    "stores of its own — into its `notes`, and name the data sources the "
-    "artifact will read in `data_sources`."
+    "## Your task\n"
+    "Answer three questions and record the answers with `finish_gathering`:\n"
+    "1. Artifact type — confirm or correct the current one.\n"
+    "2. External data — which sources the artifact will read. For each one, "
+    "obtain a real sample in this step (scratchpad for databases, files and "
+    "APIs; web_fetch for pages) and record its shape in `data_findings`. If "
+    "the artifact reads no external data, say so in one line.\n"
+    "3. Open points — decisions only the user can make.\n\n"
+    "Not part of this step: functional requirements, UI, layout, feature "
+    "lists. The brief is drafted on the next step from what you record "
+    "here.\n\n"
+    "## Rules\n"
+    "- Do not add features the user did not ask for. `Agent's "
+    "understanding` is another agent's reading of the request, not the "
+    "user's words: treat what it adds as assumptions, not as facts.\n"
+    "- When the request leaves something open, either ask the user or write "
+    "your choice as ONE line under `assumptions`. Ask only when the answer "
+    "changes the artifact type or a data source, or the artifact would be "
+    "useless if guessed wrong. Taste and style are never worth a question. "
+    "One question with options beats several.\n"
+    "- A source is verified only if you ran code against it or fetched the "
+    "page in this step. A source you name in `data_sources` but did not "
+    "touch is fetched before generation starts — naming one is how you "
+    "request that.\n"
+    "- Write `summary`, `constraints`, `assumptions` and `open_points` in "
+    "the language of the user request.\n"
+    "- Keep the whole `finish_gathering` call under about 30 lines.\n\n"
+    "## When there is no external data\n"
+    "Reply with one line and call `finish_gathering` at once: no scratchpad, "
+    "no web search, no description of the page."
 )
 
 _REDRAW_SUFFIX = (

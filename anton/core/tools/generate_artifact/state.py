@@ -195,6 +195,11 @@ class GenState:
     agent_understanding: str = ""
     known_data: str = ""
     user_preferences: str = ""
+    # The `## Connected Data Sources` section as `build_datasource_context`
+    # renders it (slugs and DS_* names, no values), or "" when nothing is
+    # connected. Filled by the entry point; rendered into the call kickoff so
+    # the gathering step knows what it can query.
+    datasource_context: str = ""
     # THE shared message list for phases A-D. Dropped at the spec boundary:
     # generation nodes build their context from the fields on this state, not
     # from this list. One list, because phase B relies on seeing what phase
@@ -202,6 +207,12 @@ class GenState:
     messages: list[dict] = field(default_factory=list)
     qa_log: list[str] = field(default_factory=list)
     gathering_notes: str = ""
+    # Structured halves of the `finish_gathering` call, kept apart from the
+    # rendered `gathering_notes` because the brief presents them differently:
+    # assumptions as proposals to confirm, open points as questions to the
+    # user. Both survive the process via `discovery.json`.
+    assumptions: list[str] = field(default_factory=list)
+    open_points: list[str] = field(default_factory=list)
     # Set by `finish_gathering`. Empty means it was never called and the
     # originally registered `artifact_type` stands.
     final_artifact_type: str = ""

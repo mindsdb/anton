@@ -898,6 +898,8 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
             brief_markdown=state.brief,
             data_notes=state.data_notes,
             web_notes=state.web_notes,
+            assumptions=list(state.assumptions),
+            open_points=list(state.open_points),
         ),
     )
 
