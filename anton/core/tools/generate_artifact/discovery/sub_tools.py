@@ -378,11 +378,15 @@ _DATA_TOOLS = frozenset({"scratchpad", "web_search", "web_fetch"})
 # the old code removed it from the array outright. On the redraw step it is
 # required: it is how the artifact type and the declared data sources get
 # re-stated after a user correction.
+#
+# `write_prd` allows nothing: the step is a single call with no tool loop,
+# so a tool call there can only end as an empty reply and a raised error.
+# Listing data tools as allowed would describe a path that does not exist.
 ALLOWED_TOOLS_BY_STEP: dict[str, frozenset[str]] = {
     STEP_GATHERING: _DATA_TOOLS | {"ask_user", "finish_gathering"},
     STEP_DRAFT_BRIEF: _DATA_TOOLS,
     STEP_REDRAW_BRIEF: _DATA_TOOLS | {"finish_gathering"},
-    STEP_WRITE_PRD: _DATA_TOOLS,
+    STEP_WRITE_PRD: frozenset(),
     STEP_TECH_SPEC: frozenset(),
     STEP_API_SPEC: frozenset(),
 }

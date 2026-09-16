@@ -67,3 +67,12 @@ def test_an_unknown_tool_is_rejected_on_every_step():
 def test_an_unknown_step_rejects_everything():
     """A step nobody registered must not silently inherit gathering's rights."""
     assert st.rejection_for("some_new_step", "scratchpad", questions_left=1) is not None
+
+
+def test_write_prd_allows_no_tools_at_all():
+    """The step is one call with no tool loop: a tool call there ends as an
+    empty reply and a raised error. The gate must not describe a path that
+    does not exist."""
+    assert st.ALLOWED_TOOLS_BY_STEP[st.STEP_WRITE_PRD] == frozenset()
+    for name in ("scratchpad", "web_search", "web_fetch", "finish_gathering", "ask_user"):
+        assert st.rejection_for(st.STEP_WRITE_PRD, name, questions_left=1) is not None

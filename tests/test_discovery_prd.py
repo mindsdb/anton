@@ -216,3 +216,55 @@ async def test_write_prd_updates_the_state_not_only_the_file(tmp_path):
     await prd.write_prd(state)
     assert state.prd != "# Stale PRD from the previous call"
     assert state.prd == (artifact_dir / "prd.md").read_text(encoding="utf-8")
+
+
+def test_write_prd_instruction_names_the_latest_brief_as_the_source():
+    """On the revise path the history holds brief v1, the user's feedback and
+    brief v2, which already reflects that feedback. The old "anything the user
+    changed in their reply overrides the brief" invited the model to re-apply
+    the feedback on top of v2; the source is the latest brief, full stop."""
+    text = prd._WRITE_PRD_INSTRUCTION
+    assert "The latest brief in this conversation is the source" in text
+    assert "overrides the brief" not in text
+    assert "Do not call any tool" in text
+
+
+def test_write_prd_instruction_lets_a_data_free_artifact_skip_the_data_model():
+    """Sixth live run 2026-09-16: "fields and a few sample rows" was demanded
+    unconditionally, so the PRD for a card game invented an in-memory card
+    table and a fixed emoji list, which the spec then froze verbatim."""
+    text = prd._WRITE_PRD_INSTRUCTION
+    assert "If there is no external data and nothing stored, one line saying so" in text
+    assert "Do not describe in-memory variables or invent content lists" in text
+
+
+def test_write_prd_instruction_keeps_sensitive_sample_values_out():
+    """Sample rows come from real connected sources. A PRD is a document a
+    person reads and shares; real names, emails or salaries must not land in
+    it — made-up values of the same shape carry the same information."""
+    text = prd._WRITE_PRD_INSTRUCTION
+    assert "looks sensitive" in text
+    assert "made-up ones of the same shape" in text
+
+
+def test_write_prd_instruction_leaves_visual_style_to_the_build_step():
+    """Sixth live run: the UI/UX section added flip animation, hover feedback
+    and a "calm, friendly" style nobody agreed to, under a header downstream
+    reads as "accepted by the user". Layout follows the requirements; the
+    look is the spec's decision."""
+    text = prd._WRITE_PRD_INSTRUCTION
+    assert "Do not invent a visual style, animations or effects here" in text
+    assert "Do not add requirements the brief does not contain" in text
+
+
+def test_write_prd_instruction_asks_for_brevity_without_a_line_count():
+    """Same shape as the brief and gathering instructions: a task, sections,
+    rules, the user's language, and a push toward brevity — phrased as
+    "as short as the requirements allow" rather than a line count, because a
+    presentation outline or a multi-table data model legitimately runs long."""
+    text = prd._WRITE_PRD_INSTRUCTION
+    assert text.startswith("## Your task")
+    assert "## Sections" in text and "## Rules" in text
+    assert "Write in the language of the user request" in text
+    assert "as short as the requirements allow" in text
+    assert "lines" not in text.lower()
