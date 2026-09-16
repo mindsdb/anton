@@ -104,6 +104,21 @@ class _FetchResult:
     num_bytes: int = 0
 
 
+@dataclass(frozen=True)
+class _SearchResult:
+    """A formatted search response plus whether results were actually served.
+
+    Carried for the same reason ``_FetchResult`` carries ``status`` (ENG-2677):
+    the caller cannot tell a results block from an error message by reading it.
+    The results block is arbitrary web prose — up to 20 snippets of 600
+    characters — and routinely contains words like "failed", which is exactly
+    what the ENG-1276 substring fallback scans for.
+    """
+
+    text: str
+    served: bool  # True only when real hits were returned
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SSRF guard
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +195,7 @@ def _check_url_ssrf(url: str) -> str | None:
     return None
 
 
-async def _search_exa(query: str, api_key: str, max_results: int) -> str:
+async def _search_exa(query: str, api_key: str, max_results: int) -> _SearchResult:
     """Hit Exa's ``/search`` endpoint and format hits as markdown."""
     payload: dict[str, Any] = {
         "query": query,
@@ -193,12 +208,15 @@ async def _search_exa(query: str, api_key: str, max_results: int) -> str:
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.post(EXA_SEARCH_ENDPOINT, json=payload, headers=headers)
         if resp.status_code != 200:
-            return f"Exa search failed ({resp.status_code}): {resp.text[:500]}"
+            return _SearchResult(
+                f"Exa search failed ({resp.status_code}): {resp.text[:500]}", served=False
+            )
         data = resp.json()
 
     results = data.get("results") or []
     if not results:
-        return f"No results for query: {query!r}"
+        # Tier 3: the search ran and found nothing. Not a tool failure.
+        return _SearchResult(f"No results for query: {query!r}", served=False)
     lines = [f"Web search results for: {query!r} (Exa, {len(results)} hits)\n"]
     for i, r in enumerate(results, 1):
         title = r.get("title") or r.get("url") or "(untitled)"
@@ -209,10 +227,10 @@ async def _search_exa(query: str, api_key: str, max_results: int) -> str:
         lines.append(f"{i}. **{title}**\n   {url}")
         if snippet:
             lines.append(f"   {snippet}")
-    return "\n".join(lines)
+    return _SearchResult("\n".join(lines), served=True)
 
 
-async def _search_brave(query: str, api_key: str, max_results: int) -> str:
+async def _search_brave(query: str, api_key: str, max_results: int) -> _SearchResult:
     """Hit Brave Search's web endpoint and format hits as markdown."""
     headers = {
         "X-Subscription-Token": api_key,
@@ -222,12 +240,15 @@ async def _search_brave(query: str, api_key: str, max_results: int) -> str:
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.get(BRAVE_SEARCH_ENDPOINT, headers=headers, params=params)
         if resp.status_code != 200:
-            return f"Brave search failed ({resp.status_code}): {resp.text[:500]}"
+            return _SearchResult(
+                f"Brave search failed ({resp.status_code}): {resp.text[:500]}", served=False
+            )
         data = resp.json()
 
     web = (data.get("web") or {}).get("results") or []
     if not web:
-        return f"No results for query: {query!r}"
+        # Tier 3: the search ran and found nothing. Not a tool failure.
+        return _SearchResult(f"No results for query: {query!r}", served=False)
     lines = [f"Web search results for: {query!r} (Brave, {len(web)} hits)\n"]
     for i, r in enumerate(web, 1):
         title = r.get("title") or r.get("url") or "(untitled)"
@@ -236,7 +257,7 @@ async def _search_brave(query: str, api_key: str, max_results: int) -> str:
         lines.append(f"{i}. **{title}**\n   {url}")
         if snippet:
             lines.append(f"   {snippet}")
-    return "\n".join(lines)
+    return _SearchResult("\n".join(lines), served=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -471,7 +492,27 @@ def has_search_credential(settings: object) -> bool:
     return False
 
 
-async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> str:
+async def handle_web_search_fallback(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
+    """Search the web through the configured provider.
+
+    Verdicts (ENG-2677) — the same defect as `web_fetch` had, for the same
+    reason. On success this returns a results block of up to 20 snippets at 600
+    characters each: arbitrary web prose, which the ENG-1276 substring fallback
+    scanned for "failed" / "timed out". One snippet about a failed merger made a
+    working search count as a failed tool call.
+
+    * `ok=True`  — real hits were returned.
+    * `ok=None`  — everything else, deliberately: a provider error, "no
+      results", or no configured provider. "No results" is tier 3 (the search
+      ran and found nothing, cf. `recall_skill`'s NO MATCH); the provider-error
+      string contains "failed" and so is already counted by the substring
+      fallback, exactly as it is today.
+
+    No branch returns `ok=False`, so this can only remove a nudge or breaker
+    firing, never add one.
+    """
     query = (tc_input.get("query") or "").strip()
     if not query:
         return "web_search requires a non-empty `query`."
@@ -484,10 +525,12 @@ async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> 
 
     provider = (getattr(settings, "external_search_provider", None) or "").lower()
     if provider == "exa":
-        return await _search_exa(query, settings.exa_api_key, max_results)
-    if provider == "brave":
-        return await _search_brave(query, settings.brave_api_key, max_results)
-    return _NO_PROVIDER_MSG
+        found = await _search_exa(query, settings.exa_api_key, max_results)
+    elif provider == "brave":
+        found = await _search_brave(query, settings.brave_api_key, max_results)
+    else:
+        return _NO_PROVIDER_MSG
+    return ToolOutcome(content=found.text, ok=True if found.served else None)
 
 
 async def handle_web_fetch_fallback(
@@ -518,6 +561,14 @@ async def handle_web_fetch_fallback(
     Because no branch returns `ok=False`, this change can only ever REMOVE a
     nudge or breaker firing, never add one. Timeouts and transport errors keep
     counting exactly as they do today, via the substring fallback.
+
+    **Expected side effect on the root-cause ledger.** `_record_root_cause`
+    returns early on `ok=True`, so a successful page mentioning "failed" no
+    longer books a phantom failure. Measured before/after on one such page:
+    `failures=1, tiers={'unclassified': 1}` -> `failures=0, tiers={}`. So
+    `root_cause_failures` and `root_cause_unclassified` will DROP for this
+    cohort after release. That is the noise leaving, not tool health improving
+    — do not read the drop as fewer real failures.
     """
     del session  # unused — fetch needs no settings
     url = (tc_input.get("url") or "").strip()

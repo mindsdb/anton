@@ -62,6 +62,15 @@ def _has_https_url_line(text: str) -> bool:
     return any(line.lstrip().startswith("https://") for line in text.splitlines())
 
 
+def _text(out):
+    """The caller-facing text of a `web_search` / `web_fetch` result.
+
+    Since ENG-2677 both handlers return a `ToolOutcome` on the provider/fetch
+    paths; the argument-validation and no-provider branches still return `str`.
+    """
+    return out.content if hasattr(out, "content") else out
+
+
 anthropic_only = pytest.mark.skipif(
     not _have("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set — live test skipped",
@@ -499,12 +508,12 @@ class TestExaLive:
             max_results=3,
         )
 
-        assert "Web search results for: 'Anthropic Claude'" in out
+        assert "Web search results for: 'Anthropic Claude'" in _text(out)
         # At least one https:// URL should appear in the formatted output.
         assert _has_https_url_line(out)
         # And the markdown numbering means we got real hits, not the "no
         # results" branch.
-        assert "1. **" in out
+        assert "1. **" in _text(out)
 
     @pytest.mark.asyncio
     async def test_handler_dispatch_via_session(self):
@@ -522,7 +531,7 @@ class TestExaLive:
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
         assert _has_https_url_line(out)
-        assert "Anthropic Claude" in out  # query echoed in the header
+        assert "Anthropic Claude" in _text(out)  # query echoed in the header
 
     @pytest.mark.asyncio
     async def test_setup_probe_endpoint_contract(self):
@@ -558,9 +567,9 @@ class TestBraveLive:
             max_results=3,
         )
 
-        assert "Web search results for: 'Anthropic Claude'" in out
+        assert "Web search results for: 'Anthropic Claude'" in _text(out)
         assert _has_https_url_line(out)
-        assert "1. **" in out
+        assert "1. **" in _text(out)
 
     @pytest.mark.asyncio
     async def test_handler_dispatch_via_session(self):
@@ -576,7 +585,7 @@ class TestBraveLive:
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
         assert _has_https_url_line(out)
-        assert "Anthropic Claude" in out
+        assert "Anthropic Claude" in _text(out)
 
     @pytest.mark.asyncio
     async def test_setup_probe_endpoint_contract(self):
@@ -613,10 +622,10 @@ class TestWebFetchLive:
             None, {"url": "https://example.com", "max_chars": 5000}
         )
         # The header line includes status + byte count.
-        assert "HTTP 200" in out
+        assert "HTTP 200" in _text(out)
         # Signature text from the canonical example.com page.
-        assert "Example Domain" in out
+        assert "Example Domain" in _text(out)
         # Confirms the HTML stripper actually ran (the live page has
         # <html>/<body>/<a> tags that should not survive in our output).
-        assert "<html" not in out.lower()
-        assert "<body" not in out.lower()
+        assert "<html" not in _text(out).lower()
+        assert "<body" not in _text(out).lower()

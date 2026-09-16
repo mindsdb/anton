@@ -37,6 +37,16 @@ def _session_with_settings(**fields):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _text(out):
+    """The caller-facing text of a `web_search` / `web_fetch` result.
+
+    Since ENG-2677 both handlers return a `ToolOutcome` carrying the verdict on
+    the provider/fetch paths; the argument-validation and no-provider branches
+    still return a bare `str`.
+    """
+    return out.content if hasattr(out, "content") else out
+
+
 class TestWebSearchFallbackExa:
     async def test_returns_no_provider_message_when_unconfigured(self):
         session = _session_with_settings()
@@ -102,10 +112,10 @@ class TestWebSearchFallbackExa:
         # — the latter would also pass for "https://a.example.evil.com" and
         # CodeQL's incomplete-URL-substring-sanitization rule (correctly)
         # warns on that pattern even in tests.
-        out_lines = out.splitlines()
-        assert "Result A" in out
+        out_lines = _text(out).splitlines()
+        assert "Result A" in _text(out)
         assert "   https://a.example" in out_lines
-        assert "Result B" in out
+        assert "Result B" in _text(out)
 
     async def test_exa_non_200_response_returns_error_string(self):
         session = _session_with_settings(
@@ -119,8 +129,8 @@ class TestWebSearchFallbackExa:
 
         with patch.object(httpx.AsyncClient, "post", new=_post):
             out = await handle_web_search_fallback(session, {"query": "x"})
-        assert "Exa search failed" in out
-        assert "401" in out
+        assert "Exa search failed" in _text(out)
+        assert "401" in _text(out)
 
     async def test_caps_max_results_to_safe_range(self):
         session = _session_with_settings(
@@ -181,8 +191,8 @@ class TestWebSearchFallbackBrave:
         assert captured["url"] == "https://api.search.brave.com/res/v1/web/search"
         assert captured["headers"]["X-Subscription-Token"] == "brv-key"
         assert captured["params"] == {"q": "anton", "count": 5}
-        assert "Brave hit" in out
-        assert "A hit." in out
+        assert "Brave hit" in _text(out)
+        assert "A hit." in _text(out)
 
     async def test_brave_no_results(self):
         session = _session_with_settings(
@@ -196,7 +206,7 @@ class TestWebSearchFallbackBrave:
 
         with patch.object(httpx.AsyncClient, "get", new=_get):
             out = await handle_web_search_fallback(session, {"query": "obscure"})
-        assert "No results" in out
+        assert "No results" in _text(out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,23 +214,14 @@ class TestWebSearchFallbackBrave:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _text(out):
-    """The caller-facing text of a `web_fetch` result.
-
-    Since ENG-2677 the fetch path returns a `ToolOutcome` carrying the verdict;
-    the two argument-validation branches still return a bare `str`.
-    """
-    return out.content if hasattr(out, "content") else out
-
-
 class TestWebFetchFallback:
     async def test_rejects_non_http_urls(self):
         out = await handle_web_fetch_fallback(None, {"url": "ftp://x.example"})
-        assert "http(s)" in out
+        assert "http(s)" in _text(out)
 
     async def test_empty_url(self):
         out = await handle_web_fetch_fallback(None, {"url": "   "})
-        assert "requires" in out
+        assert "requires" in _text(out)
 
     async def test_strips_html_to_text(self):
         async def _get(self, url, headers=None):
@@ -512,9 +513,9 @@ class TestStripHtml:
     def test_block_tags_get_newline_separation(self):
         html = "<p>one</p><p>two</p>"
         out = _strip_html(html)
-        assert "one" in out and "two" in out
+        assert "one" in _text(out) and "two" in _text(out)
         # Some kind of separator between paragraphs (newline or blank line).
-        assert "\n" in out
+        assert "\n" in _text(out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -689,6 +690,14 @@ class TestWebFetchVerdict:
     was working.
     """
 
+    # A public address, so the SSRF pre-flight passes without a real lookup.
+    # Stubbing this is load-bearing, not tidiness: `_fetch_once` runs
+    # `socket.getaddrinfo` before any HTTP call, and on a resolver failure it
+    # returns status="blocked" -> ok=None. `test_4xx_...` would then be GREEN
+    # without ever exercising a 404 (verified by running it with the resolver
+    # patched to raise).
+    _PUBLIC_DNS = [(2, 1, 6, "", ("93.184.216.34", 0))]
+
     async def _fetch(self, status, body="<p>hi</p>"):
         async def _get(self, url, headers=None):
             return httpx.Response(
@@ -698,6 +707,9 @@ class TestWebFetchVerdict:
             )
         with patch.object(httpx.AsyncClient, "get", new=_get), patch(
             "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ), patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo",
+            new=lambda *a, **k: self._PUBLIC_DNS,
         ):
             return await handle_web_fetch_fallback(None, {"url": "https://example.com"})
 
@@ -763,8 +775,8 @@ class TestWebFetchDoesNotPoisonTheErrorStreak:
             out = ChatSession._apply_error_tracking(
                 sess, text, "web_fetch", streak, nudged, ok=ok
             )
-            nudge = nudge or RESILIENCE_NUDGE in out
-            breaker = breaker or "SYSTEM: The 'web_fetch' tool has failed" in out
+            nudge = nudge or RESILIENCE_NUDGE in _text(out)
+            breaker = breaker or "SYSTEM: The 'web_fetch' tool has failed" in _text(out)
         return streak.get("web_fetch", 0), nudge, breaker
 
     def test_successful_pages_mentioning_failure_do_not_climb(self):
@@ -787,3 +799,93 @@ class TestWebFetchDoesNotPoisonTheErrorStreak:
         # count is the deferred question.
         msg = "Fetch returned HTTP 403 for https://x.example"
         assert self._run([(msg, None)] * 6) == (0, False, False)
+
+
+class TestWebFetchVerdictOnNonHttpFailures:
+    """The paths where no HTTP status is ever obtained (F4).
+
+    `TestWebFetchVerdict` only covers integer statuses. These cover the
+    `status="transient_giveup"` and `status="blocked"` branches, so a later
+    change that made a timeout or a resolver failure `ok=False` — a real
+    behaviour change — cannot pass unnoticed.
+    """
+
+    async def test_exhausted_timeout_is_left_unverdicted(self):
+        async def _get(self, url, headers=None):
+            raise httpx.TimeoutException("slow")
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ), patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo",
+            new=lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://x.example"})
+        assert out.ok is None
+        assert "timed out" in out.content.lower()
+
+    async def test_unresolvable_host_is_left_unverdicted(self):
+        def _boom(*a, **k):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        with patch("anton.core.tools.web_tools.socket.getaddrinfo", new=_boom):
+            out = await handle_web_fetch_fallback(None, {"url": "https://gone.example"})
+        assert out.ok is None
+        assert "Could not resolve host" in out.content
+
+
+class TestWebSearchVerdict:
+    """`ok` on the search path — the same defect as web_fetch had (F5).
+
+    On success the results block is up to 20 snippets of 600 characters of
+    arbitrary web prose, which the substring fallback scanned for "failed".
+    """
+
+    @staticmethod
+    def _session():
+        return _session_with_settings(
+            external_search_provider="exa", exa_api_key="k"
+        )
+
+    async def _search(self, response):
+        async def _post(self, url, json=None, headers=None):
+            return response(httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", new=_post):
+            return await handle_web_search_fallback(self._session(), {"query": "q"})
+
+    async def test_hits_are_an_explicit_success(self):
+        out = await self._search(lambda req: httpx.Response(
+            200,
+            json={"results": [{
+                "title": "Why the merger failed",
+                "url": "https://a.example",
+                "text": "The deal timed out before regulatory review closed.",
+            }]},
+            request=req,
+        ))
+        # Both marker words appear in the RESULTS — the exact shape that used
+        # to make a working search count as a failed tool call.
+        assert "failed" in out.content and "timed out" in out.content
+        assert out.ok is True
+
+    async def test_no_results_is_left_unverdicted(self):
+        out = await self._search(lambda req: httpx.Response(
+            200, json={"results": []}, request=req))
+        assert out.ok is None
+        assert "No results" in out.content
+
+    async def test_provider_error_is_left_unverdicted(self):
+        out = await self._search(lambda req: httpx.Response(
+            401, text="bad key", request=req))
+        assert out.ok is None
+        # Contains "failed", so the substring fallback still counts it — the
+        # behaviour this change deliberately leaves alone.
+        assert "Exa search failed" in out.content
+
+    async def test_no_configured_provider_still_returns_a_plain_string(self):
+        out = await handle_web_search_fallback(
+            _session_with_settings(), {"query": "q"}
+        )
+        assert isinstance(out, str)
+        assert "anton setup search" in out
