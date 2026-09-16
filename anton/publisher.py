@@ -113,6 +113,26 @@ class PublishJobTimeout(RuntimeError):
         )
 
 
+def _clamp_poll_interval(value: float) -> float:
+    """Clamp a poll interval to [0.5, 15.0]s."""
+    return min(max(value, 0.5), 15.0)
+
+
+def _initial_poll_after_s(raw) -> float:
+    """Parse the 202 body's `poll_after_s`, falling back to the default.
+
+    Invalid values (non-numeric, negative, NaN) must never raise — they fall
+    back to `_DEFAULT_POLL_AFTER_S` and get clamped like any other interval.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_POLL_AFTER_S
+    if value < 0:
+        return _DEFAULT_POLL_AFTER_S
+    return value
+
+
 def _wait_for_publish_job(
     publish_url: str,
     job_id: str,
@@ -129,14 +149,27 @@ def _wait_for_publish_job(
     the poll goes to the same host the POST went to (in non-prod the minted
     VIEW_HOST differs from the API host). Transient poll errors are retried
     within the budget: a lost GET must not fail a publish that is succeeding.
+
+    The deadline is computed once up front. The poll interval is clamped to
+    [0.5, 15.0]s and never allowed to sleep past the remaining budget; the
+    budget is checked BEFORE sleeping, so a timeout never costs one more
+    request than necessary. A status body may carry its own `poll_after_s`,
+    which (clamped the same way) replaces the interval for the next iteration.
     """
     url = f"{publish_url.rstrip('/')}/upload/jobs/{job_id}"
     started = _monotonic()
+    deadline = started + budget_s
+    poll = _clamp_poll_interval(poll_after_s)
     while True:
-        time.sleep(poll_after_s)
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            raise PublishJobTimeout(job_id=job_id, report_id=report_id, waited_s=budget_s)
+        time.sleep(min(poll, max(remaining, 0)))
+        remaining = deadline - _monotonic()
+        request_timeout = max(1, int(min(PUBLISH_JOB_POLL_TIMEOUT_S, remaining)))
         try:
             _status, raw = minds_request_with_status(
-                url, api_key, verify=ssl_verify, timeout=PUBLISH_JOB_POLL_TIMEOUT_S,
+                url, api_key, verify=ssl_verify, timeout=request_timeout,
             )
             job = json.loads(raw)
         except urllib.error.HTTPError as e:
@@ -161,9 +194,9 @@ def _wait_for_publish_job(
                     int(err.get("status_code") or 500), str(err.get("message") or "unknown error"),
                     job_id=job_id, report_id=job.get("report_id") or report_id,
                 )
-        waited = _monotonic() - started
-        if waited >= budget_s:
-            raise PublishJobTimeout(job_id=job_id, report_id=report_id, waited_s=waited)
+            next_poll = job.get("poll_after_s")
+            if isinstance(next_poll, (int, float)) and not isinstance(next_poll, bool):
+                poll = _clamp_poll_interval(float(next_poll))
 
 
 # Owner-side housekeeping files that must never enter the published
@@ -609,7 +642,7 @@ def publish(
         result = _wait_for_publish_job(
             publish_url, accepted["job_id"], api_key,
             budget_s=job_budget_s, ssl_verify=ssl_verify,
-            poll_after_s=float(accepted.get("poll_after_s") or _DEFAULT_POLL_AFTER_S),
+            poll_after_s=_initial_poll_after_s(accepted.get("poll_after_s")),
             report_id=accepted.get("report_id"),
         )
     else:

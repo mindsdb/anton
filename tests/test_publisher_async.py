@@ -103,7 +103,7 @@ def test_fullstack_sends_async_flag_and_polls_until_done(tmp_path):
     # Polls the publish_url host, not status_url; GET with no body.
     assert [c.full_url for c in calls[1:]] == ["https://pub.test/upload/jobs/" + "a" * 32] * 2
     assert all(c.get_method() == "GET" and c.data is None for c in calls[1:])
-    assert sleeps == [3, 3]
+    assert sleeps == [3.0, 3.0]
 
 
 def test_static_does_not_send_async_flag_and_handles_200(tmp_path):
@@ -193,6 +193,78 @@ def test_poll_5xx_is_retried(tmp_path):
             mock.patch.object(publisher.time, "sleep", lambda s: None):
         assert publish(_fullstack(tmp_path), api_key="k", publish_url="https://pub.test")["report_id"] == "rid"
     assert len(calls) == 3
+
+
+def test_poll_interval_is_clamped_and_never_exceeds_budget(tmp_path):
+    """A server-suggested poll_after_s far above the 15s ceiling must be
+    clamped, and the loop must never sleep past the remaining budget."""
+    running = (200, {"job_id": "1" * 32, "status": "running"})
+    fake, calls = _urlopen(
+        [(202, {"job_id": "1" * 32, "report_id": "rid", "status": "queued", "poll_after_s": 600})]
+        + [running] * 1000
+    )
+    clock = {"t": 0.0}
+    sleeps = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        clock["t"] += s
+
+    with mock.patch.object(urllib.request, "urlopen", fake), \
+            mock.patch.object(publisher, "_collect_datasource_secrets", return_value=({}, [])), \
+            mock.patch.object(publisher.time, "sleep", fake_sleep), \
+            mock.patch.object(publisher, "_monotonic", lambda: clock["t"]), \
+            pytest.raises(PublishJobTimeout):
+        publish(_fullstack(tmp_path), api_key="k", publish_url="https://pub.test", job_budget_s=90)
+    assert sleeps  # at least one poll happened
+    assert all(s <= 15.0 for s in sleeps)
+    assert sum(sleeps) <= 90
+
+
+@pytest.mark.parametrize("bad_poll_after_s", [-5, "soon"])
+def test_negative_or_garbage_poll_after_s_falls_back(tmp_path, bad_poll_after_s):
+    fake, calls = _urlopen([
+        (202, {"job_id": "2" * 32, "report_id": "rid", "status": "queued", "poll_after_s": bad_poll_after_s}),
+        (200, {"job_id": "2" * 32, "status": "done", "result": {"report_id": "rid"}}),
+    ])
+    sleeps = []
+    with mock.patch.object(urllib.request, "urlopen", fake), \
+            mock.patch.object(publisher, "_collect_datasource_secrets", return_value=({}, [])), \
+            mock.patch.object(publisher.time, "sleep", sleeps.append):
+        publish(_fullstack(tmp_path), api_key="k", publish_url="https://pub.test")
+    assert sleeps[0] == 3.0
+
+
+def test_poll_interval_updates_from_status_body(tmp_path):
+    fake, calls = _urlopen([
+        (202, {"job_id": "3" * 32, "report_id": "rid", "status": "queued", "poll_after_s": 3}),
+        (200, {"job_id": "3" * 32, "status": "running", "poll_after_s": 7}),
+        (200, {"job_id": "3" * 32, "status": "done", "result": {"report_id": "rid"}}),
+    ])
+    sleeps = []
+    with mock.patch.object(urllib.request, "urlopen", fake), \
+            mock.patch.object(publisher, "_collect_datasource_secrets", return_value=({}, [])), \
+            mock.patch.object(publisher.time, "sleep", sleeps.append):
+        publish(_fullstack(tmp_path), api_key="k", publish_url="https://pub.test")
+    assert sleeps == [3.0, 7.0]
+
+
+def test_timeout_checked_before_sleeping(tmp_path):
+    """When the deadline has already passed by the time a poll response
+    comes back, the next loop iteration must raise WITHOUT issuing another
+    status request."""
+    fake, calls = _urlopen([
+        (202, {"job_id": "4" * 32, "report_id": "rid", "status": "queued", "poll_after_s": 3}),
+        (200, {"job_id": "4" * 32, "status": "running"}),
+    ])
+    clock = iter([0, 0, 0, 1000])
+    with mock.patch.object(urllib.request, "urlopen", fake), \
+            mock.patch.object(publisher, "_collect_datasource_secrets", return_value=({}, [])), \
+            mock.patch.object(publisher.time, "sleep", lambda s: None), \
+            mock.patch.object(publisher, "_monotonic", lambda: next(clock)), \
+            pytest.raises(PublishJobTimeout):
+        publish(_fullstack(tmp_path), api_key="k", publish_url="https://pub.test", job_budget_s=90)
+    assert len(calls) == 2
 
 
 def test_on_job_accepted_callback_receives_202_body(tmp_path):
