@@ -174,7 +174,7 @@ WRITE_FILE_SCHEMA: dict = {
         f"`{FILE_BEGIN_MARKER}` and a line `{FILE_END_MARKER}`, and then make "
         "this call with just the path. Everything between those two lines is "
         "written verbatim.\n\n"
-        "Path is relative to the artifact root (e.g. \"dashboard.html\", "
+        "Path is relative to the artifact root (e.g. \"index.html\", "
         "\"static/index.html\", \"backend.py\"). Parent directories are "
         "created automatically.\n\n"
         "`mode=\"w\"` (default) creates or overwrites the file; `mode=\"a\"` "

@@ -212,7 +212,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "transactions, analytics) belongs in an external database, which usually means "
         "fullstack-stateless-app; when in doubt, prefer stateless.\n\n"
         "Pass `primary` (optional) when you already know the entry-point "
-        "filename you'll write — e.g. `\"dashboard.html\"` for an html-app, "
+        "filename you'll write — e.g. `\"index.html\"` for an html-app, "
         "`\"static/index.html\"` for a fullstack app, `\"report.pdf\"` for a "
         "document. The renderer uses it to decide what to open by default. "
         "Skip when you don't know yet — the renderer falls back to a "
@@ -246,7 +246,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
             },
             "primary": {
                 "type": "string",
-                "description": "Relative path of the entry-point file you'll write (e.g. \"dashboard.html\"). Optional — skip if you don't know yet.",
+                "description": "Relative path of the entry-point file you'll write (e.g. \"index.html\"). Optional — skip if you don't know yet.",
             },
         },
         "required": ["name", "description", "type"],

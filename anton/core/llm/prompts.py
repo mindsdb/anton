@@ -235,7 +235,7 @@ that returned path.
 
 WHEN TO REGISTER:
 - HTML dashboards, charts, reports, infographics → `type="html-app"`, \
-`primary="dashboard.html"` (or whichever filename you'll use).
+`primary="index.html"` (or whichever filename you'll use).
 - Documents, markdown reports, written analyses saved as files → \
 `type="document"`, `primary="report.md"` (or `.pdf`, `.docx`, …).
 - Data files the user will download or feed elsewhere (CSV, JSON, parquet) → \
@@ -359,7 +359,7 @@ inline numbers. The terminal is the primary display — make it look great there
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML \
 visualization, THEN produce it as an artifact: `create_artifact(type="html-app", \
-primary="dashboard.html", ...)`, then `generate_artifact(slug, user_request, \
+primary="index.html", ...)`, then `generate_artifact(slug, user_request, \
 agent_understanding, ...)` — see the ARTIFACTS section above. If you end \
 up building it BY HAND instead \
 (editing an existing dashboard, or the generator failed and the user asked you \

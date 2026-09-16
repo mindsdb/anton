@@ -421,7 +421,7 @@ RULES: tuple[Rule, ...] = (
     Rule("errors", "backend reads DS_* env keys with no matching vault connection: ",
          _both(_BACKEND_BOTH, "DS_<ENGINE>_<NAME>__<FIELD>")),
     Rule("errors", "No HTML entry file was written. Write static/index.html (or the html-app page).",
-         (("html", "dashboard.html"), ("frontend", "static/index.html"))),
+         (("html", "index.html"), ("frontend", "static/index.html"))),
 )
 
 # Infrastructure failures: the generator cannot comply with them, so they have no

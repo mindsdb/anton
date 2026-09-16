@@ -249,20 +249,23 @@ def test_subagent_prompt_serves_html_app_only():
 
 
 def test_html_prompt_pins_the_registered_primary():
-    """Otherwise the model writes dashboard.html while metadata promises another name."""
+    """Otherwise the model writes the default name while metadata promises another."""
     system = prompts.build_subagent_system_prompt(
         "html-app", Path("/tmp/a"), primary="report.html"
     )
     assert "report.html" in system
 
 
-def test_html_prompt_falls_back_to_dashboard_html():
-    """primary is optional (Artifact.primary: str | None)."""
+def test_html_prompt_falls_back_to_index_html():
+    """primary is optional (Artifact.primary: str | None). The default was
+    `dashboard.html` until 2026-09-16 — the tenth live run wrote a card game
+    under that name."""
     for primary in (None, ""):
         system = prompts.build_subagent_system_prompt(
             "html-app", Path("/tmp/a"), primary=primary
         )
-        assert "dashboard.html" in system
+        assert "index.html" in system
+        assert "dashboard.html" not in system
 
 
 def test_write_discipline_block_is_present_in_both_frontend_prompts():

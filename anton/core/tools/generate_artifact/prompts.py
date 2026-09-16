@@ -516,7 +516,11 @@ straight into your reply between the markers avoids the problem entirely —
 prefer that.\
 """
 
-HTML_APP_DEFAULT_PRIMARY = "dashboard.html"
+# The entry-point filename for an html-app whose `create_artifact` call set no
+# `primary`. Was "dashboard.html" until 2026-09-16 — a leftover from the
+# dashboard-only origin of the tool; the tenth live run wrote a card game to
+# that name. `index.html` is what a browser, a static host and a reader expect.
+HTML_APP_DEFAULT_PRIMARY = "index.html"
 
 
 # ---------------------------------------------------------------------------

@@ -456,7 +456,7 @@ async def test_unmapped_ds_error_lists_available_connections(tmp_path: Path, mon
 
 def test_html_app_default_primary_is_shared():
     """The cleanup step and the prompt must rely on one shared default."""
-    assert orchestrator.HTML_APP_DEFAULT_PRIMARY == "dashboard.html"
+    assert orchestrator.HTML_APP_DEFAULT_PRIMARY == "index.html"
 
 
 def test_read_frontend_html_prefers_primary_among_written(tmp_path: Path):
@@ -473,12 +473,12 @@ def test_read_frontend_html_ignores_files_this_run_did_not_write(tmp_path: Path)
     """primary is the expectation, written is the fact; the fact must be verified.
 
     An easy regression to introduce: make primary (or its default) candidate #1
-    unconditionally. Then, with no primary set, a `dashboard.html` left over from a
+    unconditionally. Then, with no primary set, an `index.html` left over from a
     previous generation would shadow the fresh `report.html`.
     """
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
     st.primary = None  # the agent set no primary — create_artifact allows that
-    (tmp_path / "dashboard.html").write_text("<body>stale from a previous run</body>")
+    (tmp_path / "index.html").write_text("<body>stale from a previous run</body>")
     (tmp_path / "report.html").write_text("<body>written now</body>")
     html = orchestrator._read_frontend_html(st, ["report.html"])
     assert html == "<body>written now</body>"

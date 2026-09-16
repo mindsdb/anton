@@ -565,7 +565,7 @@ def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
     # html-app: pick ONLY among what this run actually wrote. `primary` is the
     # expectation, `written` is the fact, and the fact is what must be verified:
     # otherwise, with no primary set, candidate #1 becomes the default
-    # `dashboard.html`, and a leftover file of that name from a previous
+    # `index.html`, and a leftover file of that name from a previous
     # generation would shadow the fresh `report.html`. Within what was written,
     # primary takes priority — for the case where the loop wrote several .html.
     written_html = [rel for rel in written if rel.endswith(".html")]
