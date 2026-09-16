@@ -98,7 +98,10 @@ async def test_finish_gathering_renders_the_structured_fields_into_notes():
 
 
 async def test_finish_gathering_tolerates_fields_of_the_wrong_shape():
-    """The schema is a hint; the model's JSON is not trusted to match it."""
+    """The schema is a hint; the model's JSON is not trusted to match it.
+    A string where a list was asked for is still an answer and is kept;
+    `null` and blank items are dropped; a non-list `data_findings` is
+    ignored."""
     session = _session_with_plan_sequence(
         _response(tool_calls=[_tc("finish_gathering", {
             "summary": "ready",
@@ -110,9 +113,40 @@ async def test_finish_gathering_tolerates_fields_of_the_wrong_shape():
     )
     state = _state(session)
     await engine.run_gathering_loop(state)
-    assert state.assumptions == []
+    assert state.assumptions == ["a single string instead of a list"]
     assert state.open_points == ["42"]
-    assert state.gathering_notes == "ready\n\n### Open points\n- 42"
+    assert state.gathering_notes == (
+        "ready\n\n### Assumptions\n- a single string instead of a list"
+        "\n\n### Open points\n- 42"
+    )
+
+
+async def test_finish_gathering_keeps_list_fields_sent_as_strings():
+    """Twelfth live run 2026-09-16: `constraints`, `assumptions` and
+    `open_points` all arrived as strings. The old parser returned empty
+    lists for all three, `gathering_notes` shrank to the summary, and
+    `discovery.json` held no assumption and no open point — the hot path
+    survived only because `draft_brief` reads the tool call off the history.
+    `open_points` also began with the model's own tool-call markup."""
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {
+            "summary": "Offline game in one HTML file; no external data.",
+            "artifact_type": "html-app",
+            "constraints": "Arrows + space, active only on your turn\n- on-screen buttons for mobile (request)",
+            "assumptions": "Points per cleared cell of the matching letter",
+            "open_points": "\n<parameter name=\"open_points\">What \"your symbol\" means in single-player: the badge alternates (default: yes)",
+        })]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.assumptions == ["Points per cleared cell of the matching letter"]
+    assert state.open_points == [
+        'What "your symbol" means in single-player: the badge alternates (default: yes)'
+    ]
+    notes = state.gathering_notes
+    assert "### Constraints\n- Arrows + space, active only on your turn\n- on-screen buttons for mobile (request)" in notes
+    assert "### Assumptions" in notes and "### Open points" in notes
+    assert "<parameter" not in notes
 
 
 async def test_no_tool_calls_leaves_final_artifact_type_empty():

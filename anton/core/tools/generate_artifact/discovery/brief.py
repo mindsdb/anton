@@ -256,8 +256,10 @@ async def redraw_brief(state: PrdState) -> None:
         # A correction can retract an assumption or settle an open point;
         # the re-stated lists replace the old ones only when the model sent
         # them, so a call without the fields keeps what gathering recorded.
+        # "Sent" means present and not null — a list sent as one string is
+        # still the model's answer (`string_list` splits it), not an omission.
         for key in ("assumptions", "open_points"):
-            if isinstance(inp.get(key), list):
+            if inp.get(key) is not None:
                 setattr(state, key, string_list(inp.get(key)))
 
     if declared is not None:

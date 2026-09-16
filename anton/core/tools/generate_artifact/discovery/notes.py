@@ -8,6 +8,8 @@ a generator needs verbatim has to be here or in `spec.md`.
 
 from __future__ import annotations
 
+import re
+
 # Caps for the exec-code record: per-cell code, per-cell output snippet, and
 # the whole section. Oldest cells are dropped first — the most recent ones are
 # the ones that worked.
@@ -95,13 +97,38 @@ def render_web_notes(calls: list[dict]) -> str:
     return header + "\n" + "\n".join(blocks)
 
 
+# Residue of the model's own tool-call syntax leaking into a JSON value.
+# Twelfth live run 2026-09-16: `open_points` arrived as the string
+# '\n<parameter name="open_points">Что означает ...' — the model wrote the
+# field's opening tag inside the field. It is markup, never content.
+_TOOL_CALL_MARKUP_RE = re.compile(r"</?parameter(?:\s[^>]*)?>")
+
+# Leading list markers a model puts in front of each line when it sends a
+# list as one multi-line string: "- ", "* ", "• ", "1. ", "2) ".
+_LIST_MARKER_RE = re.compile(r"^(?:[-*•]|\d{1,2}[.)])\s+")
+
+
 def string_list(value) -> list[str]:
-    """A schema `array` of strings as the model actually sent it: anything
-    that is not a list becomes empty; items are stringified, `null` and
-    blanks dropped. The model's JSON is never trusted to match the schema."""
-    if not isinstance(value, list):
+    """A schema `array` of strings as the model actually sent it. The
+    model's JSON is never trusted to match the schema:
+
+    - a list: items stringified, `null` and blanks dropped;
+    - a string: one item per non-blank line, list markers removed. Twelfth
+      live run 2026-09-16: `constraints`, `assumptions` and `open_points`
+      all came as plain strings, the old "not a list → empty" dropped every
+      one of them, and `discovery.json` recorded no assumption and no open
+      point — a cold start would have redrawn the brief without them;
+    - anything else (a number, an object): empty.
+
+    Every item is also cleaned of tool-call markup (`<parameter ...>`)."""
+    if isinstance(value, str):
+        raw = [_LIST_MARKER_RE.sub("", line.strip()) for line in value.splitlines()]
+    elif isinstance(value, list):
+        raw = [str(v) for v in value if v is not None]
+    else:
         return []
-    return [str(v).strip() for v in value if v is not None and str(v).strip()]
+    cleaned = (_TOOL_CALL_MARKUP_RE.sub("", item).strip() for item in raw)
+    return [item for item in cleaned if item]
 
 
 def render_gathering_notes(inp: dict) -> str:

@@ -12,7 +12,7 @@ import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.interaction.elicit import AskAnswer
-from anton.core.llm.provider import LLMResponse, Usage
+from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief
 from anton.core.tools.generate_artifact.discovery.state import PrdState
 
@@ -345,3 +345,40 @@ async def test_show_and_confirm_requests_compact_rendering(monkeypatch):
     assert seen_requests[0].compact is True
 
 
+
+
+def _redraw_response(content: str, **fields) -> LLMResponse:
+    """A redraw reply: the new brief plus a `finish_gathering` call."""
+    call = ToolCall(id="tc1", name="finish_gathering", input={
+        "summary": "redrawn", "artifact_type": "html-app", "data_sources": [], **fields,
+    })
+    return LLMResponse(content=content, tool_calls=[call], usage=Usage(input_tokens=1, output_tokens=1))
+
+
+async def test_redraw_brief_replaces_the_lists_when_they_arrive_as_strings(tmp_path):
+    """`redraw_brief` used to replace the lists only for a JSON array, so a
+    correction re-stated as one string kept the OLD assumptions and open
+    points — the same schema drift the twelfth live run showed on the
+    gathering step, with the opposite failure: stale data instead of none."""
+    state = _state(tmp_path)
+    state.assumptions = ["old assumption"]
+    state.open_points = ["old question"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response(
+        "## Goal\nRedrawn.",
+        assumptions="- new assumption\n- another one",
+        open_points="",
+    ))
+    await brief.redraw_brief(state)
+    assert state.assumptions == ["new assumption", "another one"]
+    assert state.open_points == []
+
+
+async def test_redraw_brief_keeps_the_lists_a_call_does_not_mention(tmp_path):
+    """A `finish_gathering` without the fields is not a retraction."""
+    state = _state(tmp_path)
+    state.assumptions = ["old assumption"]
+    state.open_points = ["old question"]
+    state.session._llm.plan = AsyncMock(return_value=_redraw_response("## Goal\nRedrawn."))
+    await brief.redraw_brief(state)
+    assert state.assumptions == ["old assumption"]
+    assert state.open_points == ["old question"]
