@@ -308,13 +308,13 @@ class TestRouterRole:
         assert client.router_provider is router
         assert client.router_model == "model-c"
 
-    async def test_gate_confirms_one_router_auth_refusal(self, mock_providers):
+    async def test_summarize_confirms_one_router_auth_refusal(self, mock_providers):
         planning, coding = mock_providers
         router = AsyncMock(spec=LLMProvider)
         router.complete = AsyncMock(
             side_effect=[
                 ProviderAuthError("Invalid API key"),
-                LLMResponse(content="delegate", usage=Usage()),
+                LLMResponse(content="summary", usage=Usage()),
             ]
         )
         client = LLMClient(
@@ -326,12 +326,12 @@ class TestRouterRole:
             router_model="model-c",
         )
 
-        response = await client.gate(system="sys", messages=[])
+        response = await client.summarize(system="sys", messages=[])
 
-        assert response.content == "delegate"
+        assert response.content == "summary"
         assert router.complete.await_count == 2
 
-    async def test_gate_propagates_second_router_auth_refusal(self, mock_providers):
+    async def test_summarize_propagates_second_router_auth_refusal(self, mock_providers):
         planning, coding = mock_providers
         router = AsyncMock(spec=LLMProvider)
         router.complete = AsyncMock(
@@ -347,7 +347,7 @@ class TestRouterRole:
         )
 
         with pytest.raises(ProviderAuthError) as err:
-            await client.gate(system="sys", messages=[])
+            await client.summarize(system="sys", messages=[])
 
         assert router.complete.await_count == 2
         assert err.value.role == "router"
