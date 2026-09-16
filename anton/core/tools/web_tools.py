@@ -40,6 +40,7 @@ from urllib.parse import urlparse
 
 import httpx2 as httpx
 
+from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 
 if TYPE_CHECKING:
@@ -406,12 +407,18 @@ def _log_fetch(
     )
 
 
-async def _fetch_url(url: str, max_chars: int) -> str:
-    """GET a URL with bounded retry on transient failures; return text content.
+async def _fetch_url(url: str, max_chars: int) -> _FetchResult:
+    """GET a URL with bounded retry on transient failures.
 
     GET is idempotent, so retrying is safe. Permanent failures (4xx, NXDOMAIN,
     SSL) short-circuit inside ``_fetch_once`` and never reach a second attempt.
     Emits exactly one structured log line per call, whatever the outcome.
+
+    Returns the whole ``_FetchResult``, not just ``.text`` (ENG-2677). The
+    status is the caller's only honest way to tell a fetched page from an
+    error message: both arrive as prose, and the error prose is indistinguishable
+    from page content that happens to discuss errors. Flattening it here was
+    what forced the verdict to be guessed from the text downstream.
     """
     started = time.monotonic()
     last_error = ""
@@ -426,12 +433,15 @@ async def _fetch_url(url: str, max_chars: int) -> str:
         _log_fetch(
             url, outcome.status, outcome.num_bytes, attempt, started, level=logging.INFO
         )
-        return outcome.text
+        return outcome
 
     _log_fetch(
         url, "transient_giveup", 0, _MAX_FETCH_ATTEMPTS, started, level=logging.WARNING
     )
-    return f"{last_error} (gave up after {_MAX_FETCH_ATTEMPTS} attempts)"
+    return _FetchResult(
+        f"{last_error} (gave up after {_MAX_FETCH_ATTEMPTS} attempts)",
+        status="transient_giveup",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -480,7 +490,35 @@ async def handle_web_search_fallback(session: "ChatSession", tc_input: dict) -> 
     return _NO_PROVIDER_MSG
 
 
-async def handle_web_fetch_fallback(session: "ChatSession", tc_input: dict) -> str:
+async def handle_web_fetch_fallback(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
+    """Fetch a URL and return its text.
+
+    Verdicts (ENG-2677). `ok` drives the per-tool error streak, so it fires the
+    resilience nudge at 2 consecutive failures and the circuit breaker at 5 —
+    a verdict here is a behaviour decision, not a label.
+
+    * `ok=True` — a 2xx response, i.e. we returned a page. **This is the whole
+      point of the change.** On success this handler returns the PAGE CONTENT,
+      up to 20,000 characters of arbitrary prose, and the ENG-1276 substring
+      fallback scans it for the words "failed" / "timed out" / "[error]".
+      An ordinary article about a failed merger, a postmortem, or a refund
+      policy therefore counted as a FAILED tool call — five such pages in a row
+      told the agent to stop retrying an approach that was working, and the
+      richer the page the likelier the misjudgement.
+
+    * `ok=None` — everything else, DELIBERATELY, not an oversight. A 404 is not
+      a tool failure: the tool worked and the answer was negative, which is the
+      tier-3 category `recall_skill`'s NO MATCH family already occupies (see
+      ENG-2248). Whether repeated 403/404 should eventually nudge is a real
+      product question with its own before/after on the nudge rate, and it gets
+      its own ticket rather than riding along here.
+
+    Because no branch returns `ok=False`, this change can only ever REMOVE a
+    nudge or breaker firing, never add one. Timeouts and transport errors keep
+    counting exactly as they do today, via the substring fallback.
+    """
     del session  # unused — fetch needs no settings
     url = (tc_input.get("url") or "").strip()
     if not url:
@@ -489,7 +527,9 @@ async def handle_web_fetch_fallback(session: "ChatSession", tc_input: dict) -> s
         return f"web_fetch only supports http(s) URLs; got: {url!r}"
     max_chars = int(tc_input.get("max_chars") or 20000)
     max_chars = max(500, min(max_chars, 200_000))
-    return await _fetch_url(url, max_chars)
+    result = await _fetch_url(url, max_chars)
+    served = isinstance(result.status, int) and 200 <= result.status < 300
+    return ToolOutcome(content=result.text, ok=True if served else None)
 
 
 WEB_SEARCH_FALLBACK_TOOL = ToolDef(
