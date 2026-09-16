@@ -26,7 +26,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SETUPTOOLS_SCM_PRETEND_VERSION=${ANTON_VERSION} \
     VIRTUAL_ENV=/opt/anton-venv \
     PATH=/opt/anton-venv/bin:/usr/local/bin:$PATH \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
 WORKDIR /app
 COPY . /app
@@ -56,9 +57,30 @@ RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
               echo "       so nothing else would ever fail. Keep .git in .dockerignore." >&2; \
               exit 1; }; } \
     && uv venv "$VIRTUAL_ENV" \
-    && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --frozen --no-dev --no-cache \
+    && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --frozen --no-dev --no-cache --extra htmllint \
     && uv pip install --no-cache boto3 \
-    && chown -R 1000:1000 "$VIRTUAL_ENV"
+    && chown -R 1000:1000 "$VIRTUAL_ENV" \
+    # Cloud path for the HTML artifact lint (anton/core/artifacts/html_lint.py):
+    # no Electron in this image, so it runs headless Chromium via Playwright's
+    # Python binding instead. `install-deps` resolves python:3.12-slim's
+    # missing shared libraries itself, rather than a hand-maintained apt list.
+    # `--only-shell` installs the headless shell build (~262 MB) instead of
+    # full Chrome for Testing; it also pulls ffmpeg (~5 MB), unavoidable and
+    # harmless. PLAYWRIGHT_BROWSERS_PATH is set above so both this and the
+    # runtime launch write to /opt/playwright instead of root's $HOME/.cache,
+    # which UID 1000 can't read.
+    #
+    # Adds ~822 MB total, not the ~270 MB the plan estimated: `install-deps`
+    # alone pulls ~327 MB of apt packages (fonts/X11/mesa/cups — this base
+    # image starts with none of it), and the `playwright` pip package bundles
+    # its own private Node.js binary (~121 MB, `driver/node`) as the process
+    # its Python API talks to internally — so this is not actually a
+    # Node-free image, just one with no *system* Node. See "The decision" in
+    # docs/ENG-1204-html-lint-cloud-plan.md for the full breakdown.
+    && "$VIRTUAL_ENV/bin/playwright" install-deps chromium \
+    && "$VIRTUAL_ENV/bin/playwright" install --only-shell chromium \
+    && chown -R 1000:1000 "$PLAYWRIGHT_BROWSERS_PATH" \
+    && rm -rf /var/lib/apt/lists/*
 
 # scratchpad-boot.sh: the single-cell entrypoint the controller execs (reads code + delimiter on stdin).
 RUN printf '#!/bin/sh\nexec python -m anton.core.backends.scratchpad_boot\n' \
