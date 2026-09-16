@@ -889,3 +889,120 @@ class TestWebSearchVerdict:
         )
         assert isinstance(out, str)
         assert "anton setup search" in out
+
+
+class TestTierThreePromiseIsPinnedToTheRealText:
+    """`ok=None` does NOT mean "not counted" — so pin the string property.
+
+    `_apply_error_tracking` short-circuits only on an explicit verdict
+    (`if ok is not None: is_error = not ok`); otherwise it falls through to the
+    ENG-1276 substring match. So for every non-2xx outcome the verdict is still
+    decided by scanning the text, and this handler's tier-3 promise — "a 404 is
+    not a tool failure" — holds only because `"Fetch returned HTTP 404 for ..."`
+    happens to contain none of `_LEGACY_FAILURE_MARKERS`.
+
+    That is a guarantee resting on phrasing. Rewording `_fetch_once`'s message
+    to `"Fetch failed with HTTP 404 for ..."` reinstates exactly the false
+    positive this ticket removed, and every other test in this file still
+    passes. Both halves of the ticket's before/after table are pinned below, so
+    a reword in EITHER direction fails.
+
+    Limit, stated rather than implied: this enumerates the outcomes that exist
+    today. A brand-new non-2xx branch added later with unlucky wording is not
+    caught by it.
+    """
+
+    _PUBLIC = [(2, 1, 6, "", ("93.184.216.34", 0))]
+    _PRIVATE = [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+    async def _outcome(self, *, dns=None, get=None):
+        cms = [
+            patch(
+                "anton.core.tools.web_tools.socket.getaddrinfo",
+                new=(dns or (lambda *a, **k: self._PUBLIC)),
+            ),
+            patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0),
+        ]
+        if get:
+            cms.append(patch.object(httpx.AsyncClient, "get", new=get))
+        for c in cms:
+            c.__enter__()
+        try:
+            return await handle_web_fetch_fallback(None, {"url": "https://x.example"})
+        finally:
+            for c in reversed(cms):
+                c.__exit__(None, None, None)
+
+    @staticmethod
+    def _status(code):
+        async def _get(self, url, headers=None):
+            return httpx.Response(code, text="body", request=httpx.Request("GET", url))
+        return _get
+
+    @pytest.mark.parametrize("code", [400, 403, 404, 410, 451, 500, 501, 505, 511])
+    async def test_http_errors_carry_no_legacy_marker(self, code):
+        """A non-2xx must not read as a failure to the substring fallback."""
+        from anton.core.session import _LEGACY_FAILURE_MARKERS
+
+        out = await self._outcome(get=self._status(code))
+        assert out.ok is None
+        hit = [m for m in _LEGACY_FAILURE_MARKERS if m in out.content]
+        assert not hit, (
+            f"HTTP {code} message now contains {hit} — it will trip the error "
+            f"streak, reinstating the ENG-2677 false positive: {out.content!r}"
+        )
+
+    async def test_unresolvable_and_blocked_hosts_carry_no_legacy_marker(self):
+        from anton.core.session import _LEGACY_FAILURE_MARKERS
+
+        def _nxdomain(*a, **k):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        for label, kwargs in (
+            ("NXDOMAIN at the SSRF pre-flight", {"dns": _nxdomain}),
+            ("SSRF-blocked private address", {"dns": lambda *a, **k: self._PRIVATE}),
+        ):
+            out = await self._outcome(**kwargs)
+            hit = [m for m in _LEGACY_FAILURE_MARKERS if m in out.content]
+            assert not hit, f"{label} now contains {hit}: {out.content!r}"
+
+    async def test_transport_failures_still_DO_carry_a_marker(self):
+        """The other half: these are meant to keep counting, unchanged.
+
+        If a reword ever made these marker-free they would stop reaching the
+        streak — a silent loss of the one failure signal web_fetch has today.
+        """
+        from anton.core.session import _LEGACY_FAILURE_MARKERS
+
+        async def _timeout(self, url, headers=None):
+            raise httpx.TimeoutException("slow")
+
+        async def _connect(self, url, headers=None):
+            # Retryable TransportError -> raised at web_tools.py:359, surfaced
+            # through the transient-giveup message. NOTE the exception text is
+            # deliberately marker-free: with a message like "getaddrinfo
+            # failed" the assertion below passes off the EXCEPTION rather than
+            # the template, and a reword of the template goes undetected.
+            # (That is how the first version of this test was green under
+            # mutation.)
+            raise httpx.ConnectError("connection refused")
+
+        async def _ssl(self, url, headers=None):
+            # NON-retryable: a ConnectError wrapping an SSLError returns
+            # directly at web_tools.py:360. A separate line with its own
+            # wording, so it needs its own case — covering only _connect left
+            # that line free to lose its marker unnoticed (caught by mutation).
+            err = httpx.ConnectError("certificate verify error")
+            err.__cause__ = ssl.SSLError("bad certificate")
+            raise err
+
+        for label, get in (
+            ("timeout", _timeout),
+            ("retryable transport error", _connect),
+            ("non-retryable SSL error", _ssl),
+        ):
+            out = await self._outcome(get=get)
+            assert any(m in out.content for m in _LEGACY_FAILURE_MARKERS), (
+                f"{label} no longer contains a legacy marker, so it will stop "
+                f"counting toward the streak: {out.content!r}"
+            )
