@@ -160,7 +160,8 @@ FINISH_GATHERING_SCHEMA: dict = {
                     "Ambiguities in the request itself that only the user "
                     "can settle and that were not asked (question budget "
                     "spent or not worth a question). Not ideas for extra "
-                    "features. The brief raises them with the user."
+                    "features, and not a connected source the artifact does "
+                    "not need. The brief raises them with the user."
                 ),
             },
         },

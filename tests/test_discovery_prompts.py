@@ -151,6 +151,16 @@ def test_gathering_step_defines_open_points_as_ambiguities_not_feature_ideas():
     assert "one line" not in message
 
 
+def test_gathering_step_does_not_turn_unused_connections_into_a_question():
+    """Live run 2026-09-16 (third): with `## Connected Data Sources` in the
+    kickoff, the model asked the user to confirm that two databases the
+    game does not need would not be used — noise in the brief and a
+    negative nobody asked about in the PRD."""
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "connected data source the request does not need is simply not used" in message
+    assert "do not ask the user to confirm it" in message
+
+
 def test_gathering_step_names_the_structured_fields():
     message = step_message(sub_tools.STEP_GATHERING, _state())
     for field_name in ("`data_findings`", "`assumptions`", "`open_points`", "`constraints`"):
