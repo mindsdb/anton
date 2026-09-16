@@ -532,10 +532,11 @@ HTML_APP_DEFAULT_PRIMARY = "dashboard.html"
 _GEN_HTML_INPUTS = """\
 ## What you receive
 The user message carries these sections, in this order (some may be absent):
-- `## Brief` — the request as the calling agent understood it.
 - `## Product requirements` (prd.md) — reviewed and accepted by the user.
   This is the authoritative source; where anything else disagrees with it,
   the PRD wins. It ends at `{prd_footer}`.
+- `## Brief` — only when there is no PRD: the request as the calling agent
+  understood it.
 - `## Data` — scratchpad cells already run earlier in this pipeline: pad
   name, code, printed output. The schema and samples you need are here.
 - `### Sources read from the web` — notes and quotes from web pages, when the
@@ -698,7 +699,9 @@ def build_subagent_system_prompt(
 
 
 def build_user_kickoff(context: str) -> str:
-    parts: list[str] = ["## Brief", context.strip()]
+    # The context renders its own section headers (`## Product requirements`,
+    # or `## Brief` when there is no PRD) — see `orchestrator._spec_context`.
+    parts: list[str] = [context.strip()]
     parts.append(
         "Read the sections above, then follow the workflow from your "
         "instructions: run a scratchpad cell only if the data to embed is not "
@@ -821,7 +824,7 @@ def build_backend_kickoff(
     context: str,
     api_spec: str,
 ) -> str:
-    parts = ["## Brief", context.strip()]
+    parts = [context.strip()]
     parts.append("## API Specification\n" + api_spec)
     parts.append(
         "Use the `scratchpad` tool to confirm the schema/sample of any data "
@@ -861,7 +864,7 @@ def build_frontend_kickoff(
     context: str,
     api_spec: str,
 ) -> str:
-    parts = ["## Brief", context.strip()]
+    parts = [context.strip()]
     parts.append(
         "## API Specification\n"
         "(Call these endpoints with `fetch(api('/api/...'))` — "
@@ -900,8 +903,9 @@ def prd_section(state) -> str:
     """The PRD block, or "" when this run has no PRD.
 
     The header states the document's standing rather than leaving the node to
-    infer it from position: the same context also carries `## Brief`, written
-    by the calling agent, and on any disagreement the accepted PRD wins. One
+    infer it from position: the same context carries `spec.md` and the data
+    record, and on any disagreement the accepted PRD wins. (The brief travels
+    only when there is no PRD — see `orchestrator._spec_context`.) One
     renderer for every node, so no node reads a differently-framed PRD.
 
     The footer marks where the quoted document ends. `prd.md` carries its own
@@ -1063,7 +1067,7 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
 # carry the PRD forward verbatim.
 TECH_SPEC_CARRY_FORWARD = (
     "This is the LAST step that sees this conversation. Next to your "
-    "document, the code-writing steps receive the brief, the PRD verbatim, "
+    "document, the code-writing steps receive the PRD verbatim, "
     "the scratchpad cells run in this pipeline (code plus the first "
     f"{EXEC_OUTPUT_MAX} characters of each printed output) and short excerpts "
     "of the web pages read. They do NOT receive this conversation, full "

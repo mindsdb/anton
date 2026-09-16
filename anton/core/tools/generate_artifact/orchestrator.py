@@ -252,12 +252,21 @@ async def _write_tech_spec(state: GenState) -> str | None:
 
 
 def _spec_context(state: GenState) -> str:
-    """Brief + gathered data + tech spec — the shared context handed to
-    api-spec and generation nodes (explicit inter-node data flow)."""
-    parts = [state.brief.strip()]
+    """PRD (or the brief when there is none) + gathered data + tech spec —
+    the shared context handed to api-spec and generation nodes.
+
+    The brief is NOT sent next to a PRD. Since phase B it is the confirmation
+    proposal shown to the user — "here is what I suggest, continue or say
+    what to change" — with questions the accepted PRD has already settled;
+    the PRD supersedes it on every point. Measured 2026-09-16: 1 KB of every
+    generation round, and a second voice the generator had to reconcile.
+    """
+    parts: list[str] = []
     prd = prompts.prd_section(state)
     if prd:
         parts.append(prd)
+    elif state.brief.strip():
+        parts.append(f"## Brief\n{state.brief.strip()}")
     if state.data_notes.strip():
         parts.append("## Data\n" + state.data_notes.strip())
     if state.web_notes.strip():

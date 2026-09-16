@@ -115,8 +115,8 @@ async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, mon
 # ── reaching the nodes ──────────────────────────────────────────────────────
 
 def test_prd_section_states_its_own_standing(tmp_path: Path):
-    """Nodes see `## Brief` (written by the calling agent) and the PRD side by
-    side; the header — not the position — is what tells them which wins."""
+    """Nodes see the PRD next to `spec.md` and the data record; the header —
+    not the position — is what tells them which wins."""
     st = _state(tmp_path, prd="## Goal\nShow orders")
     section = prompts.prd_section(st)
     assert "authoritative" in section
@@ -148,6 +148,40 @@ def test_generation_nodes_see_the_prd(tmp_path: Path):
     """`_spec_context` feeds the tech spec, the API spec and both generators."""
     st = _state(tmp_path, prd="## UI/UX requirements\ndark background")
     assert "dark background" in orchestrator._spec_context(st)
+
+
+def test_generation_nodes_do_not_see_the_brief_next_to_a_prd(tmp_path: Path):
+    """Since phase B the brief is the confirmation proposal shown to the user
+    ("here is what I suggest — continue or say what to change"), with
+    questions the accepted PRD has already settled. Ninth live run
+    2026-09-16: 1 KB of every generation round and a second voice next to
+    the authoritative document. The PRD supersedes it."""
+    st = _state(tmp_path, prd="## Goal\nShow orders")
+    st.brief = "Вот что предлагаю сделать.\n\n**Вопросы**\n- Нужен ли таймер?"
+    context = orchestrator._spec_context(st)
+    assert "## Brief" not in context
+    assert "Нужен ли таймер" not in context
+    assert "Show orders" in context
+
+
+def test_generation_nodes_fall_back_to_the_brief_without_a_prd(tmp_path: Path):
+    st = _state(tmp_path)
+    st.brief = "An orders dashboard."
+    context = orchestrator._spec_context(st)
+    assert context.startswith("## Brief\nAn orders dashboard.")
+
+
+def test_kickoffs_do_not_prepend_their_own_brief_header():
+    """The context renders its own section headers; a kickoff that added
+    `## Brief` on top would label the PRD as the brief."""
+    ctx = "## Product requirements\n...\n--- end of prd.md ---"
+    for kickoff in (
+        prompts.build_user_kickoff(ctx),
+        prompts.build_frontend_kickoff(ctx, "{}"),
+        prompts.build_backend_kickoff(ctx, "{}"),
+    ):
+        assert not kickoff.startswith("## Brief")
+        assert kickoff.startswith("## Product requirements")
 
 
 # ── the resume point ────────────────────────────────────────────────────────
