@@ -232,8 +232,7 @@ step and costs a regeneration:
 - No absolute URL in any `fetch()` call — relative paths only.
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
-- Script tags are plain `<script>` and `</script>` — never an underscore
-  variant — and every opened script block must be closed with `</script>`.
+- Every opened `<script>` block must be closed with `</script>`.
 - No universal `* { ... !important }` rule.
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,

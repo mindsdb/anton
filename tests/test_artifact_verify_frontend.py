@@ -159,7 +159,7 @@ def test_universal_important_after_exempt_media_block_is_still_error():
 
 
 def test_mangled_script_tag_residue_is_error():
-    """ENG-1986 escaping leaks `<_script`-style forms into the model's view and
+    """Residue of the removed ENG-1986 escaping stays an error: `<_script`-style forms into the model's view and
     the model reproduces mutated variants; live run 2026-08-27 shipped a page
     whose only script block was closed with `</_script>` — JS never ran."""
     for bad in ("<_script>", "<_/script>", "</_script>"):

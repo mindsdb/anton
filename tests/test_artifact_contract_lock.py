@@ -374,9 +374,14 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "absolute URL")),
     Rule("errors", "Frontend must not use the global name window.__antonCommentsLayer.",
          _both(_FRONT_BOTH, "__antonCommentsLayer")),
+    # Guard, not contract: the prompt stopped mentioning underscore variants
+    # when the transport-level escape (ENG-1986) was removed — a model that
+    # never reads `<_script` cannot write it, and telling it "never an
+    # underscore variant" while it saw escaped tags in its own history made
+    # it rewrite a correct file (live run 2026-09-16). No prompt marker.
     Rule("errors", "Frontend contains a mangled script tag (an underscore variant like "
                     "`<_script` or `</_script`); write plain `<script>`/`</script>`.",
-         _both(_FRONT_BOTH, "underscore")),
+         ()),
     Rule("errors", "Frontend opens a <script> block but never closes it with </script>.",
          _both(_FRONT_BOTH, "must be closed")),
     Rule("errors", "Frontend must not use universal `* { ... !important }` rules.",
