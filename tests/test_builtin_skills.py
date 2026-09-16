@@ -401,12 +401,15 @@ class TestToolDescriptionsAfterTheSwitch:
 
 
 class TestSkillDescriptionsSteerAway:
-    """The description is all the thalamus sees when deciding to preload a skill.
+    """The description is all the agent sees when deciding to `recall_skill`.
 
-    `_inject_recalled_skills` puts the FULL body of up to three skills into the
-    context per turn — i.e. ~270 lines of "do it by hand" land in front of the
-    agent before it picks a path. So the description must open with the
+    The skill catalog in the system prompt lists labels with their descriptions
+    and says "when the user's request matches one of them, call
+    recall_skill(label)"; a recall puts the FULL body (~270 lines of "do it by
+    hand") into the context. So the description must open with the
     applicability condition, not with "MANDATORY reading before ANY…".
+    (Until ENG-2666 a thalamus gate preloaded up to three skills per turn from
+    the same descriptions — the gate is gone, the steering still matters.)
     """
 
     LABELS = ("build-html-dashboard", "build-fullstack-backend")
