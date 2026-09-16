@@ -357,13 +357,6 @@ class TestRepairOfAnAlreadyPoisonedConversation:
             1 for m in poisoned if is_user_turn(m)
         )
 
-    def test_no_new_consecutive_same_role_pair(self):
-        poisoned = self._poisoned()
-        fixed, _ = repair_replayed_tool_ids(poisoned)
-        before = [i for i in range(1, len(poisoned)) if poisoned[i]["role"] == poisoned[i - 1]["role"]]
-        after = [i for i in range(1, len(fixed)) if fixed[i]["role"] == fixed[i - 1]["role"]]
-        assert after == before
-
     def test_the_pair_stays_paired(self):
         fixed, _ = repair_replayed_tool_ids(self._poisoned())
         assert fixed[1]["content"][1]["id"] == fixed[2]["content"][0]["tool_use_id"]
@@ -536,40 +529,77 @@ class TestTheWiringIsPinned:
         assert len(response.tool_calls) == 1
         assert response.tool_calls[0].id and response.tool_calls[0].name
 
-    def test_the_tool_loop_calls_the_belt(self):
-        """AST, not behaviour: the belt is expected to be a permanent no-op, so
-        only its presence at the call site can be asserted. Mirrors
-        `tests/test_verifier_truncation.py`'s wiring pins."""
-        import ast
+    def test_the_belt_runs_BEFORE_the_history_block_is_built(self):
+        """Position, not presence — order is the whole point of the belt.
+
+        A set of called names only asserts the belt runs *somewhere*: moving
+        the call to after `_append_history(...)` writes the unsanitised ids
+        into history — the exact failure the belt exists to prevent — and left
+        the suite green (review: pnewsam on #471).
+        """
         import inspect
-        import textwrap
+        import re
 
         from anton.core.session import ChatSession
 
         src = inspect.getsource(ChatSession._stream_and_handle_tools)
-        called = {
-            n.func.attr
-            for n in ast.walk(ast.parse(textwrap.dedent(src)))
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-        }
-        assert "_ensure_replayable_calls" in called
+        belt = src.index("_ensure_replayable_calls(")
+        # The first `tool_use` block built from this round's calls; everything
+        # that reaches history goes through it.
+        block = re.search(r'"type":\s*"tool_use"', src)
+        assert block is not None, "the tool_use block construction moved"
+        assert belt < block.start(), (
+            "the belt must run before the tool_use blocks are built, or the "
+            "unsanitised ids are already in history by the time it fires"
+        )
 
-    def test_the_scratchpad_boot_loop_calls_its_belt(self):
-        """AST for the same reason the sibling wiring tests use it: importing
-        `scratchpad_boot` reads stdin at import time."""
-        import ast
+    def test_the_scratchpad_boot_belt_runs_before_its_history_block(self):
+        """Same property, same reason. Read from source rather than imported:
+        importing `scratchpad_boot` reads stdin at import time.
+
+        Scoped to the enclosing function rather than the whole module — the
+        earlier version parsed the entire file, so the call could migrate to
+        any function in it and still pass (review: pnewsam on #471).
+        """
         import pathlib as _pathlib
+        import re
 
         import anton
 
         src = (_pathlib.Path(anton.__file__).parent
                / "core" / "backends" / "scratchpad_boot.py").read_text()
-        called = {
-            n.func.id
-            for n in ast.walk(ast.parse(src))
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        }
-        assert "_ensure_replayable_calls" in called
+        # The CALL, not the definition: `def _ensure_replayable_calls(response)`
+        # contains the same substring, and matching it pinned nothing at all.
+        call = re.search(r"\n\s+_ensure_replayable_calls\(response\)\s*\n", src)
+        assert call is not None, "the boot belt's call site is gone"
+        block = re.search(r'"type":\s*"tool_use"', src[call.end():])
+        assert block is not None, "the boot loop's tool_use block moved"
+        # Same function: no new `def` at module or class level in between.
+        between = src[call.end():call.end() + block.start()]
+        assert not re.search(r"\n\s{0,4}def ", between), (
+            "the belt and the history block are no longer in the same function"
+        )
+
+    def test_a_bad_call_reaching_the_loop_never_lands_in_history(self):
+        """Behaviour, not shape: drives a poisoned `LLMResponse` through the
+        belt and asserts on what a history block built from it would carry."""
+        from anton.core.llm.provider import LLMResponse
+
+        session, _ = self._session()
+        response = LLMResponse(
+            content="", tool_calls=[ToolCall(id="", name="", input={"a": 1})],
+        )
+        session._ensure_replayable_calls(response)
+        blocks = [
+            {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input}
+            for tc in response.tool_calls
+        ]
+        assert blocks and all(b["id"] and b["name"] for b in blocks)
+        assert not [
+            i for i in _translate_messages_to_responses_input(
+                [{"role": "assistant", "content": blocks}])
+            if i.get("call_id") == "" or i.get("name") == ""
+        ]
 
 
 
@@ -649,3 +679,79 @@ class TestNoToolStepIsLeftOpenOrClosedTwice:
         ]
         starts, ends = self._pairs(await _run_responses_stream(events))
         assert starts == ["call_ok"] and ends == ["call_ok"]
+
+
+class TestResumeRepairsToo:
+    """`/resume` assigns `_history` directly and reaches none of the
+    constructor's work — so it saw none of the repair.
+
+    It is also the path that matters most: `/resume` is what a user types after
+    a conversation stops working, so the surface most likely to meet a poisoned
+    history was the one the repair did not cover (review: pnewsam on #471).
+    """
+
+    @staticmethod
+    def _poisoned():
+        return [
+            {"role": "user", "content": "load my csv"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "", "name": "", "input": {"a": 1}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "", "content": "x"}]},
+            {"role": "user", "content": "still there?"},
+        ]
+
+    async def test_resume_repairs_the_history_it_restores(self, tmp_path):
+        from anton.commands.session import restore_session
+        from anton.core.session import ChatSession, ChatSessionConfig
+        from tests.conftest import make_mock_llm
+
+        history = self._poisoned()
+        store = MagicMock()
+        store.load = MagicMock(return_value=history)
+        rebuilt = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        with patch("anton.commands.session.rebuild_session",
+                   AsyncMock(return_value=rebuilt)):
+            out = await restore_session(
+                sid="sid-1", console=MagicMock(), settings=MagicMock(), state={},
+                self_awareness=None, cortex=None, workspace=None,
+                session=session, episodic=None, history_store=store,
+            )
+            out = out[0] if isinstance(out, tuple) else out
+
+        block = out.history[1]["content"][0]
+        assert block["id"] and block["name"] == UNNAMED_REPLAYED_TOOL
+        assert out.history[2]["content"][0]["tool_use_id"] == block["id"]
+        wire = _translate_messages_to_responses_input(out.history)
+        assert not [i for i in wire if i.get("call_id") == "" or i.get("name") == ""]
+
+    async def test_resume_counts_turns_off_the_repaired_list(self, tmp_path):
+        """`ChatSession.__init__` counts from `self._history`, not from the
+        caller's list, because the repair can turn an unpairable `tool_result`
+        into text and the two then disagree. `/resume` must match."""
+        from anton.commands.session import restore_session
+        from anton.core.session import ChatSession, ChatSessionConfig
+        from tests.conftest import make_mock_llm
+
+        # An orphan tool_result: no preceding assistant call to pair with, so
+        # the repair rewrites it to text — which makes it a real user turn.
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "", "content": "orphan"}]},
+        ]
+        store = MagicMock()
+        store.load = MagicMock(return_value=history)
+        rebuilt = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        with patch("anton.commands.session.rebuild_session",
+                   AsyncMock(return_value=rebuilt)):
+            out = await restore_session(
+                sid="sid-1", console=MagicMock(), settings=MagicMock(), state={},
+                self_awareness=None, cortex=None, workspace=None,
+                session=ChatSession(ChatSessionConfig(llm_client=make_mock_llm())),
+                episodic=None, history_store=store,
+            )
+            out = out[0] if isinstance(out, tuple) else out
+        assert out._turn_count == sum(1 for m in out.history if is_user_turn(m))

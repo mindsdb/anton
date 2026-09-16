@@ -194,8 +194,6 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
         for b in new_blocks:
             if isinstance(b, dict) and b.get("type") == "tool_use" and _bad(b, "id"):
                 b["id"] = _mint(b)
-                if not isinstance(b.get("name"), str) or not b["name"]:
-                    b["name"] = UNNAMED_REPLAYED_TOOL
                 minted.append(b["id"])
                 repaired += 1
         out[i] = {**msg, "content": new_blocks}
