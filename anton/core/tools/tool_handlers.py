@@ -220,38 +220,52 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     return {".xlsx": _xlsx_linter, ".html": _html_linter}
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
-    """Run the format-appropriate checker on artifact folders this cell
-    edited (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list().
+def lint_artifact_files(store, slug: str) -> list[str]:
+    """Run the format-appropriate checker over every current file in `slug`,
+    unconditionally — no mtime gating. The caller decides when an artifact
+    is worth (re)checking; this only answers "what does it look like now".
+
+    Shared by the write-time hook (`lint_changed_artifact_files`, scoped to
+    files a cell just touched) and `handle_open_artifact` (a re-check on
+    every later open, since a finding otherwise only ever reaches the agent
+    at the one cell that wrote it — an agent that doesn't act on the spot
+    would never see it again).
     """
     linters = _artifact_linters()
     if not linters:
         return []
+    messages: list[str] = []
+    for path in (store.root / slug).rglob("*"):
+        linter = linters.get(path.suffix.lower())
+        if linter is None or not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
+                continue
+        except OSError:
+            continue
+        file_messages = linter(path)
+        if not file_messages:
+            # None (couldn't check) or [] (checked, clean) — either way,
+            # nothing worth telling the agent about this file.
+            continue
+        for message in file_messages:
+            messages.append(f"{slug}/{path.name} — {message}")
+    return messages
+
+
+def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
+    """Run `lint_artifact_files` on artifact folders this cell edited
+    (mtime moved since `before`), so findings reach the agent as
+    tool-result text right away, not only via a later open()/list().
+    """
     after = snapshot_existing_artifact_mtimes(store)
     messages: list[str] = []
     for slug, prev_mtime in before.items():
         current = after.get(slug)
         if current is None or current <= prev_mtime:
             continue
-
-        for path in (store.root / slug).rglob("*"):
-            linter = linters.get(path.suffix.lower())
-            if linter is None or not path.is_file():
-                continue
-            try:
-                if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
-                    continue
-            except OSError:
-                continue
-            file_messages = linter(path)
-            if not file_messages:
-                # None (couldn't check) or [] (checked, clean) — either way,
-                # nothing worth telling the agent about this file.
-                continue
-            for message in file_messages:
-                messages.append(f"{slug}/{path.name} — {message}")
-
+        messages.extend(lint_artifact_files(store, slug))
     return messages
 
 
@@ -644,8 +658,7 @@ async def handle_open_artifact(
     # rather than at write time because the writes themselves happen in
     # scratchpad cells the tool layer never sees.
     _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
-    # Tier 1: the artifact was opened and its descriptor returned.
-    return ToolOutcome(content=json.dumps({
+    content = json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
         "name": artifact.name,
@@ -653,7 +666,23 @@ async def handle_open_artifact(
         "description": artifact.description,
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
-    }, indent=2), ok=True)
+    }, indent=2)
+    # Re-check on every open, not just at write time: a finding otherwise
+    # only ever reaches the agent in the one cell that wrote the file, and
+    # an agent that didn't act on it in that moment would never see it
+    # again. Off the loop for the same reason as the write-time hook — the
+    # checkers shell out with multi-second timeouts.
+    try:
+        import asyncio
+
+        lint_messages = await asyncio.to_thread(lint_artifact_files, store, artifact.slug)
+    except Exception:
+        lint_messages = []
+        _log.warning("artifact lint failed on open for %s", artifact.slug, exc_info=True)
+    if lint_messages:
+        content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
+    # Tier 1: the artifact was opened and its descriptor returned.
+    return ToolOutcome(content=content, ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
