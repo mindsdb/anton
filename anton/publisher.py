@@ -113,24 +113,20 @@ class PublishJobTimeout(RuntimeError):
         )
 
 
-def _clamp_poll_interval(value: float) -> float:
-    """Clamp a poll interval to [0.5, 15.0]s."""
-    return min(max(value, 0.5), 15.0)
+def _poll_interval(raw, fallback: float) -> float:
+    """Parse a server `poll_after_s` (202 body or status body) into a poll
+    interval clamped to [0.5, 15.0]s.
 
-
-def _initial_poll_after_s(raw) -> float:
-    """Parse the 202 body's `poll_after_s`, falling back to the default.
-
-    Invalid values (non-numeric, negative, NaN) must never raise — they fall
-    back to `_DEFAULT_POLL_AFTER_S` and get clamped like any other interval.
+    Invalid values (missing, non-numeric, negative, NaN) must never raise —
+    they keep `fallback`, which is itself clamped.
     """
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return _DEFAULT_POLL_AFTER_S
+        value = fallback
     if value < 0:
-        return _DEFAULT_POLL_AFTER_S
-    return value
+        value = fallback
+    return min(max(value, 0.5), 15.0)
 
 
 def _wait_for_publish_job(
@@ -140,7 +136,7 @@ def _wait_for_publish_job(
     *,
     budget_s: float,
     ssl_verify: bool,
-    poll_after_s: float = _DEFAULT_POLL_AFTER_S,
+    poll_after_s=_DEFAULT_POLL_AFTER_S,
     report_id: str | None = None,
 ) -> dict:
     """Poll GET {publish_url}/upload/jobs/{job_id} until done/failed or budget.
@@ -159,7 +155,7 @@ def _wait_for_publish_job(
     url = f"{publish_url.rstrip('/')}/upload/jobs/{job_id}"
     started = _monotonic()
     deadline = started + budget_s
-    poll = _clamp_poll_interval(poll_after_s)
+    poll = _poll_interval(poll_after_s, _DEFAULT_POLL_AFTER_S)
     while True:
         remaining = deadline - _monotonic()
         if remaining <= 0:
@@ -194,9 +190,7 @@ def _wait_for_publish_job(
                     int(err.get("status_code") or 500), str(err.get("message") or "unknown error"),
                     job_id=job_id, report_id=job.get("report_id") or report_id,
                 )
-            next_poll = job.get("poll_after_s")
-            if isinstance(next_poll, (int, float)) and not isinstance(next_poll, bool):
-                poll = _clamp_poll_interval(float(next_poll))
+            poll = _poll_interval(job.get("poll_after_s"), poll)
 
 
 # Owner-side housekeeping files that must never enter the published
@@ -635,6 +629,9 @@ def publish(
 
     url = f"{publish_url.rstrip('/')}/upload"
     status, raw = minds_request_with_status(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    # The encoded bundle is no longer needed; drop it before a poll that may
+    # hold this frame for minutes (cowork-server runs publishes in threads).
+    del payload, payload_dict
     if status == 202:
         accepted = json.loads(raw)
         if on_job_accepted is not None:
@@ -642,7 +639,7 @@ def publish(
         result = _wait_for_publish_job(
             publish_url, accepted["job_id"], api_key,
             budget_s=job_budget_s, ssl_verify=ssl_verify,
-            poll_after_s=_initial_poll_after_s(accepted.get("poll_after_s")),
+            poll_after_s=accepted.get("poll_after_s"),
             report_id=accepted.get("report_id"),
         )
     else:

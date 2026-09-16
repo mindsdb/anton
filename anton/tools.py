@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
+import urllib.error
 import uuid
 from typing import TYPE_CHECKING
 
@@ -40,8 +41,6 @@ def _report_missing_error(exc: Exception) -> bool:
     and double the wait (ENG-1580). PublishJobFailed is therefore never a
     retry trigger, whatever its status_code.
     """
-    import urllib.error
-
     return isinstance(exc, urllib.error.HTTPError) and exc.code == 404
 
 

@@ -56,6 +56,11 @@ def minds_v1_base(base_url: str) -> str:
     return f"{base}/v1"
 
 
+# urllib timeout on every Minds API call, including POST /upload. cowork-server
+# imports it to size its lock TTL around a publish (ENG-1580).
+DEFAULT_REQUEST_TIMEOUT_S = 30
+
+
 def minds_request_with_status(
     url: str,
     api_key: str,
@@ -63,7 +68,7 @@ def minds_request_with_status(
     method: str = "GET",
     payload: bytes | None = None,
     verify: bool = True,
-    timeout: int = 30,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_S,
 ) -> tuple[int, bytes]:
     """HTTP transport for all Minds API calls; returns (status, body).
 
@@ -105,7 +110,7 @@ def minds_request(
     method: str = "GET",
     payload: bytes | None = None,
     verify: bool = True,
-    timeout: int = 30,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_S,
 ) -> bytes:
     """Body-only wrapper over minds_request_with_status (the historical API)."""
     return minds_request_with_status(

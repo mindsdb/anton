@@ -21,7 +21,7 @@ import anton.tools as tools
 from anton.publisher import PublishJobFailed, PublishJobTimeout
 
 
-def _artifact(tmp_path: Path) -> Path:
+def _artifact(tmp_path: Path, *, published: bool = True) -> Path:
     root = tmp_path / "artifacts"
     art = root / "sales"
     art.mkdir(parents=True)
@@ -30,8 +30,9 @@ def _artifact(tmp_path: Path) -> Path:
         "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
         "type": "html-app", "primary": "report.html",
     }))
-    (art / "report.html").write_text("<html></html>")
-    (art / ".published.json").write_text(json.dumps({"report.html": {"report_id": "old-id", "view_url": "https://v/x", "mode": "public"}}))
+    (art / "report.html").write_text("<html><title>Sales</title></html>")
+    if published:
+        (art / ".published.json").write_text(json.dumps({"report.html": {"report_id": "old-id", "view_url": "https://v/x", "mode": "public"}}))
     return art / "report.html"
 
 
@@ -125,15 +126,8 @@ def test_other_errors_do_not_retry(tmp_path, err):
 @pytest.mark.asyncio
 async def test_chat_publish_prints_job_timeout_as_failure_line(tmp_path):
     import anton.chat as chat
+    _artifact(tmp_path, published=False)
     root = tmp_path / "artifacts"
-    art = root / "sales"
-    art.mkdir(parents=True)
-    (art / "metadata.json").write_text(json.dumps({
-        "schemaVersion": 1, "id": "c" * 32, "slug": "sales", "name": "Sales",
-        "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
-        "description": "", "type": "html-app", "primary": "report.html",
-    }))
-    (art / "report.html").write_text("<html><title>Sales</title></html>")
     settings = _settings(root, workspace=tmp_path)
     buf = io.StringIO()
     err = PublishJobTimeout(job_id="j" * 32, report_id="old-id", waited_s=180)
