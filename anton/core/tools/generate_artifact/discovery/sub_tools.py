@@ -150,7 +150,9 @@ FINISH_GATHERING_SCHEMA: dict = {
                 "description": (
                     "Decisions made without the user — including anything "
                     "`Agent's understanding` added to the request — one line "
-                    "each. The brief presents them as proposals."
+                    "each. The brief presents them as proposals. A decision "
+                    "listed under `open_points` does not appear here, and an "
+                    "unused connected source appears in neither list."
                 ),
             },
             "open_points": {

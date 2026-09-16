@@ -159,6 +159,18 @@ def test_gathering_step_does_not_turn_unused_connections_into_a_question():
     message = step_message(sub_tools.STEP_GATHERING, _state())
     assert "connected data source the request does not need is simply not used" in message
     assert "do not ask the user to confirm it" in message
+    # Fourth run: banned from the questions, it resurfaced as an assumption
+    # and reached the brief as a "proposal".
+    assert "not list it under `assumptions` either" in message
+
+
+def test_gathering_step_records_each_decision_in_one_list_only():
+    """Runs 2 and 4: the same decision (difficulty levels) sat under
+    `assumptions` and under `open_points`, so the brief showed it twice —
+    as a proposal and as a question with the same default."""
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "Every decision is recorded once" in message
+    assert "never in both lists" in message
 
 
 def test_gathering_step_names_the_structured_fields():
