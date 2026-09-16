@@ -33,7 +33,8 @@ Events written back on stdout (JSONL):
       `summary`. cowork saves both and seeds `summary` + the uncovered tail next
       turn, instead of resending (and re-summarizing) the whole conversation.
       Mutually exclusive with `history` above, which the same compaction
-      suppresses.
+      suppresses. Omitted on failure too: the next turn re-seeds the same
+      history and compacts it again.
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
 

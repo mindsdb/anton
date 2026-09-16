@@ -566,7 +566,7 @@ def test_a_session_without_history_still_completes():
     assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
 
 
-# ── compaction result (ENG-1827) ─────────────────────────────────────────────
+# ── compaction result ────────────────────────────────────────────────────────
 
 
 class _CompactingSession(_HistorySession):
@@ -607,8 +607,10 @@ def test_a_session_without_last_compaction_still_completes():
 
 
 def test_compaction_not_emitted_when_the_turn_fails():
-    """A failed turn's summary covers messages whose turn never landed; the
-    failure paths skip the pre-terminal emits entirely."""
+    """Same as memory and skills: every pre-terminal emit sits past the point a
+    failure exits from. What that costs is re-compacting next turn, not a wrong
+    cutoff — the count is clamped to the seed, so it cannot reach a message the
+    failed turn produced."""
     session = _CompactingSession(raise_on_stream=RuntimeError("boom"))
     events = _drive(session)
     assert _compaction_events(events) == []
