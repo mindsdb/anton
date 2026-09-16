@@ -157,6 +157,15 @@ def test_write_prd_instruction_promotes_accepted_proposals_and_defaults():
     assert "expanding the same five sections" not in text
 
 
+def test_write_prd_instruction_asks_data_model_to_skip_negatives():
+    """Fifth live run 2026-09-16: the brief already had this rule and was
+    clean, but the PRD's Data model still said "the connected databases
+    are not used" — the kickoff's connections section is in its history."""
+    text = prd._WRITE_PRD_INSTRUCTION
+    assert "State only what IS used" in text
+    assert "does NOT use" in text
+
+
 def test_write_prd_instruction_forbids_copying_long_form_source_content():
     """The 2026-08-27 live run retold one article three times (pad -> prd.md
     -> spec.md -> index.html). The PRD gives the structure, not the content.
