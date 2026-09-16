@@ -44,11 +44,16 @@ def test_tech_spec_prompt_targets_spec_md():
 
 
 def test_tech_spec_prompt_pins_the_stack():
-    system, _ = prompts.build_tech_spec_prompt(_state())
-    assert "FastAPI" in system
-    assert "Python >= 3.12" in system
-    assert "/api/*" in system
-    assert "never mention a port number" in system
+    """The stack block lives in the step instruction now, so the hot path —
+    which never saw the cold-start system prompt — gets it too."""
+    system, user = prompts.build_tech_spec_prompt(_state())
+    joined = system + user
+    assert "FastAPI" in joined
+    assert "Python >= 3.12" in joined
+    assert "/api/*" in joined
+    instruction = prompts.build_tech_spec_instruction(_state())
+    assert prompts._TECH_SPEC_STACK in instruction
+    assert "never mention a port number" in joined
     # The generator rules must state the target runtime too.
     assert "Python >= 3.12" in prompts._BACKEND_RULES
 
@@ -384,30 +389,59 @@ def test_role_is_the_composition_of_both_halves():
     assert prompts._ROLE_WRITE in prompts._ROLE
 
 
-def test_tech_spec_is_compact_for_html_app_with_prd():
+def test_tech_spec_instruction_refuses_to_restate_a_prd_it_has():
     """A full spec next to a confirmed PRD is near-pure duplication (measured
-    2026-08-27: 190 s / 13k output tokens restating a 20 KB PRD), and
-    `_spec_context` then carries both into every generation prompt."""
-    system, _ = prompts.build_tech_spec_prompt(
+    2026-08-27: 190 s / 13k output tokens restating a 20 KB PRD; seventh live
+    run 2026-09-16: a 5.5 KB spec for a 2.1 KB PRD, five of eight sections a
+    retelling), and `_spec_context` carries both into every generation
+    prompt. The rule is in the INSTRUCTION, because the hot path never saw
+    the cold-start system prompt where it used to live."""
+    instruction = prompts.build_tech_spec_instruction(
         _state(artifact_type="html-app", is_fullstack=False, prd="# PRD\nGoal: x")
     )
-    assert "do\nNOT restate it" in system or "do NOT restate it" in system
-    assert "Implementation notes" in system
+    assert "Do not restate the PRD" in instruction
+    assert "Implementation notes" in instruction
+    assert "No acceptance criteria" in instruction
+    assert "Do not call any tool" in instruction
 
 
-def test_tech_spec_stays_full_without_prd():
-    system, _ = prompts.build_tech_spec_prompt(
+def test_tech_spec_instruction_drops_the_no_restate_rule_without_a_prd():
+    """Nothing to restate — the rule would only confuse."""
+    instruction = prompts.build_tech_spec_instruction(
         _state(artifact_type="html-app", is_fullstack=False)
     )
-    assert "Implementation notes" not in system
+    assert "Do not restate the PRD" not in instruction
+    assert "Implementation notes" in instruction
 
 
-def test_tech_spec_stays_full_for_fullstack_even_with_prd():
-    """Fullstack specs feed the API design — the compact form is html-app only."""
-    system, _ = prompts.build_tech_spec_prompt(
+def test_tech_spec_instruction_adds_a_backend_section_for_fullstack():
+    """Fullstack specs feed the API design: they get a `## Backend` section
+    on top of the shared rules, not a licence to retell the PRD."""
+    fullstack = prompts.build_tech_spec_instruction(
         _state(artifact_type="fullstack-stateless-app", is_fullstack=True, prd="# PRD")
     )
-    assert "Implementation notes" not in system
+    html = prompts.build_tech_spec_instruction(
+        _state(artifact_type="html-app", is_fullstack=False, prd="# PRD")
+    )
+    assert "## Backend" in fullstack and "/api/*" in fullstack
+    assert "## Backend" not in html
+    assert "Do not restate the PRD" in fullstack
+
+
+def test_tech_spec_instruction_leaves_the_frontends_design_rules_alone():
+    """Seventh live run: the spec spent lines on palette, flip timing and a
+    breakpoint the generator's own `_DESIGN_RULES` already decide."""
+    instruction = prompts.build_tech_spec_instruction(_state(prd="# PRD"))
+    assert "frontend's own design rules" in instruction
+    assert "theme, fonts, chart library" in instruction
+
+
+def test_cold_and_hot_tech_spec_paths_ask_for_the_same_document():
+    """The cold-start prompt is the assembled context plus the very same
+    instruction the hot path sends — one text, one set of rules."""
+    st = _state(artifact_type="html-app", is_fullstack=False, prd="# PRD")
+    _, user = prompts.build_tech_spec_prompt(st)
+    assert user.endswith(prompts.build_tech_spec_instruction(st))
 
 
 def test_role_says_verification_is_not_the_models_job():

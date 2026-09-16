@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from anton.core.llm.provider import StreamComplete
-from anton.core.tools.generate_artifact import engine, orchestrator
+from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.state import (
     SPEC_MAX_TOKENS,
     SPEC_MAX_TOKENS_RETRY,
@@ -346,6 +346,12 @@ async def test_the_spec_node_continues_the_history_when_there_is_one(tmp_path, m
     assert seen["tools"] == state.pipeline_tools
     # No restating of a context the conversation already holds.
     assert "A dashboard." not in seen["user"]
+    # ...but the step's own rules travel in the instruction: this is the only
+    # step-specific text the hot path ever sees (seventh live run 2026-09-16
+    # ran on a bare "write the specification now" and retold the PRD).
+    assert seen["user"] == prompts.build_tech_spec_instruction(state)
+    assert prompts._TECH_SPEC_STACK in seen["user"]
+    assert "Implementation notes" in seen["user"]
 
 
 def test_the_tech_spec_ask_demands_the_source_material_be_carried_forward():
@@ -361,3 +367,20 @@ def test_the_tech_spec_ask_demands_the_source_material_be_carried_forward():
     assert TECH_SPEC_CARRY_FORWARD in instruction
     assert "LAST step" in TECH_SPEC_CARRY_FORWARD
     assert "verbatim" in TECH_SPEC_CARRY_FORWARD
+
+
+def test_the_carry_forward_names_what_actually_reaches_the_build_step():
+    """The old text said "nothing else from above reaches them". False —
+    `_spec_context` hands the generators the brief, the PRD verbatim, the
+    exec record and the web excerpts — and it pushed the model to carry the
+    PRD forward word for word. The accurate list is what makes "carry forward
+    only what they cannot get elsewhere" mean something."""
+    from anton.core.tools.generate_artifact.discovery.notes import EXEC_OUTPUT_MAX
+    from anton.core.tools.generate_artifact.prompts import TECH_SPEC_CARRY_FORWARD
+
+    text = TECH_SPEC_CARRY_FORWARD
+    assert "nothing else from above" not in text
+    assert "the PRD verbatim" in text
+    assert f"first {EXEC_OUTPUT_MAX} characters" in text
+    assert "do NOT receive this conversation" in text
+    assert "cannot get elsewhere" in text

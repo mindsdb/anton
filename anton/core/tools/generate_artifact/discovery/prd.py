@@ -1,9 +1,10 @@
 """Phase C: expand the confirmed brief into `prd.md` and save it.
 
 The document stays on disk as the human-readable record of what the user
-agreed to. It is no longer the channel the generator reads its requirements
-from — that is `spec.md` on the hot path and `discovery.json` on a cold
-start — which is why its mandate can shrink.
+agreed to, and `prd_section` hands it verbatim to the spec and generation
+nodes as the authoritative requirements source. What shrank is its mandate,
+not its reach: connection code and source material travel through
+`data_notes` / `web_notes`, and the tech spec is told not to restate it.
 """
 
 from __future__ import annotations

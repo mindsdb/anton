@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .discovery.notes import EXEC_OUTPUT_MAX
+
 # The body markers are quoted to the model in several places here and parsed in
 # `sub_tools.extract_file_body`; every surface reads the one constant, because a
 # literal that drifts breaks the protocol silently.
@@ -1045,68 +1047,112 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
 """
 
 
-# html-app with a confirmed PRD: the PRD already fixes goal, data model,
-# functional and UI/UX requirements, and `_spec_context` hands it to the
-# generator verbatim NEXT TO this document. A full spec there is almost pure
-# duplication — measured 2026-08-27: 190 s and 13k output tokens to restate a
-# 20 KB PRD as a 35 KB spec, which then rode into every generation prompt.
-_TECH_SPEC_COMPACT = """\
-A user-confirmed PRD is provided below. It is the authoritative requirements
-source, and the generator receives it VERBATIM alongside your document — so do
-NOT restate it: no retelling of its content, requirements, data, copy or
-structure. Write ONLY what the PRD does not already say:
-- `## Insights` — as described above, when the artifact shows data.
-- `## Implementation notes` — component breakdown, rendering and interaction
-  details, tricky parts, edge cases. Terse bullet points, no prose.
-Keep the whole document SHORT — it complements the PRD instead of replacing
-it, and every line you write is context the generator must carry."""
+# Everything the spec writer is told lives in the step INSTRUCTION, not in a
+# system prompt: on the hot path the node continues the phases A-D history
+# under the shared pipeline system prompt (part of the cached prefix, so it
+# cannot carry step-specific text), and the seventh live run of 2026-09-16
+# showed what a bare "write the specification now" produces next to a
+# confirmed PRD — a 5.5 KB retelling of a 2.1 KB PRD, eight sections of which
+# five restated the PRD and one (acceptance criteria) restated it a third
+# time, riding into every generation round as 60 % of the frontend context.
+# The rules below used to sit in the cold-start system prompt only, where no
+# live run ever read them.
+
+# What the code-writing steps actually receive next to spec.md — see
+# `orchestrator._spec_context`. Stated exactly, because the previous wording
+# ("nothing else from above reaches them") was false and pushed the model to
+# carry the PRD forward verbatim.
+TECH_SPEC_CARRY_FORWARD = (
+    "This is the LAST step that sees this conversation. Next to your "
+    "document, the code-writing steps receive the brief, the PRD verbatim, "
+    "the scratchpad cells run in this pipeline (code plus the first "
+    f"{EXEC_OUTPUT_MAX} characters of each printed output) and short excerpts "
+    "of the web pages read. They do NOT receive this conversation, full "
+    "scratchpad outputs or full page texts. So carry forward verbatim only "
+    "what the build step needs and cannot get elsewhere: exact figures and "
+    "computed values, quotes to display, image URLs, the source link, the "
+    "full text of anything the artifact must reproduce exactly. Do not "
+    "paraphrase what must be reproduced exactly."
+)
+
+_TECH_SPEC_NO_RESTATE = (
+    "- Do not restate the PRD: no retelling of its goal, requirements, data "
+    "model, copy or structure. Where the PRD decides something, do not "
+    "repeat it."
+)
+
+_TECH_SPEC_CONTENT = (
+    "## Content\n"
+    "- `## Insights`: only when the artifact shows data to a human (a "
+    "dashboard, report or any charted view). One line each, per chart or "
+    "element: `<element>: <what it conveys and why it matters>`. A checklist, not "
+    "prose, no design discussion. It tells the frontend generator what each "
+    "visual is FOR.\n"
+    "- `## Implementation notes`: component breakdown, state, interaction "
+    "details, timings, edge cases, exact UI strings. Terse bullets. Skip what "
+    "the frontend's own design rules already decide (theme, fonts, chart "
+    "library); name only what is specific to this artifact."
+)
+
+_TECH_SPEC_BACKEND = (
+    "- `## Backend` (fullstack types): the endpoints under `/api/*`, the data "
+    "flow between frontend, backend and the external sources, and for a "
+    "stateful app the STATE collections with what each stores."
+)
+
+_TECH_SPEC_EXCLUSIONS = (
+    "- No acceptance criteria, no restated constraints, no "
+    "technology-selection section."
+)
+
+
+def build_tech_spec_instruction(state) -> str:
+    """The step message for `make_tech_spec`, complete in itself.
+
+    On the hot path this is the ONLY step-specific text the model sees (the
+    system prompt is the shared pipeline one); `build_tech_spec_prompt`
+    prepends the assembled context for the cold-start path, where there is
+    no history to have seen it. Tolerates a bare object — the only two
+    attributes read are optional.
+    """
+    has_prd = bool((getattr(state, "prd", "") or "").strip())
+    fullstack = bool(getattr(state, "is_fullstack", False)) or str(
+        getattr(state, "artifact_type", "")
+    ).startswith("fullstack-")
+    reach = ["## What reaches the build step", TECH_SPEC_CARRY_FORWARD]
+    if has_prd:
+        reach.append(_TECH_SPEC_NO_RESTATE)
+    content = [_TECH_SPEC_CONTENT]
+    if fullstack:
+        content.append(_TECH_SPEC_BACKEND)
+    content.append(_TECH_SPEC_EXCLUSIONS)
+    return (
+        "## Your task\n"
+        "Write the technical specification (`spec.md`) for the build. Do not "
+        "call any tool. Reply with the document only, as GitHub-flavoured "
+        "markdown, no code fence around the whole document.\n\n"
+        + "\n".join(reach)
+        + "\n\n"
+        + "\n".join(content)
+        + "\n\n## Fixed stack\n"
+        + _TECH_SPEC_STACK
+        + "\n\nKeep the whole document short: it complements the PRD, and "
+        "every line is context the build step carries on every round."
+    )
 
 
 def build_tech_spec_prompt(state) -> tuple[str, str]:
+    """Cold-start form: the assembled context plus the same instruction the
+    hot path sends, so both paths ask for the same document."""
     system = (
         _DATA_CONTEXT_HEADER
-        + "You are the `make_tech_spec` node. Write a detailed technical "
-        "specification for building this artifact — the backend behaviour (if a "
-        "backend is needed) and the frontend behaviour, screens, and data flow. "
-        "Base it on the brief and the gathered data. Output GitHub-flavoured "
-        "Markdown only (no code fences around the whole document). This document "
-        "will be saved to `spec.md` and handed to the backend and frontend "
-        "generators.\n\n"
-        "If the artifact shows data to a human (a dashboard, report or any "
-        "charted view), OPEN the specification with an `## Insights` section: "
-        "one line each, `<chart or element>: <the insight it conveys and why it "
-        "matters>`. Terse — a checklist, not prose, no design discussion. It "
-        "tells the frontend generator what each visual is FOR, which is the "
-        "difference between a polished page and a pile of charts.\n\n"
-        + (
-            _TECH_SPEC_COMPACT + "\n\n"
-            if state.artifact_type == "html-app" and getattr(state, "prd", "")
-            else ""
-        )
-        + _TECH_SPEC_STACK
+        + "You are the `make_tech_spec` node. Your document is saved to "
+        "`spec.md` and handed to the backend and frontend generators next to "
+        "the material below; the instruction at the end of the user message "
+        "says what goes into it."
     )
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"
         + build_tech_spec_instruction(state)
     )
     return system, user
-
-
-TECH_SPEC_CARRY_FORWARD = (
-    "This is the LAST step that can see the material gathered earlier in "
-    "this conversation. The code-writing steps that follow start from this "
-    "specification and a short set of notes — nothing else from above "
-    "reaches them. Carry forward everything they will need verbatim: exact "
-    "figures, quotes to display, image URLs, the source link. Do not "
-    "paraphrase what must be reproduced exactly."
-)
-
-
-def build_tech_spec_instruction(state) -> str:
-    """The task half of the tech-spec ask, without restating the context.
-
-    On the hot path the context is already in the shared history, so only
-    this travels; `build_tech_spec_prompt` prepends the assembled context for
-    the cold-start path, where there is no history to have seen it.
-    """
-    return "Write the technical specification now.\n\n" + TECH_SPEC_CARRY_FORWARD
