@@ -513,9 +513,9 @@ class TestStripHtml:
     def test_block_tags_get_newline_separation(self):
         html = "<p>one</p><p>two</p>"
         out = _strip_html(html)
-        assert "one" in _text(out) and "two" in _text(out)
+        assert "one" in out and "two" in out
         # Some kind of separator between paragraphs (newline or blank line).
-        assert "\n" in _text(out)
+        assert "\n" in out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -775,8 +775,8 @@ class TestWebFetchDoesNotPoisonTheErrorStreak:
             out = ChatSession._apply_error_tracking(
                 sess, text, "web_fetch", streak, nudged, ok=ok
             )
-            nudge = nudge or RESILIENCE_NUDGE in _text(out)
-            breaker = breaker or "SYSTEM: The 'web_fetch' tool has failed" in _text(out)
+            nudge = nudge or RESILIENCE_NUDGE in out
+            breaker = breaker or "SYSTEM: The 'web_fetch' tool has failed" in out
         return streak.get("web_fetch", 0), nudge, breaker
 
     def test_successful_pages_mentioning_failure_do_not_climb(self):

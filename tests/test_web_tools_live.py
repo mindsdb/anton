@@ -502,18 +502,20 @@ class TestExaLive:
         """Direct adapter call — the format helper formats real hits."""
         from anton.core.tools.web_tools import _search_exa
 
-        out = await _search_exa(
+        # `_search_exa` returns a `_SearchResult` since ENG-2677; the
+        # assertions below are about the formatted text.
+        out = (await _search_exa(
             query="Anthropic Claude",
             api_key=os.environ["EXA_API_KEY"],
             max_results=3,
-        )
+        )).text
 
-        assert "Web search results for: 'Anthropic Claude'" in _text(out)
+        assert "Web search results for: 'Anthropic Claude'" in out
         # At least one https:// URL should appear in the formatted output.
         assert _has_https_url_line(out)
         # And the markdown numbering means we got real hits, not the "no
         # results" branch.
-        assert "1. **" in _text(out)
+        assert "1. **" in out
 
     @pytest.mark.asyncio
     async def test_handler_dispatch_via_session(self):
@@ -530,7 +532,7 @@ class TestExaLive:
         out = await handle_web_search_fallback(
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
-        assert _has_https_url_line(out)
+        assert _has_https_url_line(_text(out))
         assert "Anthropic Claude" in _text(out)  # query echoed in the header
 
     @pytest.mark.asyncio
@@ -561,15 +563,16 @@ class TestBraveLive:
     async def test_search_returns_real_results(self):
         from anton.core.tools.web_tools import _search_brave
 
-        out = await _search_brave(
+        # `_search_brave` returns a `_SearchResult` since ENG-2677.
+        out = (await _search_brave(
             query="Anthropic Claude",
             api_key=os.environ["BRAVE_API_KEY"],
             max_results=3,
-        )
+        )).text
 
-        assert "Web search results for: 'Anthropic Claude'" in _text(out)
+        assert "Web search results for: 'Anthropic Claude'" in out
         assert _has_https_url_line(out)
-        assert "1. **" in _text(out)
+        assert "1. **" in out
 
     @pytest.mark.asyncio
     async def test_handler_dispatch_via_session(self):
@@ -584,7 +587,7 @@ class TestBraveLive:
         out = await handle_web_search_fallback(
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
-        assert _has_https_url_line(out)
+        assert _has_https_url_line(_text(out))
         assert "Anthropic Claude" in _text(out)
 
     @pytest.mark.asyncio
