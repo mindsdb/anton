@@ -430,13 +430,19 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "- `slug`: the artifact slug from a prior `create_artifact` call.\n"
         "- `user_request`: the user's request, as close to their original "
         "wording as possible.\n"
-        "- `agent_understanding`: how you understand the task, based on the "
-        "whole conversation so far.\n"
+        "- `agent_understanding`: what the user asked for, in your words — "
+        "only what they said or what plainly follows from it. Do NOT add "
+        "features, screens, mechanics or styling of your own: the pipeline "
+        "proposes those to the user itself, and anything you put here is "
+        "shown to them as a proposal they have to read and accept. One or "
+        "two sentences is the normal size.\n"
         "- `known_data` (optional): anything already known about the data "
         "needed — descriptions, or scratchpad references (pad name, cell) "
         "if you already fetched something.\n"
-        "- `user_preferences` (optional): relevant known preferences (style, "
-        "preferred APIs, etc.).\n\n"
+        "- `user_preferences` (optional): preferences the user stated "
+        "themselves, in this or an earlier conversation (language, style, "
+        "preferred APIs). Never infer a preference from an artifact you "
+        "built before — its features were your choices, not theirs.\n\n"
         "Returns a `status`:\n"
         '- `generated` — done. `files_written` are the artifact\'s own files '
         "(report those), `internal_files` are generation inputs like "
@@ -473,10 +479,12 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
             "agent_understanding": {
                 "type": "string",
                 "description": (
-                    "How you understand the task, from the whole "
-                    "conversation. If the user asked for a change after "
-                    "seeing the brief, put the change here and keep "
-                    "`user_request` unchanged."
+                    "What the user asked for, in your words: only what they "
+                    "said or what plainly follows from it, one or two "
+                    "sentences. Do not add features, mechanics or styling of "
+                    "your own — the pipeline proposes those to the user. If "
+                    "the user asked for a change after seeing the brief, put "
+                    "the change here and keep `user_request` unchanged."
                 ),
             },
             "known_data": {
@@ -490,8 +498,10 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
             "user_preferences": {
                 "type": "string",
                 "description": (
-                    "Relevant known user preferences (style, preferred APIs, "
-                    "etc.)."
+                    "Preferences the user stated themselves, in this or an "
+                    "earlier conversation (language, style, preferred APIs). "
+                    "Never infer a preference from an artifact you built "
+                    "before — its features were your choices, not theirs."
                 ),
             },
         },

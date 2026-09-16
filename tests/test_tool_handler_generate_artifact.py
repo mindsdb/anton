@@ -272,6 +272,27 @@ def test_the_tool_schema_has_no_context_parameter():
     }
 
 
+def test_the_soft_input_fields_forbid_the_outer_agent_from_inventing_scope():
+    """Five live runs on an eight-word request: the outer agent put ten
+    features into `agent_understanding` and, by the fifth run, wrote into
+    `user_preferences` that the user "likes combo scoring and localStorage
+    records" — features it had itself built the time before. The pipeline
+    labelled all of it as proposals, but seven proposals on a short
+    request are accepted unread. The fix has to be at the source."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    props = GENERATE_ARTIFACT_TOOL.input_schema["properties"]
+    understanding = props["agent_understanding"]["description"]
+    assert "only what they said" in understanding
+    assert "Do not add features" in understanding
+    preferences = props["user_preferences"]["description"]
+    assert "stated themselves" in preferences
+    assert "Never infer a preference from an artifact you built before" in preferences
+    # The prose description carries the same two rules.
+    assert "Do NOT add features" in GENERATE_ARTIFACT_TOOL.description
+    assert "Never infer a preference" in GENERATE_ARTIFACT_TOOL.description
+
+
 def test_generate_prd_is_no_longer_a_tool():
     import anton.core.tools.tool_defs as td
 
