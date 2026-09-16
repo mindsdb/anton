@@ -166,7 +166,9 @@ _GATHERING_INSTRUCTION = (
 _REDRAW_SUFFIX = (
     "\n\nThe user has already seen a brief and asked for a change; the "
     "correction is in this call's updated understanding. Redraw the brief "
-    "with the correction applied.\n\n"
+    "with the correction applied. A correction can accept or reject a "
+    "proposal or answer a question: whatever it settles leaves Proposals "
+    "or Questions and, if kept, becomes a requirement.\n\n"
     "Then call `finish_gathering` to re-state the artifact type and the data "
     "sources the corrected artifact needs. This is REQUIRED: if the "
     "correction introduces a source nobody has fetched yet, that call is the "

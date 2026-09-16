@@ -276,6 +276,40 @@ def test_draft_brief_instruction_forbids_describing_the_input_affordance():
     assert "do not describe how to answer" in lowered
 
 
+def test_draft_brief_instruction_routes_assumptions_and_open_points_to_their_own_sections():
+    """Live run 2026-09-16: the brief showed gathering's assumptions as
+    requirements and dropped both open points, so the user accepted a
+    brief that hid what was decided for them."""
+    text = brief._DRAFT_BRIEF_INSTRUCTION
+    assert "what the gathering step recorded above" in text
+    # The brief step must not invite the call (see test_discovery_prompts).
+    assert "finish_gathering" not in text
+    assert "## Assumptions recorded earlier" in text  # cold-start input
+    assert "- Proposals — one line per `assumption`" in text
+    assert "- Questions — one line per `open_point`" in text
+    assert "default that applies if the user simply continues" in text
+    assert "Do NOT add anything from `assumptions` here" in text
+
+
+def test_draft_brief_instruction_says_continuing_accepts_the_defaults():
+    """Accept is the default answer, so a question without a default is a
+    question nobody answers. The brief has to say what continuing means."""
+    lowered = brief._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "if the user continues, the proposals and the defaults above are used" in lowered
+
+
+def test_draft_brief_instruction_carries_no_example_that_can_leak():
+    """Live run 2026-09-16: "the device's system clock" from the old Data
+    model example surfaced verbatim in a brief for a card game."""
+    lowered = brief._DRAFT_BRIEF_INSTRUCTION.lower()
+    assert "system clock" not in lowered
+    assert "clock face" not in lowered
+
+
+def test_draft_brief_instruction_pins_the_language_to_the_request():
+    assert "same language as the user request" in brief._DRAFT_BRIEF_INSTRUCTION
+
+
 async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):
     """A bare Enter (no selection, no free text) must resolve to "accept",
     not the channel's own default of "cancelled" — accepting the brief as

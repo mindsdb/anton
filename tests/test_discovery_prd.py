@@ -147,6 +147,16 @@ def test_write_prd_instruction_also_forbids_process_meta_commentary():
 
 
 
+def test_write_prd_instruction_promotes_accepted_proposals_and_defaults():
+    """The brief now separates proposals and questions from requirements;
+    once accepted they have to become requirements, or the PRD loses them
+    the way the 2026-09-16 run lost both open points."""
+    text = prd._WRITE_PRD_INSTRUCTION
+    assert "Proposals are accepted" in text
+    assert "the stated default is the decision" in text
+    assert "expanding the same five sections" not in text
+
+
 def test_write_prd_instruction_forbids_copying_long_form_source_content():
     """The 2026-08-27 live run retold one article three times (pad -> prd.md
     -> spec.md -> index.html). The PRD gives the structure, not the content.
