@@ -94,21 +94,9 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
                 errors.append(f"Backend call must use the /api/* prefix, got: {path!r}")
                 break
 
-    # 5b. Script-tag integrity — the "JS never runs" class. An opening
-    # `<script` with no closing `</script` anywhere is an error. So is an
-    # underscore variant (`<_script`, `</_script`): the transport used to
-    # escape script tags that way for the gateway WAF (ENG-1986, removed
-    # 2026-09-16 once the WAF stopped blocking them), and a page that carried
-    # the residue had all of its JavaScript silently disabled (2026-08-27).
-    # The prompt no longer mentions underscores — the model cannot produce
-    # them unless it reads them — so this check is a guard, not a contract
-    # the model is asked to keep.
-    if re.search(r"<_/?_?script|</?_script", html, re.I):
-        errors.append(
-            "Frontend contains a mangled script tag (an underscore variant like "
-            "`<_script` or `</_script`); write plain `<script>`/`</script>`."
-        )
-    elif "<script" in low and "</script" not in low:
+    # 5b. Script-tag integrity — the "JS never runs" class: an opening
+    # `<script` with no closing `</script` anywhere.
+    if "<script" in low and "</script" not in low:
         errors.append("Frontend opens a <script> block but never closes it with </script>.")
 
     # 6. Forbidden globals / CSS.
