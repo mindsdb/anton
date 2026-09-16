@@ -326,7 +326,22 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         # failed as "truncated" because the TRANSCRIPT was clipped, not
         # the answer.
         "long_complete_reply": "COMPLETE",
+        # ENG-2686: INCOMPLETE here IS the incident — the honest N/D reply
+        # was force-continued into invented fares. And the three risk
+        # controls guard the over-correction: a one-shot give-up must not
+        # become STUCK, a requested estimate and a computed total must not
+        # become "unsourced".
+        "honest_unobtainable_data": "STUCK",
+        "one_attempt_give_up": "INCOMPLETE",
+        "user_requested_estimate": "COMPLETE",
+        "computed_total_not_verbatim": "COMPLETE",
+        # And the shadow-replay finding: a failed attempt followed by asking
+        # the user is WAITING. INCOMPLETE here IS ENG-716's incident.
+        "asks_user_after_one_failed_attempt": "WAITING",
     }
+    assert set(single) | {"implied_success_data_never_arrived", "disclaimered_fabrication"} == set(by_name), (
+        "a new case was added without deciding here whether it is single-valued"
+    )
     for name, verdict in single.items():
         assert by_name[name].acceptable == (verdict,), (
             f"{name} must accept only {verdict}; the alternative label IS the "
@@ -334,24 +349,32 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         )
 
 
-def test_only_the_hallucinated_success_case_accepts_two_verdicts():
-    """One deliberate exception, and it must not spread quietly.
+def test_only_the_hallucinated_success_cases_accept_two_verdicts():
+    """Two deliberate exceptions, both the same invariant, and it must not
+    spread quietly.
 
     ENG-1134's safeguard is "never accept a hallucinated success as done", which
-    both INCOMPLETE and STUCK satisfy. COMPLETE and WAITING must never be
-    acceptable there — those are the failure.
+    both INCOMPLETE and STUCK satisfy. ENG-2686 added the disclaimered variant
+    of the same incident (invented figures passed as COMPLETE behind an
+    "indicative" label). COMPLETE and WAITING must never be acceptable in
+    either — those are the failure.
     """
     multi = [c for c in ev._CASES if len(c.acceptable) > 1]
 
-    assert [c.name for c in multi] == ["implied_success_data_never_arrived"], (
-        f"exactly one case may accept multiple verdicts; found "
+    assert [c.name for c in multi] == [
+        "implied_success_data_never_arrived",
+        "disclaimered_fabrication",
+    ], (
+        f"exactly two cases may accept multiple verdicts; found "
         f"{[c.name for c in multi]}"
     )
-    acceptable = set(multi[0].acceptable)
-    assert acceptable == {"INCOMPLETE", "STUCK"}
-    assert not acceptable & {"COMPLETE", "WAITING"}, (
-        "accepting COMPLETE or WAITING here would delete the ENG-1134 safeguard"
-    )
+    for case in multi:
+        acceptable = set(case.acceptable)
+        assert acceptable == {"INCOMPLETE", "STUCK"}, case.name
+        assert not acceptable & {"COMPLETE", "WAITING"}, (
+            f"{case.name}: accepting COMPLETE or WAITING here would delete the "
+            "hallucinated-success safeguard"
+        )
 
 
 def test_the_recovered_case_asks_one_unambiguous_question():
@@ -536,3 +559,34 @@ def test_a_served_id_cannot_inject_lines_into_the_report(alias):
     assert recorded is not None, "a poisoned id must still be recorded, not dropped"
     assert "\n" not in recorded, f"newline survived sanitisation: {recorded!r}"
     assert len(recorded) <= 80, "the sanitiser's length cap did not apply"
+
+
+def test_only_the_one_attempt_control_carries_a_pass_rate_threshold():
+    """The pass-rate path must not spread quietly either.
+
+    ENG-1211 allowed a case to record a pass rate over N with a documented
+    threshold when the verdict is measurably not stable. ENG-2686 took that
+    path for exactly one case, with the measured rates in its comment. Every
+    incident case stays N-of-N — a fabrication fixture that passes "most of
+    the time" ships the fabrication the rest of the time.
+    """
+    rated = [c for c in ev._CASES if c.min_pass_rate < 1.0]
+    assert [c.name for c in rated] == ["one_attempt_give_up"], (
+        f"only the one-attempt control may carry a threshold; found "
+        f"{[c.name for c in rated]}"
+    )
+    case = rated[0]
+    # 11 of 12: passes a ~4% slip, fails the 5/24 regression that motivated it.
+    assert case.min_pass_rate >= 11 / 12
+    assert ev._runs_for(case) == ev._RATE_RUNS >= 12
+    assert ev._required_passes(case, 12) == 11
+    # And a threshold never rounds down to an extra allowed miss.
+    assert ev._required_passes(case, 6) == 6
+
+
+def test_n_of_n_is_still_the_rule_for_every_other_case():
+    for case in ev._CASES:
+        if case.name == "one_attempt_give_up":
+            continue
+        n = ev._runs_for(case)
+        assert ev._required_passes(case, n) == n, case.name
