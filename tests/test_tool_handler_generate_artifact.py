@@ -124,7 +124,7 @@ async def test_handler_forwards_primary_to_generate(monkeypatch, tmp_path):
         def folder_for(self, slug):
             return tmp_path
 
-    monkeypatch.setattr(th, "_artifact_store", lambda session: _Store())
+    monkeypatch.setattr(th, "resolve_artifact_store", lambda session: _Store())
 
     _, out = await _collect(
         object(), {"slug": "a", "user_request": "build it", "agent_understanding": "an app"},

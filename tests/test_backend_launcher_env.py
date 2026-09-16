@@ -179,7 +179,7 @@ async def test_the_generator_launches_with_only_the_declared_credentials(tmp_pat
     # inside the function body, so a module attribute here would never be read
     # and this test would pass on an inert patch.
     monkeypatch.setattr(
-        "anton.core.tools.tool_handlers._artifact_store",
+        "anton.core.tools.tool_handlers.resolve_artifact_store",
         lambda s: SimpleNamespace(
             open=lambda slug: SimpleNamespace(datasources=[ref]),
             update=lambda *a, **k: None,

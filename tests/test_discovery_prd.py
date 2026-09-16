@@ -24,7 +24,7 @@ def _response(content: str) -> LLMResponse:
 
 def _state(artifact_path: Path, **over) -> PrdState:
     # `_workspace.artifacts_dir` defaults to `artifact_path`'s parent so
-    # `_artifact_store(session)` resolves to the same root a test's own
+    # `resolve_artifact_store(session)` resolves to the same root a test's own
     # `ArtifactStore(tmp_path / "artifacts")` uses — needed by the
     # write_prd type-update tests below, harmless for the tests that never
     # reach that branch.

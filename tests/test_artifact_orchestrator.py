@@ -293,7 +293,7 @@ async def test_run_data_terminal_returns_error(tmp_path: Path):
 async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
     st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
     st.gathering_complete = True
-    st.session._workspace = None  # _artifact_store returns None → port update skipped
+    st.session._workspace = None  # resolve_artifact_store returns None → port update skipped
     st.session._llm.generate_object = AsyncMock(
         side_effect=AssertionError("the data phase must not call the model here")
     )

@@ -120,14 +120,14 @@ async def write_prd(state: PrdState) -> str:
     final_type = state.final_artifact_type or state.artifact_type
     if final_type != state.artifact_type:
         # Reuse the exact same store-construction helper the handler used
-        # (`tool_handlers._artifact_store`, keyed off `session._workspace`)
+        # (`tool_handlers.resolve_artifact_store`, keyed off `session._workspace`)
         # instead of guessing the artifacts root back out of `artifact_path`
         # — that guess (`artifact_path.parent`) only holds while
         # `artifact_path == <artifacts_root>/<slug>`, which is true today
         # but is exactly the kind of assumption that breaks silently later.
-        from anton.core.tools.tool_handlers import _artifact_store
+        from anton.core.tools.tool_handlers import resolve_artifact_store
 
-        store = _artifact_store(state.session)
+        store = resolve_artifact_store(state.session)
         if store is not None:
             store.update(state.slug, type=final_type)
 

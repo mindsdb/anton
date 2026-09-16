@@ -436,9 +436,9 @@ async def _declare_datasources(state: GenState, refs: list) -> None:
     """Persist the mapped `DatasourceRef`s into artifact metadata."""
     if not refs:
         return
-    from anton.core.tools.tool_handlers import _artifact_store
+    from anton.core.tools.tool_handlers import resolve_artifact_store
 
-    store = _artifact_store(state.session)
+    store = resolve_artifact_store(state.session)
     if store is not None:
         store.update(state.slug, datasources=refs)
         state.record("declare_datasources", "done", ", ".join(r.slug for r in refs))
@@ -663,9 +663,9 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                     (f for f in result["files_written"] if f.endswith(".html")), None
                 )
                 if actual and actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
-                    from anton.core.tools.tool_handlers import _artifact_store
+                    from anton.core.tools.tool_handlers import resolve_artifact_store
 
-                    store = _artifact_store(state.session)
+                    store = resolve_artifact_store(state.session)
                     if store is not None:
                         store.update(state.slug, primary=actual)
                     state.primary = actual
@@ -784,9 +784,9 @@ def _launch_datasource_env(state: GenState) -> dict[str, str]:
     datasource gets the inherited `DS_*` stripped instead of inheriting them.
     """
     from anton.core.artifacts.backend_launcher import build_datasource_env
-    from anton.core.tools.tool_handlers import _artifact_store
+    from anton.core.tools.tool_handlers import resolve_artifact_store
 
-    store = _artifact_store(state.session)
+    store = resolve_artifact_store(state.session)
     if store is None:
         return {}
     try:
@@ -830,9 +830,9 @@ async def _run_and_verify_app(state: GenState) -> str | None:
             problem = launch
         else:
             port = launch["port"]
-            from anton.core.tools.tool_handlers import _artifact_store
+            from anton.core.tools.tool_handlers import resolve_artifact_store
 
-            store = _artifact_store(state.session)
+            store = resolve_artifact_store(state.session)
             if store is not None:
                 store.update(state.slug, port=port)
             state.record("run_app", "done", f"port {port}")
