@@ -12,6 +12,7 @@ import os
 import tempfile
 import uuid
 from datetime import datetime, timezone
+import logging as _logging
 from pathlib import Path
 
 from typing import TYPE_CHECKING
@@ -36,6 +37,270 @@ def is_user_turn(message: dict) -> bool:
         isinstance(block, dict) and block.get("type") == "tool_result"
         for block in content
     )
+
+
+def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
+    """Re-key replayed tool blocks whose id never survived generation.
+
+    Returns ``(history, repaired_block_count)``; the input list is never
+    mutated (messages that need a change are copied first, so a host that
+    holds the same dicts is not edited underneath it).
+
+    ENG-2420 wrote `tool_use` blocks with ``id: ""`` into stored
+    conversations. Replaying one makes the provider reject the entire request
+    — ``400 Invalid 'input[N].call_id': empty string`` — so every later turn
+    of that conversation fails and it never recovers. Guarding the readers
+    stops NEW ones; this repairs the ones already in users' stored histories,
+    which is why it runs at the single ingress every surface shares
+    (`ChatSessionConfig.initial_history`) rather than in one host.
+
+    **Count-preserving by contract, not by taste.** `ChatSession.last_compaction`
+    reports ``covered_through`` as a positional count into `initial_history`,
+    and the host maps that count onto its own message list (cowork-server's
+    `_persist_history_compaction` does ``tail_start + covered - 1``). Dropping
+    a message here would shift a saved compaction cutoff onto the wrong
+    message and silently drop or duplicate real history on the next turn —
+    a worse bug than the one being fixed, and one that would be blamed on
+    compaction. So blocks are rewritten in place and no message is ever added
+    or removed.
+
+    A tool-reply user message also keeps at least one `tool_result` block, so
+    `is_user_turn` still reads it as a reply rather than a new turn. Rewriting
+    it to plain text would inflate the session's turn count and — in exactly
+    the shape being repaired, where the poisoned turn died and the next
+    message is a real user turn — leave two consecutive user messages, which
+    `_seed_history` and `_validate_history_for_provider` both treat as a
+    provider hazard.
+
+    Pairing uses the adjacent (assistant, user) model because that is the only
+    shape anton writes: a `tool_result` block is only ever built from the
+    `tc.id` of a call in the immediately preceding assistant message. Anything
+    that does not fit it is rewritten to text rather than guessed at.
+    """
+    from anton.core.llm.provider import UNNAMED_REPLAYED_TOOL, usable_call_id
+
+    seen: dict[str, int] = {}
+
+    def _mint(block: dict | None = None) -> str:
+        """A DETERMINISTIC id, derived from what the block already says.
+
+        Not `uuid4`, and that is the whole point. This repair is re-applied on
+        every load and is never written back: cowork-server leaves
+        `history_store` unset, and it persists only `session.history[seed_len:]`
+        — this turn's messages — so the repaired seed never reaches the
+        `messages` table. A random id would therefore differ on every turn,
+        changing the replayed prefix each time and missing the prompt cache on
+        the WHOLE conversation, forever, for exactly the conversations being
+        healed. Byte-stability of the history prefix is an explicit design goal
+        of the host that builds it (see `_stamp_message`, "cache-safe").
+
+        Keyed on content rather than position so a compaction summary being
+        prepended — which shifts every index — does not change the ids of the
+        tail it kept. The occurrence counter disambiguates a conversation that
+        made the identical call twice; note that counter IS positional in
+        effect, so a compaction that drops one of two identical calls does
+        renumber the survivor. That costs one cache miss on a prefix the
+        compaction had already invalidated, so it is not worth engineering
+        around — but the claim is "stable across repeated loads of the same
+        history", not "stable across every edit of it" (review: pnewsam on
+        #471, which correctly caught the earlier wording overstating this).
+        """
+        import hashlib
+        import json as _json
+
+        if block is None:
+            basis = "orphan"
+        else:
+            basis = _json.dumps(
+                [block.get("name") or "", block.get("input")],
+                sort_keys=True, default=str,
+            )
+        seen[basis] = seen.get(basis, 0) + 1
+        digest = hashlib.sha256(f"{basis}|{seen[basis]}".encode()).hexdigest()
+        return f"call_repaired_{digest[:24]}"
+
+    def _render(value) -> str:
+        """The original payload as text, for a placeholder that replaces it.
+
+        Never raises and never truncates: the value was already in history at
+        this size, so carrying it costs nothing new, and a repair that throws
+        away the only record of what a tool did is a worse trade than the
+        unreplayable block it removes.
+        """
+        import json as _json
+
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = [
+                b.get("text", "") if isinstance(b, dict) and b.get("type") == "text"
+                else _json.dumps(b, default=str)
+                for b in value
+            ]
+            return "\n".join(p for p in parts if p)
+        try:
+            return _json.dumps(value, sort_keys=True, default=str)
+        except Exception:  # pragma: no cover - defensive; json is total with default=str
+            return repr(value)
+
+    def _blocks(msg) -> list | None:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        return content if isinstance(content, list) else None
+
+    def _bad(block, field) -> bool:
+        return isinstance(block, dict) and not usable_call_id(block.get(field))
+
+    out = [m for m in history]
+    repaired = 0
+
+    # Names first, and separately: renaming never affects tool_use/tool_result
+    # pairing, so it needs none of the pairing machinery below. Keeping it out
+    # of the `broken` predicate is also what stops the two poisoned shapes from
+    # being conflated — pre-fix anton could write a block with a perfectly
+    # usable id and a blank name (a provider sending a good `call_id` with no
+    # name), and selecting on the id alone let that shape through all three
+    # layers untouched and onto the wire as `name: ''` (review: pnewsam on
+    # anton#471).
+    for i, msg in enumerate(out):
+        blocks = _blocks(msg)
+        if blocks is None or msg.get("role") != "assistant":
+            continue
+        if not any(isinstance(b, dict) and b.get("type") == "tool_use"
+                   and not usable_call_id(b.get("name")) for b in blocks):
+            continue
+        new_blocks = [dict(b) if isinstance(b, dict) else b for b in blocks]
+        for b in new_blocks:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and not usable_call_id(b.get("name")):
+                b["name"] = UNNAMED_REPLAYED_TOOL
+                repaired += 1
+        out[i] = {**msg, "content": new_blocks}
+
+    for i, msg in enumerate(out):
+        blocks = _blocks(msg)
+        if blocks is None or msg.get("role") != "assistant":
+            continue
+        broken = [b for b in blocks
+                  if isinstance(b, dict) and b.get("type") == "tool_use" and _bad(b, "id")]
+        if not broken:
+            continue
+
+        nxt = out[i + 1] if i + 1 < len(out) else None
+        # isinstance BEFORE .get: every other message access in this function
+        # goes through `_blocks`/`_bad`, which are guarded; this one was not,
+        # and a non-dict message directly after a broken assistant message
+        # raised AttributeError straight out of `ChatSession.__init__` —
+        # strictly worse than the 400 being fixed (review: pnewsam on #471).
+        reply_blocks = (
+            _blocks(nxt)
+            if isinstance(nxt, dict) and nxt.get("role") == "user"
+            else None
+        )
+        pairable = reply_blocks is not None and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in reply_blocks
+        )
+
+        new_blocks = [dict(b) if isinstance(b, dict) else b for b in blocks]
+        if not pairable:
+            # Nothing to pair with, so a minted id would be an orphan
+            # `tool_use` — which is its own 400 on Anthropic. Keep the message
+            # and the block COUNT, drop only the call.
+            for pos, b in enumerate(new_blocks):
+                if isinstance(b, dict) and b.get("type") == "tool_use" and _bad(b, "id"):
+                    # The call's name and arguments ride into the placeholder
+                    # rather than being thrown away. On the CLI this is not a
+                    # transient rewrite: both resume paths set `history_store`,
+                    # so `_persist_history` saves the whole list on the next
+                    # turn and the original block is gone for good. Carrying it
+                    # also leaves the model the context of what that turn was
+                    # doing (review: pnewsam on #471).
+                    new_blocks[pos] = {
+                        "type": "text",
+                        "text": (
+                            f"[a tool call to {b.get('name') or 'an unnamed tool'!r} was "
+                            f"recorded without an id and could not be replayed: "
+                            f"{_render(b.get('input'))}]"
+                        ),
+                    }
+                    repaired += 1
+            out[i] = {**msg, "content": new_blocks}
+            continue
+
+        minted: list[str] = []
+        for b in new_blocks:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and _bad(b, "id"):
+                b["id"] = _mint(b)
+                minted.append(b["id"])
+                repaired += 1
+        out[i] = {**msg, "content": new_blocks}
+
+        queue = list(minted)
+        new_reply = [dict(b) if isinstance(b, dict) else b for b in reply_blocks]
+        for b in new_reply:
+            if not queue:
+                break
+            if isinstance(b, dict) and b.get("type") == "tool_result" and _bad(b, "tool_use_id"):
+                b["tool_use_id"] = queue.pop(0)
+                repaired += 1
+        for orphan in queue:
+            # A block, not a message: still count-preserving.
+            new_reply.append({
+                "type": "tool_result",
+                "tool_use_id": orphan,
+                "content": "[no result was recorded for this call]",
+            })
+            repaired += 1
+        out[i + 1] = {**nxt, "content": new_reply}
+
+    # A bad `tool_result` the pass above never claimed has no matching call in
+    # the message before it. Re-keying it alone would orphan it, so it is
+    # rewritten to text — the one case that can change `is_user_turn`, which is
+    # why it is logged rather than done quietly.
+    for i, msg in enumerate(out):
+        blocks = _blocks(msg)
+        if blocks is None or msg.get("role") != "user":
+            continue
+        if not any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   and _bad(b, "tool_use_id") for b in blocks):
+            continue
+        new_blocks = []
+        rewritten = []
+        for b in blocks:
+            if isinstance(b, dict) and b.get("type") == "tool_result" and _bad(b, "tool_use_id"):
+                # Content preserved: a tool result is often the only record of
+                # what the data actually said, and on the CLI this rewrite is
+                # written back to the session file (review: pnewsam on #471).
+                #
+                # Appended AFTER the surviving blocks rather than rewritten in
+                # place: the chat-completions translator emits text blocks as a
+                # `user` message and tool_results as `tool` messages, so a text
+                # block ahead of a good sibling would produce
+                # `[assistant, user, tool]` — a shape OpenAI rejects. Block
+                # count is unchanged either way.
+                rewritten.append({
+                    "type": "text",
+                    "text": (
+                        "[a tool result with no matching call]\n"
+                        f"{_render(b.get('content'))}"
+                    ),
+                })
+                repaired += 1
+            else:
+                new_blocks.append(b)
+        new_blocks.extend(rewritten)
+        out[i] = {**msg, "content": new_blocks}
+        _logging.getLogger(__name__).warning(
+            "ENG-2420: replayed history had a tool_result with no pairable call "
+            "at index %d; rewrote it as text (this message may now count as a "
+            "user turn).", i,
+        )
+
+    if repaired:
+        _logging.getLogger(__name__).warning(
+            "ENG-2420: repaired %d unreplayable tool block(s) in replayed "
+            "history; the conversation would otherwise have been rejected by "
+            "the provider on every turn.", repaired,
+        )
+    return out, repaired
 
 
 class HistoryStore:
