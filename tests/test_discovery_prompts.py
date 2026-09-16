@@ -142,6 +142,15 @@ def test_gathering_step_states_the_task_and_keeps_design_out():
     assert "Put everything the brief needs" not in message
 
 
+def test_gathering_step_defines_open_points_as_ambiguities_not_feature_ideas():
+    """Live run 2026-09-16: both open points were features nobody asked for
+    (high-score table, sound effects) — the no-new-features rule was being
+    bypassed through the question list."""
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "Not ideas for extra features" in message
+    assert "one line" not in message
+
+
 def test_gathering_step_names_the_structured_fields():
     message = step_message(sub_tools.STEP_GATHERING, _state())
     for field_name in ("`data_findings`", "`assumptions`", "`open_points`", "`constraints`"):

@@ -157,9 +157,10 @@ FINISH_GATHERING_SCHEMA: dict = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Decisions only the user can make that were not asked "
-                    "(question budget spent or not worth a question). The "
-                    "brief raises them with the user."
+                    "Ambiguities in the request itself that only the user "
+                    "can settle and that were not asked (question budget "
+                    "spent or not worth a question). Not ideas for extra "
+                    "features. The brief raises them with the user."
                 ),
             },
         },

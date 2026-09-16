@@ -135,8 +135,10 @@ _GATHERING_INSTRUCTION = (
     "2. External data — which sources the artifact will read. For each one, "
     "obtain a real sample in this step (scratchpad for databases, files and "
     "APIs; web_fetch for pages) and record its shape in `data_findings`. If "
-    "the artifact reads no external data, say so in one line.\n"
-    "3. Open points — decisions only the user can make.\n\n"
+    "the artifact reads no external data, say so in `summary`.\n"
+    "3. Open points — places where the request itself is ambiguous and only "
+    "the user can settle it. Not ideas for extra features: a feature nobody "
+    "asked for is neither an open point nor an assumption — leave it out.\n\n"
     "Not part of this step: functional requirements, UI, layout, feature "
     "lists. The brief is drafted on the next step from what you record "
     "here.\n\n"
@@ -157,8 +159,8 @@ _GATHERING_INSTRUCTION = (
     "the language of the user request.\n"
     "- Keep the whole `finish_gathering` call under about 30 lines.\n\n"
     "## When there is no external data\n"
-    "Reply with one line and call `finish_gathering` at once: no scratchpad, "
-    "no web search, no description of the page."
+    "Call `finish_gathering` at once: no scratchpad, no web search, no "
+    "description of the page."
 )
 
 _REDRAW_SUFFIX = (
