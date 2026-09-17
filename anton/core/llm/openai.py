@@ -16,7 +16,6 @@ from anton.utils.datasources import scrub_credentials
 
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
-    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMProvider,
@@ -36,6 +35,7 @@ from .provider import (
     TransientProviderError,
     Usage,
     classify_404,
+    classify_content_rejection,
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
@@ -222,30 +222,23 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             model, message=provider_msg, code=code, status=status_str,
         ) from exc
 
-    # A permanent, content-SHAPED rejection: some block in conversation history
-    # reached the provider in a shape it doesn't parse — not a provider-
-    # availability issue, so retrying the identical request fails identically
-    # every time (ENG-1992). Two dialects recognized: OpenAI Responses' "Invalid
-    # value: 'x'. Supported values are: ..." (param names the offending content
-    # index) and Anthropic's "Input tag 'x' found using 'type' does not match
-    # any of the expected tags". cowork-server's turn-error mapping detects this
-    # type (or its scrubbed class name on the remote path) and repairs the
-    # offending content in the conversation's stored history so the next turn
-    # doesn't resend the same poison — see ContentValidationError's docstring.
-    if etype == "invalid_request_error":
-        provider_msg = str(envelope.get("message") or body.get("message") or "").lower()
-        param = str(envelope.get("param") or body.get("param") or "").lower()
-        _content_shape_error = (
-            (".content[" in param or param.endswith(".content"))
-            or "supported values are" in provider_msg
-            or "does not match any of the expected tags" in provider_msg
-        )
-        if _content_shape_error:
-            raise ContentValidationError(
-                "The model provider rejected part of this conversation's content "
-                "(an attachment or image in an unsupported format). That content "
-                "will be removed automatically so the conversation can continue."
-            ) from exc
+    # A permanent rejection of the request's OWN content — either the wrong
+    # SHAPE (ENG-1992) or too large (ENG-2689). Neither is a provider-
+    # availability issue: retrying the identical request fails identically
+    # every time, because the translation that built the bad block runs fresh
+    # from the same stored history on every call. cowork-server's turn-error
+    # mapping detects the resulting type (or its scrubbed class name on the
+    # remote path) and repairs the conversation's stored history so the next
+    # turn doesn't resend the same poison. The heuristic lives in provider.py
+    # so this mapper and the Anthropic one can't drift apart — before ENG-2689
+    # only this one had the branch, and BYOK Anthropic had the bug untreated.
+    _content = classify_content_rejection(
+        error_type=etype,
+        message=envelope.get("message") or body.get("message"),
+        param=envelope.get("param") or body.get("param"),
+    )
+    if _content is not None:
+        raise _content from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the

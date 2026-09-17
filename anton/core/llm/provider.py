@@ -1136,6 +1136,12 @@ class ContentValidationError(ConnectionError):
     already in conversation history — a schema/shape mismatch (e.g. an image
     block built for the wrong provider), not a provider-availability issue.
 
+    Also the BASE of ``ContentTooLargeError`` (ENG-2689), so callers that want
+    "the provider permanently refused our content, repair the history and stop
+    retrying" should keep testing against THIS type; only callers choosing
+    user-facing copy need to distinguish the subtype, because the remedies
+    differ. Raise the subclass, catch the parent.
+
     Distinct from every other permanent-failure type here in one way that
     matters: retrying the IDENTICAL request fails identically every time,
     because the translation that produced the bad block runs fresh from
@@ -1154,6 +1160,125 @@ class ContentValidationError(ConnectionError):
     def __init__(self, message: str, *, code: str = "content_validation") -> None:
         super().__init__(message)
         self.code = code
+
+
+class ContentTooLargeError(ContentValidationError):
+    """The provider permanently refused the request because content already in
+    history is too BIG for it — an image whose pixel dimensions or byte size
+    exceed what the model accepts (ENG-2689) — rather than the wrong SHAPE.
+
+    Split from its parent for one reason: the remedy differs, and only the user
+    can apply it. A shape mismatch is our own serialization bug, repaired
+    server-side, and "we fixed it, keep going" is honest copy. A size refusal
+    gets the same repair (the offending image is stripped so the conversation
+    is not stuck re-sending it forever), but the user still has to attach
+    something smaller — so telling them it is fixed and they can carry on is
+    not true. Hence a distinct type, and downstream, a distinct card.
+
+    Subclasses ContentValidationError so every existing caller keeps behaving
+    correctly without knowing the subtype exists: the session's no-retry rule
+    and cowork-server's history repair both key on the parent.
+
+    The class NAME is load-bearing. A remote/pod turn crosses the wire as
+    ``"<ExceptionType>: <message>"`` (``anton.cloud_turn.__main__._scrub``), so
+    on the hosted path the type name is the ONLY discriminator the host
+    receives — the ``code`` attribute does not survive the trip.
+    """
+
+    def __init__(self, message: str, *, code: str = "content_too_large") -> None:
+        super().__init__(message, code=code)
+
+
+# Phrases that identify a permanent, content-SHAPED rejection (ENG-1992) in the
+# two dialects we have actually observed. Matched on the provider's prose
+# because no provider gives this a structured code.
+_CONTENT_SHAPE_PHRASES = (
+    "supported values are",
+    "does not match any of the expected tags",
+)
+
+# ...and a content-SIZE rejection (ENG-2689). Observed live as OpenAI's
+# "requires 32400 patches after processing, exceeding the limit of 30000.
+# Please resize the image and try again"; Anthropic phrases the same refusal as
+# "image dimensions exceed max allowed size" / "image exceeds N MB maximum".
+_CONTENT_SIZE_PHRASES = ("resize", "too large", "exceed", "dimension")
+
+# Cap on how much provider prose is quoted back to the user. Long enough for
+# the observed sentence and its remedy, short enough that a provider echoing a
+# chunk of the request can't turn an error card into a wall of text.
+_MAX_PROVIDER_DETAIL_CHARS = 300
+
+
+def _quote_provider(message: str) -> str:
+    """Credential-scrubbed, whitespace-collapsed, length-capped provider prose,
+    safe to show a user. Scrubbed because some dialects echo request content
+    back inside the error message, and this string ends up on screen."""
+    from anton.utils.datasources import scrub_credentials
+
+    detail = " ".join(scrub_credentials(message).split())
+    if len(detail) > _MAX_PROVIDER_DETAIL_CHARS:
+        detail = detail[: _MAX_PROVIDER_DETAIL_CHARS - 1].rstrip() + "\u2026"
+    return detail
+
+
+def classify_content_rejection(
+    *, error_type: str | None, message: str | None, param: str | None = None,
+) -> "ContentValidationError | None":
+    """Classify a 400 that blames the request's OWN content, else None.
+
+    Shared by the OpenAI-compatible and Anthropic status-error mappers for the
+    same reason ``classify_404`` is (ENG-1139): the heuristic and its exact
+    wording must not drift between providers. Before ENG-2689 only the OpenAI
+    mapper had this branch at all, so a BYOK-Anthropic user hit the identical
+    bug with none of the handling.
+
+    Two families, both permanent, both meaning "retrying the identical request
+    fails identically forever":
+
+    * **shape** (ENG-1992) — a content block reached the provider in a form it
+      cannot parse. Our bug; repaired server-side; nothing for the user to do.
+    * **size** (ENG-2689) — an image exceeds the provider's pixel or byte
+      limit. Not our bug; repaired the same way so the conversation survives,
+      but the user must re-attach something smaller.
+
+    Size is tested FIRST because a size refusal can also carry a ``param`` that
+    satisfies the shape test, and the size copy is the more specific of the two.
+
+    Over-matching here is not free: downstream this triggers stripping EVERY
+    image block from the conversation's stored history. So the size family
+    additionally requires the provider to have mentioned an image at all — a
+    400 about, say, a too-long text field must never cost the user their
+    images. Deliberately conservative: an unrecognised 400 keeps its old
+    behaviour rather than risking a destructive false positive.
+    """
+    if (error_type or "").strip().lower() != "invalid_request_error":
+        return None
+
+    raw = message or ""
+    low = raw.lower()
+    par = (param or "").lower()
+
+    if "image" in low and any(phrase in low for phrase in _CONTENT_SIZE_PHRASES):
+        return ContentTooLargeError(
+            "An image in this conversation is too large for the model to "
+            f"accept. The provider said: {_quote_provider(raw)} "
+            "That image will be removed automatically so the conversation can "
+            "continue \u2014 re-attach a smaller or lower-resolution copy if you "
+            "still need it."
+        )
+
+    if (
+        ".content[" in par
+        or par.endswith(".content")
+        or any(phrase in low for phrase in _CONTENT_SHAPE_PHRASES)
+    ):
+        return ContentValidationError(
+            "The model provider rejected part of this conversation's content "
+            "(an attachment or image in an unsupported format). That content "
+            "will be removed automatically so the conversation can continue."
+        )
+
+    return None
 
 
 def classify_404(
@@ -1272,6 +1397,10 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     ProviderOverloadedError,
     ModelUnavailableError,
     ContentValidationError,
+    # Subclass of ContentValidationError, so isinstance() already covered
+    # it — listed anyway because the triage test compares NAMES, which is
+    # what makes a new type fail at authoring time rather than in prod.
+    ContentTooLargeError,
     EndpointConfigurationError,
 )
 

@@ -27,6 +27,7 @@ from .provider import (
     TransientProviderError,
     Usage,
     classify_404,
+    classify_content_rejection,
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
@@ -130,6 +131,23 @@ def _raise_for_status_error(
             message=envelope.get("message") or body.get("message"),
             error_type=envelope.get("type"),
         ) from exc
+
+    # A permanent rejection of the request's OWN content — the wrong SHAPE
+    # (ENG-1992) or an image too large for the model (ENG-2689). Retrying the
+    # identical request fails identically every time, so it must never reach
+    # the transient classifier or the generic "try again in a moment" copy
+    # below. Shared with the openai.py mapper (see classify_content_rejection)
+    # so the heuristic and its wording can't drift: until ENG-2689 this branch
+    # existed only there, which left BYOK Anthropic users with the raw bug —
+    # four identical retries and a message telling them to try again.
+    _env = body.get("error") if isinstance(body.get("error"), dict) else {}
+    _content = classify_content_rejection(
+        error_type=_env.get("type") or body.get("type"),
+        message=_env.get("message") or body.get("message"),
+        param=_env.get("param") or body.get("param"),
+    )
+    if _content is not None:
+        raise _content from exc
 
     # Body `code` in both dialects — the SDK may deliver the wire envelope
     # unmodified, unlike the openai client which peels it.

@@ -40,6 +40,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     CURATED_PROVIDER_ERRORS,
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
@@ -4248,6 +4249,28 @@ class ChatSession:
                     # the auto-retry below sends a malformed history
                     # and we get the same 400 forever.
                     self._seal_dangling_tool_uses("interrupted by error")
+
+                    # A permanent rejection of content already in history
+                    # (ENG-1992 shape, ENG-2689 size). The request is rebuilt
+                    # from the SAME stored history on every attempt, so it is
+                    # byte-identical each time and fails identically each time
+                    # — the provider's own docstring says so. Retrying it spent
+                    # four full requests on a refusal that was permanent by
+                    # construction, injected a "diagnose and fix the issue"
+                    # note the model cannot act on, and delayed by ~34s the
+                    # repair that actually unsticks the conversation.
+                    #
+                    # Raised HERE, after the seal above, rather than with the
+                    # other early-raise types at the top of this handler: the
+                    # failure can land mid-tool-round, and a dangling tool_use
+                    # left in history would 400 the NEXT turn too — turning a
+                    # repairable conversation into a differently-broken one.
+                    if isinstance(_agent_exc, ContentValidationError):
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "content_rejected"
+                        )
+                        raise
+
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to
                         # recover. A TransientProviderError reaching here is a
