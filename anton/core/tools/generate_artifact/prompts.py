@@ -192,6 +192,16 @@ _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
+- STYLING: Tailwind CSS is the recommended way to style the page. Load it
+  once in `<head>` via CDN:
+  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>`
+  and use utility classes for layout, spacing, typography and colour
+  (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a
+  `<style>` block stays allowed wherever utilities fall short — keyframes,
+  chart containers, complex selectors — or when the page is too small to
+  need a framework. No other CSS or JS library: the two CDN scripts named in
+  these rules (Tailwind, ECharts) are the ONLY external resources a page
+  may load.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
@@ -460,7 +470,9 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
 _FRONTEND_RULES = """\
 FRONTEND — `static/index.html`:
 
-- Single self-contained HTML file. Inline all CSS in `<style>`, all JS in `<script>`.
+- Single self-contained HTML file: your own CSS in `<style>`, all JS in
+  `<script>`. The only external resources are the CDN scripts named in the
+  design rules (Tailwind, ECharts).
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -562,9 +574,10 @@ step is `generate_frontend`.
 
 ## Your task
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
-of the artifact folder. Inline all CSS and JS and embed all data in the file.
-Do not reference any other file of the artifact; the only external resource
-allowed is the ECharts `<script>` from the CDN named in the design rules.
+of the artifact folder. Inline your own CSS and all JS and embed all data in
+the file. Do not reference any other file of the artifact; the only external
+resources allowed are the Tailwind and ECharts `<script>` tags from the CDNs
+named in the design rules.
 
 UI text and the `<html lang>` attribute follow the language of the PRD.
 
@@ -1028,7 +1041,8 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
 - The launcher assigns the port at run time: never mention a port number or
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
-  types) with inline CSS/JS — vanilla JavaScript, Apache ECharts for charts.
+  types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
+  CSS where needed), Apache ECharts for charts.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
   document/key-value store keyed by (partition key, sort key) with named
   collections, no scan, no secondary indexes, atomic counters. The spec must

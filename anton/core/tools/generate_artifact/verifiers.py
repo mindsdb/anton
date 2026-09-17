@@ -22,7 +22,11 @@ from .state import VerifyResult
 
 _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
 _BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
-_ECHARTS_CDN = "cdn.jsdelivr.net/npm/echarts"
+# Libraries the design rules let a page load from the network. Matched as
+# substrings of the script URL so a different CDN host or version still
+# passes; anything else is advisory-flagged, since the prompt allows other
+# libraries only when the user asked for them.
+_ALLOWED_CDN_LIBRARIES = ("echarts", "tailwindcss")
 
 _UNIVERSAL_IMPORTANT = re.compile(r"\*\s*\{[^}]*!important")
 # Media queries whose universal `!important` blocks are legitimate practice
@@ -128,10 +132,10 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
     block_tags = re.findall(r"<(?:div|section|table|main|article)\b", low)
     if block_tags and "id=" not in low:
         warnings.append("Significant blocks have no stable `id` attributes.")
-    # Charts via a non-ECharts CDN.
+    # A library loaded from a CDN the design rules do not name.
     for src in _BARE_SCRIPT_SRC.findall(html):
-        if src.startswith("http") and _ECHARTS_CDN not in src and "echarts" not in src:
-            warnings.append(f"Chart/library CDN other than ECharts detected: {src!r} (allowed only if the user asked).")
+        if src.startswith("http") and not any(lib in src.lower() for lib in _ALLOWED_CDN_LIBRARIES):
+            warnings.append(f"Library CDN other than ECharts or Tailwind detected: {src!r} (allowed only if the user asked).")
             break
 
     return VerifyResult(errors=errors, warnings=warnings)

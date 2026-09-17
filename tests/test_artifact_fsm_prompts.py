@@ -225,6 +225,27 @@ def test_visual_rules_carry_the_frontend_verifier_contract():
         assert marker in rules, marker
 
 
+def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
+    """Tailwind via CDN is the recommended styling; a `<style>` block stays
+    allowed, and no other library may be loaded. Both frontend prompts and
+    the spec writer's stack block must agree, or the spec forbids what the
+    frontend step is told to do."""
+    rules = prompts._DESIGN_RULES
+    assert "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4" in rules
+    assert "recommended" in rules
+    assert "Hand-written CSS" in rules
+    assert "ONLY external resources" in rules
+    for text in (
+        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+        prompts._TECH_SPEC_STACK,
+    ):
+        assert "Tailwind" in text
+        assert "ECharts" in text
+    # The spec block no longer says "inline CSS" as if a framework were banned.
+    assert "inline CSS" not in prompts._TECH_SPEC_STACK
+
+
 def test_frontend_rules_pin_static_as_the_only_served_folder():
     assert "static/" in prompts._FRONTEND_RULES
     assert "only" in prompts._FRONTEND_RULES.lower()

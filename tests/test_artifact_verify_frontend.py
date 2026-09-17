@@ -262,3 +262,30 @@ def test_skip_reason_blames_the_run_when_the_browser_exists(monkeypatch, tmp_pat
     reason = browser_check_skip_reason()
     assert reason.startswith("browser configured but the check produced no result")
     assert "8s" in reason
+
+
+TAILWIND_CDN = '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>'
+
+
+def test_tailwind_cdn_is_not_flagged():
+    """The design rules recommend Tailwind via CDN, so the CDN warning must not
+    contradict them — it would ride the retry message next to real errors."""
+    html = GOOD.replace("</head>", TAILWIND_CDN + "</head>")
+    r = verify_frontend(html, is_fullstack=True)
+    assert r.ok, r.errors
+    assert not r.warnings, r.warnings
+
+
+def test_tailwind_play_cdn_v3_is_not_flagged_either():
+    html = GOOD.replace("</head>", '<script src="https://cdn.tailwindcss.com"></script></head>')
+    r = verify_frontend(html, is_fullstack=True)
+    assert not r.warnings, r.warnings
+
+
+def test_other_library_cdn_is_still_a_warning():
+    html = GOOD.replace("</head>", '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script></head>')
+    r = verify_frontend(html, is_fullstack=True)
+    assert r.ok, r.errors
+    assert len(r.warnings) == 1
+    assert "other than ECharts or Tailwind" in r.warnings[0]
+    assert "cdn.plot.ly" in r.warnings[0]

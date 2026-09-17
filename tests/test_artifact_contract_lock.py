@@ -382,8 +382,8 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "z-index")),
     Rule("warnings", "Significant blocks have no stable `id` attributes.",
          _both(_FRONT_BOTH, "stable `id`")),
-    Rule("warnings", "Chart/library CDN other than ECharts detected: ",
-         _both(_FRONT_BOTH, "ECharts")),
+    Rule("warnings", "Library CDN other than ECharts or Tailwind detected: ",
+         _both(_FRONT_BOTH, "ECharts") + _both(_FRONT_BOTH, "Tailwind")),
     # ── verify_frontend_live: html-app only. The page is loaded through
     # file://, where a fullstack frontend's /api/* fetches cannot resolve, so
     # the check is not run there and the frontend prompt need not carry it. ──
