@@ -800,6 +800,11 @@ def build_api_spec_instruction(*, stateless: bool) -> str:
         "none. Where `spec.md` lists none, derive them from the PRD's "
         "functional requirements. `/api/health` is added by the backend "
         "generator on its own and may be left out.\n"
+        "- This document is the ONLY place the request and response shapes "
+        "live: `spec.md` names the endpoints, you decide their fields. Give "
+        "each operation the fields the PRD's requirements and the frontend "
+        "behaviour in `spec.md` need — no more — with the format of every "
+        "value fixed (a string's pattern in words, a number's unit).\n"
         "- For every operation: a one-line `summary`, its path/query "
         "`parameters`, a `requestBody` schema for POST/PUT/PATCH, the `200` "
         "response schema, and any non-200 status the frontend must handle.\n"
@@ -1144,10 +1149,21 @@ _TECH_SPEC_CONTENT = (
     "library); name only what is specific to this artifact."
 )
 
+# The API contract (shapes, fields, formats, examples) lives in ONE place —
+# `openapi.json`, written on the next step. The eighteenth live run
+# (2026-09-17) had spec.md give `GET /api/time` a response shape and the API
+# step give it another (an extra field, a different date format); both
+# generators followed openapi.json, so the app worked, but the two documents
+# disagreed inside the same kickoff. spec.md names the endpoints and the flow;
+# it does not shape them.
 _TECH_SPEC_BACKEND = (
-    "- `## Backend` (fullstack types): the endpoints under `/api/*`, the data "
-    "flow between frontend, backend and the external sources, and for a "
-    "stateful app the STATE collections with what each stores."
+    "- `## Backend` (fullstack types): the endpoints under `/api/*` as a list, "
+    "one line each — `METHOD /api/path: what it is for` — plus the data flow "
+    "between frontend, backend and the external sources, and for a stateful "
+    "app the STATE collections with what each stores. No request or response "
+    "shapes, field lists, formats or example payloads: the API contract is "
+    "written on the next step (`openapi.json`) and is the only place they "
+    "live, so a shape here would be a second source that can disagree with it."
 )
 
 _TECH_SPEC_EXCLUSIONS = (

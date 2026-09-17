@@ -205,6 +205,7 @@ def test_api_spec_instruction_carries_the_rules_the_system_prompt_used_to():
         "OpenAPI 3.1",
         "`## Backend`",
         "add none, drop none",
+        "ONLY place the request and response shapes",
         "/api/...",
         "Compact",
         "no `tags`",
@@ -477,6 +478,10 @@ def test_tech_spec_instruction_adds_a_backend_section_for_fullstack():
     assert "## Backend" in fullstack and "/api/*" in fullstack
     assert "## Backend" not in html
     assert "Do not restate the PRD" in fullstack
+    # The section lists endpoints; the contract (shapes, fields, formats)
+    # lives in openapi.json only — run 18 had the two disagree.
+    assert "No request or response shapes" in fullstack
+    assert "`openapi.json`" in fullstack
 
 
 def test_tech_spec_instruction_leaves_the_frontends_design_rules_alone():
