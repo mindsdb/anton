@@ -328,8 +328,8 @@ class _VerifierVerdict(BaseModel):
     (reasons arguing INCOMPLETE under a STUCK label, ~1 in 24): it removed
     that slip, 24/24, but the ENG-836 environment wall dropped from clean to
     22/24 STUCK on the same model. The wall is the shipped guarantee, so the
-    order stays; the one-attempt control carries a measured threshold instead
-    (tests/test_verifier_verdict_live.py).
+    order stays; the one-attempt control is gated on ``mindshub_air`` and
+    recorded, not gated, on haiku (tests/test_verifier_verdict_live.py).
     """
 
     status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(

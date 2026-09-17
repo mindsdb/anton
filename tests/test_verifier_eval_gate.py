@@ -561,38 +561,31 @@ def test_a_served_id_cannot_inject_lines_into_the_report(alias):
     assert len(recorded) <= 80, "the sanitiser's length cap did not apply"
 
 
-def test_only_the_one_attempt_control_carries_a_pass_rate_threshold():
-    """The pass-rate path must not spread quietly either.
+def test_only_the_one_attempt_control_is_recorded_not_gated_on_a_model():
+    """The skip path must not spread quietly.
 
-    ENG-1211 allowed a case to record a pass rate over N with a documented
-    threshold when the verdict is measurably not stable. ENG-2686 took that
-    path for exactly one case, with the measured rates in its comment. Every
-    incident case stays N-of-N — a fabrication fixture that passes "most of
-    the time" ships the fabrication the rest of the time.
+    ENG-2686 measured a ~1-in-16 STUCK label slip on haiku for the one-attempt
+    give-up control (reasons arguing INCOMPLETE under a STUCK label), tried an
+    11-of-12 threshold, and watched it flake on its first CI run. So that one
+    control is gated N-of-N on mindshub_air and recorded, not gated, on haiku.
+    Every incident case is gated on every model — a fabrication fixture that
+    is "recorded" somewhere ships the fabrication there.
     """
-    rated = [c for c in ev._CASES if c.min_pass_rate < 1.0]
-    assert [c.name for c in rated] == ["one_attempt_give_up"], (
-        f"only the one-attempt control may carry a threshold; found "
-        f"{[c.name for c in rated]}"
+    skipping = [c for c in ev._CASES if c.skip_models]
+    assert [c.name for c in skipping] == ["one_attempt_give_up"], (
+        f"only the one-attempt control may skip a model; found "
+        f"{[c.name for c in skipping]}"
     )
-    case = rated[0]
-    # 11 of 12: passes a ~4% slip, fails the 5/24 regression that motivated it.
-    assert case.min_pass_rate >= 11 / 12
-    # Mechanics only — `_RATE_RUNS` is env-overridable for one-off runs, so
-    # asserting its value here would make an offline unit test depend on the
-    # shell (self-review of #483).
-    assert ev._runs_for(case) == ev._RATE_RUNS
-    assert ev._required_passes(case, 12) == 11
-    # And a threshold never rounds down to an extra allowed miss.
-    assert ev._required_passes(case, 6) == 6
+    case = skipping[0]
+    assert case.skip_models == ("haiku",)
+    # Still gated somewhere in the matrix, at the trade-off guard's count.
+    assert ev._NARRATING_MODEL not in case.skip_models
+    assert ev._runs_for(case) == 12
 
 
-def test_n_of_n_is_still_the_rule_for_every_other_case():
-    for case in ev._CASES:
-        if case.name == "one_attempt_give_up":
-            continue
-        n = ev._runs_for(case)
-        assert ev._required_passes(case, n) == n, case.name
+def test_run_overrides_are_only_the_premature_give_up_guard():
+    overridden = [c for c in ev._CASES if c.runs is not None]
+    assert [c.name for c in overridden] == ["one_attempt_give_up"]
 
 
 def test_fabrication_guards_run_at_the_higher_count():
