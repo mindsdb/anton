@@ -96,15 +96,17 @@ _CONTENT_ARG_MSG = (
 )
 
 
-async def _drain_stream(events) -> "LLMResponse":
-    """Consume a `plan_stream()`/`code_stream()` iterator, discarding the
-    token-level deltas, and return the final assembled response.
+async def _drain_stream(events, on_text=None) -> "LLMResponse":
+    """Consume a `plan_stream()`/`code_stream()` iterator and return the final
+    assembled response; hand each text delta to ``on_text`` when given.
 
     Used in place of the one-shot `plan()`/`code()` calls. This pipeline runs
     headless — its own progress surface is the step-level `ToolProgress`
-    protocol, not per-token UX — so nothing needs the intermediate
-    `StreamTextDelta`/`StreamToolUse*` events, only the terminal
-    `StreamComplete`. The reason to stream at all is transport, not UX: a
+    protocol — so nothing needs the intermediate `StreamToolUse*` events,
+    only the terminal `StreamComplete`. The text deltas have one taker:
+    `GenState.peek_for` feeds them to the live tail in the spinner footer
+    (`progress.LivePeek`), so a minute-long write is not a frozen screen.
+    The reason to stream at all is transport, not UX: a
     non-streaming call sends no bytes over the wire until the whole response
     is ready, and `api.mindshub.ai` sits behind Cloudflare, which kills a
     connection that has been silent for ~100s with a 524 — a real failure on
@@ -124,12 +126,14 @@ async def _drain_stream(events) -> "LLMResponse":
     whether it survives is a race against the proxy's idle timeout. Hence
     `_call_with_stream_retry` below.
     """
-    from anton.core.llm.provider import StreamComplete
+    from anton.core.llm.provider import StreamComplete, StreamTextDelta
 
     result = None
     async for event in events:
         if isinstance(event, StreamComplete):
             result = event.response
+        elif on_text is not None and isinstance(event, StreamTextDelta) and event.text:
+            on_text(event.text)
     if result is None:
         raise RuntimeError("LLM stream ended without a StreamComplete event")
     return result
@@ -160,6 +164,7 @@ async def _call_with_stream_retry(
     tools: list[dict] | None,
     max_tokens: int | None,
     default_cap: int | None,
+    on_text=None,
 ) -> tuple["LLMResponse", int | None]:
     """One LLM round, retried once if the connection dies mid-stream.
 
@@ -182,7 +187,8 @@ async def _call_with_stream_retry(
     budget = max_tokens
     try:
         return await _drain_stream(
-            llm_call(system=system, messages=messages, tools=tools, max_tokens=budget)
+            llm_call(system=system, messages=messages, tools=tools, max_tokens=budget),
+            on_text,
         ), budget
     except _STREAM_DROP_ERRORS:
         effective = budget or default_cap
@@ -192,7 +198,8 @@ async def _call_with_stream_retry(
             "with a halved output budget (%s -> %s)", effective, retry_budget,
         )
     return await _drain_stream(
-        llm_call(system=system, messages=messages, tools=tools, max_tokens=retry_budget)
+        llm_call(system=system, messages=messages, tools=tools, max_tokens=retry_budget),
+        on_text,
     ), retry_budget
 
 
@@ -241,6 +248,7 @@ async def _plan_whole_document(
     on_retry=None,
     messages: list[dict] | None = None,
     tools: list[dict] | None = None,
+    on_text=None,
 ) -> tuple[str, str | None]:
     """One planning call for a whole specification, retried once with more room.
 
@@ -299,7 +307,7 @@ async def _plan_whole_document(
         )
         response = await _drain_stream(session._llm.plan_stream(
             system=system, messages=call_messages, max_tokens=budget, tools=tools,
-        ))
+        ), on_text)
         trace.llm_call(
             node=node_label, method="plan", system=system,
             messages=call_messages, response=response, attempt=attempt,
@@ -507,6 +515,7 @@ async def _generate_api_spec(
     messages: list[dict] | None = None,
     tools: list[dict] | None = None,
     system_override: str | None = None,
+    on_text=None,
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
 
@@ -536,6 +545,7 @@ async def _generate_api_spec(
         body, error = await _plan_whole_document(
             session, system=system, user=user + extra, node_label=node_label,
             trace=trace, on_retry=on_retry, messages=messages, tools=tools,
+            on_text=on_text,
         )
         if error is not None:
             # Already worded in terms of the output limit. Without this branch
@@ -672,6 +682,7 @@ async def _run_loop(
     step_injections: list[tuple[str, str]] | None = None,
     require_files: bool = True,
     spend=None,
+    on_text=None,
 ) -> dict | str:
     """Run one bounded sub-agent tool-call loop.
 
@@ -756,6 +767,7 @@ async def _run_loop(
             tools=tools,
             max_tokens=budget,
             default_cap=default_cap,
+            on_text=on_text,
         )
         cap = used_budget or default_cap
 

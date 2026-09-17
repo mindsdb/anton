@@ -70,20 +70,24 @@ async def _fetch_data_sample(state: GenState) -> str:
     """Run a scratchpad loop that pulls a data sample; return its summary."""
     if state.public_sources is None:
         state.public_sources = _public_data_sources_skill(state.session)
-    result = await engine._run_loop(
-        session=state.session,
-        system=prompts.build_fetch_data_system_prompt(
-            state.artifact_path,
-            datasource_context=state.datasource_context,
-            public_sources=state.public_sources,
-        ),
-        kickoff=prompts.build_fetch_data_kickoff(state),
-        artifact_path=state.artifact_path,
-        require_files=False,
-        node_label="fetch_data_sample",
-        trace=state.trace_log,
-        spend=state.spend,
-    )
+    try:
+        result = await engine._run_loop(
+            on_text=state.peek_for("fetch_data_sample"),
+            session=state.session,
+            system=prompts.build_fetch_data_system_prompt(
+                state.artifact_path,
+                datasource_context=state.datasource_context,
+                public_sources=state.public_sources,
+            ),
+            kickoff=prompts.build_fetch_data_kickoff(state),
+            artifact_path=state.artifact_path,
+            require_files=False,
+            node_label="fetch_data_sample",
+            trace=state.trace_log,
+            spend=state.spend,
+        )
+    finally:
+        state.peek_done("fetch_data_sample")
     if isinstance(result, str):
         # Loop failed — surface as a note so the next is_data_enough sees it.
         return f"(data fetch step reported: {result})"
@@ -235,12 +239,16 @@ async def _write_tech_spec(state: GenState) -> str | None:
         system, user = prompts.build_tech_spec_prompt(state)
         messages = None
         tools = None
-    body, trunc_err = await engine._plan_whole_document(
-        state.session, system=system, user=user, node_label="make_tech_spec",
-        messages=messages, tools=tools,
-        trace=state.trace_log,
-        on_retry=lambda: state.step_started("make_tech_spec", attempt=1),
-    )
+    try:
+        body, trunc_err = await engine._plan_whole_document(
+            state.session, system=system, user=user, node_label="make_tech_spec",
+            messages=messages, tools=tools,
+            trace=state.trace_log,
+            on_retry=lambda: state.step_started("make_tech_spec", attempt=1),
+            on_text=state.peek_for("make_tech_spec"),
+        )
+    finally:
+        state.peek_done("make_tech_spec")
     if trunc_err is not None:
         # Deliberately terminal. Writing the cut spec would put it into
         # `_spec_context` for both generators, which would then build half a
@@ -292,14 +300,18 @@ async def _make_api_spec(state: GenState) -> str | None:
     stateless = state.artifact_type == "fullstack-stateless-app"
     # Same split as `_write_tech_spec`: continue the shared history when there
     # is one, fall back to the assembled context on a cold start.
-    spec_or_err = await engine._generate_api_spec(
-        state.session, _spec_context(state), stateless=stateless,
-        trace=state.trace_log, node_label="make_api_spec",
-        messages=state.messages or None,
-        tools=state.pipeline_tools if state.messages else None,
-        system_override=state.pipeline_system if state.messages else None,
-        on_retry=lambda: state.step_started("make_api_spec", attempt=1),
-    )
+    try:
+        spec_or_err = await engine._generate_api_spec(
+            state.session, _spec_context(state), stateless=stateless,
+            trace=state.trace_log, node_label="make_api_spec",
+            messages=state.messages or None,
+            tools=state.pipeline_tools if state.messages else None,
+            system_override=state.pipeline_system if state.messages else None,
+            on_retry=lambda: state.step_started("make_api_spec", attempt=1),
+            on_text=state.peek_for("make_api_spec"),
+        )
+    finally:
+        state.peek_done("make_api_spec")
     if spec_or_err.startswith("Error:"):
         state.error = f"make_api_spec: {spec_or_err}"
         return state.error
@@ -524,12 +536,16 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                     "call finish.",
                 ),
             ]
-        result = await engine._run_loop(
-            session=state.session, system=system, kickoff=kickoff,
-            artifact_path=state.artifact_path,
-            node_label="generate_backend", attempt=attempt, trace=state.trace_log,
-            step_injections=injections, spend=state.spend,
-        )
+        try:
+            result = await engine._run_loop(
+                session=state.session, system=system, kickoff=kickoff,
+                artifact_path=state.artifact_path,
+                node_label="generate_backend", attempt=attempt, trace=state.trace_log,
+                step_injections=injections, spend=state.spend,
+                on_text=state.peek_for("generate_backend"),
+            )
+        finally:
+            state.peek_done("generate_backend")
         if isinstance(result, dict) and result.get("over_budget"):
             state.record("generate_backend", "stopped_over_budget",
                          "the write loop did not close in its wind-down rounds")
@@ -651,12 +667,16 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             kickoff = prompts.build_frontend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
         else:
             kickoff = prompts.build_user_kickoff(_spec_context(state)) + extra
-        result = await engine._run_loop(
-            session=state.session, system=system, kickoff=kickoff,
-            artifact_path=state.artifact_path,
-            node_label="generate_frontend", attempt=attempt, trace=state.trace_log,
-            spend=state.spend,
-        )
+        try:
+            result = await engine._run_loop(
+                session=state.session, system=system, kickoff=kickoff,
+                artifact_path=state.artifact_path,
+                node_label="generate_frontend", attempt=attempt, trace=state.trace_log,
+                spend=state.spend,
+                on_text=state.peek_for("generate_frontend"),
+            )
+        finally:
+            state.peek_done("generate_frontend")
         if isinstance(result, dict) and result.get("over_budget"):
             state.record("generate_frontend", "stopped_over_budget",
                          "the write loop did not close in its wind-down rounds")

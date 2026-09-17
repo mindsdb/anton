@@ -14,12 +14,21 @@ from unittest.mock import AsyncMock, Mock
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import orchestrator
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
+from anton.core.tools.generate_artifact import engine
+from anton.core.tools.generate_artifact import sub_tools as file_tools
 from anton.core.tools.generate_artifact.progress import (
+    PEEK_GROUPS,
+    PEEK_LINE_MAX,
+    PEEK_PREFIX,
+    QUESTION_CLOSED,
+    QUESTION_OPEN,
     STEP_LABELS,
+    LivePeek,
     StepCounter,
     label_for,
     plan_steps,
 )
+from anton.core.llm.provider import StreamTextDelta
 from anton.core.tools.generate_artifact.state import GenState, VerifyResult
 
 
@@ -333,3 +342,129 @@ def test_the_data_phase_reports_its_iteration_as_the_attempt():
     for step in ("define_required_data", "is_possible_to_fetch", "fetch_data_sample"):
         assert f'step_started("{step}", attempt=state.data_iterations)' in src, step
     assert "state.entry = entry" in src
+
+
+# ── live peek ───────────────────────────────────────────────────────────────
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _peeks(queue: asyncio.Queue) -> list[str]:
+    out = []
+    while not queue.empty():
+        line = queue.get_nowait()
+        assert line.startswith(PEEK_PREFIX)
+        out.append(line[len(PEEK_PREFIX):])
+    return out
+
+
+def test_the_peek_prefix_cannot_be_mistaken_for_a_step_line():
+    """Same queue as the step lines and the question sentinels; a control
+    byte keeps the three apart, and the markers the tail hides are the ones
+    the file protocol really uses."""
+    assert PEEK_PREFIX.startswith("\x00")
+    assert not QUESTION_OPEN.startswith(PEEK_PREFIX)
+    assert not QUESTION_CLOSED.startswith(PEEK_PREFIX)
+    for marker in (file_tools.FILE_BEGIN_MARKER, file_tools.FILE_END_MARKER):
+        assert marker.startswith("<<<ANTON_FILE_")
+
+
+def test_the_tail_keeps_the_last_lines_and_hides_protocol_and_blanks():
+    q: asyncio.Queue = asyncio.Queue()
+    peek = LivePeek(q, lines=3, clock=_Clock())
+    peek.feed("frontend", file_tools.FILE_BEGIN_MARKER + "\n<!DOCTYPE html>\n<html>\n\n  <head>\n    <ti")
+    assert _peeks(q) == ["<html>\n  <head>\n    <ti"]
+    # The partial last line grows as the stream continues.
+    peek.feed("frontend", "tle>Clock</title>\n" + "x" * 300 + "\n")
+    peek._sent_at = float("-inf")  # past the throttle
+    peek.feed("frontend", "")
+    tail = _peeks(q)[-1].split("\n")
+    assert tail[0] == "  <head>"
+    assert tail[1] == "    <title>Clock</title>"
+    assert len(tail[2]) == PEEK_LINE_MAX and tail[2].endswith("\u2026")
+
+
+def test_the_tail_is_pushed_at_most_once_per_interval_and_only_when_changed():
+    clock = _Clock()
+    q: asyncio.Queue = asyncio.Queue()
+    peek = LivePeek(q, interval=0.3, clock=clock)
+    peek.feed("spec", "# Spec\n")
+    peek.feed("spec", "## Insights\n")          # 0.0s later: held back
+    clock.now += 0.1
+    peek.feed("spec", "- one\n")                # still inside the interval
+    assert _peeks(q) == ["# Spec"]
+    clock.now += 0.3
+    peek.feed("spec", "")                        # interval over: the held tail goes out
+    assert _peeks(q) == ["# Spec\n## Insights\n- one"]
+    clock.now += 1
+    peek.feed("spec", "")                        # nothing new: nothing sent
+    assert _peeks(q) == []
+
+
+def test_two_live_groups_get_headings_and_a_finished_one_drops_out():
+    """The fullstack generators stream in parallel; one tail on top of the
+    other would flicker between two files. Alone, a group needs no heading."""
+    clock = _Clock()
+    q: asyncio.Queue = asyncio.Queue()
+    peek = LivePeek(q, clock=clock)
+    peek.feed("backend", "import os\n")
+    clock.now += 1
+    peek.feed("frontend", "<html>\n")
+    assert _peeks(q) == ["import os", "backend:\n  import os\nfrontend:\n  <html>"]
+    peek.clear("backend")                        # forced: no wait for the interval
+    assert _peeks(q) == ["<html>"]
+    peek.clear("frontend")
+    assert _peeks(q) == [""]                     # empty tail clears the footer
+    peek.clear("frontend")
+    assert _peeks(q) == []                       # already clear: nothing to say
+
+
+def test_peek_for_is_silent_without_a_channel_and_feeds_it_when_there_is_one(tmp_path: Path):
+    assert _state(tmp_path, progress=None).peek_for("generate_frontend") is None
+    st = _state(tmp_path)
+    on_text = st.peek_for("generate_frontend")
+    on_text("<body>\n<h1>Hi</h1>\n")
+    st.peek_done("generate_frontend")
+    assert _peeks(st.progress) == ["<body>\n<h1>Hi</h1>", ""]
+    assert set(PEEK_GROUPS) >= {"generate_frontend", "generate_backend", "make_tech_spec", "make_api_spec"}
+
+
+async def test_the_stream_drain_hands_text_deltas_to_on_text():
+    from anton.core.llm.provider import StreamComplete
+
+    async def events():
+        yield StreamTextDelta(text="<<<ANTON_FILE_BEGIN>>>\n")
+        yield StreamTextDelta(text="<html>")
+        yield StreamTextDelta(text="")
+        yield StreamComplete(response=type("R", (), {"content": "done"})())
+
+    seen: list[str] = []
+    response = await engine._drain_stream(events(), seen.append)
+    assert response.content == "done"
+    assert seen == ["<<<ANTON_FILE_BEGIN>>>\n", "<html>"]
+    # Without a taker the drain is what it always was.
+    assert (await engine._drain_stream(events())).content == "done"
+
+
+async def test_the_generation_loop_streams_its_tail_and_clears_it_after(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    st.gathering_complete = True
+
+    async def fake_loop(**kw):
+        kw["on_text"]("<<<ANTON_FILE_BEGIN>>>\n<html>\n<body>\n")
+        (tmp_path / "index.html").write_text("<html><body></body></html>")
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", lambda *a, **k: VerifyResult(errors=[]))
+    monkeypatch.setattr(orchestrator, "_frontend_entry", lambda state, written: tmp_path / "index.html")
+    await orchestrator._gen_verify_frontend(st)
+    lines = _drain(st)
+    assert lines[0] == "Writing the page (step 1 of 4)"
+    assert PEEK_PREFIX + "<html>\n<body>" in lines
+    assert lines.index(PEEK_PREFIX + "") > lines.index(PEEK_PREFIX + "<html>\n<body>")

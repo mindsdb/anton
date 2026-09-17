@@ -569,3 +569,32 @@ async def test_a_missing_agent_understanding_is_rejected(tmp_path: Path, monkeyp
     )
     assert out.startswith("Error:")
     assert "agent_understanding" in out
+
+
+async def test_a_peek_line_is_relayed_as_a_peek_and_dropped_while_a_question_is_open():
+    """The live tail replaces itself in the footer, so it must not be printed
+    as a step line — and unlike a step line it is not worth holding through a
+    question: by the time the answer comes it is stale."""
+    import asyncio
+
+    from anton.core.tools.generate_artifact.progress import (
+        PEEK_PREFIX,
+        QUESTION_CLOSED,
+        QUESTION_OPEN,
+    )
+    from anton.core.tools.tool_handlers import _drain_progress
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for line in (
+        "Writing the page (step 3 of 4)", PEEK_PREFIX + "<html>\n<body>",
+        QUESTION_OPEN, PEEK_PREFIX + "<div>", "Verifying the page (step 4 of 4)",
+        QUESTION_CLOSED, PEEK_PREFIX + "", None,
+    ):
+        queue.put_nowait(line)
+    markers = [m async for m in _drain_progress(queue)]
+    assert [(m.text, m.kind) for m in markers] == [
+        ("Writing the page (step 3 of 4)", "step"),
+        ("<html>\n<body>", "peek"),
+        ("Verifying the page (step 4 of 4)", "step"),
+        ("", "peek"),
+    ]

@@ -186,6 +186,29 @@ class TestStreamDisplay:
         assert MockLive.call_count == 2
 
 
+    @patch("anton.chat_ui.Live")
+    def test_tool_peek_lives_in_the_footer_and_a_step_line_clears_it(self, MockLive):
+        """The live tail of a streaming tool is transient: nothing is printed,
+        the footer shows it under an arrow with the extra lines indented, and
+        the next step line (or an empty peek) takes it down."""
+        display, console = self._make_display()
+        display.start()
+
+        display.update_progress("tool_peek", "<html>\n  <body>\n    <h1>Hi</h1>")
+        assert console.print.call_count == 0
+        assert display._line3_peek == "<html>\n  <body>\n    <h1>Hi</h1>"
+        footer = display._build_spinner_display()
+        peek_text = footer.renderables[1].plain
+        assert peek_text == "  \u21b3 <html>\n      <body>\n        <h1>Hi</h1>"
+
+        display.update_progress("tool_progress", "Verifying the page (step 4 of 4)")
+        assert display._line3_peek == ""
+        display.update_progress("tool_peek", "again")
+        display.update_progress("tool_peek", "")
+        assert display._line3_peek == ""
+        assert len(display._build_spinner_display().renderables) == 2
+
+
 class TestActivityTracking:
     def _make_display(self):
         console = MagicMock()

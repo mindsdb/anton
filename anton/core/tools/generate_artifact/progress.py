@@ -14,6 +14,9 @@ does not cover.
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 # Keyed by the node label the orchestrator already uses for `state.record` and
 # the debug trace, so one node has one name across all three channels.
 STEP_LABELS: dict[str, str] = {
@@ -72,7 +75,7 @@ _DATA_PHASE_STEPS: frozenset[str] = frozenset(
 )
 # A resumed run starts further down the plan. Keyed by the checkpoint entry
 # names (`discovery.checkpoint.ENTRY_*`, spelled out here to keep this module
-# import-free; `test_artifact_progress.py` holds the two in step).
+# free of package imports; `test_artifact_progress.py` holds the two in step).
 _ENTRY_FIRST_STEP: dict[str, tuple[str, str]] = {
     # entry: (first step for html-app, first step for fullstack)
     "resume_spec": ("make_tech_spec", "make_tech_spec"),
@@ -149,3 +152,98 @@ def label_for(
 # printed on top of a live prompt.
 QUESTION_OPEN = "\x00question-open"
 QUESTION_CLOSED = "\x00question-closed"
+
+# A live tail of the reply being streamed rides on the same queue, prefixed so
+# the handler can tell it from a step line: a step line is printed once and
+# stays, the tail replaces the previous tail in the spinner footer. The text
+# after the prefix is the whole tail; empty text clears it.
+PEEK_PREFIX = "\x00peek:"
+PEEK_LINES = 4
+PEEK_INTERVAL = 0.3
+PEEK_LINE_MAX = 100
+# Lines carrying the file-body protocol markers (`sub_tools.FILE_*_MARKER`)
+# are protocol, not content, and stay out of the tail.
+_MARKER_PREFIX = "<<<ANTON_FILE_"
+# The heading a group gets when more than one stream is live at once — the
+# fullstack generators write in parallel — keyed by the node that streams.
+PEEK_GROUPS: dict[str, str] = {
+    "generate_frontend": "frontend",
+    "generate_backend": "backend",
+    "make_tech_spec": "spec",
+    "make_api_spec": "api",
+    "fetch_data_sample": "data",
+}
+
+
+class LivePeek:
+    """The last few lines of what the running LLM calls have streamed so far.
+
+    `feed(group, delta)` takes a text delta of one stream and pushes the
+    rendered tails onto the progress queue, at most once per `interval` and
+    only when they changed; `clear(group)` drops a finished stream's tail
+    and pushes at once. With one live group the tail is bare; with several
+    (the fullstack generators run in parallel) each gets a `group:` heading
+    and its lines are indented under it.
+    """
+
+    def __init__(
+        self,
+        queue: "asyncio.Queue[str | None]",
+        *,
+        lines: int = PEEK_LINES,
+        interval: float = PEEK_INTERVAL,
+        clock=time.monotonic,
+    ) -> None:
+        self._queue = queue
+        self._lines = lines
+        self._interval = interval
+        self._clock = clock
+        self._buffers: dict[str, str] = {}
+        self._tails: dict[str, list[str]] = {}
+        self._sent = ""
+        self._sent_at = float("-inf")
+
+    def feed(self, group: str, delta: str) -> None:
+        raw = (self._buffers.get(group, "") + delta).split("\n")
+        # Keep some slack over the tail length: blank and marker lines are
+        # dropped below and must not shorten what is shown.
+        raw = raw[-(self._lines * 3 + 1):]
+        self._buffers[group] = "\n".join(raw)
+        tail: list[str] = []
+        for line in raw:
+            text = line.rstrip()
+            if not text.strip() or text.lstrip().startswith(_MARKER_PREFIX):
+                continue
+            if len(text) > PEEK_LINE_MAX:
+                text = text[: PEEK_LINE_MAX - 1] + "\u2026"
+            tail.append(text)
+        self._tails[group] = tail[-self._lines:]
+        self._flush(force=False)
+
+    def clear(self, group: str) -> None:
+        self._buffers.pop(group, None)
+        self._tails.pop(group, None)
+        self._flush(force=True)
+
+    def render(self) -> str:
+        live = [(group, tail) for group, tail in self._tails.items() if tail]
+        if not live:
+            return ""
+        if len(live) == 1:
+            return "\n".join(live[0][1])
+        out: list[str] = []
+        for group, tail in live:
+            out.append(f"{group}:")
+            out.extend(f"  {line}" for line in tail)
+        return "\n".join(out)
+
+    def _flush(self, *, force: bool) -> None:
+        now = self._clock()
+        if not force and now - self._sent_at < self._interval:
+            return
+        text = self.render()
+        if text == self._sent:
+            return
+        self._sent = text
+        self._sent_at = now
+        self._queue.put_nowait(PEEK_PREFIX + text)

@@ -568,6 +568,7 @@ async def _drain_progress(queue):
     describe steps that already finished.
     """
     from anton.core.tools.generate_artifact.progress import (
+        PEEK_PREFIX,
         QUESTION_CLOSED,
         QUESTION_OPEN,
     )
@@ -579,6 +580,14 @@ async def _drain_progress(queue):
         line = await queue.get()
         if line is None:
             return
+        if line.startswith(PEEK_PREFIX):
+            # The live tail of a streaming LLM call. Not a step line: it is
+            # replaced, never kept, and while a question is open it is
+            # dropped rather than held — by the time the answer arrives it
+            # describes text that has long since moved on.
+            if not depth:
+                yield ToolProgress(line[len(PEEK_PREFIX):], kind="peek")
+            continue
         if line == QUESTION_OPEN:
             # A counter, not a flag: `show_and_confirm` wraps a call that
             # wraps itself, so the sentinels arrive nested. A flag would let

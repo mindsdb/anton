@@ -282,12 +282,17 @@ class StreamDisplay:
             "dots", text=Text(f" {self._line2_status}", style="anton.muted")
         )
 
-        # Line 2: peek (only if there's something to peek at)
+        # Line 2: peek (only if there's something to peek at). A multi-line
+        # peek — a streaming tool's live tail (`tool_peek`) — keeps the arrow
+        # on its first line and indents the rest under it.
         parts: list = [spinner]
         if self._line3_peek:
+            first, *rest = self._line3_peek.splitlines() or [self._line3_peek]
             line3 = Text()
             line3.append("  \u21b3 ", style="anton.muted")
-            line3.append(self._line3_peek, style="dim")
+            line3.append(first, style="dim")
+            for extra in rest:
+                line3.append("\n    " + extra, style="dim")
             parts.append(line3)
 
         # Line 3: control + personality (at the bottom)
@@ -489,10 +494,21 @@ class StreamDisplay:
             # yielded a ToolProgress marker. Print it as a permanent line —
             # falling through to the generic phase handler below would only
             # update the transient spinner footer (Live(transient=True)),
-            # which disappears the moment the spinner stops.
+            # which disappears the moment the spinner stops. A new step also
+            # ends whatever the previous one was streaming, so its tail goes.
+            self._line3_peek = ""
             self._stop_spinner()
             self._console.print(Text(f"  {message}", style="anton.muted"))
             self._start_spinner()
+            return
+
+        if phase == "tool_peek":
+            # A streaming tool's live tail (generate_artifact: the last lines
+            # of the file being written). Transient by nature — it lives in
+            # the spinner footer, each one replaces the last, and an empty
+            # message clears it.
+            self._line3_peek = message
+            self._update_spinner()
             return
 
         if phase == "tool_done":

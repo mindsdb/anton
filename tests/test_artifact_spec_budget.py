@@ -472,7 +472,7 @@ async def test_the_spec_node_falls_back_to_the_assembled_context_without_history
     the notes explicitly — not a lone instruction into the void."""
     seen: dict = {}
 
-    async def _fake(session, *, system, user, node_label, trace=None,
+    async def _fake(session, *, system, user, node_label, trace=None, on_text=None,
                     on_retry=None, messages=None, tools=None):
         seen["messages"] = messages
         seen["user"] = user
@@ -492,7 +492,7 @@ async def test_the_spec_node_falls_back_to_the_assembled_context_without_history
 async def test_the_spec_node_continues_the_history_when_there_is_one(tmp_path, monkeypatch):
     seen: dict = {}
 
-    async def _fake(session, *, system, user, node_label, trace=None,
+    async def _fake(session, *, system, user, node_label, trace=None, on_text=None,
                     on_retry=None, messages=None, tools=None):
         seen["messages"] = messages
         seen["user"] = user

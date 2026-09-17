@@ -134,7 +134,8 @@ class ToolRegistry:
                 if emitter is not None:
                     await emitter.emit(
                         StreamTaskProgress(
-                            phase="tool_progress", message=item.text, id=tool_call_id,
+                            phase="tool_peek" if item.kind == "peek" else "tool_progress",
+                            message=item.text, id=tool_call_id,
                         )
                     )
             else:

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
-from .progress import StepCounter, label_for, plan_steps
+from .progress import PEEK_GROUPS, LivePeek, StepCounter, label_for, plan_steps
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
@@ -199,6 +199,9 @@ class GenState:
     # Built on the first counted step, not up front: the artifact type that
     # decides the plan is settled by `finish_gathering`, after the run began.
     step_counter: StepCounter | None = None
+    # Live tail of the streaming LLM calls, on the same channel (see
+    # `progress.LivePeek`). Built on first use, only when someone listens.
+    peek: LivePeek | None = None
 
     # ── Discovery phases (A-C) ───────────────────────────────────────────
     # The tool's own inputs. `brief` above holds the confirmed brief markdown
@@ -322,6 +325,27 @@ class GenState:
         )
         if text is not None:
             self.progress.put_nowait(text)
+
+    def peek_for(self, node: str):
+        """The `on_text` callback for `node`'s streaming LLM call, or None.
+
+        None when there is no progress channel, so the engine's stream
+        consumer stays a plain drain there. The node's group name is what a
+        second live stream is told apart by (`progress.PEEK_GROUPS`).
+        """
+        if self.progress is None:
+            return None
+        if self.peek is None:
+            self.peek = LivePeek(self.progress)
+        group = PEEK_GROUPS.get(node, node)
+        peek = self.peek
+        return lambda delta: peek.feed(group, delta)
+
+    def peek_done(self, node: str) -> None:
+        """Drop `node`'s tail: its call is over, the footer must not keep
+        showing the end of a file as if it were still being written."""
+        if self.peek is not None:
+            self.peek.clear(PEEK_GROUPS.get(node, node))
 
     def journal(self) -> str:
         """Compact one-line-per-step log of everything the FSM did so far.
