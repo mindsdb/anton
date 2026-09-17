@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
-from .progress import label_for
+from .progress import StepCounter, label_for, plan_steps
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
@@ -192,6 +192,13 @@ class GenState:
     # is called from synchronous FSM code that cannot await a full queue, and
     # `QueueFull` there would abort a generation over a progress line.
     progress: "asyncio.Queue[str | None] | None" = None
+    # Where this run entered the pipeline (`discovery.checkpoint.ENTRY_*`,
+    # set by `orchestrator.run`): a resumed run has fewer steps ahead of it,
+    # and the `N of M` on every progress line counts only those.
+    entry: str = "full"
+    # Built on the first counted step, not up front: the artifact type that
+    # decides the plan is settled by `finish_gathering`, after the run began.
+    step_counter: StepCounter | None = None
 
     # ── Discovery phases (A-C) ───────────────────────────────────────────
     # The tool's own inputs. `brief` above holds the confirmed brief markdown
@@ -305,7 +312,14 @@ class GenState:
         """
         if self.progress is None:
             return
-        text = label_for(node, is_fullstack=self.is_fullstack, attempt=attempt)
+        if self.step_counter is None:
+            self.step_counter = StepCounter(
+                plan_steps(is_fullstack=bool(self.is_fullstack), entry=self.entry)
+            )
+        text = label_for(
+            node, is_fullstack=self.is_fullstack, attempt=attempt,
+            position=self.step_counter.position(node),
+        )
         if text is not None:
             self.progress.put_nowait(text)
 

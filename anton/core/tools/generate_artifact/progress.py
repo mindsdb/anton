@@ -43,12 +43,90 @@ _HTML_APP_LABELS: dict[str, str] = {
 }
 
 
-def label_for(node: str, *, is_fullstack: bool = False, attempt: int = 0) -> str | None:
+# The steps a run is expected to go through once the artifact type is fixed,
+# in pipeline order. `gathering` and the brief steps come before that point
+# (the type is settled by `finish_gathering`), so they are announced without a
+# count; from `write_prd` on every line carries `N of M`.
+_PLAN_HTML_APP: tuple[str, ...] = (
+    "write_prd",
+    "make_tech_spec",
+    "generate_frontend",
+    "verify_frontend",
+)
+_PLAN_FULLSTACK: tuple[str, ...] = (
+    "write_prd",
+    "make_tech_spec",
+    "make_api_spec",
+    "generate_backend",
+    "verify_backend",
+    "generate_frontend",
+    "verify_frontend",
+    "run_app",
+    "verify_fullstack",
+)
+# The data phase is decided at run time (`orchestrator._needs_data_loop`) and
+# has not fired on a live run since the gathering step took over the work.
+# Its steps are not in the plan; when one starts, the total grows by it.
+_DATA_PHASE_STEPS: frozenset[str] = frozenset(
+    {"define_required_data", "is_possible_to_fetch", "fetch_data_sample"}
+)
+# A resumed run starts further down the plan. Keyed by the checkpoint entry
+# names (`discovery.checkpoint.ENTRY_*`, spelled out here to keep this module
+# import-free; `test_artifact_progress.py` holds the two in step).
+_ENTRY_FIRST_STEP: dict[str, tuple[str, str]] = {
+    # entry: (first step for html-app, first step for fullstack)
+    "resume_spec": ("make_tech_spec", "make_tech_spec"),
+    "resume_generate": ("generate_frontend", "generate_backend"),
+}
+
+
+def plan_steps(*, is_fullstack: bool, entry: str = "full") -> list[str]:
+    """The steps this run will announce with a count, in order."""
+    plan = list(_PLAN_FULLSTACK if is_fullstack else _PLAN_HTML_APP)
+    first = _ENTRY_FIRST_STEP.get(entry)
+    if first is not None:
+        plan = plan[plan.index(first[1] if is_fullstack else first[0]):]
+    return plan
+
+
+class StepCounter:
+    """Turns step starts into `(N, M)` positions.
+
+    `N` is the order in which distinct steps START — not the step's index in
+    the plan — so the two generation loops, which run in parallel and whose
+    verify steps finish in either order, still count up monotonically. A
+    repeated start of the same step (a retry) keeps its number. `M` is the
+    plan's length, grown by a data-phase step the moment one appears.
+    """
+
+    def __init__(self, plan: list[str]) -> None:
+        self.plan = list(plan)
+        self._started: dict[str, int] = {}
+
+    def position(self, node: str) -> tuple[int, int] | None:
+        if node not in self.plan:
+            if node not in _DATA_PHASE_STEPS:
+                return None
+            self.plan.append(node)
+        if node not in self._started:
+            self._started[node] = len(self._started) + 1
+        return self._started[node], len(self.plan)
+
+
+def label_for(
+    node: str,
+    *,
+    is_fullstack: bool = False,
+    attempt: int = 0,
+    position: tuple[int, int] | None = None,
+) -> str | None:
     """Return the line to show for `node`, or None if it has no label.
 
     `attempt` is the generate→verify loop's counter: any value above zero
     means this step is being redone after a failure, which is worth saying —
     it explains why the run is taking longer than the step list suggests.
+    `position` is the step's `(N, M)` from a `StepCounter`; both go into one
+    bracket: `Writing the backend (4 of 9, attempt 2)`.
     """
     if not is_fullstack and node in _HTML_APP_LABELS:
         text: str | None = _HTML_APP_LABELS[node]
@@ -56,7 +134,12 @@ def label_for(node: str, *, is_fullstack: bool = False, attempt: int = 0) -> str
         text = STEP_LABELS.get(node)
     if text is None:
         return None
-    return f"{text} (retry)" if attempt > 0 else text
+    notes: list[str] = []
+    if position is not None:
+        notes.append(f"{position[0]} of {position[1]}")
+    if attempt > 0:
+        notes.append(f"attempt {attempt + 1}")
+    return f"{text} ({', '.join(notes)})" if notes else text
 
 
 # Channel-control markers, not user-facing text. They travel on the same

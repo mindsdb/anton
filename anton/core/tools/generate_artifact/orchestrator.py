@@ -176,7 +176,7 @@ async def _data_phase(state: GenState) -> str | None:
                 f"after {state.data_iterations} iteration(s)",
             )
             return None
-        state.step_started("define_required_data")
+        state.step_started("define_required_data", attempt=state.data_iterations)
         required: RequiredData = await _decide(
             state, RequiredData, prompts.build_required_data_prompt(state),
             "define_required_data",
@@ -187,7 +187,7 @@ async def _data_phase(state: GenState) -> str | None:
         state.record("define_required_data", "done", required_text)
         last_reasoning = required.reasoning
 
-        state.step_started("is_possible_to_fetch")
+        state.step_started("is_possible_to_fetch", attempt=state.data_iterations)
         can: FetchVerdict = await _decide(
             state, FetchVerdict,
             prompts.build_can_fetch_prompt(state, required_text),
@@ -199,7 +199,7 @@ async def _data_phase(state: GenState) -> str | None:
             return state.error
         state.record("is_possible_to_fetch", "yes", can.reasoning)
 
-        state.step_started("fetch_data_sample")
+        state.step_started("fetch_data_sample", attempt=state.data_iterations)
         notes = await _fetch_data_sample(state)
         state.data_iterations += 1
         state.data_notes = (state.data_notes + "\n\n" + notes).strip()
@@ -1024,6 +1024,7 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
 
 async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     """Walk the whole pipeline from wherever this call is entitled to start."""
+    state.entry = entry
     if entry in (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION):
         stage = await run_discovery(state, entry=entry)
         if stage == CANCELLED:
