@@ -183,6 +183,96 @@ async def test_a_truncated_api_spec_is_not_reported_as_invalid_json(tmp_path: Pa
     assert "not valid JSON" not in out
 
 
+GOOD_SPEC = '{"openapi": "3.1.0", "paths": {"/api/time": {"get": {"summary": "t", "responses": {"200": {"description": "ok"}}}}}}'
+
+
+async def test_api_spec_hot_path_sends_the_instruction_alone():
+    """The PRD and spec.md are already in the shared history as the model's
+    own replies; restating them cost ~4 000 characters per run."""
+    seen: list[dict] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        seen.append({"system": system, "last": messages[-1]["content"], "n": len(messages)})
+        return _one_event_stream(_response(GOOD_SPEC, output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    history = [{"role": "user", "content": "kickoff"}, {"role": "assistant", "content": "# PRD"}]
+    out = await engine._generate_api_spec(
+        session, "## Product requirements\nCTX", stateless=True,
+        messages=history, tools=[{"name": "x", "description": "d", "input_schema": {}}],
+        system_override="pipeline-system",
+    )
+    assert not out.startswith("Error:")
+    assert seen[0]["system"] == "pipeline-system"
+    assert seen[0]["n"] == len(history) + 1
+    assert seen[0]["last"] == prompts.build_api_spec_instruction(stateless=True)
+    assert "CTX" not in seen[0]["last"]
+
+
+async def test_api_spec_cold_path_carries_the_context_before_the_instruction():
+    seen: dict = {}
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        seen["last"] = messages[-1]["content"]
+        return _one_event_stream(_response(GOOD_SPEC, output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    out = await engine._generate_api_spec(session, "CTX", stateless=False)
+    assert not out.startswith("Error:")
+    assert seen["last"].startswith("## Requirements\nCTX")
+    assert seen["last"].endswith(prompts.build_api_spec_instruction(stateless=False))
+
+
+async def test_a_fenced_api_spec_is_still_accepted():
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _response("```json\n" + GOOD_SPEC + "\n```", output_tokens=50),
+    )
+    out = await engine._generate_api_spec(session, "ctx")
+    assert '"/api/time"' in out and not out.startswith("Error:")
+
+
+async def test_an_unusable_api_spec_is_asked_for_once_more_with_the_problem_named():
+    """Before, "valid JSON" was the whole check: `{"paths": {}}` passed, the
+    generators built from nothing, and `_probe_app` had nothing to probe."""
+    calls: list[str] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        calls.append(messages[-1]["content"])
+        body = '{"openapi": "3.1.0", "paths": {}}' if len(calls) == 1 else GOOD_SPEC
+        return _one_event_stream(_response(body, output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    retries: list[int] = []
+    out = await engine._generate_api_spec(session, "ctx", on_retry=lambda: retries.append(1))
+    assert not out.startswith("Error:")
+    assert len(calls) == 2
+    assert "## Previous reply rejected" in calls[1]
+    assert "`paths` is missing or empty" in calls[1]
+    assert retries == [1]
+
+
+async def test_a_second_unusable_api_spec_ends_the_node():
+    bad = '{"openapi": "3.1.0", "paths": {"/time": {"get": {"responses": {"200": {}}}}}}'
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _response(bad, output_tokens=50), _response(bad, output_tokens=50),
+    )
+    out = await engine._generate_api_spec(session, "ctx")
+    assert out.startswith("Error: API spec is not a usable OpenAPI document")
+    assert "path `/time` is not under `/api/`" in out
+
+
+def test_api_spec_problem_names_each_shape_defect():
+    p = engine._api_spec_problem
+    assert p([]) == "the document is not a JSON object"
+    assert p({"openapi": "3.1.0"}) == "`paths` is missing or empty"
+    assert p({"paths": {"/api/x": {"get": {}}}}) == "`GET /api/x` has no `responses`"
+    assert p({"paths": {"/api/x": {"post": {"responses": {"201": {}}}}}}) is None
+    # Non-operation keys (parameters, summary) at path level are ignored.
+    assert p({"paths": {"/api/x": {"parameters": [], "get": {"responses": {"200": {}}}}}}) is None
+
+
 async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):
     st = _state(tmp_path)
     st.session._llm.plan_stream = _stream_mock(

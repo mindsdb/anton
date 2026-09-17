@@ -37,6 +37,7 @@ from .debug_trace import NullTrace
 from .spend import WIND_DOWN_ROUNDS
 from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
 from .prompts import (
+    build_api_spec_instruction,
     build_api_spec_prompt,
     build_backend_kickoff,
     build_backend_system_prompt,
@@ -508,36 +509,86 @@ async def _generate_api_spec(
 ) -> str:
     """One-shot planning call → OpenAPI specification (JSON).
 
-    The model is asked for an OpenAPI document as JSON. We validate the
-    response by parsing it with ``json.loads``; if parsing succeeds the spec
-    is considered valid and the (normalized) JSON string is returned.
-
     ``messages`` and ``system_override`` are the hot path: the node continues
-    the shared history under the region's single system prompt, rather than
-    opening a fresh conversation with a restated context. They travel
-    together — a history sent under a different system prompt would discard
-    the prefix cache the shared region exists to keep.
+    the shared history under the region's single system prompt, and the step
+    message is the instruction alone — the PRD and `spec.md` are already in
+    that history as the model's own replies. They travel together: a history
+    sent under a different system prompt would discard the prefix cache the
+    shared region exists to keep. Without ``messages`` the cold-start prompt
+    carries the assembled context in front of the same instruction.
+
+    The reply is parsed and checked for shape (`_api_spec_problem`). A reply
+    that is not a usable document is asked for once more with the problem
+    named; the second failure ends the node.
     """
-    system, user = build_api_spec_prompt(context, stateless=stateless)
-    if system_override is not None:
+    if messages is not None and system_override is not None:
         system = system_override
-    body, error = await _plan_whole_document(
-        session, system=system, user=user, node_label=node_label, trace=trace,
-        on_retry=on_retry, messages=messages, tools=tools,
-    )
-    if error is not None:
-        # Already worded in terms of the output limit. Without this branch the
-        # cut JSON would fall through to `json.loads` below and be reported as
-        # "not valid JSON", pointing at the wrong cause entirely.
-        return f"Error: {error}"
-    spec = _strip_code_fence(body)
-    if not spec:
-        return "Error: API spec generation returned empty response."
-    try:
-        parsed = json.loads(spec)
-    except json.JSONDecodeError as exc:
-        return f"Error: API spec is not valid JSON: {exc}"
-    return json.dumps(parsed, indent=2, ensure_ascii=False)
+        user = build_api_spec_instruction(stateless=stateless)
+    else:
+        system, user = build_api_spec_prompt(context, stateless=stateless)
+    extra = ""
+    for attempt in range(2):
+        if attempt and on_retry is not None:
+            on_retry()
+        body, error = await _plan_whole_document(
+            session, system=system, user=user + extra, node_label=node_label,
+            trace=trace, on_retry=on_retry, messages=messages, tools=tools,
+        )
+        if error is not None:
+            # Already worded in terms of the output limit. Without this branch
+            # the cut JSON would fall through to `json.loads` below and be
+            # reported as "not valid JSON", pointing at the wrong cause.
+            return f"Error: {error}"
+        spec = _strip_code_fence(body)
+        if not spec:
+            problem = "the reply was empty"
+        else:
+            try:
+                parsed = json.loads(spec)
+            except json.JSONDecodeError as exc:
+                problem = f"the reply is not valid JSON ({exc})"
+            else:
+                problem = _api_spec_problem(parsed)
+                if problem is None:
+                    return json.dumps(parsed, indent=2, ensure_ascii=False)
+        extra = (
+            "\n\n## Previous reply rejected\n"
+            f"It could not be used: {problem}. Reply with the corrected "
+            "OpenAPI JSON document only."
+        )
+    return f"Error: API spec is not a usable OpenAPI document: {problem}"
+
+
+_API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
+
+
+def _api_spec_problem(spec) -> str | None:
+    """Why a parsed document cannot serve as the API contract, or None.
+
+    Cheap shape checks only — the generators read the document as prose, and
+    `_probe_app` reads its GET paths — so the cases caught are the ones that
+    would otherwise pass silently: no paths at all (nothing to probe, nothing
+    to build), a path outside `/api/` (the backend verifier rejects root
+    routes, so the frontend would call a path that never exists), an
+    operation with no `responses` (the frontend has no shape to render).
+    """
+    if not isinstance(spec, dict):
+        return "the document is not a JSON object"
+    paths = spec.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        return "`paths` is missing or empty"
+    for path, ops in paths.items():
+        if not str(path).startswith("/api/"):
+            return f"path `{path}` is not under `/api/`"
+        if not isinstance(ops, dict):
+            return f"path `{path}` has no operations object"
+        for method in _API_SPEC_METHODS:
+            op = ops.get(method)
+            if op is None:
+                continue
+            if not isinstance(op, dict) or not isinstance(op.get("responses"), dict) or not op["responses"]:
+                return f"`{method.upper()} {path}` has no `responses`"
+    return None
 
 
 def _strip_code_fence(text: str) -> str:

@@ -743,28 +743,75 @@ def build_user_kickoff(context: str) -> str:
 
 # ---------------------------------------------------------------------------
 # API spec generation (planning call, no tools)
+#
+# Like `make_tech_spec` (0c4767d6), the step's rules travel in the step
+# message: on the hot path the node continues the shared history under the
+# pipeline system prompt, so a system prompt of its own is never seen there.
+# Until 2026-09-17 the rules lived only in `_API_SPEC_SYSTEM`, and every live
+# run got a fenced OpenAPI 3.0 document with tags, header schemas and two
+# examples per operation — 4 000 characters for one endpoint — plus the PRD
+# and spec.md restated in the message although both were already in the
+# history as the model's own replies.
 # ---------------------------------------------------------------------------
 
-_API_SPEC_SYSTEM = """\
-You are a REST API designer.
+_API_SPEC_STATELESS = (
+    "## Stateless constraint\n"
+    "The backend implementing this spec MUST NOT persist any state between "
+    "requests: no local storage (sqlite, local files, on-disk caches) and no "
+    "in-memory store carried across requests. Connecting to an EXTERNAL "
+    "database or API to read/write data IS allowed. Design endpoints "
+    "accordingly — do NOT assume server-side sessions or mutable persisted "
+    "collections."
+)
 
-Given requirements (which may include a `### Sample` of real data under the
-`## Data` section), write a concise API specification that both a backend
-developer and a frontend developer can implement from independently and in
-parallel.
+_API_SPEC_STATEFUL = (
+    "## Durable state constraint\n"
+    "The backend implementing this spec persists its own data through the "
+    "platform STATE store — a document/key-value store keyed by "
+    "(partition key, sort key), organised into named collections. It has "
+    "NO scan operation and NO secondary indexes, so design every listing "
+    "endpoint to map onto ONE partition-key query (one collection = one "
+    "listing); an endpoint that would need to read \"everything across "
+    "partitions\" cannot be implemented. Counters must be served by an "
+    "atomic increment, not read-modify-write. Keep the stored shapes to "
+    "LIGHT state: settings, sessions, counters, simple documents keyed by "
+    "id. If the requirements need joins, transactions or analytics over "
+    "large data, design those endpoints against an EXTERNAL connected "
+    "database instead of the STATE store."
+)
 
-Output an OpenAPI 3.1 specification as a single JSON document.
 
-Rules:
-- Cover ALL endpoints needed to fulfill the requirements, under `/api/...`.
-- For every operation include a one-line `summary`, path/query `parameters`,
-  a `requestBody` schema for POST/PUT, and `responses` for `200` plus any
-  non-200 codes callers must handle.
-- Provide response `examples` derived from the data the brief describes
-  (the `### Sample` subsection, when present).
-- Be precise — frontend and backend are generated in parallel from this spec.
-- Output ONLY the raw JSON document — no markdown fences, no preamble.\
-"""
+def build_api_spec_instruction(*, stateless: bool) -> str:
+    """The step message for `make_api_spec`, complete in itself.
+
+    On the hot path this is the ONLY step-specific text the model sees;
+    `build_api_spec_prompt` prepends the assembled context for the cold
+    start, where there is no history to have seen it.
+    """
+    return (
+        "## Your task\n"
+        "Write the API contract (`openapi.json`) that the backend and frontend "
+        "generators build from, independently and in parallel. Do not call any "
+        "tool. Reply with ONE OpenAPI 3.1 JSON document and nothing else: no "
+        "markdown fence, no preamble, no commentary.\n\n"
+        "## Content\n"
+        "- The endpoints are the ones `spec.md` lists under `## Backend`: "
+        "formalise exactly those, every path under `/api/...`; add none, drop "
+        "none. Where `spec.md` lists none, derive them from the PRD's "
+        "functional requirements. `/api/health` is added by the backend "
+        "generator on its own and may be left out.\n"
+        "- For every operation: a one-line `summary`, its path/query "
+        "`parameters`, a `requestBody` schema for POST/PUT/PATCH, the `200` "
+        "response schema, and any non-200 status the frontend must handle.\n"
+        "- One response `example` per operation, taken from the `### Sample` "
+        "data when the requirements carry one.\n"
+        "- Compact: no `tags`, no `info.description`, no header schemas, no "
+        "per-field `pattern` or `example` where the type already says it, no "
+        "prose the generators do not need. Every line is context both "
+        "generators carry on every round.\n\n"
+        + (_API_SPEC_STATELESS if stateless else _API_SPEC_STATEFUL)
+        + "\n\nWrite the OpenAPI JSON document now."
+    )
 
 
 def build_api_spec_prompt(
@@ -772,37 +819,19 @@ def build_api_spec_prompt(
     *,
     stateless: bool = False,
 ) -> tuple[str, str]:
-    parts = ["## Requirements", context.strip()]
-
-    if stateless:
-        parts.append(
-            "## Stateless constraint\n"
-            "The backend implementing this spec MUST NOT persist any state between "
-            "requests: no local storage (sqlite, local files, on-disk caches) and no "
-            "in-memory store carried across requests. Connecting to an EXTERNAL "
-            "database or API to read/write data IS allowed. Design endpoints "
-            "accordingly — do NOT assume server-side sessions or mutable persisted "
-            "collections."
-        )
-    else:
-        parts.append(
-            "## Durable state constraint\n"
-            "The backend implementing this spec persists its own data through the "
-            "platform STATE store — a document/key-value store keyed by "
-            "(partition key, sort key), organised into named collections. It has "
-            "NO scan operation and NO secondary indexes, so design every listing "
-            "endpoint to map onto ONE partition-key query (one collection = one "
-            "listing); an endpoint that would need to read \"everything across "
-            "partitions\" cannot be implemented. Counters must be served by an "
-            "atomic increment, not read-modify-write. Keep the stored shapes to "
-            "LIGHT state: settings, sessions, counters, simple documents keyed by "
-            "id. If the requirements need joins, transactions or analytics over "
-            "large data, design those endpoints against an EXTERNAL connected "
-            "database instead of the STATE store."
-        )
-
-    parts.append("Write the OpenAPI JSON specification now.")
-    return _API_SPEC_SYSTEM, "\n\n".join(parts)
+    """Cold-start form: the assembled context plus the same instruction the
+    hot path sends, so both paths ask for the same document."""
+    system = (
+        _DATA_CONTEXT_HEADER
+        + "You are the `make_api_spec` node. Your document is saved to "
+        "`openapi.json` and handed to the backend and frontend generators "
+        "next to the material below; the instruction at the end of the user "
+        "message says what goes into it."
+    )
+    user = "## Requirements\n" + context.strip() + "\n\n" + build_api_spec_instruction(
+        stateless=stateless
+    )
+    return system, user
 
 
 # ---------------------------------------------------------------------------

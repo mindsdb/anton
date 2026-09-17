@@ -193,6 +193,37 @@ def test_api_spec_prompt_state_constraints_by_type():
     assert "atomic increment" in stateful_user
 
 
+def test_api_spec_instruction_carries_the_rules_the_system_prompt_used_to():
+    """On the hot path the node continues the shared history under the
+    pipeline system prompt, so a system prompt of its own is never seen. The
+    rules have to travel in the step message — the seventeenth live run got
+    a fenced OpenAPI 3.0 document with tags and header schemas because they
+    did not."""
+    instruction = prompts.build_api_spec_instruction(stateless=True)
+    for marker in (
+        "no markdown fence",
+        "OpenAPI 3.1",
+        "`## Backend`",
+        "add none, drop none",
+        "/api/...",
+        "Compact",
+        "no `tags`",
+        "## Stateless constraint",
+        "Write the OpenAPI JSON document now.",
+    ):
+        assert marker in instruction, marker
+    assert "## Durable state constraint" in prompts.build_api_spec_instruction(stateless=False)
+
+
+def test_cold_and_hot_api_spec_paths_ask_for_the_same_document():
+    """The cold start prepends the assembled context; the instruction after
+    it is byte-for-byte what the hot path sends on its own."""
+    system, user = prompts.build_api_spec_prompt("## Product requirements\nX", stateless=True)
+    assert user.startswith("## Requirements\n## Product requirements\nX")
+    assert user.endswith(prompts.build_api_spec_instruction(stateless=True))
+    assert "`make_api_spec` node" in system
+
+
 def test_tech_spec_stack_pins_the_state_store():
     """Without this the spec writer invents sqlite and the generators build it."""
     stack = prompts._TECH_SPEC_STACK
