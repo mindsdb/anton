@@ -74,10 +74,10 @@ def test_retry_is_called_out():
         "Writing the backend (attempt 2)"
     )
     assert label_for("generate_backend", is_fullstack=True, attempt=1, position=(4, 9)) == (
-        "Writing the backend (4 of 9, attempt 2)"
+        "Writing the backend (step 4 of 9, attempt 2)"
     )
     assert label_for("generate_backend", is_fullstack=True, position=(4, 9)) == (
-        "Writing the backend (4 of 9)"
+        "Writing the backend (step 4 of 9)"
     )
 
 
@@ -166,7 +166,7 @@ def test_step_started_is_a_noop_without_a_channel(tmp_path: Path):
 def test_step_started_pushes_the_label(tmp_path: Path):
     st = _state(tmp_path)
     st.step_started("make_tech_spec")
-    assert _drain(st) == ["Writing the technical specification (1 of 4)"]
+    assert _drain(st) == ["Writing the technical specification (step 1 of 4)"]
 
 
 def test_step_started_skips_an_unlabelled_node(tmp_path: Path):
@@ -201,7 +201,7 @@ async def test_the_tech_spec_reports_before_it_runs(tmp_path: Path):
     assert await orchestrator._data_phase(st) is None
     assert _drain(st) == []
     assert await orchestrator._write_tech_spec(st) is None
-    assert _drain(st) == ["Writing the technical specification (1 of 4)"]
+    assert _drain(st) == ["Writing the technical specification (step 1 of 4)"]
 
 
 async def test_backend_retry_reports_both_attempts(tmp_path: Path, monkeypatch):
@@ -227,10 +227,10 @@ async def test_backend_retry_reports_both_attempts(tmp_path: Path, monkeypatch):
 
     assert await orchestrator._gen_verify_backend(st) is None
     assert _drain(st) == [
-        "Writing the backend (1 of 9)",
-        "Verifying the backend (2 of 9)",
-        "Writing the backend (1 of 9, attempt 2)",
-        "Verifying the backend (2 of 9, attempt 2)",
+        "Writing the backend (step 1 of 9)",
+        "Verifying the backend (step 2 of 9)",
+        "Writing the backend (step 1 of 9, attempt 2)",
+        "Verifying the backend (step 2 of 9, attempt 2)",
     ]
 
 
@@ -311,10 +311,10 @@ def test_step_started_counts_a_full_html_app_run(tmp_path: Path):
     assert _drain(st) == [
         "Gathering what the artifact needs",
         "Preparing a short brief for you",
-        "Writing down the agreed requirements (1 of 4)",
-        "Writing the technical specification (2 of 4)",
-        "Writing the page (3 of 4)",
-        "Verifying the page (4 of 4)",
+        "Writing down the agreed requirements (step 1 of 4)",
+        "Writing the technical specification (step 2 of 4)",
+        "Writing the page (step 3 of 4)",
+        "Verifying the page (step 4 of 4)",
     ]
 
 
@@ -323,7 +323,7 @@ def test_a_resumed_run_counts_only_the_steps_ahead(tmp_path: Path):
     st.entry = cp.ENTRY_GENERATE
     st.step_started("generate_backend")
     st.step_started("generate_frontend")
-    assert _drain(st) == ["Writing the backend (1 of 6)", "Writing the frontend (2 of 6)"]
+    assert _drain(st) == ["Writing the backend (step 1 of 6)", "Writing the frontend (step 2 of 6)"]
 
 
 def test_the_data_phase_reports_its_iteration_as_the_attempt():

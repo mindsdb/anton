@@ -126,7 +126,7 @@ def label_for(
     means this step is being redone after a failure, which is worth saying —
     it explains why the run is taking longer than the step list suggests.
     `position` is the step's `(N, M)` from a `StepCounter`; both go into one
-    bracket: `Writing the backend (4 of 9, attempt 2)`.
+    bracket: `Writing the backend (step 4 of 9, attempt 2)`.
     """
     if not is_fullstack and node in _HTML_APP_LABELS:
         text: str | None = _HTML_APP_LABELS[node]
@@ -136,7 +136,7 @@ def label_for(
         return None
     notes: list[str] = []
     if position is not None:
-        notes.append(f"{position[0]} of {position[1]}")
+        notes.append(f"step {position[0]} of {position[1]}")
     if attempt > 0:
         notes.append(f"attempt {attempt + 1}")
     return f"{text} ({', '.join(notes)})" if notes else text
