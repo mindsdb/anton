@@ -211,6 +211,14 @@ async def _data_phase(state: GenState) -> str | None:
         # clears. Not narrowed item by item: the fetch step works from
         # `define_required_data`'s consolidated list, not per source.
         state.unverified_sources = []
+        # Condition 1 is satisfied by the same fetch. `finish_gathering` is
+        # the only other place that vouches for the data, and a gathering
+        # that ended without it (plain text, round budget, budget stop) never
+        # will — so without this line the loop could not exit at all, and
+        # three successful fetches ended in "not enough data" (I-41). The
+        # flag then reaches the next checkpoint, so a resumed run does not
+        # pay for this phase again.
+        state.gathering_complete = True
         state.record("fetch_data_sample", "done", notes[:200])
 
         if not _needs_data_loop(state):

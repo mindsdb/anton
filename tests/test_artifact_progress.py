@@ -468,3 +468,33 @@ async def test_the_generation_loop_streams_its_tail_and_clears_it_after(tmp_path
     assert lines[0] == "Writing the page (step 1 of 4)"
     assert PEEK_PREFIX + "<html>\n<body>" in lines
     assert lines.index(PEEK_PREFIX + "") > lines.index(PEEK_PREFIX + "<html>\n<body>")
+
+
+
+def test_settling_a_new_type_rebuilds_the_plan_but_keeps_the_numbers(tmp_path):
+    """The counter is created at the first `gathering` line, before the type is
+    known. When `write_prd` settles a different type the total has to follow
+    (4 → 9), while a number already shown is not renumbered."""
+    import asyncio
+
+    from anton.core.tools.generate_artifact.state import GenState
+
+    q: asyncio.Queue = asyncio.Queue()
+    st = GenState(
+        session=object(), artifact_type="html-app", artifact_path=tmp_path,
+        slug="a", progress=q,
+    )
+    st.step_started("gathering")
+    assert q.get_nowait() == "Gathering what the artifact needs"
+
+    st.settle_artifact_type("fullstack-stateless-app")
+    assert st.is_fullstack is True
+    st.step_started("write_prd")
+    assert q.get_nowait() == "Writing down the agreed requirements (step 1 of 9)"
+
+    # Settling the same type again is a no-op; a blank is ignored.
+    st.settle_artifact_type("fullstack-stateless-app")
+    st.settle_artifact_type("")
+    assert st.artifact_type == "fullstack-stateless-app"
+    st.step_started("make_tech_spec")
+    assert q.get_nowait() == "Writing the technical specification (step 2 of 9)"

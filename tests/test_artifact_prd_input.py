@@ -285,6 +285,42 @@ async def test_what_generate_prd_writes_is_what_generate_artifact_reads(tmp_path
     assert gen_state.prd == body.strip()
 
 
+async def test_write_prd_settles_the_type_the_gathering_chose(tmp_path: Path, monkeypatch):
+    """The type `finish_gathering` picked has to reach the object the rest of
+    the call reads, not only metadata and the checkpoint: with `is_fullstack`
+    still False the run skipped the API spec and the backend of the fullstack
+    app it had just agreed to build (I-40)."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from anton.core.llm.provider import LLMResponse, Usage
+    from anton.core.tools import tool_handlers
+    from anton.core.tools.generate_artifact.discovery import orchestrator as prd_orchestrator
+    from anton.core.tools.generate_artifact.discovery.state import PrdState
+
+    store = Mock()
+    monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: store)
+    prd_state = PrdState(
+        session=SimpleNamespace(
+            _llm=SimpleNamespace(plan=AsyncMock(return_value=LLMResponse(
+                content="## Goal\nA room-based game.", tool_calls=[],
+                usage=Usage(input_tokens=1, output_tokens=1),
+            ))),
+            question_count=0, elicitor=None, emit=AsyncMock(),
+        ),
+        slug="s", artifact_path=tmp_path, artifact_type="html-app",
+        user_request="a game", agent_understanding="a", known_data="", user_preferences="",
+    )
+    assert prd_state.is_fullstack is False
+    prd_state.final_artifact_type = "fullstack-stateful-app"
+
+    await prd_orchestrator.write_prd(prd_state)
+
+    assert prd_state.artifact_type == "fullstack-stateful-app"
+    assert prd_state.is_fullstack is True
+    store.update.assert_called_once_with("s", type="fullstack-stateful-app")
+
+
 async def test_a_restored_run_does_not_re_enter_the_data_loop(tmp_path: Path):
     """What the pad-inspection step used to buy, now bought by the
     checkpoint: a resumed run whose sources were verified last time does not

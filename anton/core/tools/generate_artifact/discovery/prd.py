@@ -75,7 +75,17 @@ _WRITE_PRD_INSTRUCTION = (
 async def write_prd(state: PrdState) -> str:
     """Phase 2 step 5 (or the best-effort path from an unconfirmed budget):
     expand the brief into the full PRD, save it, and update the artifact's
-    `type` in metadata.json if it changed. Returns the full PRD markdown."""
+    `type` in metadata.json if it changed. The in-memory state follows the
+    same change (`GenState.settle_artifact_type`), so the rest of this call
+    builds the type that was agreed, not the one that was registered.
+    Returns the full PRD markdown."""
+    # The type is settled BEFORE the step runs, not after: the step's own
+    # progress line is the first one that carries `step N of M`, and `M`
+    # depends on the type; the metadata write below stays where it was.
+    registered_type = state.artifact_type
+    final_type = state.final_artifact_type or registered_type
+    state.settle_artifact_type(final_type)
+
     # An empty reply raises inside `plan_step`: writing an empty prd.md and
     # reporting `prd_written` would be a silent lie about what happened.
     full_prd, _ = await sub_tools.plan_step(
@@ -93,8 +103,7 @@ async def write_prd(state: PrdState) -> str:
     # them, and the correction is lost inside one run.
     state.prd = full_prd
 
-    final_type = state.final_artifact_type or state.artifact_type
-    if final_type != state.artifact_type:
+    if final_type != registered_type:
         # Reuse the exact same store-construction helper the handler used
         # (`tool_handlers.resolve_artifact_store`, keyed off `session._workspace`)
         # instead of guessing the artifacts root back out of `artifact_path`

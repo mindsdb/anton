@@ -63,11 +63,14 @@ async def test_data_phase_terminates_when_impossible(tmp_path: Path):
     assert "no orders source connected" in err  # reasoning carried through
 
 
-async def test_data_phase_budget_exhausted(tmp_path: Path, monkeypatch):
+async def test_data_phase_exits_after_one_successful_fetch(tmp_path: Path, monkeypatch):
+    """A gathering that ended without `finish_gathering` leaves
+    `gathering_complete=False`, and nothing else ever set it — so the loop
+    used to run its three iterations and fail with "not enough data" after
+    three GOOD fetches (I-41). The fetch is what vouches for the data."""
     st = _state(tmp_path)
     st.gathering_complete = False  # never finished: the loop has to run
 
-    # Always: required → possible → fetch (writes notes) → repeat.
     def gen_obj(schema_class, **kw):
         if schema_class is RequiredData:
             return RequiredData(items=[RequiredDataItem(name="x", where="db", why="y")], reasoning="r")
@@ -82,9 +85,11 @@ async def test_data_phase_budget_exhausted(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
     err = await orchestrator._data_phase(st)
-    assert err is not None
-    assert "not enough data" in err.lower()
-    assert st.data_iterations == 3
+    assert err is None
+    assert st.data_iterations == 1
+    assert st.gathering_complete is True
+    assert "pulled a sample" in st.data_notes
+    assert orchestrator._needs_data_loop(st) is False
 
 
 # ── fetch_data_sample: exec-code record + journal handoff ────────────────────

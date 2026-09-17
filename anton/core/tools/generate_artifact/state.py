@@ -288,6 +288,28 @@ class GenState:
         if self.is_fullstack is None:
             self.is_fullstack = self.artifact_type != "html-app"
 
+    def settle_artifact_type(self, final_type: str) -> None:
+        """Make `final_type` the type the rest of the run builds for.
+
+        The gathering step may choose a type other than the one the artifact
+        was registered with. Writing that choice into metadata and the
+        checkpoint is not enough: `is_fullstack`, the `stateless` switches in
+        the spec and kickoff prompts and `verify_backend` all read THIS
+        object, and a run whose state still says `html-app` skips the API
+        spec and the backend of the fullstack app it just agreed to build
+        (I-40). The step plan is rebuilt too — the counter was created at the
+        first `gathering` line, before the type was known — while the
+        numbers already handed out stay as they are.
+        """
+        if not final_type or final_type == self.artifact_type:
+            return
+        self.artifact_type = final_type
+        self.is_fullstack = final_type != "html-app"
+        if self.step_counter is not None:
+            self.step_counter.plan = plan_steps(
+                is_fullstack=self.is_fullstack, entry=self.entry
+            )
+
     def record_qa(self, question: str, answer_summary: str) -> None:
         self.qa_log.append(f"- **Q:** {question}\n  **A:** {answer_summary}")
 
