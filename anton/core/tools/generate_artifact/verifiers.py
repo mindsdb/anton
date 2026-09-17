@@ -13,6 +13,7 @@ import json
 import re
 from pathlib import Path
 
+from anton.core.artifacts.html_lint import lint_html
 from anton.core.utils.scratchpad import install_call_failed
 
 from .state import VerifyResult
@@ -131,6 +132,56 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
             warnings.append(f"Chart/library CDN other than ECharts detected: {src!r} (allowed only if the user asked).")
             break
 
+    return VerifyResult(errors=errors, warnings=warnings)
+
+
+def verify_frontend_live(entry: Path) -> VerifyResult | None:
+    """Load the written page once in a headless browser (`html_lint`).
+
+    The class of defects the text checks above cannot see: a script that
+    throws on load, a reference to a missing local file, a renderer crash,
+    a body that renders nothing. Findings become verifier errors with the
+    same fixed prefixes the contract lock registers, so the retry kickoff
+    carries the browser's own message (`Uncaught ReferenceError: state is
+    not defined (line 4)`), which is exactly what the generator needs.
+
+    Returns `None` when the page could not be checked at all — no browser
+    configured (`ANTON_HTML_LINT_BROWSER` unset: the cloud, a bare CLI),
+    a timeout, malformed runner output — as distinct from an empty verdict,
+    which means it loaded cleanly. The caller then rests on the static
+    verdict alone and notes the skip in the trace.
+
+    Single-file `html-app` pages only: `lint_html` loads through `file://`,
+    where a fullstack frontend's relative `/api/*` fetches cannot resolve and
+    surface as `TypeError: Failed to fetch` console errors that are the
+    harness's doing, not the page's (measured 2026-09-17). The path is
+    resolved here as well as in `lint_html`: Electron's `loadFile` reads a
+    relative path against its own app directory, not the cwd.
+    """
+    findings = lint_html(entry.resolve())
+    if findings is None:
+        return None
+    errors: list[str] = []
+    warnings: list[str] = []
+    for f in findings:
+        if f.kind == "console_error":
+            errors.append(
+                f"Loaded in a headless browser, the page logged a console error: {f.detail}"
+            )
+        elif f.kind == "crashed":
+            errors.append("Loaded in a headless browser, the page crashed the renderer process.")
+        elif f.kind == "failed_request":
+            errors.append(
+                "Loaded in a headless browser, the page requested a local file that "
+                f"does not exist: {f.detail}"
+            )
+        elif f.kind == "empty_page":
+            # A warning, not an error: the runner calls this a heuristic. A
+            # canvas-only page or one that fills in from a timer renders no
+            # text at load, and both are legitimate.
+            warnings.append(
+                "Loaded in a headless browser, the page rendered no visible text or elements."
+            )
     return VerifyResult(errors=errors, warnings=warnings)
 
 

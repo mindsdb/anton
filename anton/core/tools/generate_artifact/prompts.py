@@ -237,7 +237,11 @@ step and costs a regeneration:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them.\
+  to them.
+- Where a headless browser is available (single-file `html-app` pages only),
+  the page is also loaded once: a console error, a crashed renderer or a
+  request for a local file that does not exist fails the step; a page with
+  no visible text or elements is a warning.\
 """
 
 _VISUAL_RULES = _DESIGN_RULES + "\n\nHARD OUTPUT CONTRACT: " + _VERIFIER_CONTRACT

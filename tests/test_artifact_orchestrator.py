@@ -839,3 +839,112 @@ async def test_backend_loop_failure_does_not_consume_the_verify_retry(
 
     assert err is None
     assert calls["gen"] == 3
+
+
+# ── verify_frontend: the headless-browser gate ───────────────────────────────
+
+async def test_frontend_browser_findings_trigger_a_regeneration_with_the_message(
+    tmp_path: Path, monkeypatch
+):
+    """A page that passes every text check but throws on load used to ship.
+    Now the browser's own message rides the same retry channel as the static
+    rules, so the second attempt knows the exact line to fix."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    kickoffs: list[str] = []
+
+    async def fake_loop(**kw):
+        kickoffs.append(kw["kickoff"])
+        (tmp_path / "index.html").write_text(_VALID_HTML)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    live_verdicts = iter([
+        VerifyResult(errors=[
+            "Loaded in a headless browser, the page logged a console error: "
+            "Uncaught ReferenceError: state is not defined (line 4)"
+        ]),
+        VerifyResult(),
+    ])
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(
+        orchestrator.verifiers, "verify_frontend_live", lambda entry: next(live_verdicts)
+    )
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert err is None
+    assert len(kickoffs) == 2
+    assert "## Verification failed" in kickoffs[1]
+    assert "ReferenceError: state is not defined (line 4)" in kickoffs[1]
+    assert [r.outcome for r in st.trace if r.node == "verify_frontend"] == ["fail", "ok"]
+
+
+async def test_frontend_browser_skip_leaves_the_static_verdict_and_is_traced(
+    tmp_path: Path, monkeypatch
+):
+    """No browser (the cloud, a bare CLI): the step rests on the text checks,
+    and the trace says the live check did not run — otherwise a clean trace
+    row could not be told from a page that was actually loaded."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    st.trace_log = Mock()
+
+    async def fake_loop(**kw):
+        (tmp_path / "index.html").write_text(_VALID_HTML)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry: None)
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert err is None
+    st.trace_log.node.assert_any_call(
+        "verify_frontend", "browser_skipped",
+        "no headless browser configured (ANTON_HTML_LINT_BROWSER unset)",
+    )
+
+
+async def test_frontend_browser_check_is_not_run_for_fullstack(tmp_path: Path, monkeypatch):
+    """Under file:// the fullstack page's `/api/*` fetches fail with
+    `TypeError: Failed to fetch` — a harness artifact, not a page bug."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = "{}"
+
+    async def fake_loop(**kw):
+        (tmp_path / "static").mkdir(exist_ok=True)
+        (tmp_path / "static" / "index.html").write_text(
+            _VALID_HTML.replace("</head>", '<meta name="api-base" content=""></head>')
+        )
+        return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
+
+    def must_not_run(entry):
+        raise AssertionError("the browser check must not run for a fullstack frontend")
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", must_not_run)
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+
+async def test_frontend_browser_check_waits_for_the_static_checks_to_pass(
+    tmp_path: Path, monkeypatch
+):
+    """A page the text checks already reject is not worth a browser launch:
+    the retry gets the static findings first, and the browser sees attempt 2."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    calls = {"loop": 0, "live": 0}
+
+    async def fake_loop(**kw):
+        calls["loop"] += 1
+        html = "<html><body>no viewport</body></html>" if calls["loop"] == 1 else _VALID_HTML
+        (tmp_path / "index.html").write_text(html)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    def fake_live(entry):
+        calls["live"] += 1
+        return VerifyResult()
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", fake_live)
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert calls == {"loop": 2, "live": 1}

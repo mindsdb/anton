@@ -12,6 +12,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from anton.core.artifacts.internal_files import (
     API_SPEC_FILENAME,
@@ -586,10 +587,11 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
     return state.error
 
 
-def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
+def _frontend_entry(state: GenState, written: list[str]) -> Path | None:
+    """The entry file this attempt produced, or None when it wrote none."""
     if state.is_fullstack:
         entry = state.artifact_path / "static" / "index.html"
-        return entry.read_text(encoding="utf-8") if entry.is_file() else None
+        return entry if entry.is_file() else None
     # html-app: pick ONLY among what this run actually wrote. `primary` is the
     # expectation, `written` is the fact, and the fact is what must be verified:
     # otherwise, with no primary set, candidate #1 becomes the default
@@ -601,8 +603,13 @@ def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
     for rel in [r for r in written_html if r == target] + written_html:
         p = state.artifact_path / rel
         if p.is_file():
-            return p.read_text(encoding="utf-8")
+            return p
     return None
+
+
+def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
+    entry = _frontend_entry(state, written)
+    return entry.read_text(encoding="utf-8") if entry is not None else None
 
 
 async def _gen_verify_frontend(state: GenState) -> str | None:
@@ -664,8 +671,8 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
         state.record("generate_frontend", "done", result.get("summary", ""))
 
         state.step_started("verify_frontend", attempt=attempt)
-        html = _read_frontend_html(state, result["files_written"])
-        if html is None:
+        entry_file = _frontend_entry(state, result["files_written"])
+        if entry_file is None:
             # One channel: this message rides on VerifyResult like every other
             # check — otherwise the contract lock cannot see it and the terminal
             # error loses its cause (verdict used to stay None).
@@ -674,7 +681,27 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                 "(or the html-app page)."
             ])
         else:
-            verdict = verifiers.verify_frontend(html, is_fullstack=state.is_fullstack)
+            verdict = verifiers.verify_frontend(
+                entry_file.read_text(encoding="utf-8"), is_fullstack=state.is_fullstack
+            )
+            if verdict.ok and not state.is_fullstack:
+                # Second gate, only once the text checks pass and only for the
+                # single-file page — see `verify_frontend_live` for why not the
+                # fullstack frontend. In a thread: the browser subprocess
+                # blocks for up to its 8-second timeout.
+                live = await asyncio.to_thread(verifiers.verify_frontend_live, entry_file)
+                if live is None:
+                    state.trace_log.node(
+                        "verify_frontend", "browser_skipped",
+                        "no headless browser configured (ANTON_HTML_LINT_BROWSER unset)",
+                    )
+                else:
+                    # `extend`, not `append`: the contract lock keys on
+                    # `.append(...)` / `VerifyResult(...)` literals, and these
+                    # strings are registered where `verify_frontend_live`
+                    # builds them.
+                    verdict.errors.extend(live.errors)
+                    verdict.warnings.extend(live.warnings)
         state.trace_log.verifier(
             node="verify_frontend", ok=verdict.ok,
             errors=list(verdict.errors), warnings=list(verdict.warnings),

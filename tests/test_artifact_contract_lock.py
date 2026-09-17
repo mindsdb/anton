@@ -324,7 +324,7 @@ def test_squash_does_not_truncate_but_normalize_does():
 
 # ── Rule table ───────────────────────────────────────────────────────────────
 
-_VERIFIER_FUNCS = ("verify_frontend", "evaluate_backend", "verify_backend")
+_VERIFIER_FUNCS = ("verify_frontend", "verify_frontend_live", "evaluate_backend", "verify_backend")
 _ORCHESTRATOR_FUNCS = ("_gen_verify_backend", "_gen_verify_frontend")
 
 _ARTIFACT_PATH = Path("/tmp/artifact-lock-probe")
@@ -384,6 +384,17 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "stable `id`")),
     Rule("warnings", "Chart/library CDN other than ECharts detected: ",
          _both(_FRONT_BOTH, "ECharts")),
+    # ── verify_frontend_live: html-app only. The page is loaded through
+    # file://, where a fullstack frontend's /api/* fetches cannot resolve, so
+    # the check is not run there and the frontend prompt need not carry it. ──
+    Rule("errors", "Loaded in a headless browser, the page logged a console error: ",
+         (("html", "console error"),)),
+    Rule("errors", "Loaded in a headless browser, the page crashed the renderer process.",
+         (("html", "crashed renderer"),)),
+    Rule("errors", "Loaded in a headless browser, the page requested a local file that does not exist: ",
+         (("html", "local file that does not exist"),)),
+    Rule("warnings", "Loaded in a headless browser, the page rendered no visible text or elements.",
+         (("html", "no visible text"),)),
     # ── verify_frontend, fullstack only ──
     Rule("errors", 'Missing <meta name="api-base" content=""> (required for fullstack frontends).',
          (("frontend", 'name="api-base"'),)),

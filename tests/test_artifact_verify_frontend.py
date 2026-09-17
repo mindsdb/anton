@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from anton.core.tools.generate_artifact.verifiers import verify_frontend
+from pathlib import Path
+
+from anton.core.artifacts.html_lint import HtmlFinding
+from anton.core.tools.generate_artifact import verifiers
+from anton.core.tools.generate_artifact.verifiers import verify_frontend, verify_frontend_live
 
 GOOD = """<!doctype html><html><head>
 <meta charset="utf-8">
@@ -172,3 +176,57 @@ def test_unclosed_script_block_is_error():
 def test_balanced_script_blocks_pass():
     r = verify_frontend(GOOD, is_fullstack=True)
     assert r.ok, r.errors
+
+
+# ── verify_frontend_live: the headless-browser gate (html_lint) ──────────────
+
+def test_live_check_is_skipped_when_no_browser_can_run(monkeypatch):
+    """`None` from lint_html (no ANTON_HTML_LINT_BROWSER, timeout, garbage
+    output) is "could not check", not "clean" — the caller must be able to
+    tell the two apart, so it stays None here too."""
+    monkeypatch.setattr(verifiers, "lint_html", lambda path: None)
+    assert verify_frontend_live(Path("/tmp/x/index.html")) is None
+
+
+def test_live_check_clean_page_is_an_empty_verdict(monkeypatch):
+    monkeypatch.setattr(verifiers, "lint_html", lambda path: [])
+    verdict = verify_frontend_live(Path("/tmp/x/index.html"))
+    assert verdict is not None and verdict.ok and verdict.warnings == []
+
+
+def test_live_check_maps_findings_to_errors_and_a_warning(monkeypatch):
+    """Console errors, missing local files and crashes fail the step with the
+    browser's own detail carried through; an empty render is advisory."""
+    monkeypatch.setattr(verifiers, "lint_html", lambda path: [
+        HtmlFinding(kind="console_error", detail="Uncaught ReferenceError: state is not defined (line 4)"),
+        HtmlFinding(kind="failed_request", detail="file:///tmp/x/missing.js — net::ERR_FILE_NOT_FOUND"),
+        HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page"),
+        HtmlFinding(kind="empty_page", detail="page rendered with no visible text or elements"),
+    ])
+    verdict = verify_frontend_live(Path("/tmp/x/index.html"))
+    assert verdict is not None and not verdict.ok
+    assert verdict.errors == [
+        "Loaded in a headless browser, the page logged a console error: "
+        "Uncaught ReferenceError: state is not defined (line 4)",
+        "Loaded in a headless browser, the page requested a local file that "
+        "does not exist: file:///tmp/x/missing.js — net::ERR_FILE_NOT_FOUND",
+        "Loaded in a headless browser, the page crashed the renderer process.",
+    ]
+    assert verdict.warnings == [
+        "Loaded in a headless browser, the page rendered no visible text or elements."
+    ]
+
+
+def test_live_check_hands_the_browser_an_absolute_path(monkeypatch):
+    """Electron's loadFile resolves a relative path against its own app dir
+    and reports the page as not found (seen 2026-09-17)."""
+    seen: list[Path] = []
+
+    def fake_lint(path):
+        seen.append(path)
+        return []
+
+    monkeypatch.setattr(verifiers, "lint_html", fake_lint)
+    verify_frontend_live(Path("relative/index.html"))
+    assert seen == [Path("relative/index.html").resolve()]
+    assert seen[0].is_absolute()

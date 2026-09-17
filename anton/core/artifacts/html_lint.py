@@ -56,6 +56,11 @@ def _lint_html(path: Path) -> list[HtmlFinding] | None:
     browser = _discover_browser()
     if browser is None:
         return None
+    # Absolute on purpose: Electron's `loadFile` resolves a relative path
+    # against its own app directory, not the cwd, and reports the page itself
+    # as ERR_FILE_NOT_FOUND — which the runner then returns as an empty page
+    # plus a failed request for the target (seen 2026-09-17).
+    path = Path(path).resolve()
 
     # The runner goes through both argv and env on purpose:
     # - a bare `electron` binary loads argv[1] as the app to run;
