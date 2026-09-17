@@ -4,7 +4,11 @@ from pathlib import Path
 
 from anton.core.artifacts.html_lint import HtmlFinding
 from anton.core.tools.generate_artifact import verifiers
-from anton.core.tools.generate_artifact.verifiers import verify_frontend, verify_frontend_live
+from anton.core.tools.generate_artifact.verifiers import (
+    browser_check_skip_reason,
+    verify_frontend,
+    verify_frontend_live,
+)
 
 GOOD = """<!doctype html><html><head>
 <meta charset="utf-8">
@@ -230,3 +234,31 @@ def test_live_check_hands_the_browser_an_absolute_path(monkeypatch):
     verify_frontend_live(Path("relative/index.html"))
     assert seen == [Path("relative/index.html").resolve()]
     assert seen[0].is_absolute()
+
+
+# ── browser_check_skip_reason: three causes, three fixes ─────────────────────
+
+def test_skip_reason_names_the_unset_variable(monkeypatch):
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    assert browser_check_skip_reason() == (
+        "no headless browser configured (ANTON_HTML_LINT_BROWSER unset)"
+    )
+
+
+def test_skip_reason_names_a_path_that_is_not_executable(monkeypatch, tmp_path):
+    """Thirteenth live run 2026-09-17: the trace said "unset" for what could
+    as well have been a wrong path — this is the case the old message hid."""
+    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", str(tmp_path / "no-such-electron"))
+    reason = browser_check_skip_reason()
+    assert reason.startswith("ANTON_HTML_LINT_BROWSER names no executable")
+    assert "no-such-electron" in reason
+
+
+def test_skip_reason_blames_the_run_when_the_browser_exists(monkeypatch, tmp_path):
+    fake = tmp_path / "electron"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", str(fake))
+    reason = browser_check_skip_reason()
+    assert reason.startswith("browser configured but the check produced no result")
+    assert "8s" in reason

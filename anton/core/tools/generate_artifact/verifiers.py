@@ -10,9 +10,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
+from anton.core.artifacts import html_lint
 from anton.core.artifacts.html_lint import lint_html
 from anton.core.utils.scratchpad import install_call_failed
 
@@ -183,6 +185,30 @@ def verify_frontend_live(entry: Path) -> VerifyResult | None:
                 "Loaded in a headless browser, the page rendered no visible text or elements."
             )
     return VerifyResult(errors=errors, warnings=warnings)
+
+
+def browser_check_skip_reason() -> str:
+    """Why `verify_frontend_live` returned None, for the trace.
+
+    `lint_html` folds every "could not check" into one None. The thirteenth
+    live run 2026-09-17 traced "ANTON_HTML_LINT_BROWSER unset" for what may
+    have been a wrong path or a timeout — the three need different fixes, so
+    the trace has to tell them apart. Evaluated after the fact, so a variable
+    that changes between the check and this call could mislabel one run; the
+    environment of a generation process does not change underneath it.
+    """
+    configured = os.environ.get(html_lint.BROWSER_ENV_VAR)
+    if not configured:
+        return f"no headless browser configured ({html_lint.BROWSER_ENV_VAR} unset)"
+    if html_lint.discover_browser() is None:
+        return (
+            f"{html_lint.BROWSER_ENV_VAR} names no executable "
+            f"(not a file, not on PATH): {configured!r}"
+        )
+    return (
+        "browser configured but the check produced no result "
+        f"(runner timeout of {html_lint.TIMEOUT_SECONDS}s, crash or malformed output)"
+    )
 
 
 # ---------------------------------------------------------------------------

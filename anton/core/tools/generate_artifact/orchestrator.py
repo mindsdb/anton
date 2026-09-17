@@ -693,7 +693,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                 if live is None:
                     state.trace_log.node(
                         "verify_frontend", "browser_skipped",
-                        "no headless browser configured (ANTON_HTML_LINT_BROWSER unset)",
+                        verifiers.browser_check_skip_reason(),
                     )
                 else:
                     # `extend`, not `append`: the contract lock keys on

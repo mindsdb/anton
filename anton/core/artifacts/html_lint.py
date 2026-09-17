@@ -21,7 +21,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _RUNNER_SCRIPT = Path(__file__).with_name("_html_lint_runner.js")
-_TIMEOUT_SECONDS = 8
+# Public: callers that treat `None` from `lint_html` as "could not check"
+# read these to say WHY in their own diagnostics (generate_artifact's
+# `verify_frontend` traces the reason a browser check was skipped).
+BROWSER_ENV_VAR = "ANTON_HTML_LINT_BROWSER"
+TIMEOUT_SECONDS = 8
 _RESULT_START = "RESULT_JSON_START"
 _RESULT_END = "RESULT_JSON_END"
 
@@ -53,7 +57,7 @@ def lint_html(path: Path) -> list[HtmlFinding] | None:
 
 
 def _lint_html(path: Path) -> list[HtmlFinding] | None:
-    browser = _discover_browser()
+    browser = discover_browser()
     if browser is None:
         return None
     # Absolute on purpose: Electron's `loadFile` resolves a relative path
@@ -76,7 +80,7 @@ def _lint_html(path: Path) -> list[HtmlFinding] | None:
             [browser, str(_RUNNER_SCRIPT), "--headless=new", "--disable-gpu"],
             env=env,
             capture_output=True,
-            timeout=_TIMEOUT_SECONDS,
+            timeout=TIMEOUT_SECONDS,
             text=True,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -88,8 +92,10 @@ def _lint_html(path: Path) -> list[HtmlFinding] | None:
     return _findings_from_result(result)
 
 
-def _discover_browser() -> str | None:
-    browser = os.environ.get("ANTON_HTML_LINT_BROWSER")
+def discover_browser() -> str | None:
+    """The browser binary `lint_html` would run, or None when the env var is
+    unset or names nothing executable (neither a file nor on PATH)."""
+    browser = os.environ.get(BROWSER_ENV_VAR)
     if not browser:
         return None
     if os.path.isfile(browser) and os.access(browser, os.X_OK):

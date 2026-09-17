@@ -886,6 +886,7 @@ async def test_frontend_browser_skip_leaves_the_static_verdict_and_is_traced(
     row could not be told from a page that was actually loaded."""
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
     st.trace_log = Mock()
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
 
     async def fake_loop(**kw):
         (tmp_path / "index.html").write_text(_VALID_HTML)
