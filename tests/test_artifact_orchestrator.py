@@ -987,3 +987,44 @@ async def test_frontend_browser_check_waits_for_the_static_checks_to_pass(
 
     assert await orchestrator._gen_verify_frontend(st) is None
     assert calls == {"loop": 2, "live": 1}
+
+
+async def test_relaunch_rebuilds_the_datasource_env_after_the_backend_is_regenerated(
+    tmp_path: Path, monkeypatch,
+):
+    """The retry regenerates `backend.py`, and `_gen_verify_backend` declares
+    the datasources the new code reads. An env built once before the loop
+    would relaunch without the `DS_*` a rewrite introduced (I-42)."""
+    from anton.core.tools import tool_handlers
+
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.session._scratchpads = None
+    monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: None)
+
+    envs = iter([{"DS_PG_OLD__HOST": "a"}, {"DS_PG_NEW__HOST": "b"}])
+    monkeypatch.setattr(orchestrator, "_launch_datasource_env", lambda state: next(envs))
+
+    seen: list[dict] = []
+
+    async def fake_launch(**kw):
+        seen.append(dict(kw["ds_env"]))
+        return "install failed" if len(seen) == 1 else {"port": 5000}
+    monkeypatch.setattr(orchestrator, "_launch_backend", fake_launch)
+
+    async def fake_regen(state, **kw):
+        return None
+    monkeypatch.setattr(orchestrator, "_gen_verify_backend", fake_regen)
+
+    async def fake_tail(state, limit=2000):
+        return ""
+    monkeypatch.setattr(orchestrator, "_tail_log", fake_tail)
+
+    async def fake_probe(state, port):
+        return None
+    monkeypatch.setattr(orchestrator, "_probe_app", fake_probe)
+
+    err = await orchestrator._run_and_verify_app(st)
+
+    assert err is None
+    assert seen == [{"DS_PG_OLD__HOST": "a"}, {"DS_PG_NEW__HOST": "b"}]
+    assert st.app_port == 5000

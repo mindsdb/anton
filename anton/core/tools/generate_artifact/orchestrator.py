@@ -879,10 +879,16 @@ async def _run_and_verify_app(state: GenState) -> str | None:
     if not isinstance(tracked, dict):
         tracked = {}
         state.session._tracked_backends = tracked
-    ds_env = _launch_datasource_env(state)
     problem = ""
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
         state.step_started("run_app", attempt=attempt)
+        # Rebuilt on every attempt, not once before the loop: the retry below
+        # regenerates `backend.py`, and `_gen_verify_backend` writes the
+        # datasources the new code reads into metadata via
+        # `_declare_datasources`. An env built before that has no `DS_*` for a
+        # namespace the rewrite introduced, and the relaunch fails on the
+        # first query with correct code (I-42).
+        ds_env = _launch_datasource_env(state)
         launch = await _launch_backend(
             slug=state.slug,
             artifact_folder=state.artifact_path,
