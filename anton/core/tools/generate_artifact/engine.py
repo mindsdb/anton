@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -517,15 +518,17 @@ async def _generate_api_spec(
     shared region exists to keep. Without ``messages`` the cold-start prompt
     carries the assembled context in front of the same instruction.
 
-    The reply is parsed and checked for shape (`_api_spec_problem`). A reply
-    that is not a usable document is asked for once more with the problem
-    named; the second failure ends the node.
+    The reply is parsed and checked for shape (`_api_spec_problem`), and its
+    paths against the ones `spec.md` lists under `## Backend` when ``context``
+    carries that section. A reply that is not a usable document is asked for
+    once more with the problem named; the second failure ends the node.
     """
     if messages is not None and system_override is not None:
         system = system_override
         user = build_api_spec_instruction(stateless=stateless)
     else:
         system, user = build_api_spec_prompt(context, stateless=stateless)
+    declared = _declared_api_paths(context)
     extra = ""
     for attempt in range(2):
         if attempt and on_retry is not None:
@@ -548,7 +551,7 @@ async def _generate_api_spec(
             except json.JSONDecodeError as exc:
                 problem = f"the reply is not valid JSON ({exc})"
             else:
-                problem = _api_spec_problem(parsed)
+                problem = _api_spec_problem(parsed, declared)
                 if problem is None:
                     return json.dumps(parsed, indent=2, ensure_ascii=False)
         extra = (
@@ -560,9 +563,36 @@ async def _generate_api_spec(
 
 
 _API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
+_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)]+)")
+_HEALTH_PATH = "/api/health"
 
 
-def _api_spec_problem(spec) -> str | None:
+def _normalise_api_path(path: str) -> str:
+    """`/api/rooms/{code}/` and `/api/rooms/{id}` compare equal: parameter
+    names are the contract writer's to choose, the segments are not."""
+    return re.sub(r"\{[^}]*\}", "{}", str(path).rstrip("/"))
+
+
+def _declared_api_paths(context: str) -> dict[str, str]:
+    """The paths `spec.md` lists under `## Backend`, normalised → as written.
+
+    Read from the assembled context, which carries `spec.md` on both the
+    cold and the hot path. The section runs to the next `##` heading; a line
+    counts when it names `METHOD /api/...`, in backticks or bare. Empty when
+    there is no such section — the instruction then lets the model derive
+    the endpoints from the PRD, and there is nothing to compare against.
+    """
+    match = re.search(r"^## Backend[^\n]*\n(.*?)(?=^#{1,2} |\Z)", context, re.M | re.S)
+    if not match:
+        return {}
+    found: dict[str, str] = {}
+    for path in _DECLARED_PATH_RE.findall(match.group(1)):
+        if _normalise_api_path(path) != _HEALTH_PATH:
+            found.setdefault(_normalise_api_path(path), path)
+    return found
+
+
+def _api_spec_problem(spec, declared: dict[str, str] | None = None) -> str | None:
     """Why a parsed document cannot serve as the API contract, or None.
 
     Cheap shape checks only — the generators read the document as prose, and
@@ -571,6 +601,12 @@ def _api_spec_problem(spec) -> str | None:
     to build), a path outside `/api/` (the backend verifier rejects root
     routes, so the frontend would call a path that never exists), an
     operation with no `responses` (the frontend has no shape to render).
+
+    With ``declared`` (from `_declared_api_paths`) the document's paths must
+    be exactly those, `/api/health` aside. The twentieth live run renamed
+    `GET /api/rooms/{code}/state` to `GET /api/rooms/{code}`: both generators
+    followed the document, so the app was consistent — and `spec.md` no
+    longer described it. Parameter names may differ; segments may not.
     """
     if not isinstance(spec, dict):
         return "the document is not a JSON object"
@@ -588,6 +624,20 @@ def _api_spec_problem(spec) -> str | None:
                 continue
             if not isinstance(op, dict) or not isinstance(op.get("responses"), dict) or not op["responses"]:
                 return f"`{method.upper()} {path}` has no `responses`"
+    if declared:
+        present = {
+            _normalise_api_path(p): p for p in paths if _normalise_api_path(p) != _HEALTH_PATH
+        }
+        for key in sorted(set(declared) - set(present)):
+            return (
+                f"`spec.md` lists `{declared[key]}` but the document has no such path "
+                "(keep every path exactly as `spec.md` writes it)"
+            )
+        for key in sorted(set(present) - set(declared)):
+            return (
+                f"the document adds `{present[key]}`, which `spec.md` does not list "
+                "(keep every path exactly as `spec.md` writes it)"
+            )
     return None
 
 

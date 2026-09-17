@@ -12,6 +12,7 @@ write the files, nothing else.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .discovery.notes import EXEC_OUTPUT_MAX
@@ -817,10 +818,13 @@ def build_api_spec_instruction(*, stateless: bool) -> str:
         "markdown fence, no preamble, no commentary.\n\n"
         "## Content\n"
         "- The endpoints are the ones `spec.md` lists under `## Backend`: "
-        "formalise exactly those, every path under `/api/...`; add none, drop "
-        "none. Where `spec.md` lists none, derive them from the PRD's "
-        "functional requirements. `/api/health` is added by the backend "
-        "generator on its own and may be left out.\n"
+        "formalise exactly those, every path under `/api/...` spelled exactly "
+        "as `spec.md` writes it — same segments, same parameter names; add "
+        "none, drop none, rename none (the paths are checked against "
+        "`spec.md` and a document that differs is sent back). Where `spec.md` "
+        "lists none, derive them from the PRD's functional requirements. "
+        "`/api/health` is added by the backend generator on its own and may "
+        "be left out.\n"
         "- This document is the ONLY place the request and response shapes "
         "live: `spec.md` names the endpoints, you decide their fields. Give "
         "each operation the fields the PRD's requirements and the frontend "
@@ -829,12 +833,15 @@ def build_api_spec_instruction(*, stateless: bool) -> str:
         "- For every operation: a one-line `summary`, its path/query "
         "`parameters`, a `requestBody` schema for POST/PUT/PATCH, the `200` "
         "response schema, and any non-200 status the frontend must handle.\n"
-        "- One response `example` per operation, taken from the `### Sample` "
-        "data when the requirements carry one.\n"
+        "- A response `example` only where the requirements carry `### Sample` "
+        "data for that operation — taken from there, one at most; no invented "
+        "examples anywhere else.\n"
         "- Compact: no `tags`, no `info.description`, no header schemas, no "
-        "per-field `pattern` or `example` where the type already says it, no "
-        "prose the generators do not need. Every line is context both "
-        "generators carry on every round.\n\n"
+        "per-field `pattern` or `example` where the type already says it. A "
+        "`description` only where the name and type do not already say it, "
+        "and then one short clause, not a sentence. No prose the generators "
+        "do not need: every line is context both generators carry on every "
+        "round.\n\n"
         + (_API_SPEC_STATELESS if stateless else _API_SPEC_STATEFUL)
         + "\n\nWrite the OpenAPI JSON document now."
     )
@@ -1052,12 +1059,27 @@ def build_backend_system_prompt(
     return "\n\n".join(parts)
 
 
+def _compact_api_spec(api_spec: str) -> str:
+    """The contract as ONE line of JSON for the kickoff.
+
+    `openapi.json` is written indented for people; the generators read the
+    same document as prose, and the indentation is dead weight on every
+    round of both of them — measured on the twentieth live run: 35.8 KB
+    indented against 11.7 KB compact, i.e. ~6k tokens per generator per
+    round. Text that is not JSON is passed through unchanged.
+    """
+    try:
+        return json.dumps(json.loads(api_spec), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return api_spec
+
+
 def build_backend_kickoff(
     context: str,
     api_spec: str,
 ) -> str:
     parts = [context.strip()]
-    parts.append("## API Specification\n" + api_spec)
+    parts.append("## API Specification\n" + _compact_api_spec(api_spec))
     parts.append(
         "Read the sections above, then follow the workflow from your "
         "instructions: a scratchpad cell only when `## Data` shows a source "
@@ -1112,7 +1134,7 @@ def build_frontend_kickoff(
         "## API Specification\n"
         "(Call these endpoints with `fetch(api('/api/...'))` — "
         "the backend serves them.)\n\n"
-        + api_spec
+        + _compact_api_spec(api_spec)
     )
     parts.append(_kickoff_closing(fullstack=True))
     return "\n\n".join(parts)

@@ -8,6 +8,7 @@ nothing anywhere reporting the loss.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -271,6 +272,79 @@ def test_api_spec_problem_names_each_shape_defect():
     assert p({"paths": {"/api/x": {"post": {"responses": {"201": {}}}}}}) is None
     # Non-operation keys (parameters, summary) at path level are ignored.
     assert p({"paths": {"/api/x": {"parameters": [], "get": {"responses": {"200": {}}}}}}) is None
+
+
+_BACKEND_SECTION = """\
+## Technical specification
+## Implementation notes
+Polls `GET .../state` twice a second.
+
+## Backend
+
+Endpoints:
+- `POST /api/rooms`: create a room.
+- `GET /api/rooms/{code}/state`: authoritative snapshot.
+- POST /api/rooms/{code}/action: apply one command.
+### Health
+- `GET /api/health`: liveness, added by the generator.
+
+## Progress journal (steps completed so far)
+- GET /api/not-an-endpoint appears outside the section.
+"""
+
+
+def test_declared_api_paths_come_from_the_backend_section_only():
+    """Backticked or bare, `/api/health` dropped, `###` subsections kept,
+    everything outside `## Backend` ignored — and nothing at all when the
+    section is missing, so a spec without one skips the comparison."""
+    assert engine._declared_api_paths(_BACKEND_SECTION) == {
+        "/api/rooms": "/api/rooms",
+        "/api/rooms/{}/state": "/api/rooms/{code}/state",
+        "/api/rooms/{}/action": "/api/rooms/{code}/action",
+    }
+    assert engine._declared_api_paths("## Product requirements\nX") == {}
+
+
+def _doc(*paths: str) -> dict:
+    return {"paths": {p: {"get": {"responses": {"200": {}}}} for p in paths}}
+
+
+def test_api_spec_problem_rejects_paths_that_differ_from_spec_md():
+    """The twentieth live run turned `/api/rooms/{code}/state` into
+    `/api/rooms/{code}`: the count matched, so the shape check let it
+    through and `spec.md` stopped describing the app."""
+    p = engine._api_spec_problem
+    declared = engine._declared_api_paths(_BACKEND_SECTION)
+    exact = _doc("/api/rooms", "/api/rooms/{code}/state", "/api/rooms/{code}/action")
+    assert p(exact, declared) is None
+    # Parameter names, a trailing slash and `/api/health` are not differences.
+    assert p(_doc("/api/rooms/", "/api/rooms/{id}/state", "/api/rooms/{id}/action", "/api/health"), declared) is None
+    renamed = _doc("/api/rooms", "/api/rooms/{code}", "/api/rooms/{code}/action")
+    problem = p(renamed, declared)
+    assert problem.startswith("`spec.md` lists `/api/rooms/{code}/state` but the document has no such path")
+    added = _doc("/api/rooms", "/api/rooms/{code}/state", "/api/rooms/{code}/action", "/api/stats")
+    assert p(added, declared).startswith("the document adds `/api/stats`, which `spec.md` does not list")
+    # Without a declared list (no `## Backend` section) the paths are the model's.
+    assert p(renamed) is None
+    assert p(renamed, {}) is None
+
+
+async def test_a_renamed_path_is_sent_back_with_spec_md_quoted():
+    calls: list[str] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        calls.append(messages[-1]["content"])
+        paths = ("/api/rooms", "/api/rooms/{code}", "/api/rooms/{code}/action") if len(calls) == 1 else (
+            "/api/rooms", "/api/rooms/{code}/state", "/api/rooms/{code}/action")
+        return _one_event_stream(_response(json.dumps(_doc(*paths)), output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    out = await engine._generate_api_spec(session, _BACKEND_SECTION)
+    assert not out.startswith("Error:")
+    assert len(calls) == 2
+    assert "## Previous reply rejected" in calls[1]
+    assert "`spec.md` lists `/api/rooms/{code}/state`" in calls[1]
+    assert '"/api/rooms/{code}/state"' in out
 
 
 async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):

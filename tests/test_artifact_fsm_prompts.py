@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from anton.core.tools.generate_artifact import prompts
@@ -242,8 +243,11 @@ def test_api_spec_instruction_carries_the_rules_the_system_prompt_used_to():
         "no markdown fence",
         "OpenAPI 3.1",
         "`## Backend`",
-        "add none, drop none",
+        "add none, drop none, rename none",
+        "spelled exactly",
         "ONLY place the request and response shapes",
+        "no invented",
+        "`description` only where",
         "/api/...",
         "Compact",
         "no `tags`",
@@ -252,6 +256,22 @@ def test_api_spec_instruction_carries_the_rules_the_system_prompt_used_to():
     ):
         assert marker in instruction, marker
     assert "## Durable state constraint" in prompts.build_api_spec_instruction(stateless=False)
+
+
+def test_both_kickoffs_carry_the_contract_as_one_line_of_json():
+    """`openapi.json` is indented for people; the twentieth live run put
+    35.8 KB of it into each generator's kickoff where the compact form is
+    11.7 KB. Text that is not JSON passes through unchanged."""
+    pretty = json.dumps({"openapi": "3.1.0", "paths": {"/api/t": {"get": {"responses": {"200": {}}}}}}, indent=2)
+    compact = json.dumps(json.loads(pretty))
+    assert "\n" in pretty and "\n" not in compact
+    for kickoff in (
+        prompts.build_backend_kickoff("ctx", pretty),
+        prompts.build_frontend_kickoff("ctx", pretty),
+    ):
+        assert compact in kickoff
+        assert pretty not in kickoff
+    assert "{not json" in prompts.build_backend_kickoff("ctx", "{not json")
 
 
 def test_cold_and_hot_api_spec_paths_ask_for_the_same_document():
