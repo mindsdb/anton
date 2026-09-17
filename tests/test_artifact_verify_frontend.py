@@ -56,7 +56,7 @@ def test_absolute_href_and_img_src_are_not_flagged_at_all():
 
     Neither an error nor a warning — the accepted PRD asks for exactly these,
     and the previous rule failed two correct artifacts in a row. Verified for
-    both artifact shapes because `_VISUAL_RULES` is shared.
+    both artifact shapes because `_VERIFIER_CONTRACT` is shared.
     """
     html = GOOD.replace(
         '<div id="kpi-revenue"></div>',

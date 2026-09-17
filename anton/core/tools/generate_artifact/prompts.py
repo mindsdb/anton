@@ -185,9 +185,8 @@ _ROLE = _ROLE_COMMON + "\n\n" + _ROLE_WRITE
 # Visual design rules (used in every type that has a frontend)
 # ---------------------------------------------------------------------------
 
-# Two halves, quoted separately by the html-app builder (which gives each its
-# own heading) and joined as `_VISUAL_RULES` for the fullstack frontend builder
-# and the tests that read the joined constant.
+# Two halves, quoted under their own headings by both frontend builders
+# (html-app and the fullstack `static/index.html`).
 _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
 - Dark theme: background #0d1117, text #e6edf3.
@@ -255,8 +254,6 @@ step and costs a regeneration:
   request for a local file that does not exist fails the step; a page with
   no visible text or elements is a warning.\
 """
-
-_VISUAL_RULES = _DESIGN_RULES + "\n\nHARD OUTPUT CONTRACT: " + _VERIFIER_CONTRACT
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +467,8 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
 # ---------------------------------------------------------------------------
 
 _FRONTEND_RULES = """\
-FRONTEND — `static/index.html`:
+Two of these are verifier checks as well: a page without the api-base meta
+tag, or one that calls the backend outside `/api/*`, fails the step.
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
@@ -498,41 +496,6 @@ FRONTEND — `static/index.html`:
 # ---------------------------------------------------------------------------
 # Public builders
 # ---------------------------------------------------------------------------
-
-# Mixed in everywhere _VISUAL_RULES is: chunked writing is needed by html-app and
-# by the fullstack frontend alike. It cannot live in _FRONTEND_RULES — that block
-# only goes to the fullstack branch.
-_WRITE_DISCIPLINE = f"""\
-HOW MUCH GOES IN ONE REPLY:
-One reply holds roughly {REPLY_BODY_CHARS:,} characters of file content. Almost
-every artifact is smaller than that, so the normal case is the whole file in a
-single body, written with one `write_file(path, mode="w")` — one round, and
-done. Compare the file you are about to write against that figure before you
-decide anything else.
-
-Split ONLY a file that will clearly exceed it:
-- One body per reply, so one part per reply. Each part costs a full round, and
-  splitting a file that would have fit costs that round for nothing.
-- Continue each part exactly where the file now ends, and append it with
-  `write_file(path, mode="a")`.
-- If a reply is cut off before the closing marker, nothing from it is written —
-  send that part again, shorter, and append the remainder next.
-- Do NOT re-emit the whole file to "fix" something — append the remaining part.
-  Each `write_file` already tells you the characters and lines it added and
-  the file's new totals, so an append's span is the last N lines — that is normally
-  all the confirmation you need, with no read at all. If you do read, plain
-  `read_file(path)` adds the tail on top of that. `read_file(path, full=true)`
-  answers a question nobody asked here: it re-reads the middle of the file to
-  "check the structure", which is exactly the verifier's job after `finish`.
-- The final chunk must close every tag you opened, `</body></html>` included.
-
-PYTHON → JS STRING SAFETY (only when you build content inside a scratchpad cell):
-Escape sequences resolve in Python BEFORE the text reaches the file, so `'\\n'`
-inside a Python string becomes a real newline and breaks a JS string literal.
-Use raw strings (`r"..."`) for JS blocks, or double-escape. Writing the text
-straight into your reply between the markers avoids the problem entirely —
-prefer that.\
-"""
 
 # The entry-point filename for an html-app whose `create_artifact` call set no
 # `primary`. Was "dashboard.html" until 2026-09-16 — a leftover from the
@@ -568,18 +531,44 @@ The user message carries these sections, in this order (some may be absent):
 - `## Progress journal` — one line per pipeline step done so far.\
 """
 
+# Appended for the fullstack frontend: `build_frontend_kickoff` renders this
+# section after the shared context.
+_GEN_API_SPEC_INPUT = """\
+- `## API Specification` — the backend's `openapi.json`, generated just
+  before this step: the exact paths and response shapes your `fetch` calls
+  must match.\
+"""
 
-def _gen_html_task(target: str) -> str:
+
+def _gen_html_inputs(*, fullstack: bool = False) -> str:
+    text = _GEN_HTML_INPUTS.format(prd_footer=PRD_SECTION_FOOTER)
+    return text + "\n" + _GEN_API_SPEC_INPUT if fullstack else text
+
+
+def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
+    if fullstack:
+        body = f"""\
+Produce ONE self-contained HTML file named exactly `{target}`: the
+complete frontend of a fullstack app. Inline your own CSS and all JS; the
+only external resources allowed are the Tailwind and ECharts `<script>` tags
+from the CDNs named in the design rules. The backend is generated in parallel
+and serves the endpoints listed under `## API Specification`: take exact
+paths and response shapes from there and call every one of them through the
+`api()` helper (see Fullstack rules). Embed no data — the page fetches it
+from the backend at run time."""
+    else:
+        body = f"""\
+Produce ONE self-contained HTML file named exactly `{target}`, at the root
+of the artifact folder. Inline your own CSS and all JS and embed all data in
+the file. Do not reference any other file of the artifact; the only external
+resources allowed are the Tailwind and ECharts `<script>` tags from the CDNs
+named in the design rules."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.
 
 ## Your task
-Produce ONE self-contained HTML file named exactly `{target}`, at the root
-of the artifact folder. Inline your own CSS and all JS and embed all data in
-the file. Do not reference any other file of the artifact; the only external
-resources allowed are the Tailwind and ECharts `<script>` tags from the CDNs
-named in the design rules.
+{body}
 
 UI text and the `<html lang>` attribute follow the language of the PRD.
 
@@ -590,16 +579,24 @@ Checking your own output is NOT part of the job.\
 """
 
 
-def _gen_html_workflow(target: str) -> str:
-    return f"""\
-## Workflow
-A typical run takes one or two rounds.
-1. Read the PRD, `## Data` and the specification. Plan the page.
+def _gen_html_workflow(target: str, *, fullstack: bool = False) -> str:
+    if fullstack:
+        data_step = """\
+2. Data: none to embed — the page fetches it from the backend. A scratchpad
+   cell is warranted only when the API Specification leaves a response
+   shape unclear and `## Data` holds no sample of it; otherwise skip."""
+    else:
+        data_step = """\
 2. Data, only if needed: when the dataset to embed is not already printed
    under `## Data` in a usable shape, run ONE scratchpad cell that
    aggregates it and prints it as JSON (a dashboard almost never needs raw
    rows). Skip this step when the data is already visible or the artifact
-   needs none.
+   needs none."""
+    return f"""\
+## Workflow
+A typical run takes one or two rounds.
+1. Read the PRD, `## Data` and the specification. Plan the page.
+{data_step}
 3. Write the whole file in one reply: the body between the markers plus one
    `write_file(path="{target}")` call — see Output protocol.
 4. Call `finish`. Do not read the file back and do not run checks.\
@@ -710,7 +707,7 @@ def build_subagent_system_prompt(
     return "\n\n".join(
         [
             _gen_html_task(target),
-            _GEN_HTML_INPUTS.format(prd_footer=PRD_SECTION_FOOTER),
+            _gen_html_inputs(),
             _gen_html_workflow(target),
             _gen_html_output_protocol(target),
             _GEN_SIZE_RULES,
@@ -721,18 +718,27 @@ def build_subagent_system_prompt(
     )
 
 
-def build_user_kickoff(context: str) -> str:
-    # The context renders its own section headers (`## Product requirements`,
-    # or `## Brief` when there is no PRD) — see `orchestrator._spec_context`.
-    parts: list[str] = [context.strip()]
-    parts.append(
+def _kickoff_closing(*, fullstack: bool) -> str:
+    data_clause = (
+        "the page fetches its data from the backend, so a scratchpad cell is "
+        "warranted only for a response shape the API Specification leaves "
+        "unclear"
+        if fullstack
+        else "run a scratchpad cell only if the data to embed is not already "
+        "usable under `## Data`"
+    )
+    return (
         "Read the sections above, then follow the workflow from your "
-        "instructions: run a scratchpad cell only if the data to embed is not "
-        "already usable under `## Data`; write the file as text between "
+        f"instructions: {data_clause}; write the file as text between "
         f"`{BEGIN}` and `{END}` plus one `write_file` call in the same reply; "
         "then call `finish`."
     )
-    return "\n\n".join(parts)
+
+
+def build_user_kickoff(context: str) -> str:
+    # The context renders its own section headers (`## Product requirements`,
+    # or `## Brief` when there is no PRD) — see `orchestrator._spec_context`.
+    return "\n\n".join([context.strip(), _kickoff_closing(fullstack=False)])
 
 
 # ---------------------------------------------------------------------------
@@ -860,27 +866,37 @@ def build_backend_kickoff(
 
 
 # ---------------------------------------------------------------------------
-# Frontend-only system prompt and kickoff (parallel fullstack-stateful-app)
+# Fullstack frontend (`static/index.html`) — system prompt and kickoff
+#
+# Built from the same blocks as the html-app prompt, in the same order, with
+# the fullstack-only material in two places: the task paragraph and a
+# `## Fullstack rules` section. Until 2026-09-17 this builder stacked the
+# shared `_ROLE` (scratchpad discipline, an html-app data recipe, a second
+# copy of the write protocol) on top of its own blocks — 32 % more text than
+# the html-app prompt, no workflow, no input map, no UI-language rule, stale
+# "brief" wording, and every protocol fix had to be made twice.
 # ---------------------------------------------------------------------------
 
+FULLSTACK_FRONTEND_TARGET = "static/index.html"
+
+
 def build_frontend_system_prompt(artifact_path: Path) -> str:
-    parts: list[str] = [_ROLE]
-    parts.append(
-        "## Your task\n"
-        "Produce exactly one file: `static/index.html` — the complete frontend.\n"
-        "The backend is being generated in parallel — call its endpoints via the\n"
-        "API Specification you receive. Use the spec to know exact paths and\n"
-        "response shapes; use the `api()` helper for every fetch call."
+    # `artifact_path` is not quoted, for the same reason as in the html-app
+    # builder: every path the model writes is relative to the artifact root.
+    target = FULLSTACK_FRONTEND_TARGET
+    return "\n\n".join(
+        [
+            _gen_html_task(target, fullstack=True),
+            _gen_html_inputs(fullstack=True),
+            _gen_html_workflow(target, fullstack=True),
+            _gen_html_output_protocol(target),
+            _GEN_SIZE_RULES,
+            "## Verifier contract\n" + _VERIFIER_CONTRACT,
+            "## Fullstack rules\n" + _FRONTEND_RULES,
+            "## Design rules\n" + _DESIGN_RULES,
+            _GEN_TOOLS,
+        ]
     )
-    parts.append(_VISUAL_RULES)
-    parts.append(_WRITE_DISCIPLINE)
-    parts.append(_FRONTEND_RULES)
-    parts.append(
-        "## Output folder\n"
-        f"All `write_file` paths are relative to: `{artifact_path}`\n"
-        "Do NOT write outside that folder."
-    )
-    return "\n\n".join(parts)
 
 
 def build_frontend_kickoff(
@@ -894,13 +910,7 @@ def build_frontend_kickoff(
         "the backend serves them.)\n\n"
         + api_spec
     )
-    parts.append(
-        "Use the `scratchpad` tool to inspect a data sample if you need it to "
-        "design charts and tables. Then write `static/index.html`: its content "
-        f"as text between `{BEGIN}` and `{END}`, plus "
-        "`write_file(path=\"static/index.html\")` in the same reply, and call "
-        "`finish`."
-    )
+    parts.append(_kickoff_closing(fullstack=True))
     return "\n\n".join(parts)
 
 

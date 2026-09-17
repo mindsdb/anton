@@ -211,17 +211,22 @@ def test_stateful_task_demands_the_manifest_file():
     assert "exactly two files" in stateless
 
 
-def test_visual_rules_carry_the_frontend_verifier_contract():
-    """_VISUAL_RULES is shared by html-app and the fullstack frontend — the rules go there."""
-    rules = prompts._VISUAL_RULES
-    for marker in (
+def test_verifier_contract_reaches_both_frontend_prompts():
+    """`_VERIFIER_CONTRACT` is quoted under `## Verifier contract` by the
+    html-app builder and the fullstack frontend builder alike."""
+    for rules in (
+        prompts._VERIFIER_CONTRACT,
+        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+      for marker in (
         "explicit `<body>`",
         "absolute URL",
         "__antonCommentsLayer",
         "!important",
         "z-index",
         "stable `id`",
-    ):
+      ):
         assert marker in rules, marker
 
 
@@ -293,12 +298,10 @@ def test_html_prompt_falls_back_to_index_html():
         assert "dashboard.html" not in system
 
 
-def test_write_discipline_block_is_present_in_both_frontend_prompts():
-    """Split writing is needed by html-app and the fullstack frontend alike.
-
-    The html-app prompt has its own size block (`_GEN_SIZE_RULES`), so the
-    shared marker is the rule itself, not the constant."""
-    assert "mode=\"a\"" in prompts._WRITE_DISCIPLINE
+def test_size_rules_block_is_present_in_both_frontend_prompts():
+    """Split writing is needed by html-app and the fullstack frontend alike;
+    since 2026-09-17 both quote the one `_GEN_SIZE_RULES` block."""
+    assert "mode=\"a\"" in prompts._GEN_SIZE_RULES
     for system in (
         prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
@@ -473,7 +476,7 @@ def test_role_forbids_new_scratchpad_names():
     assert "NEVER create a scratchpad with a new name" in prompts._ROLE_COMMON
 
 
-def test_the_write_discipline_no_longer_states_a_character_limit():
+def test_the_size_rules_no_longer_state_a_character_limit():
     """The limit was derived from how long a silent connection survives, and
     with the body in the text there is no silence to survive.
 
@@ -481,14 +484,14 @@ def test_the_write_discipline_no_longer_states_a_character_limit():
     one-body-per-reply every needless split costs a whole round. The ceiling
     that remains is the reply's own output budget, which needs no number here.
     """
-    d = prompts._WRITE_DISCIPLINE
+    d = prompts._GEN_SIZE_RULES
     assert "characters of `content`" not in d
     assert "HARD CHUNK LIMIT" not in d
     # The phrase that produced the opposite error: naming the first two chunks
     # as "where oversized calls fail" had the model keep exactly those small
     # and then send 19 819 characters in the one right after.
     assert "oversized calls fail" not in d
-    assert "in a\nsingle body" in d
+    assert "single body" in d
 
 
 def test_the_size_guidance_is_a_number_the_model_can_check():
@@ -503,7 +506,7 @@ def test_the_size_guidance_is_a_number_the_model_can_check():
     """
     from anton.core.tools.generate_artifact.state import REPLY_BODY_CHARS
 
-    d = prompts._WRITE_DISCIPLINE
+    d = prompts._GEN_SIZE_RULES
     assert f"{REPLY_BODY_CHARS:,} characters" in d
     assert "output budget" not in d
 
@@ -514,7 +517,7 @@ def test_splitting_is_described_as_the_exception_not_the_recipe():
     execute without ever weighing whether to split at all, and the one live
     split we measured fell exactly on the boundary it named.
     """
-    d = prompts._WRITE_DISCIPLINE
+    d = prompts._GEN_SIZE_RULES
 
     # No structural recipe left.
     for gone in ("opening `<body>`", "then the scripts", "First part:"):
@@ -675,9 +678,83 @@ def test_html_prompt_quotes_the_markers_and_the_size_from_the_constants():
     assert s.index("single body") < s.index("Split ONLY")
 
 
-def test_visual_rules_still_join_design_and_contract_for_the_fullstack_frontend():
-    """`build_frontend_system_prompt` keeps the joined constant; the html-app
-    builder quotes the two halves under their own headings."""
-    assert prompts._DESIGN_RULES in prompts._VISUAL_RULES
-    assert prompts._VERIFIER_CONTRACT in prompts._VISUAL_RULES
+def test_design_rules_do_not_restate_the_contract():
+    """The two halves are quoted under their own headings by both frontend
+    builders, so a rule must live in exactly one of them."""
     assert 'name="viewport"' not in prompts._DESIGN_RULES
+    for system in (
+        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        assert "## Verifier contract\n" in system
+        assert "## Design rules\n" in system
+
+
+# ── fullstack frontend prompt: same skeleton as html-app (2026-09-17) ───────
+#
+# Until then `build_frontend_system_prompt` stacked the shared `_ROLE` on top
+# of its own blocks. Two live runs (13 and 14) showed the html-app structure
+# holding — one body, no self-check — so the fullstack frontend now uses the
+# same blocks, with the fullstack-only material in the task paragraph and a
+# `## Fullstack rules` section.
+
+def _fullstack_prompt() -> str:
+    return prompts.build_frontend_system_prompt(Path("/tmp/artifact-prompt-probe"))
+
+
+def test_fullstack_prompt_has_the_html_app_skeleton_plus_its_own_rules():
+    s = _fullstack_prompt()
+    order = ["## Your task", "## What you receive", "## Workflow",
+             "## Output protocol", "## Verifier contract", "## Fullstack rules",
+             "## Design rules", "## Tools"]
+    positions = [s.index(h) for h in order]
+    assert positions == sorted(positions), order
+    assert s.count("static/index.html") >= 3  # task, workflow, output protocol
+
+
+def test_fullstack_prompt_carries_no_leftovers_from_the_role_block():
+    """Scratchpad discipline, the html-app data recipe, a second copy of the
+    write protocol and the absolute folder path all came from `_ROLE`."""
+    s = _fullstack_prompt()
+    for gone in (
+        "SCRATCHPAD DISCIPLINE",
+        "DATA INTO FILES",
+        "HOW MUCH GOES IN ONE REPLY",
+        "## Output folder",
+        "/tmp/artifact-prompt-probe",
+        "main agent",
+        "VERIFICATION IS NOT YOUR JOB",
+        "the brief's",
+    ):
+        assert gone not in s, gone
+    assert "NOT part of the job" in s
+    assert s.count('name="viewport"') == 1
+    assert s.count("Split ONLY") == 1
+
+
+def test_fullstack_prompt_names_its_input_sections_and_the_api_spec():
+    s = _fullstack_prompt()
+    for heading in (
+        "`## Data`",
+        "`## Technical specification`",
+        "`## Progress journal`",
+        "`## API Specification`",
+        prompts.PRD_SECTION_FOOTER,
+    ):
+        assert heading in s, heading
+    assert "language of the PRD" in s
+    # The two fullstack-only verifier failures are announced as such.
+    assert 'name="api-base"' in s
+    assert "fails the step" in s
+
+
+def test_fullstack_prompt_and_kickoff_do_not_invite_a_data_step():
+    """The page fetches from the backend; the old kickoff opened with "Use the
+    scratchpad tool to inspect a data sample", an invitation to spend a round
+    on data the page will never embed."""
+    s = _fullstack_prompt()
+    assert "Embed no data" in s
+    kickoff = prompts.build_frontend_kickoff("## Product requirements\nx", "{}")
+    assert "inspect a data sample" not in kickoff
+    assert "follow the workflow from your instructions" in kickoff
+    assert kickoff.index("## API Specification") < kickoff.index("follow the workflow")
