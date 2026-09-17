@@ -293,7 +293,10 @@ builds from scratch, so it is not the tool for a small edit.
 what was created and point to it by `name` and `slug`, and include the primary \
 file's path (`<artifact_path>/<primary>`) so it is clickable/openable in a plain \
 CLI. NEVER end with only a description of the content and no pointer to the \
-result. For fullstack apps, prefer the `url` the launch step returned.
+result. For fullstack apps the entry point is the `url` from the \
+`generate_artifact` (or `launch_backend`) result — the running backend serves \
+the page and its `/api/*`; `static/index.html` opened from disk cannot reach \
+the API, so never present its path as the way to open the app.
 """
 
 

@@ -617,7 +617,12 @@ _STATUS_INSTRUCTIONS = {
         "Every file listed was statically verified by the generation "
         "pipeline. Do NOT re-read, re-parse or re-verify them, and do not "
         "open them looking for problems — report the result to the user and "
-        "act only on problems the user actually reports."
+        "act only on problems the user actually reports. When the result "
+        "carries `url`, the backend is running there and that URL is the "
+        "app's entry point: give the user the URL, not the path of "
+        "`static/index.html` — opened from disk the page cannot reach its "
+        "`/api/*`. Without `url` (html-app), the entry point is "
+        "`<path>/<primary>`."
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "

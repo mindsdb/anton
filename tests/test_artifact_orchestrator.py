@@ -321,6 +321,39 @@ async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
     assert isinstance(out, dict)
     assert launched["health_path"] == "/api/health"
     assert any(s["node"] == "verify_fullstack" and s["outcome"] == "ok" for s in out["trace"])
+    # The launch URL is the app's entry point and rides the result at the top
+    # level — the sixteenth live run had it only as "port 42303" inside the
+    # trace, and the agent pointed the user at static/index.html on disk.
+    assert out["url"] == "http://127.0.0.1:5555"
+    assert out["port"] == 5555
+
+
+def test_result_carries_no_url_until_an_app_was_launched(tmp_path: Path):
+    """html-app runs, and fullstack runs that stop before `run_app`, have no
+    running backend — the key is absent rather than null, so the agent's
+    "when the result carries `url`" branch is unambiguous."""
+    st = _state(tmp_path, artifact_type="html-app")
+    st.files_written = ["index.html"]
+    shell = orchestrator._result_shell(st)
+    assert "url" not in shell and "port" not in shell
+    st.app_url, st.app_port = "http://127.0.0.1:4242", 4242
+    shell = orchestrator._result_shell(st)
+    assert shell["url"] == "http://127.0.0.1:4242" and shell["port"] == 4242
+
+
+def test_agent_facing_texts_name_the_url_as_the_fullstack_entry_point():
+    """Three surfaces the agent reads before writing its final message must
+    agree: the `generated` instruction in the tool result, and the ARTIFACTS
+    section of the system prompt."""
+    from anton.core.llm import prompts as llm_prompts
+    from anton.core.tools.tool_handlers import _STATUS_INSTRUCTIONS
+
+    generated = _STATUS_INSTRUCTIONS["generated"]
+    assert "`url`" in generated and "entry point" in generated
+    assert "static/index.html" in generated
+    assert "prefer" not in llm_prompts.ARTIFACTS_PROMPT.split("AFTER FINISHING")[1]
+    assert "never present its path" in llm_prompts.ARTIFACTS_PROMPT
+    assert "cannot reach the API" in llm_prompts.ARTIFACTS_PROMPT
 
 
 # ── Task 10: public generate() delegate ──────────────────────────────────────

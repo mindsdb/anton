@@ -866,6 +866,8 @@ async def _run_and_verify_app(state: GenState) -> str | None:
             problem = launch
         else:
             port = launch["port"]
+            state.app_port = port
+            state.app_url = launch.get("url") or f"http://127.0.0.1:{port}"
             from anton.core.tools.tool_handlers import resolve_artifact_store
 
             store = resolve_artifact_store(state.session)
@@ -910,7 +912,7 @@ async def _run_and_verify_app(state: GenState) -> str | None:
 
 
 def _result_shell(state: GenState) -> dict:
-    return {
+    shell = {
         "files_written": state.files_written,
         # Generation input, not output: it physically sits in the artifact folder
         # but is not an artifact for the user (see the design spec, 3.6).
@@ -918,6 +920,14 @@ def _result_shell(state: GenState) -> dict:
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }
+    # The sixteenth live run (2026-09-17) had the agent present
+    # `<path>/static/index.html` as the entry point of a fullstack app: the
+    # port was in the trace, the URL nowhere, and the system prompt's "prefer
+    # the url the launch step returned" had nothing to prefer.
+    if state.app_url:
+        shell["url"] = state.app_url
+        shell["port"] = state.app_port
+    return shell
 
 
 def _save_checkpoint(state: GenState, stage: str) -> None:

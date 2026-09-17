@@ -178,6 +178,11 @@ class GenState:
     # Generation inputs (spec.md, openapi.json) rather than user-facing output:
     # reported in a separate field so the agent does not present them as artifacts.
     internal_files: list[str] = field(default_factory=list)
+    # Where the launched backend answers (fullstack only, set by `run_app`).
+    # Reported as the app's entry point: `static/index.html` opened from disk
+    # cannot reach its `/api/*`, so the file path is not one.
+    app_url: str | None = None
+    app_port: int | None = None
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
