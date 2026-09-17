@@ -201,7 +201,9 @@ VISUAL DESIGN (for every HTML file you produce):
   chart containers, complex selectors — or when the page is too small to
   need a framework. No other CSS or JS library: the two CDN scripts named in
   these rules (Tailwind, ECharts) are the ONLY external resources a page
-  may load.
+  may load. Both are fetched every time the page opens, so a page that must
+  work OFFLINE or without external resources (brief or PRD says so) skips
+  Tailwind and styles itself with hand-written CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
@@ -1042,7 +1044,9 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts.
+  CSS where needed), Apache ECharts for charts. Both libraries need network
+  access when the page opens; when the PRD requires offline use, the spec
+  says so and the frontend is styled with hand-written CSS only.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
   document/key-value store keyed by (partition key, sort key) with named
   collections, no scan, no secondary indexes, atomic counters. The spec must

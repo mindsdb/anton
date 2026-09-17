@@ -235,6 +235,10 @@ def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
     assert "recommended" in rules
     assert "Hand-written CSS" in rules
     assert "ONLY external resources" in rules
+    # Both CDNs need network at view time: an offline requirement wins over
+    # the recommendation, and the spec writer knows it too.
+    assert "OFFLINE" in rules
+    assert "offline" in prompts._TECH_SPEC_STACK
     for text in (
         prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
