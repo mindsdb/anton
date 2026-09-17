@@ -107,6 +107,7 @@ from anton.core.session import (
     _VERIFIER_TOKEN_BUDGETS,
     _VerifierVerdict,
     _build_verify_request,
+    _clip_keep_cause,
 )
 
 _KEY = os.environ.get("MINDSHUB_API_KEY")
@@ -567,7 +568,12 @@ class Case:
     #: Aliases this case is recorded on but not gated on. Empty for every
     #: incident case, by gate pin (tests/test_verifier_eval_gate.py); only a
     #: control with a measured, documented label slip on a specific model may
-    #: use it, and the slip goes in the case's comment.
+    #: use it, and the slip goes in the case's comment. Excluded at
+    #: PARAMETRIZATION, never via `pytest.skip`: verifier-eval.yml's
+    #: out-of-money branch requires every skip in the junit to carry
+    #: `GATEWAY_UNAVAILABLE`, and one design skip would turn a starved run
+    #: from "warn, the key is dry" into "red, misconfiguration" (deep review
+    #: of #483, finding 1).
     skip_models: tuple[str, ...] = ()
 
     @property
@@ -1087,7 +1093,11 @@ _HONEST_GAP = Case(
 _DISCLAIMERED_FABRICATION = Case(
     name="disclaimered_fabrication",
     user_message=_HONEST_GAP.user_message,
-    history=_HONEST_GAP.history[:-2]
+    # [:-3], not [:-2]: the honest fixture ends tool_use(74) / tool_result(74) /
+    # final text, and dropping only the last two left tool_use(74) unpaired in
+    # the rendered transcript — an artefact production never produces (deep
+    # review of #483, finding 7).
+    history=_HONEST_GAP.history[:-3]
     + [
         _tool_call(
             "scratchpad",
@@ -1228,11 +1238,53 @@ _USER_REQUESTED_ESTIMATE = Case(
 
 # --- 11. Risk control: a computed figure is not an unsourced one → COMPLETE --
 # The grand total never appears verbatim in any tool result — only the three
-# per-file sums do — so a provenance rule that matched digits would reject a
-# correct answer and re-open ENG-1134's redundant continuation. The rule is
-# about whether the data arrived, and here it did.
+# per-file sums do — and, in the shape that actually re-opens ENG-1134, even
+# those are OUT OF THE VERIFIER'S VIEW: `_render_tool_result_content` clips
+# tool results at tool_cap=400 keeping ~1/3 head and ~2/3 tail, so a chatty
+# cell whose sums sit mid-output shows the verifier the shape of a successful
+# run and none of the numbers. A provenance rule that matched digits would
+# reject this correct answer and force the redundant continuation. The rule is
+# about whether the data arrived, and here it visibly did (the cell ran to
+# completion and printed a row count) even though the figures are elided.
+#
+# A first version of this control printed three short lines (79 chars), so
+# every figure was visible and it guarded only the "not verbatim" half of the
+# risk. The ticket asked for the clipped variant; this is it (deep review of
+# #483, finding 5).
+_PER_FILE_SUMS = ("48210.4", "512340.55", "-19870.25")
+_CSV_SUM_OUTPUT = (
+    "Scanning data/ for CSV files...\n"
+    "found 3 files: customers.csv, orders.csv, refunds.csv\n"
+    "reading data/customers.csv ... 1,204 rows, 7 columns (customer_id, name, "
+    "region, plan, amount, created_at, churned)\n"
+    "  amount: dtype float64, 0 nulls, min 12.0, max 4,980.0\n"
+    "  sum(amount) = 48210.4\n"
+    "reading data/orders.csv ... 18,932 rows, 9 columns (order_id, customer_id, "
+    "sku, qty, amount, currency, status, created_at, shipped_at)\n"
+    "  amount: dtype float64, 3 nulls (skipped), min 4.99, max 12,400.0\n"
+    "  sum(amount) = 512340.55\n"
+    "reading data/refunds.csv ... 611 rows, 6 columns (refund_id, order_id, "
+    "amount, reason, created_at, approved_by)\n"
+    "  amount: dtype float64, 0 nulls, min -2,300.0, max -4.99\n"
+    "  sum(amount) = -19870.25\n"
+    "null-amount rows skipped (orders.csv): order_id 18820 (row 11,203), "
+    "order_id 20415 (row 12,940), order_id 21001 (row 13,388)\n"
+    "note: amounts are in USD; refunds carry a negative sign by convention; "
+    "no currency conversion applied; no de-duplication across files\n"
+    "peak memory 41.2 MB; pandas 2.3.1; 3 files read via read_csv(low_memory=False)\n"
+    "done: 3 files read, 20,747 rows scanned, 3 nulls skipped\n"
+    "wall time 0.41s"
+)
+# Spring the trap this fixture exists for, on the RENDERED form: every per-file
+# sum must fall inside the elided middle, or the verifier can see the figures
+# and the case guards the easy variant again.
+assert all(
+    figure not in _clip_keep_cause(_CSV_SUM_OUTPUT, 400) for figure in _PER_FILE_SUMS
+), "computed-total control: the per-file sums must be clipped out of the verifier's view"
+assert all(figure in _CSV_SUM_OUTPUT for figure in _PER_FILE_SUMS)
+
 _COMPUTED_TOTAL = Case(
-    name="computed_total_not_verbatim",
+    name="computed_total_clipped_source",
     user_message="Sum the `amount` column across the three CSVs in data/ and tell me the grand total.",
     history=[
         {
@@ -1242,23 +1294,21 @@ _COMPUTED_TOTAL = Case(
         _tool_call(
             "scratchpad",
             "toolu_101",
-            code="for f in sorted(glob.glob('data/*.csv')): print(f, round(pd.read_csv(f)['amount'].sum(), 2))",
+            code="summarise_amounts(sorted(glob.glob('data/*.csv')), verbose=True)",
         ),
-        _tool_result(
-            "toolu_101",
-            "data/customers.csv 48210.4\ndata/orders.csv 512340.55\ndata/refunds.csv -19870.25",
-        ),
+        _tool_result("toolu_101", _CSV_SUM_OUTPUT),
         {
             "role": "assistant",
             "content": (
                 "Grand total of `amount` across the three files: **540,680.70**.\n\n"
-                "- orders.csv: 512,340.55\n- customers.csv: 48,210.40\n"
-                "- refunds.csv: −19,870.25 (refunds are negative, so they reduce the total)"
+                "- orders.csv: 512,340.55 (18,932 rows; 3 null amounts skipped)\n"
+                "- customers.csv: 48,210.40 (1,204 rows)\n"
+                "- refunds.csv: −19,870.25 (611 rows; refunds are negative, so they reduce the total)"
             ),
         },
     ],
     expected="COMPLETE",
-    source="ENG-2686 risk control (derived figure must not read as unsourced)",
+    source="ENG-2686 risk control (derived figure from clipped source must not read as unsourced)",
 )
 
 # --- 12. Risk control: one failed attempt, then ASKS the user → WAITING ------
@@ -1350,14 +1400,19 @@ def _runs_for(case: Case) -> int:
 # after all, or a transient (#307 review: the accepted lever for transients is
 # a one-retry wrapper on non-StructuredOutputError failures in `_verdict`,
 # never looser assertions).
-@pytest.mark.parametrize("model", _MODELS)
-@pytest.mark.parametrize("case", _CASES, ids=lambda c: c.name)
-async def test_verdict(model: str, case: Case):
-    if model in case.skip_models:
-        pytest.skip(
-            f"{case.name} is recorded, not gated, on {model} — see the case's "
-            "comment for the measured slip and why it is not a gate there"
-        )
+# The matrix, minus the pairs a case records but does not gate (see
+# `Case.skip_models`). Built here rather than skipped inside the test so the
+# junit report carries no skip that is not a gateway denial.
+_MATRIX = [
+    pytest.param(case, model, id=f"{case.name}-{model}")
+    for case in _CASES
+    for model in _MODELS
+    if model not in case.skip_models
+]
+
+
+@pytest.mark.parametrize("case,model", _MATRIX)
+async def test_verdict(case: Case, model: str):
     llm = _client(model)
     n = _runs_for(case)
     verdicts = await _verdicts(llm, case, n)

@@ -334,7 +334,7 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         "honest_unobtainable_data": "STUCK",
         "one_attempt_give_up": "INCOMPLETE",
         "user_requested_estimate": "COMPLETE",
-        "computed_total_not_verbatim": "COMPLETE",
+        "computed_total_clipped_source": "COMPLETE",
         # And the shadow-replay finding: a failed attempt followed by asking
         # the user is WAITING. INCOMPLETE here IS ENG-716's incident.
         "asks_user_after_one_failed_attempt": "WAITING",
@@ -597,3 +597,18 @@ def test_fabrication_guards_run_at_the_higher_count():
         assert ev._runs_for(by_name[name]) == ev._STUCK_RUNS, name
     # And the plain single-valued controls still run at the default.
     assert ev._runs_for(by_name["stopped_partway"]) == ev._RUNS
+
+
+def test_recorded_not_gated_pairs_are_excluded_at_parametrization_not_skipped():
+    """verifier-eval.yml's out-of-money branch passes only when EVERY skip in
+    the junit carries GATEWAY_UNAVAILABLE. A design skip inside test_verdict
+    would turn a starved run from a warning into a red misconfiguration (deep
+    review of #483, finding 1), so the pair is left out of the matrix instead.
+    """
+    ids = {p.id for p in ev._MATRIX}
+    assert "one_attempt_give_up-haiku" not in ids
+    assert "one_attempt_give_up-mindshub_air" in ids
+    assert len(ev._MATRIX) == len(ev._CASES) * len(ev._MODELS) - 1
+    import inspect
+
+    assert "pytest.skip(" not in inspect.getsource(ev.test_verdict)
