@@ -50,6 +50,60 @@ logger = logging.getLogger(__name__)
 AsyncAPIKeyProvider = Callable[[], Awaitable[str]]
 
 
+def _error_body(exc: "openai.APIStatusError") -> tuple[object, dict, dict]:
+    """``(raw_body, body, envelope)`` off an SDK error, Gemini's list wrapper undone.
+
+    ``raw_body`` is the unwrapped value even when it is not a dict, because
+    ``wallet_denial_code`` inspects it directly; ``body`` is the dict-or-empty
+    form every structured check below uses.
+
+    Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-element
+    ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare object, and
+    the SDK stores whatever it parsed. Shared by the 400 path and the full status
+    ladder so the two cannot read the wire differently — missing this unwrap is
+    what made ENG-1145 surface as an opaque 404.
+    """
+    raw = exc.body
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        raw = raw[0]
+    body = raw if isinstance(raw, dict) else {}
+    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+    return raw, body, envelope
+
+
+def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
+    """Classify the 400s we can name. Returns when we cannot, so the caller
+    re-raises the SDK error exactly as it does today.
+
+    **A 400 never reaches ``_raise_for_status_error``.** ``BadRequestError``
+    subclasses ``APIStatusError``, so the ``except openai.BadRequestError``
+    clause at each call site matches first, and its bare ``raise`` re-raises out
+    of the whole ``try`` — a sibling ``except`` cannot catch an exception
+    re-raised from its own handler. The content classifier was therefore
+    unreachable on exactly the path ENG-2689's incident came from, and ENG-1992's
+    branch had the same problem before it: that fix only ever worked because
+    cowork-server independently matched the provider's message text.
+
+    Deliberately NOT "route 400s through the full ladder": ``classify_transient``
+    maps a 400 carrying ``type: api_error`` to a retryable TransientProviderError
+    (verified), so doing that would silently make some 400s retry that are
+    terminal today. Naming only what we can name leaves every other 400
+    byte-identical; the generic-fallback question is ENG-1283's.
+    """
+    msg = str(exc).lower()
+    if "context_length_exceeded" in msg or "maximum context length" in msg:
+        raise ContextOverflowError(str(exc)) from exc
+
+    _, body, envelope = _error_body(exc)
+    content = classify_content_rejection(
+        error_type=envelope.get("type") or body.get("type"),
+        message=envelope.get("message") or body.get("message"),
+        param=envelope.get("param") or body.get("param"),
+    )
+    if content is not None:
+        raise content from exc
+
+
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
     """Map a provider HTTP error onto anton's typed/curated exceptions.
 
@@ -109,11 +163,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # structured check below (auth / quota / model) silently misses on Gemini
     # and the error falls through to the generic "temporarily unavailable"
     # message — the exact reason ENG-1145 surfaced as an opaque 404.
-    raw_body = exc.body
-    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
-        raw_body = raw_body[0]
-    body = raw_body if isinstance(raw_body, dict) else {}
-    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+    raw_body, body, envelope = _error_body(exc)
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
     # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
@@ -1094,9 +1144,7 @@ class OpenAIProvider(LLMProvider):
         try:
             response = await self._client.chat.completions.create(**kwargs)
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1309,9 +1357,7 @@ class OpenAIProvider(LLMProvider):
                                 json_delta=tc_delta.function.arguments,
                             )
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1523,9 +1569,7 @@ class OpenAIProvider(LLMProvider):
         try:
             response = await self._client.responses.create(**kwargs)
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1684,9 +1728,7 @@ class OpenAIProvider(LLMProvider):
                         stop_reason = getattr(final_response, "status", None)
                         served_model = getattr(final_response, "model", None) or served_model
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)

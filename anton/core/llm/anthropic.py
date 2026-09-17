@@ -40,6 +40,30 @@ from .provider import (
 logger = logging.getLogger(__name__)
 
 
+def _raise_for_bad_request(exc: anthropic.BadRequestError) -> None:
+    """Classify the 400s we can name. Returns when we cannot, so the caller
+    re-raises the SDK error exactly as it does today.
+
+    The openai.py twin carries the full rationale; the trap is identical here.
+    ``BadRequestError`` subclasses ``APIStatusError``, so the clause below
+    matches a 400 first and its bare ``raise`` re-raises out of the whole
+    ``try`` — ``_raise_for_status_error`` never sees a 400, on either provider.
+    """
+    msg = str(exc).lower()
+    if "prompt is too long" in msg or "context limit" in msg:
+        raise ContextOverflowError(str(exc)) from exc
+
+    body = exc.body if isinstance(exc.body, dict) else {}
+    env = body.get("error") if isinstance(body.get("error"), dict) else {}
+    content = classify_content_rejection(
+        error_type=env.get("type") or body.get("type"),
+        message=env.get("message") or body.get("message"),
+        param=env.get("param") or body.get("param"),
+    )
+    if content is not None:
+        raise content from exc
+
+
 def _raise_for_status_error(
     exc: anthropic.APIStatusError, *, provider: str = "Anthropic", model: str = "",
 ) -> NoReturn:
@@ -276,9 +300,7 @@ class AnthropicProvider(LLMProvider):
         try:
             response = await self._client.messages.create(**kwargs)
         except anthropic.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "prompt is too long" in msg or "context limit" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except anthropic.APIStatusError as exc:
             _raise_for_status_error(exc, model=model)
@@ -470,9 +492,7 @@ class AnthropicProvider(LLMProvider):
                         stop_reason = event.delta.stop_reason
                         output_tokens = event.usage.output_tokens
         except anthropic.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "prompt is too long" in msg or "context limit" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except anthropic.APIStatusError as exc:
             _raise_for_status_error(exc, model=model)
