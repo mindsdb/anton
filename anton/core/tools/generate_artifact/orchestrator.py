@@ -491,6 +491,8 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
         state.artifact_path,
         stateless=stateless,
         datasource_context=state.datasource_context,
+        declared_sources=state.declared_sources,
+        data_notes=state.data_notes,
     )
     verdict = None  # guards the terminal message when no attempt ever verified
     last_loop_error: str | None = None  # see the comment in _gen_verify_frontend

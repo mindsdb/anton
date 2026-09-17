@@ -535,14 +535,16 @@ The user message carries these sections, in this order (some may be absent):
 # section after the shared context.
 _GEN_API_SPEC_INPUT = """\
 - `## API Specification` — the backend's `openapi.json`, generated just
-  before this step: the exact paths and response shapes your `fetch` calls
-  must match.\
+  before this step: the exact paths and response shapes {consumer}.\
 """
 
 
-def _gen_html_inputs(*, fullstack: bool = False) -> str:
+def _gen_html_inputs(*, fullstack: bool = False, backend: bool = False) -> str:
     text = _GEN_HTML_INPUTS.format(prd_footer=PRD_SECTION_FOOTER)
-    return text + "\n" + _GEN_API_SPEC_INPUT if fullstack else text
+    if not fullstack:
+        return text
+    consumer = "your routes must serve" if backend else "your `fetch` calls must match"
+    return text + "\n" + _GEN_API_SPEC_INPUT.format(consumer=consumer)
 
 
 def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
@@ -603,7 +605,19 @@ A typical run takes one or two rounds.
 """
 
 
-def _gen_html_output_protocol(target: str) -> str:
+_HTML_BODY_EXAMPLE = """\
+<!DOCTYPE html>
+<html lang="…">
+…the entire file…
+</html>"""
+
+_PYTHON_BODY_EXAMPLE = """\
+import argparse
+…the entire file…
+    uvicorn.run(app, host="127.0.0.1", port=args.port)"""
+
+
+def _gen_html_output_protocol(target: str, example: str = _HTML_BODY_EXAMPLE) -> str:
     return f"""\
 ## Output protocol
 A file is written in TWO parts of the SAME reply:
@@ -611,10 +625,7 @@ A file is written in TWO parts of the SAME reply:
   2. a `write_file` call naming the path — with NO content argument.
 
 {BEGIN}
-<!DOCTYPE html>
-<html lang="…">
-…the entire file…
-</html>
+{example}
 {END}
 
 …and in the same reply: `write_file(path="{target}")`.
@@ -629,7 +640,8 @@ Rules:
 """
 
 
-_GEN_SIZE_RULES = f"""\
+def _gen_size_rules(last_part_rule: str) -> str:
+    return f"""\
 ### Size and splitting
 One reply holds about {REPLY_BODY_CHARS:,} characters of file content. Almost
 every artifact fits, so the default is the whole file in a single body with
@@ -641,8 +653,17 @@ every artifact fits, so the default is the whole file in a single body with
 - If a reply is cut off before the closing marker, nothing is written and
   the tool result tells you what to send next. Follow it; never re-emit the
   whole file to "fix" something.
-- The last part must close every open tag, `</body></html>` included.\
+- {last_part_rule}\
 """
+
+
+_GEN_SIZE_RULES = _gen_size_rules(
+    "The last part must close every open tag, `</body></html>` included."
+)
+_GEN_SIZE_RULES_PYTHON = _gen_size_rules(
+    "The last part must leave the module complete: every block closed, "
+    "`handler = Mangum(...)` and the `__main__` block at the end."
+)
 
 
 _GEN_TOOLS = """\
@@ -843,43 +864,191 @@ def build_api_spec_prompt(
 # Backend-only system prompt and kickoff (parallel fullstack-stateful-app)
 # ---------------------------------------------------------------------------
 
+def _gen_backend_task(*, stateless: bool) -> str:
+    if stateless:
+        files = """\
+Produce exactly two files, one per reply, in this order:
+1. `backend.py` — the FastAPI backend implementing every operation of the
+   `## API Specification` you receive, exactly as specified: paths, methods,
+   request and response shapes.
+2. `requirements.txt` — every package `backend.py` imports, one per line."""
+    else:
+        files = """\
+Produce exactly three files, one per reply, in this order:
+1. `backend.py` — the FastAPI backend implementing every operation of the
+   `## API Specification` you receive, exactly as specified: paths, methods,
+   request and response shapes.
+2. `state_manifest.json` — the STATE key schema and collection registry (see
+   the State rules).
+3. `requirements.txt` — every package `backend.py` imports, one per line."""
+    return f"""\
+You are a single-purpose worker inside an artifact-generation pipeline. This
+step is `generate_backend`.
+
+## Your task
+{files}
+The frontend is generated in parallel from the same specification and calls
+exactly what it says, so the backend must serve exactly that — nothing
+renamed, nothing added, nothing left out.
+
+You are done when every file is written and you have called
+`finish(summary="<one line>")`. A deterministic verifier then installs the
+requirements, imports the module and checks it; on failure you get another
+attempt with the exact errors. Checking your own output is NOT part of the
+job.\
+"""
+
+
+def _gen_backend_workflow(*, stateless: bool) -> str:
+    if stateless:
+        tail = """\
+4. Write `requirements.txt` in its own reply.
+5. Call `finish`. Do not read the files back and do not run checks."""
+        rounds = "three rounds"
+    else:
+        tail = """\
+4. Write `state_manifest.json` in its own reply.
+5. Write `requirements.txt` in its own reply.
+6. Call `finish`. Do not read the files back and do not run checks."""
+        rounds = "four rounds"
+    return f"""\
+## Workflow
+A typical run takes {rounds}: one file per reply, then `finish`.
+1. Read the PRD, the specification and `## API Specification`. Plan the
+   routes.
+2. Data, only if needed: when `## Data` shows a source the backend queries
+   and its schema or a sample is unclear, run ONE scratchpad cell against
+   it. Skip this step when the backend reads no external data.
+3. Write `backend.py` in one reply: the canonical skeleton from the Backend
+   rules with your routes inside `# === API routes ===` — see Output
+   protocol. The tool result then asks for the next file.
+{tail}\
+"""
+
+
+def _gen_backend_verifier_contract(*, stateless: bool) -> str:
+    state_rule = (
+        "- `anton_state` is not imported: this app persists nothing of its own."
+        if stateless
+        else "- A module-level `STATE = None` slot, a valid `state_manifest.json` "
+        "next to `backend.py`, and no STATE store built at import time."
+    )
+    return f"""\
+## Verifier contract
+After `finish`, `requirements.txt` is installed into the launch venv and
+`backend.py` is compiled and imported there; each of these fails the step
+and costs a regeneration:
+- The module imports without error and defines `app` as a FastAPI instance
+  and `handler = Mangum(app, lifespan="off")`.
+- A module-level `SECRETS` dict exists, and no secret is copied into a
+  module-level variable at import time — read `SECRETS[...]` at point of use.
+- Every route lives under `/api/*` and `GET /api/health` exists; a route at
+  the root fails the step.
+- `requirements.txt` lists `fastapi`, `mangum` and `uvicorn`, and never
+  `anton_state`.
+- Every `DS_*` key the code reads names a connection listed under
+  `## Connected Data Sources`; an invented key fails the step and cannot be
+  recovered.
+{state_rule}\
+"""
+
+
+_NO_DATASOURCES_NOTE = """\
+## Connected Data Sources
+None are used by this artifact: leave `SECRETS` empty and read no `DS_*`
+variable.\
+"""
+
+
+def _datasource_section(
+    catalog: str, declared_sources: list[str] | tuple[str, ...], data_notes: str
+) -> str:
+    """The `## Connected Data Sources` section for the backend prompt.
+
+    The full catalog lists every connection the user has, whether or not the
+    artifact reads it — the eighteenth live run (2026-09-17) carried two
+    databases with ten `DS_*` names into a backend whose spec said "no
+    external data". The gathering step records which sources the artifact
+    uses (`data_sources` → `state.declared_sources`), so:
+    - no declared source and no `DS_*` in the gathered data → a one-line note
+      instead of the catalog;
+    - declared sources naming (by slug, label or engine) some of the
+      connections → only those connections;
+    - declared sources matching nothing → the full catalog, since the names
+      are free text ("orders table") and a wrong drop would cost a
+      regeneration that the full catalog never does.
+    """
+    catalog = catalog.strip()
+    if not catalog:
+        return ""
+    declared = [d.lower() for d in declared_sources if str(d).strip()]
+    if not declared:
+        # Gathered cells that read a `DS_*` variable are evidence of a source
+        # the model forgot to declare: keep the catalog then.
+        return catalog if "DS_" in data_notes else _NO_DATASOURCES_NOTE
+    header, sep, rest = catalog.partition("\n### Slug: `")
+    if not sep:
+        return catalog
+    blocks = ["### Slug: `" + b for b in rest.split("\n### Slug: `")]
+    kept = []
+    for block in blocks:
+        first = block.splitlines()[0].lower()
+        engine_line = next((l for l in block.splitlines() if l.lower().startswith("engine:")), "")
+        needles = [first, engine_line.lower()]
+        if any(any(n and (n in d or any(tok in d for tok in _slug_tokens(n))) for n in needles) for d in declared):
+            kept.append(block)
+    if not kept:
+        return catalog
+    return header + "\n" + "\n".join(kept)
+
+
+def _slug_tokens(line: str) -> list[str]:
+    """Searchable names from a catalog line: the slug, its label, the engine."""
+    import re
+
+    tokens = re.findall(r"`([^`]+)`", line)  # the slug in backticks
+    m = re.search(r"label:\s*(.+)$", line)
+    if m and m.group(1).strip() != "(none)":
+        tokens.append(m.group(1).strip().strip("\"'"))
+    m = re.match(r"engine:\s*(.+)$", line)
+    if m:
+        tokens.append(m.group(1).strip())
+    return [t.lower() for t in tokens if len(t) >= 3]
+
+
 def build_backend_system_prompt(
     artifact_path: Path,
     *,
     stateless: bool = False,
     datasource_context: str = "",
+    declared_sources: list[str] | tuple[str, ...] = (),
+    data_notes: str = "",
 ) -> str:
-    parts: list[str] = [_ROLE]
-    if stateless:
-        task = (
-            "## Your task\n"
-            "Produce exactly two files:\n"
-            "1. `backend.py` — FastAPI backend implementing the API Specification you receive.\n"
-            "2. `requirements.txt` — pip dependencies.\n"
-            "The frontend is being generated in parallel — focus ONLY on the backend.\n"
-            "Implement every endpoint in the spec exactly as described."
-        )
-    else:
-        task = (
-            "## Your task\n"
-            "Produce exactly three files:\n"
-            "1. `backend.py` — FastAPI backend implementing the API Specification you receive.\n"
-            "2. `state_manifest.json` — the STATE key schema and collection registry "
-            "(see DURABLE STATE below).\n"
-            "3. `requirements.txt` — pip dependencies.\n"
-            "The frontend is being generated in parallel — focus ONLY on the backend.\n"
-            "Implement every endpoint in the spec exactly as described."
-        )
-    parts.append(task)
-    parts.append(_BACKEND_RULES)
-    parts.append(_STATELESS_RULES if stateless else _STATEFUL_RULES)
-    if datasource_context.strip():
-        parts.append(datasource_context.strip())
-    parts.append(
-        "## Output folder\n"
-        f"All `write_file` paths are relative to: `{artifact_path}`\n"
-        "Do NOT write outside that folder."
-    )
+    """System prompt for `generate_backend`.
+
+    Same skeleton as the two frontend prompts (task → inputs → workflow →
+    output protocol → size → verifier contract → rules → tools). Until
+    2026-09-17 it stacked the shared `_ROLE` on top of the backend rules —
+    scratchpad discipline, an html-app data recipe, a second copy of the
+    write protocol, the absolute output folder — and carried every connected
+    data source whether the artifact used it or not. `artifact_path` is not
+    quoted: every path the model writes is relative to the artifact root.
+    """
+    target = "backend.py"
+    parts = [
+        _gen_backend_task(stateless=stateless),
+        _gen_html_inputs(fullstack=True, backend=True),
+        _gen_backend_workflow(stateless=stateless),
+        _gen_html_output_protocol(target, example=_PYTHON_BODY_EXAMPLE),
+        _GEN_SIZE_RULES_PYTHON,
+        _gen_backend_verifier_contract(stateless=stateless),
+        "## Backend rules\n" + _BACKEND_RULES,
+        "## State rules\n" + (_STATELESS_RULES if stateless else _STATEFUL_RULES),
+    ]
+    section = _datasource_section(datasource_context, declared_sources, data_notes)
+    if section:
+        parts.append(section)
+    parts.append(_GEN_TOOLS)
     return "\n\n".join(parts)
 
 
@@ -890,11 +1059,12 @@ def build_backend_kickoff(
     parts = [context.strip()]
     parts.append("## API Specification\n" + api_spec)
     parts.append(
-        "Use the `scratchpad` tool to confirm the schema/sample of any data "
-        "described under `## Data`. Then write `backend.py` first: its content "
-        f"as text between `{BEGIN}` and `{END}`, plus `write_file(path=\"backend.py\")` "
-        "in the same reply. You will receive the next instruction after it is "
-        "written."
+        "Read the sections above, then follow the workflow from your "
+        "instructions: a scratchpad cell only when `## Data` shows a source "
+        "the backend queries and its shape is unclear; write `backend.py` "
+        f"first, as text between `{BEGIN}` and `{END}` plus "
+        "`write_file(path=\"backend.py\")` in the same reply — the tool "
+        "result then asks for the next file; then call `finish`."
     )
     return "\n\n".join(parts)
 

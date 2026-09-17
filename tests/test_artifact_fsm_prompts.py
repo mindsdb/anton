@@ -80,12 +80,50 @@ def test_backend_prompt_states_the_ds_env_var_convention():
         assert "DS_<ENGINE>_<NAME>__<FIELD>" in system
 
 
-def test_backend_prompt_embeds_the_datasource_catalog():
-    catalog = "\n\n## Connected Data Sources\n- `postgres-prod_db` (postgres) → DS_POSTGRES_PROD_DB__HOST"
+_CATALOG = (
+    "\n\n## Connected Data Sources\nEach connection has a Slug …\n"
+    "\n### Slug: `mysql-df6b1140` — Label: (none)\nEngine: MySQL\nHost: h\n"
+    "Credential env vars:\n - DS_MYSQL_DF6B1140__HOST\n"
+    "\n### Slug: `snowflake-wh42` — Label: warehouse\nEngine: Snowflake\n"
+    "Credential env vars:\n - DS_SNOWFLAKE_WH42__ACCOUNT\n"
+)
+
+
+def test_backend_prompt_embeds_the_catalog_entries_the_artifact_declared():
+    """Distinctive names — `_BACKEND_RULES` itself quotes DS_POSTGRES_PROD_DB__*
+    and DS_HUBSPOT_MAIN__* as examples, so an assertion on those passes
+    vacuously."""
     system = prompts.build_backend_system_prompt(
-        Path("/tmp/a"), stateless=True, datasource_context=catalog
+        Path("/tmp/a"), stateless=True, datasource_context=_CATALOG,
+        declared_sources=["sales rows from the warehouse (snowflake)"],
     )
-    assert "DS_POSTGRES_PROD_DB__HOST" in system
+    assert "DS_SNOWFLAKE_WH42__ACCOUNT" in system
+    assert "DS_MYSQL_DF6B1140__HOST" not in system
+
+
+def test_backend_prompt_replaces_the_catalog_with_a_note_when_no_source_is_declared():
+    """Run 18: two databases and ten DS_* names went into a backend whose spec
+    said "no external data" — noise and a temptation."""
+    system = prompts.build_backend_system_prompt(
+        Path("/tmp/a"), stateless=True, datasource_context=_CATALOG,
+    )
+    assert "None are used by this artifact" in system
+    assert "DS_SNOWFLAKE_WH42__ACCOUNT" not in system
+    assert "DS_MYSQL_DF6B1140__HOST" not in system
+
+
+def test_datasource_section_keeps_the_whole_catalog_when_unsure():
+    """Declared names are free text; a wrong drop costs a regeneration that
+    the full catalog never does. Gathered cells reading `DS_*` count as a
+    declaration the model forgot to make."""
+    both = ("DS_MYSQL_DF6B1140__HOST", "DS_SNOWFLAKE_WH42__ACCOUNT")
+    unsure = prompts._datasource_section(_CATALOG, ["the article at http://x"], "")
+    assert all(name in unsure for name in both)
+    forgot = prompts._datasource_section(_CATALOG, [], "cell: os.environ['DS_MYSQL_DF6B1140__HOST']")
+    assert all(name in forgot for name in both)
+    by_slug = prompts._datasource_section(_CATALOG, ["mysql-df6b1140 orders"], "")
+    assert "DS_MYSQL_DF6B1140__HOST" in by_slug and "DS_SNOWFLAKE" not in by_slug
+    assert prompts._datasource_section("", [], "") == ""
 
 
 def test_fetch_prompt_embeds_the_datasource_catalog():
@@ -285,6 +323,63 @@ def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
         assert "ECharts" in text
     # The spec block no longer says "inline CSS" as if a framework were banned.
     assert "inline CSS" not in prompts._TECH_SPEC_STACK
+
+
+# ── backend prompt: same skeleton as the two frontend prompts (2026-09-17) ──
+
+def _backend_prompt(*, stateless: bool = True) -> str:
+    return prompts.build_backend_system_prompt(
+        Path("/tmp/artifact-prompt-probe"), stateless=stateless
+    )
+
+
+def test_backend_prompt_has_the_shared_skeleton_plus_its_own_rules():
+    s = _backend_prompt()
+    order = ["## Your task", "## What you receive", "## Workflow",
+             "## Output protocol", "## Verifier contract", "## Backend rules",
+             "## State rules", "## Tools"]
+    positions = [s.index(h) for h in order]
+    assert positions == sorted(positions), order
+    assert "step is `generate_backend`" in s
+    assert "one file per reply" in s
+    assert "NOT part of the\njob" in s or "NOT part of the job" in s
+
+
+def test_backend_prompt_carries_no_leftovers_from_the_role_block():
+    s = _backend_prompt()
+    for gone in (
+        "SCRATCHPAD DISCIPLINE",
+        "DATA INTO FILES",
+        "HOW MUCH GOES IN ONE REPLY",
+        "## Output folder",
+        "/tmp/artifact-prompt-probe",
+        "the brief's",
+        "main agent",
+        'write_file(path="index.html")',
+        "</body></html>",
+    ):
+        assert gone not in s, gone
+    # The python example replaces the html one in the output protocol.
+    assert "uvicorn.run(app" in s.split("## Output protocol")[1].split("## Verifier")[0]
+
+
+def test_backend_verifier_contract_names_what_verify_backend_checks():
+    stateless = _backend_prompt(stateless=True)
+    contract = stateless.split("## Verifier contract")[1].split("## Backend rules")[0]
+    for marker in ("/api/health", 'Mangum(app, lifespan="off")', "SECRETS", "point of use",
+                   "requirements.txt", "`anton_state`", "DS_*", "fails the step"):
+        assert marker in contract, marker
+    assert "`anton_state` is not imported" in contract
+    stateful = _backend_prompt(stateless=False).split("## Verifier contract")[1].split("## Backend rules")[0]
+    assert "STATE = None" in stateful and "state_manifest.json" in stateful
+
+
+def test_backend_kickoff_does_not_open_with_a_scratchpad_invitation():
+    kickoff = prompts.build_backend_kickoff("## Product requirements\nx", "{}")
+    assert "confirm the schema/sample" not in kickoff
+    assert "follow the workflow from your instructions" in kickoff
+    assert 'write_file(path="backend.py")' in kickoff
+    assert kickoff.index("## API Specification") < kickoff.index("follow the workflow")
 
 
 def test_frontend_rules_pin_static_as_the_only_served_folder():
