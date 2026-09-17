@@ -437,8 +437,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "shown to them as a proposal they have to read and accept. One or "
         "two sentences is the normal size.\n"
         "- `known_data` (optional): anything already known about the data "
-        "needed — descriptions, or scratchpad references (pad name, cell) "
-        "if you already fetched something.\n"
+        "needed. If you already fetched something, NAME THE SCRATCHPAD it "
+        "lives in (and the cell): the tool runs its own checks in that pad "
+        "and cannot find it otherwise.\n"
         "- `user_preferences` (optional): preferences the user stated "
         "themselves, in this or an earlier conversation (language, style, "
         "preferred APIs). Never infer a preference from an artifact you "
@@ -490,9 +491,10 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
             "known_data": {
                 "type": "string",
                 "description": (
-                    "What is already known about the data needed — "
-                    "descriptions, or scratchpad references (pad name, cell) "
-                    "if you already fetched something."
+                    "What is already known about the data needed. If you "
+                    "already fetched something, name the scratchpad it lives "
+                    "in (and the cell) — the tool reuses that pad for its own "
+                    "checks and cannot find it otherwise."
                 ),
             },
             "user_preferences": {

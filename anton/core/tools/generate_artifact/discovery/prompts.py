@@ -62,6 +62,35 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
 # Same heading `anton.utils.datasources.build_datasource_context` renders, so
 # the kickoff reads the same whether or not anything is connected.
 DATASOURCES_HEADER = "## Connected Data Sources"
+SCRATCHPADS_HEADER = "## Scratchpads already in this session"
+
+
+def render_scratchpads_context(pads: list[tuple[str, int, str]]) -> str:
+    """The kickoff section naming the scratchpads the calling agent ran.
+
+    ``pads`` is ``(name, cell_count, last_description)``; a count of 0 means
+    the pad is known from an earlier turn but not loaded now. Empty input
+    renders nothing: with no pad to reuse, a new name is the right move and
+    the single-scratchpad guard stays silent anyway.
+    """
+    if not pads:
+        return ""
+    lines = [SCRATCHPADS_HEADER]
+    for name, count, last in pads:
+        if count:
+            tail = f"{count} cell{'s' if count != 1 else ''}"
+            if last:
+                tail += f", last: {last}"
+        else:
+            tail = "from an earlier turn"
+        lines.append(f"- `{name}` — {tail}")
+    lines.append(
+        "Run your checks in one of these: they hold the imports, connections "
+        "and data the calling agent already fetched. A new name is an empty "
+        "environment and is refused unless you pass "
+        "`confirm_new_scratchpad=true`."
+    )
+    return "\n".join(lines)
 
 
 def build_call_kickoff(state: PrdState) -> str:
@@ -80,11 +109,13 @@ def build_call_kickoff(state: PrdState) -> str:
     connections = (state.datasource_context or "").strip() or (
         f"{DATASOURCES_HEADER}\n(none)"
     )
+    pads = (state.scratchpads_context or "").strip()
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
         f"## Known data\n{state.known_data or '(none provided)'}\n\n"
-        f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
+        + (f"{pads}\n\n" if pads else "")
+        + f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
         f"{connections}\n"
     )
 
@@ -135,7 +166,9 @@ _GATHERING_INSTRUCTION = (
     "1. Artifact type — confirm or correct the current one.\n"
     "2. External data — which sources the artifact will read. For each one, "
     "obtain a real sample in this step (scratchpad for databases, files and "
-    "APIs; web_fetch for pages) and record its shape in `data_findings`. If "
+    "APIs — in a pad listed under `## Scratchpads already in this session` "
+    "when there is one; web_fetch for pages) and record its shape in "
+    "`data_findings`. If "
     "the artifact reads no external data, say so in `summary`.\n"
     "3. Open points — places where the request itself is ambiguous and only "
     "the user can settle it. Not ideas for extra features: a feature nobody "

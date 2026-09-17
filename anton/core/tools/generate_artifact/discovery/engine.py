@@ -42,6 +42,18 @@ def _web_tools() -> dict[str, tuple]:
     }
 
 
+def _exec_ran(outcome) -> bool:
+    """Whether a scratchpad exec result describes a cell that executed.
+
+    False for the single-scratchpad guard's challenge (`ok=True`, guidance
+    rather than a failure, hence the `reason`) and for a cell the runtime
+    reported as failed: neither is working data-access code.
+    """
+    if getattr(outcome, "reason", "") == "new_scratchpad_challenged":
+        return False
+    return getattr(outcome, "ok", None) is not False
+
+
 async def run_gathering_loop(state: "PrdState") -> None:
     """Run phase 1 to completion (or until MAX_ROUNDS is exhausted).
 
@@ -184,12 +196,16 @@ async def run_gathering_loop(state: "PrdState") -> None:
             elif name == "scratchpad":
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = protocol.unwrap_outcome(await handle_scratchpad(state.session, inp))
+                outcome = await handle_scratchpad(state.session, inp)
+                content = protocol.unwrap_outcome(outcome)
                 state.trace_log.scratchpad(node="scratchpad", input=inp, output=content)
                 # Raw material for `notes.render_exec_notes`: the working
                 # data-access code is what phase E needs, and it must not
-                # depend on the model mentioning it in a summary.
-                if inp.get("action") == "exec" and inp.get("code"):
+                # depend on the model mentioning it in a summary. Only a cell
+                # that RAN counts: the twenty-third live run recorded an exec
+                # the single-scratchpad guard had refused, and both generators
+                # received its code with the refusal text as its "Output".
+                if inp.get("action") == "exec" and inp.get("code") and _exec_ran(outcome):
                     state.scratchpad_execs.append({
                         "name": inp.get("name"),
                         "code": inp.get("code"),

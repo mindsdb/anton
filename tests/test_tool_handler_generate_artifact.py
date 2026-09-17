@@ -598,3 +598,13 @@ async def test_a_peek_line_is_relayed_as_a_peek_and_dropped_while_a_question_is_
         ("Verifying the page (step 4 of 4)", "step"),
         ("", "peek"),
     ]
+
+
+def test_known_data_asks_the_outer_agent_to_name_the_scratchpad():
+    """Without the pad name the gathering step cannot reuse the agent's
+    data and guesses a new pad — refused by the single-scratchpad guard."""
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
+    assert "name the scratchpad" in schema_text
+    assert "NAME THE SCRATCHPAD" in GENERATE_ARTIFACT_TOOL.description

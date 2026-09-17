@@ -203,6 +203,50 @@ async def _call_with_stream_retry(
     ), retry_budget
 
 
+def _scratchpads_context(session) -> str:
+    """Render the pads the calling agent ran, for the gathering kickoff.
+
+    Names come from where the single-scratchpad guard looks
+    (`session._agent_scratchpad_names` plus the manager's persisted
+    `agent_pads()`), so the list is exactly the set a new name would be
+    refused against; system pads (the backend launcher's) are not in it.
+    Cell counts and the last description come from the loaded runtimes when
+    present. Best-effort: a session without a manager renders nothing.
+    """
+    names: set[str] = set()
+    seen = getattr(session, "_agent_scratchpad_names", None)
+    if isinstance(seen, set):
+        names |= {n for n in seen if isinstance(n, str)}
+    manager = getattr(session, "_scratchpads", None)
+    if manager is not None and hasattr(manager, "agent_pads"):
+        try:
+            persisted = manager.agent_pads()
+            if isinstance(persisted, set):
+                names |= persisted
+        except Exception:
+            pass
+    if not names:
+        return ""
+    try:
+        loaded = dict(getattr(manager, "pads", None) or {})
+    except Exception:
+        loaded = {}
+    pads: list[tuple[str, int, str]] = []
+    for name in sorted(names):
+        runtime = loaded.get(name)
+        cells = list(getattr(runtime, "cells", None) or []) if runtime is not None else []
+        last = ""
+        for cell in reversed(cells):
+            desc = getattr(cell, "description", "") or ""
+            if desc:
+                last = desc
+                break
+        pads.append((name, len(cells), last))
+    from .discovery.prompts import render_scratchpads_context
+
+    return render_scratchpads_context(pads)
+
+
 def _output_token_cap(session) -> int | None:
     """The client's effective output cap, or None when it cannot be read.
 
@@ -436,6 +480,7 @@ async def generate(
         known_data=known_data,
         user_preferences=user_preferences,
         datasource_context=_datasource_context(session),
+        scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
         progress=progress,
         spend=SpendGuard(session=session),

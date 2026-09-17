@@ -21,6 +21,11 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     restored_context,
     step_message,
 )
+from anton.core.tools.generate_artifact import engine
+from anton.core.tools.generate_artifact.discovery.prompts import (
+    SCRATCHPADS_HEADER,
+    render_scratchpads_context,
+)
 from anton.core.tools.generate_artifact.state import GenState
 
 
@@ -195,3 +200,51 @@ def test_restored_context_omits_empty_assumption_sections():
     text = restored_context(_state())
     assert "Assumptions recorded earlier" not in text
     assert "Open points recorded earlier" not in text
+
+
+# ── scratchpads the calling agent already ran ───────────────────────────────
+
+def test_the_kickoff_lists_the_pads_to_reuse_only_when_there_are_any():
+    """The twenty-third live run: `known_data` never named the pad, the
+    step guessed a new name, the single-scratchpad guard refused it and a
+    round was lost. The kickoff now names the pads; with none there is
+    nothing to say, and no guard to run into."""
+    section = render_scratchpads_context([("rentals_app", 4, "Key metrics")])
+    kickoff = build_call_kickoff(_state(scratchpads_context=section))
+    assert SCRATCHPADS_HEADER in kickoff
+    assert "- `rentals_app` — 4 cells, last: Key metrics" in kickoff
+    assert kickoff.index("## Known data") < kickoff.index(SCRATCHPADS_HEADER) < kickoff.index("## User preferences")
+    assert SCRATCHPADS_HEADER not in build_call_kickoff(_state())
+    assert render_scratchpads_context([]) == ""
+
+
+def test_the_pads_section_names_the_guard_and_the_gathering_step_points_at_it():
+    section = render_scratchpads_context([("a", 1, ""), ("b", 0, "ignored")])
+    assert "- `a` — 1 cell\n" in section
+    assert "- `b` — from an earlier turn" in section
+    assert "confirm_new_scratchpad=true" in section
+    assert SCRATCHPADS_HEADER in step_message("gathering", _state())
+
+
+def test_the_pads_context_comes_from_where_the_guard_looks():
+    """Same two sources as the single-scratchpad guard, so the list is
+    exactly what a new name would be refused against; a pad only the
+    manager loaded (the backend launcher's) is not the agent's."""
+    from types import SimpleNamespace as N
+
+    session = N(
+        _agent_scratchpad_names={"rentals_app"},
+        _scratchpads=N(
+            agent_pads=lambda: {"old_pad"},
+            pads={
+                "rentals_app": N(cells=[N(description="Inspect"), N(description="")]),
+                "launcher-slug": N(cells=[N(description="system")]),
+            },
+        ),
+    )
+    text = engine._scratchpads_context(session)
+    assert "- `rentals_app` — 2 cells, last: Inspect" in text
+    assert "- `old_pad` — from an earlier turn" in text
+    assert "launcher-slug" not in text
+    assert engine._scratchpads_context(N()) == ""
+    assert engine._scratchpads_context(N(_agent_scratchpad_names=set(), _scratchpads=None)) == ""

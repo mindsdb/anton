@@ -215,6 +215,11 @@ class GenState:
     # connected. Filled by the entry point; rendered into the call kickoff so
     # the gathering step knows what it can query.
     datasource_context: str = ""
+    # The `## Scratchpads already in this session` section of the gathering
+    # kickoff (`discovery.prompts.render_scratchpads_context`): the pads the
+    # calling agent already ran, so the step reuses them instead of guessing
+    # a new name and being refused by the single-scratchpad guard.
+    scratchpads_context: str = ""
     # Body of the built-in public-data-sources skill, read from disk on the
     # data loop's first fetch and reused by its later iterations. None until
     # then; "" when the skill is unavailable.

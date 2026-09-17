@@ -431,3 +431,45 @@ async def test_a_source_nothing_was_run_against_stays_unverified():
     await engine.run_gathering_loop(state)
 
     assert state.unverified_sources == ["orders table"]
+
+
+async def test_only_cells_that_ran_are_recorded_for_the_data_notes(monkeypatch):
+    """The twenty-third live run recorded an exec the single-scratchpad
+    guard had refused: both generators then received its code with the
+    refusal text as its "Output". A refused or failed cell is not working
+    data-access code and stays out of `scratchpad_execs`."""
+    from anton.core.tools.registry import ToolOutcome
+
+    outcomes = iter([
+        ToolOutcome(content="You already have an active scratchpad ('rentals_app') …",
+                    ok=True, reason="new_scratchpad_challenged"),
+        ToolOutcome(content="Traceback … UndefinedTable", ok=False, reason="cell_error"),
+        ToolOutcome(content="[output] 504 rows", ok=True),
+        "plain string result",
+    ])
+
+    async def fake_handle_scratchpad(session, inp):
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        "anton.core.tools.tool_handlers.handle_scratchpad", fake_handle_scratchpad
+    )
+    execs = [
+        _tc("scratchpad", {"action": "exec", "name": "hr", "code": "print(1)"}, id="a"),
+        _tc("scratchpad", {"action": "exec", "name": "rentals_app", "code": "bad()"}, id="b"),
+        _tc("scratchpad", {"action": "exec", "name": "rentals_app", "code": "print(2)"}, id="c"),
+        _tc("scratchpad", {"action": "exec", "name": "rentals_app", "code": "print(3)"}, id="d"),
+    ]
+    session = _session_with_plan_sequence(
+        _response(tool_calls=execs),
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ok", "artifact_type": "html-app"})]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert [(x["code"], x["output"]) for x in state.scratchpad_execs] == [
+        ("print(2)", "[output] 504 rows"),
+        ("print(3)", "plain string result"),
+    ]
+    # The model still sees every result, refusal included — only the notes skip it.
+    result_blocks = state.messages[2]["content"]
+    assert len(result_blocks) == 4
