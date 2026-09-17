@@ -1241,8 +1241,16 @@ def classify_content_rejection(
       limit. Not our bug; repaired the same way so the conversation survives,
       but the user must re-attach something smaller.
 
-    Size is tested FIRST because a size refusal can also carry a ``param`` that
-    satisfies the shape test, and the size copy is the more specific of the two.
+    Size is tested FIRST as a tie-break, not because anything observed needs
+    it: neither live body satisfies both tests today (the OpenAI patch-limit
+    400 carries ``param="input"``, and Anthropic's dimension refusal puts its
+    content path in the MESSAGE, not the param — checked, both miss the shape
+    predicate). It is ordered anyway because a body that ever satisfies both
+    is far more likely to be a size refusal carrying a content-indexed param
+    than a shape refusal that talks about resizing, and the size copy names a
+    concrete limit and remedy where the shape copy can only say "unsupported
+    format". Settling the tie-break now costs one line; discovering it later
+    costs another user.
 
     Over-matching here is not free: downstream this triggers stripping EVERY
     image block from the conversation's stored history. So the size family
