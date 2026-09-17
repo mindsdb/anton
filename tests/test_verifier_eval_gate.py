@@ -578,7 +578,10 @@ def test_only_the_one_attempt_control_carries_a_pass_rate_threshold():
     case = rated[0]
     # 11 of 12: passes a ~4% slip, fails the 5/24 regression that motivated it.
     assert case.min_pass_rate >= 11 / 12
-    assert ev._runs_for(case) == ev._RATE_RUNS >= 12
+    # Mechanics only — `_RATE_RUNS` is env-overridable for one-off runs, so
+    # asserting its value here would make an offline unit test depend on the
+    # shell (self-review of #483).
+    assert ev._runs_for(case) == ev._RATE_RUNS
     assert ev._required_passes(case, 12) == 11
     # And a threshold never rounds down to an extra allowed miss.
     assert ev._required_passes(case, 6) == 6
@@ -590,3 +593,14 @@ def test_n_of_n_is_still_the_rule_for_every_other_case():
             continue
         n = ev._runs_for(case)
         assert ev._required_passes(case, n) == n, case.name
+
+
+def test_fabrication_guards_run_at_the_higher_count():
+    """The two hallucinated-success cases guard a low-rate laundering
+    regression, so they must not run at the 3-run default (self-review of
+    #483: at N=3 a 1-in-6 COMPLETE rate is caught ~42% of the time)."""
+    by_name = {c.name: c for c in ev._CASES}
+    for name in ("implied_success_data_never_arrived", "disclaimered_fabrication"):
+        assert ev._runs_for(by_name[name]) == ev._STUCK_RUNS, name
+    # And the plain single-valued controls still run at the default.
+    assert ev._runs_for(by_name["stopped_partway"]) == ev._RUNS

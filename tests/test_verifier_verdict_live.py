@@ -54,8 +54,8 @@ instead of N-of-N (``Case.min_pass_rate``, 11 of 12) — the other branch of
 the policy ENG-1211 wrote down, taken only after four wordings and a schema
 reorder failed to remove a ~1-in-24 label slip on haiku; the case's comment
 has the numbers and the gate pins that no other case takes this path. N
-defaults to 3; the
-STUCK-expected cases run 6, because STUCK's base rate under the pre-ENG-836
+defaults to 3; cases
+whose acceptable set includes STUCK run 6, because STUCK's base rate under the pre-ENG-836
 rubric was measured at ~1-in-5 (Kiranam session: 4 COMPLETE / 4 INCOMPLETE /
 1 STUCK on one blocker), so a single run passes ~20% of the time by luck. The
 environment-wall case therefore doubles as ENG-836's before/after measurement,
@@ -1173,9 +1173,11 @@ _ONE_ATTEMPT_GIVE_UP = Case(
     # and gemini-flash-3: 0 slips in 12+ each. Moving the counting rule into
     # the INCOMPLETE bullet cut the rate; reason-before-status removed it but
     # cost the ENG-836 wall 2/24 on the same model (see _VerifierVerdict's
-    # docstring). So this control is a rate: 11 of 12, which a ~4% slip passes
-    # and the 5/24 regression (a wording that DISCUSSED one attempt inside the
-    # STUCK bullet) fails. Everything else in this file stays N-of-N.
+    # docstring). So this control is a rate: 11 of 12. Power, honestly: a ~4%
+    # slip passes (P(<=1 miss of 12) ~ 0.92), a >=40% miss rate fails >99% of
+    # runs, but the 5/24 (~21%) regression that motivated the counting rule
+    # would still pass ~28% of runs — a rate check with the power N=12 buys,
+    # not a tight gate. Everything else in this file stays N-of-N.
     min_pass_rate=11 / 12,
 )
 
@@ -1325,7 +1327,13 @@ _RATE_RUNS = int(os.environ.get("VERIFIER_EVAL_RATE_RUNS", "12"))
 def _runs_for(case: Case) -> int:
     if case.min_pass_rate < 1.0:
         return _RATE_RUNS
-    return _STUCK_RUNS if case.expected == "STUCK" else _RUNS
+    # Any case whose acceptable set includes STUCK runs at the higher count:
+    # the STUCK-expected cases for ENG-836's measured 1-in-5 base rate, and
+    # the two hallucinated-success cases because they guard a LOW-rate
+    # laundering regression — `disclaimered_fabrication` returned COMPLETE
+    # 1 in 3 on haiku under an intermediate ENG-2686 wording, and at N=3 a
+    # 1-in-6 rate is caught only ~42% of the time (self-review of #483).
+    return _STUCK_RUNS if "STUCK" in case.acceptable else _RUNS
 
 
 def _required_passes(case: Case, n: int) -> int:
