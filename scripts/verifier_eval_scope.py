@@ -163,7 +163,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--head", required=True, help="head revision, or WORKTREE for the working tree")
     ap.add_argument("--github-output", help="path to $GITHUB_OUTPUT to append scope= and pytest_args=")
     a = ap.parse_args(argv)
-    scope, reasons = decide(a.base, a.head)
+    try:
+        scope, reasons = decide(a.base, a.head)
+    except Exception as exc:  # noqa: BLE001 — fail CLOSED, to the full matrix
+        # A git error, an unparsable revision, anything unexpected: the safe
+        # answer is the full matrix, never a red job and never the guard. A
+        # decision step that can fail open would re-create ENG-1334.
+        scope, reasons = "full", [f"scope decision failed, defaulting to full: {exc!r}"[:300]]
     print(f"verifier-eval scope: {scope}")
     for r in reasons:
         print(f"  because {r}")
