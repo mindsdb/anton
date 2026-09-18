@@ -598,3 +598,51 @@ class TestHermesIsNotStatedAsFact:
         """So the next reader resolves the disagreement instead of guessing."""
         body = store.load("cowork-product").declarative_md
         assert "cowork/harnesses/" in body
+
+
+class TestPipelineContractMirrored:
+    """The hand-built path (these skills) must state the same constraints
+    `generate_artifact` enforces on its own output, so a manual build does
+    not silently drift from what the launcher, the host app and the cloud
+    runner expect. Markers are the load-bearing phrases of the pipeline's
+    verifier contracts (`generate_artifact/prompts.py`)."""
+
+    BACKEND_MARKERS = (
+        "GET /api/health",
+        '{"status": "ok"}',
+        "Python >= 3.12",
+        "never `anton_state`",
+        "Do NOT import `anton_state`",
+        "STATE = None",
+        "state_manifest.json",
+        'health_path="/api/health"',
+        "never derive or invent a `DS_*` key",
+    )
+    FRONTEND_MARKERS = (
+        "<body>",
+        'name="viewport"',
+        "No absolute URL in any `fetch()`",
+        "window.__antonCommentsLayer",
+        "!important",
+        "z-index",
+        "stable `id` attributes",
+        "@tailwindcss/browser@4",
+        "echarts@5",
+        'primary="index.html"',
+    )
+
+    def test_backend_skill_states_the_verifier_contract(self, store):
+        body = store.load("build-fullstack-backend").declarative_md
+        missing = [m for m in self.BACKEND_MARKERS if m not in body]
+        assert not missing, missing
+
+    def test_dashboard_skill_states_the_verifier_contract(self, store):
+        body = store.load("build-html-dashboard").declarative_md
+        missing = [m for m in self.FRONTEND_MARKERS if m not in body]
+        assert not missing, missing
+
+    def test_fullstack_frontend_step_points_at_the_host_contract(self, store):
+        body = store.load("build-fullstack-backend").declarative_md
+        assert "HOST CONTRACT" in body
+        assert "__antonCommentsLayer" in body
+        assert "<html lang>" in body

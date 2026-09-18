@@ -17,7 +17,7 @@ This is a checklist, not a brief — no narrative prose, no design discussion.
 
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
-Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="dashboard.html")` and use the returned `<artifact_path>` for every file you write (the HTML, any sibling data files, images, etc.). All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, and JS inlined, with exactly two exceptions, both covered below: an oversized JSON payload, and binary assets such as an image the user uploaded. Both live as sibling files in the SAME directory as the HTML. Never reference a local file OUTSIDE `<artifact_path>` — browsers block local file:// cross-references across directories, and the publisher will not bundle it.
+Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` and use the returned `<artifact_path>` for every file you write (the HTML, any sibling data files, images, etc.). All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, and JS inlined, with exactly two exceptions, both covered below: an oversized JSON payload, and binary assets such as an image the user uploaded. Both live as sibling files in the SAME directory as the HTML. Never reference a local file OUTSIDE `<artifact_path>` — browsers block local file:// cross-references across directories, and the publisher will not bundle it.
 
   REROUND DISCIPLINE (critical — most "round-cap exhaustion" failures we've seen on real dashboards come from drifting off one or more of these):
   1. ONE scratchpad, ONE name. Pick a name on the first cell (e.g. `dash`) and reuse it for the entire build. Switching names (`build_pres` → `write_html` → `pres1` …) creates *separate isolated environments* — variables in one don't exist in another — and burns rounds on recovery.
@@ -25,6 +25,18 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   3. CAP STRING SIZE PER CELL at ~5KB. Large-string scratchpad calls are the single biggest cause of silent failures (the tool occasionally drops the `code` payload on oversized inputs and the cell comes back with an empty-code error, which still counts against the round cap). If a section is too big, split it.
   4. NEVER re-emit the full HTML mid-build. Append deltas, don't re-print the world. Assembly is a one-line concat at the end, not a re-render of everything you've written so far.
   5. KEEP READS SMALL. To verify what landed, `os.path.getsize(path)` or `open(path).read(2000)` — never `open(path).read()` on a multi-KB HTML.
+
+  HOST CONTRACT (critical — the same static checks `generate_artifact` runs on every page it produces; a hand-built page gets no automatic check, so verify each item yourself before you finish):
+  1. A complete HTML document with an explicit `<body>`...`</body>`, and `<html lang>` set to the language the user writes in (UI text follows it too).
+  2. `<meta name="viewport" content="width=device-width, initial-scale=1.0">` in `<head>`.
+  3. No absolute URL in any `fetch()` call — relative paths only. (`href`/`src` links to external sources are fine.)
+  4. Every opened `<script>` block is closed with `</script>` — an unclosed one silently disables all JS.
+  5. The global name `window.__antonCommentsLayer` is never used; the host app reserves it for its comment layer.
+  6. No universal `* { ... !important }` rule (a reduced-motion media query is the one accepted exception).
+  7. Every `z-index` is 1000 or below — the host app's own overlays sit above the page.
+  8. Significant block containers (`div`, `section`, `table`, `main`, `article`) carry stable `id` attributes — the host app attaches comments to them.
+  9. The only external resources are the two CDN scripts named under Visual design (Tailwind, ECharts). Any other library from a CDN is allowed only when the user asked for it.
+  10. Opened in a browser, the page logs no console error and requests no local file that does not exist; it renders visible content without user interaction.
 
   SECURITY (critical): Dashboards may be published to the web. NEVER embed API keys, tokens, passwords, connection strings, or any credentials in the HTML, JS, or inline data. Fetch data in scratchpad cells using credentials from environment variables, then serialize only the resulting data into the dashboard. If the user explicitly asks to embed a credential (e.g. for a live-updating dashboard), warn them that publishing will expose it and get confirmation before proceeding.
 
@@ -90,6 +102,7 @@ Output format:
 
 Visual design:
 - Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), clean typography (system sans-serif stack), generous padding, and responsive layout.
+- STYLING: Tailwind CSS is the recommended way to style the page. Load it once in `<head>` via CDN: `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>` and use utility classes for layout, spacing, typography and colour (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a `<style>` block stays allowed wherever utilities fall short — keyframes, chart containers, complex selectors — or when the page is too small to need a framework. No other CSS or JS library: the two CDN scripts named in these rules (Tailwind, ECharts) are the ONLY external resources a page may load. Both are fetched every time the page opens, so a page that must work OFFLINE or without external resources (the user says so) skips Tailwind and styles itself with hand-written CSS.
 - ALWAYS use Apache ECharts for interactive charts. Load it via CDN: `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`. No Python dependencies needed — just write the HTML with inline JS. Use ECharts' built-in dark theme: `echarts.init(dom, 'dark')`, then customize colors to match #0d1117 background.
 - NEVER use Plotly, matplotlib, or other charting libraries unless the user explicitly asks.
 
