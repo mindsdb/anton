@@ -107,7 +107,7 @@ from anton.core.session import (
     _VERIFIER_TOKEN_BUDGETS,
     _VerifierVerdict,
     _build_verify_request,
-    _clip_keep_cause,
+    _render_verify_transcript,
 )
 
 _KEY = os.environ.get("MINDSHUB_API_KEY")
@@ -1275,12 +1275,6 @@ _CSV_SUM_OUTPUT = (
     "done: 3 files read, 20,747 rows scanned, 3 nulls skipped\n"
     "wall time 0.41s"
 )
-# Spring the trap this fixture exists for, on the RENDERED form: every per-file
-# sum must fall inside the elided middle, or the verifier can see the figures
-# and the case guards the easy variant again.
-assert all(
-    figure not in _clip_keep_cause(_CSV_SUM_OUTPUT, 400) for figure in _PER_FILE_SUMS
-), "computed-total control: the per-file sums must be clipped out of the verifier's view"
 assert all(figure in _CSV_SUM_OUTPUT for figure in _PER_FILE_SUMS)
 
 _COMPUTED_TOTAL = Case(
@@ -1309,6 +1303,17 @@ _COMPUTED_TOTAL = Case(
     ],
     expected="COMPLETE",
     source="ENG-2686 risk control (derived figure from clipped source must not read as unsourced)",
+)
+
+# Spring the trap this fixture exists for, on the RENDERED form: every per-file
+# sum must fall inside the elided middle, or the verifier can see the figures
+# and the case guards the easy variant again. Rendered through the production
+# function rather than re-stating its `tool_cap` default, which would keep
+# passing while silently no longer describing what the verifier is shown.
+_RENDERED_CSV_CASE = _render_verify_transcript(_COMPUTED_TOTAL.history)
+assert all(figure not in _RENDERED_CSV_CASE for figure in _PER_FILE_SUMS), (
+    "computed-total control: the per-file sums must be clipped out of the "
+    "verifier's view"
 )
 
 # --- 12. Risk control: one failed attempt, then ASKS the user → WAITING ------
@@ -1421,11 +1426,11 @@ async def test_verdict(case: Case, model: str):
     # "why did the rubric flip" — so surface them in the failure message
     # instead of just the statuses.
     detail = "; ".join(f"{v.status}: {v.reason}" for v in verdicts)
-    # Every run must land inside the case's acceptable set. For the four
-    # single-valued cases that is identical to the previous
-    # `statuses == [expected] * n` — all N runs, that exact status. For the one
-    # case with two acceptable verdicts it asserts the incident's actual
-    # invariant instead of a proxy for it (see Case.acceptable).
+    # Every run must land inside the case's acceptable set. For a single-valued
+    # case that is identical to the previous `statuses == [expected] * n` — all
+    # N runs, that exact status. For the two hallucinated-success cases, which
+    # accept two verdicts, it asserts the incident's actual invariant instead of
+    # a proxy for it (see Case.acceptable).
     wrong = [s for s in statuses if s not in case.acceptable]
     assert not wrong, (
         f"{case.name} on {model}: every one of {n} runs must be in "

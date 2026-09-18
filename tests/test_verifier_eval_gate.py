@@ -307,13 +307,13 @@ def test_the_workflow_bounds_the_job_so_a_hang_cannot_hold_a_runner():
 
 
 def test_single_valued_cases_still_demand_that_exact_verdict():
-    """The acceptable-set change must not have loosened the other four cases.
+    """The acceptable-set change must not have loosened the single-valued cases.
 
-    Four of the five fixtures exist because the *wrong label is the bug* — a
-    recovered error judged INCOMPLETE force-continues (ENG-1134), a genuine
-    question judged INCOMPLETE makes the agent answer itself (ENG-716), an
-    environment wall judged INCOMPLETE walks into the wall (ENG-836). Those
-    must stay single-valued.
+    Every fixture but the two hallucinated-success ones exists because the
+    *wrong label is the bug* — a recovered error judged INCOMPLETE
+    force-continues (ENG-1134), a genuine question judged INCOMPLETE makes the
+    agent answer itself (ENG-716), an environment wall judged INCOMPLETE walks
+    into the wall (ENG-836). Those must stay single-valued.
     """
     by_name = {c.name: c for c in ev._CASES}
 
