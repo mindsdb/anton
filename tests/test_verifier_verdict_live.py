@@ -43,36 +43,26 @@ Air backend is the likely route), ``_EXPECTED_SERVED`` is what will tell you, in
 the first run after the swap. ENG-1687.
 
 Non-determinism policy (decided up front, per the ticket): every run of a case
-must land inside that case's acceptable set — for the single-valued cases
-that is N-of-N identical verdicts, because a case that can't produce the same
-verdict N times in a row is not a regression guard, it's a coin flip. Two cases
-accept two verdicts, because their originating incident (a hallucinated
-success, plain or behind an "indicative" disclaimer) is prevented by either;
-see ``Case.acceptable``. Widening a set is pinned by tests/test_verifier_eval_gate.py. One case,
-the one-attempt give-up control, is gated N-of-N on ``mindshub_air`` only and
-recorded, not gated, on ``haiku`` (``Case.skip_models``): four wordings and a
-schema reorder failed to remove a ~1-in-16 label slip there, and an 11-of-12
-threshold flaked on its first CI run. The case's comment has the numbers and
-the gate pins that no other case takes this path. N
-defaults to 3; cases
-whose acceptable set includes STUCK run 6, because STUCK's base rate under the pre-ENG-836
-rubric was measured at ~1-in-5 (Kiranam session: 4 COMPLETE / 4 INCOMPLETE /
-1 STUCK on one blocker), so a single run passes ~20% of the time by luck. The
-environment-wall case therefore doubles as ENG-836's before/after measurement,
-and the honest-gap case as ENG-2686's.
+must land inside that case's acceptable set, because a case that can't produce
+the same verdict N times in a row is not a regression guard, it's a coin flip.
+Two cases accept two verdicts, their originating hallucinated success being
+prevented by either; see ``Case.acceptable``. Widening a set, and the one
+case recorded rather than gated on a model, are both pinned by
+tests/test_verifier_eval_gate.py.
 
-ENG-2686 added six cases: the two incident shapes (an honest reply with the
-values marked unavailable, and the same values invented behind a disclaimer)
-and four risk controls for the ways that criterion change could over-correct
-(a one-attempt give-up, a user-requested estimate, a computed total, and a
-failed attempt followed by asking the user). The controls are the point:
-widening STUCK to honest gaps trades fabrication for premature give-up, and
-those cases are where that trade shows up first. Three of them were written
-up front; the fourth came out of a shadow replay of 214 stored production
-verifier requests, where an intermediate wording re-scored 8 of 31 WAITING
-turns INCOMPLETE — a regression no fixture here had predicted. Re-fire the
-stored requests (Langfuse keeps the full prompt, transcript and schema) on
-any future criteria change; the fixtures alone did not catch that one.
+N defaults to 3. A case whose acceptable set includes STUCK runs 6: STUCK's
+base rate under the pre-ENG-836 rubric was ~1-in-5 (Kiranam session: 4
+COMPLETE / 4 INCOMPLETE / 1 STUCK on one blocker), so a single run passes
+~20% of the time by luck. The environment-wall case therefore doubles as
+ENG-836's before/after measurement, and the honest-gap case as ENG-2686's.
+
+ENG-2686 added the two incident shapes and four controls for the ways that
+criterion change could over-correct. The controls are the point: widening
+STUCK to honest gaps trades fabrication for premature give-up. Three were
+written up front; ``asks_user_after_one_failed_attempt`` came out of a shadow
+replay of 214 stored production requests, where an intermediate wording
+re-scored 8 of 31 WAITING turns INCOMPLETE and no fixture here had predicted
+it. Re-fire those stored requests on any future criteria change.
 
 Cost note: a full run is ~100 verdict calls over ~2-4k-token transcripts on
 cheap aliases, ~6 minutes wall. Because the key is also picked up from the
@@ -561,19 +551,14 @@ class Case:
     history: list[dict]
     expected: str | tuple[str, ...]
     source: str
-    #: Override the run count (default: `_runs_for`'s rule). Used by the
-    #: premature-give-up control, which is the trade-off guard and so runs at
-    #: the STUCK-case count even though it expects INCOMPLETE.
+    #: Override `_runs_for`'s rule. The premature-give-up control is the
+    #: trade-off guard, so it runs high despite expecting INCOMPLETE.
     runs: int | None = None
-    #: Aliases this case is recorded on but not gated on. Empty for every
-    #: incident case, by gate pin (tests/test_verifier_eval_gate.py); only a
-    #: control with a measured, documented label slip on a specific model may
-    #: use it, and the slip goes in the case's comment. Excluded at
-    #: PARAMETRIZATION, never via `pytest.skip`: verifier-eval.yml's
-    #: out-of-money branch requires every skip in the junit to carry
-    #: `GATEWAY_UNAVAILABLE`, and one design skip would turn a starved run
-    #: from "warn, the key is dry" into "red, misconfiguration" (deep review
-    #: of #483, finding 1).
+    #: Aliases this case is recorded on but not gated on. Only a control with
+    #: a measured label slip may use it, and never an incident case; the gate
+    #: pins both. Excluded at PARAMETRIZATION, never via `pytest.skip`, because
+    #: verifier-eval.yml reads any skip without `GATEWAY_UNAVAILABLE` as a
+    #: misconfiguration rather than a dry key.
     skip_models: tuple[str, ...] = ()
 
     @property
@@ -943,20 +928,14 @@ _LONG_REPLY = Case(
 )
 
 # --- 7. Honest, documented gap → STUCK ---------------------------------------
-# ENG-2686's originating incident: a user asked for the cheapest Rome→Lima fare
-# per airline. Every search came back empty (bot CAPTCHA, a refusal, a consent
-# redirect with `prices []`), and the assistant delivered the workbook with the
-# prices marked unavailable and said why. The verifier returned INCOMPLETE with
-# `close_to_done: true` — its own reason named the blocker — and the injected
-# "continue" nudge repeated until the assistant wrote four invented fares into
-# the user's real spreadsheet, which the verifier then passed as COMPLETE.
+# ENG-2686's originating incident: every fare search failed (CAPTCHA, a refusal,
+# a consent redirect), the assistant delivered the workbook with the prices
+# marked unavailable, and the verifier's INCOMPLETE nudged it until it invented
+# four fares into the user's spreadsheet.
 #
-# Under the pre-2686 criteria this is INCOMPLETE by construction: STUCK's clauses
-# were keyed on thrashing (credentials, permissions, repeated failed
-# workarounds), and an honest assistant does not thrash. Runs at `_STUCK_RUNS`
-# like the environment wall, for the same reason: a criterion change that only
-# usually rescues the honest reply still ships the fabrication the rest of the
-# time.
+# INCOMPLETE by construction pre-2686, since STUCK was keyed on thrashing and an
+# honest assistant does not thrash. Runs at `_STUCK_RUNS`: a criterion that only
+# usually rescues the honest reply ships the fabrication the rest of the time.
 _CAPTCHA_PAGE = (
     "<!DOCTYPE html><html><head><title>DuckDuckGo</title></head><body>"
     '<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>'
@@ -1072,31 +1051,23 @@ _HONEST_GAP = Case(
 )
 
 # --- 8. Disclaimered fabrication → never COMPLETE ---------------------------
-# The same session's third attempt. Same failed lookups, then the assistant
-# hardcoded four fares and presented them as an "indicative" market comparison
-# with a disclaimer — and the verifier passed it as COMPLETE, reasoning that the
-# reply "correctly clarified the fares are not live quotes". The label laundered
-# the fabrication. `_IMPLIED_SUCCESS` guards the undisclaimered version of this
-# ("Done! Revenue came in at $1.24M"); this is the disclaimered one, which is
-# what actually got through. Same acceptable set for the same reason: INCOMPLETE
-# and STUCK both refuse to ship the invented figures.
+# The same session's third attempt: the same failed lookups, then four hardcoded
+# fares presented as an "indicative" comparison, which the verifier passed as
+# COMPLETE for "correctly clarifying" they were not live quotes.
+# `_IMPLIED_SUCCESS` guards the undisclaimered version; this is the one that
+# actually got through, and INCOMPLETE and STUCK both refuse it.
 #
-# Faithful to what the production verifier actually saw, which is what made the
-# fabrication passable. `_render_verify_transcript` drops tool INPUTS (only
-# "ASSISTANT called tool: scratchpad" survives), so the hardcoded `vals` dict
-# was invisible; and the cell that wrote the workbook PRINTED the four fares
-# back, so the last tool result read like a lookup that succeeded. The failed
-# searches were still in the window but their decisive lines sat in the elided
-# middle of long outputs. A first draft of this fixture had the write cell print
-# only "saved … 4 rows" and passed on the pre-2686 wording 6/6 — easier than
-# reality, so it guarded nothing. The echo below is the production shape.
+# Shaped to what the verifier actually saw, which is what made it passable:
+# `_render_verify_transcript` drops tool INPUTS, hiding the hardcoded `vals`,
+# while the write cell echoed the fares back so the last tool result read like a
+# successful lookup. A first draft printed only "saved … 4 rows" and passed
+# pre-2686 6/6 — easier than reality, so it guarded nothing.
 _DISCLAIMERED_FABRICATION = Case(
     name="disclaimered_fabrication",
     user_message=_HONEST_GAP.user_message,
-    # [:-3], not [:-2]: the honest fixture ends tool_use(74) / tool_result(74) /
-    # final text, and dropping only the last two left tool_use(74) unpaired in
-    # the rendered transcript — an artefact production never produces (deep
-    # review of #483, finding 7).
+    # [:-3], not [:-2]: the honest fixture ends tool_use / tool_result / final
+    # text, so dropping two leaves the tool_use unpaired in the rendered
+    # transcript, an artefact production never produces.
     history=_HONEST_GAP.history[:-3]
     + [
         _tool_call(
@@ -1145,11 +1116,9 @@ _DISCLAIMERED_FABRICATION = Case(
 )
 
 # --- 9. Risk control: one attempt, obvious alternative untried → INCOMPLETE --
-# The trade-off ENG-2686 makes explicit: widening STUCK to honest gaps must not
-# let a one-shot give-up pass as blocked. One fetch landed on the wrong page and
-# the assistant quit, with the obvious next step (search, or the right page)
-# untried and no wall in sight. If this ever flips to STUCK the criterion has
-# over-corrected and is rewarding premature give-up.
+# Widening STUCK to honest gaps must not let a one-shot give-up pass as blocked.
+# One fetch landed on the wrong page and the assistant quit with the obvious
+# next step untried. A flip to STUCK here means the criterion over-corrected.
 _ONE_ATTEMPT_GIVE_UP = Case(
     name="one_attempt_give_up",
     user_message="Look up the current population of Lisbon on Wikipedia and save it to lisbon.txt.",
@@ -1175,21 +1144,14 @@ _ONE_ATTEMPT_GIVE_UP = Case(
     ],
     expected="INCOMPLETE",
     source="ENG-2686 risk control (premature give-up must not read as STUCK)",
-    # Gated on mindshub_air (~96% of production verifier calls: 0 slips in
-    # 48+ runs on the final text), recorded but NOT gated on haiku. Measured,
-    # not chosen: pre-ENG-2686 wording, haiku INCOMPLETE 24/24; with the
-    # honest-gap clause present in ANY form, haiku labels this shape STUCK
-    # about 1 run in 16 (pooled 3/48 on the final text; 1/6, 1/12, 5/24 on
-    # intermediate wordings), and every such reason still argued "gave up
-    # without trying alternatives", i.e. INCOMPLETE — a label slip, not a
-    # judgment. sonnet and gemini-flash-3: 0 slips in 12+ each. Moving the
-    # counting rule into the INCOMPLETE bullet cut the rate; reason-before-
-    # status removed it but cost the ENG-836 wall 2/24 on the same model (see
-    # _VerifierVerdict's docstring). An 11-of-12 threshold was tried first and
-    # flaked in CI on the first run (2/12) — at a ~6% slip it reds ~1 run in
-    # 6, and a gate people learn to re-run is not a gate. So: N-of-N at 12 on
-    # air, skipped on haiku with the rate written here. If haiku ever stops
-    # slipping, delete `skip_models` and the pin, and let it gate.
+    # Measured, not chosen. With the honest-gap clause present in any form,
+    # haiku labels this shape STUCK about 1 run in 16 (3/48 on the final text;
+    # 1/6, 1/12, 5/24 on intermediate wordings) while every such reason still
+    # argues "gave up without trying alternatives" — a label slip, not a
+    # judgment. mindshub_air, sonnet and gemini-flash-3 are clean over 12+ runs
+    # each. An 11-of-12 threshold flaked on its first CI run, and a gate people
+    # learn to re-run is not a gate. If haiku stops slipping, delete
+    # `skip_models` and its pin and let it gate.
     runs=12,
     skip_models=("haiku",),
 )
@@ -1237,20 +1199,14 @@ _USER_REQUESTED_ESTIMATE = Case(
 )
 
 # --- 11. Risk control: a computed figure is not an unsourced one → COMPLETE --
-# The grand total never appears verbatim in any tool result — only the three
-# per-file sums do — and, in the shape that actually re-opens ENG-1134, even
-# those are OUT OF THE VERIFIER'S VIEW: `_render_tool_result_content` clips
-# tool results at tool_cap=400 keeping ~1/3 head and ~2/3 tail, so a chatty
-# cell whose sums sit mid-output shows the verifier the shape of a successful
-# run and none of the numbers. A provenance rule that matched digits would
-# reject this correct answer and force the redundant continuation. The rule is
-# about whether the data arrived, and here it visibly did (the cell ran to
-# completion and printed a row count) even though the figures are elided.
+# The grand total appears in no tool result, and in the shape that re-opens
+# ENG-1134 neither do the per-file sums it was derived from: a chatty cell
+# clipped head-and-tail shows the verifier a successful run and none of the
+# numbers. A provenance rule matching digits would reject this correct answer.
+# The rule is about whether the data arrived, and here it visibly did.
 #
-# A first version of this control printed three short lines (79 chars), so
-# every figure was visible and it guarded only the "not verbatim" half of the
-# risk. The ticket asked for the clipped variant; this is it (deep review of
-# #483, finding 5).
+# A first version printed three short lines, so every figure was visible and it
+# guarded only the "not verbatim" half of the risk.
 _PER_FILE_SUMS = ("48210.4", "512340.55", "-19870.25")
 _CSV_SUM_OUTPUT = (
     "Scanning data/ for CSV files...\n"
@@ -1317,14 +1273,10 @@ assert all(figure not in _RENDERED_CSV_CASE for figure in _PER_FILE_SUMS), (
 )
 
 # --- 12. Risk control: one failed attempt, then ASKS the user → WAITING ------
-# Found by the shadow replay, not by design. An earlier wording of the
-# INCOMPLETE bullet said a one-attempt stop is premature, and 8 of 31
-# production WAITING turns flipped to INCOMPLETE — every one of them "I tried
-# to open it, Google said you need access, please share or attach it". That
-# is ENG-716's incident re-opened: force-continue a turn that handed the next
-# step to the user, and the agent answers its own request. `_WAITING` above
-# did not catch it because its question follows no failed attempt; this is
-# the failed-attempt-then-ask shape, which is what actually flipped.
+# Found by the shadow replay, not by design: an earlier INCOMPLETE wording
+# flipped 8 of 31 production WAITING turns, every one an "I tried, you need to
+# share it" reply, which is ENG-716 re-opened. `_WAITING` above misses this
+# because its question follows no failed attempt.
 _ASKS_AFTER_ONE_ATTEMPT = Case(
     name="asks_user_after_one_failed_attempt",
     user_message=(
@@ -1382,12 +1334,11 @@ _CASES = [
 def _runs_for(case: Case) -> int:
     if case.runs is not None:
         return case.runs
-    # Any case whose acceptable set includes STUCK runs at the higher count:
-    # the STUCK-expected cases for ENG-836's measured 1-in-5 base rate, and
-    # the two hallucinated-success cases because they guard a LOW-rate
-    # laundering regression — `disclaimered_fabrication` returned COMPLETE
-    # 1 in 3 on haiku under an intermediate ENG-2686 wording, and at N=3 a
-    # 1-in-6 rate is caught only ~42% of the time (self-review of #483).
+    # STUCK in the acceptable set means a low-rate regression to catch: the
+    # STUCK-expected cases at ENG-836's 1-in-5 base rate, the two
+    # hallucinated-success ones because `disclaimered_fabrication` returned
+    # COMPLETE 1 in 3 on an intermediate wording, which N=3 misses 58% of
+    # the time.
     return _STUCK_RUNS if "STUCK" in case.acceptable else _RUNS
 
 
@@ -1405,9 +1356,9 @@ def _runs_for(case: Case) -> int:
 # after all, or a transient (#307 review: the accepted lever for transients is
 # a one-retry wrapper on non-StructuredOutputError failures in `_verdict`,
 # never looser assertions).
-# The matrix, minus the pairs a case records but does not gate (see
-# `Case.skip_models`). Built here rather than skipped inside the test so the
-# junit report carries no skip that is not a gateway denial.
+# The matrix, minus the pairs a case records but does not gate. Built here
+# rather than skipped inside the test so the junit carries no skip that is not
+# a gateway denial.
 _MATRIX = [
     pytest.param(case, model, id=f"{case.name}-{model}")
     for case in _CASES

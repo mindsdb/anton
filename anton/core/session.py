@@ -322,14 +322,10 @@ class _VerifierVerdict(BaseModel):
     coding model). The field descriptions below double as the verifier's
     instructions — see LLMClient.generate_object_code (ENG-716).
 
-    Field order (``status`` first) was re-measured on ENG-2686 and kept.
-    Putting ``reason`` first, so the model justifies before it labels, was
-    tried against haiku's residual label slip on the one-attempt control
-    (reasons arguing INCOMPLETE under a STUCK label, ~1 in 24): it removed
-    that slip, 24/24, but the ENG-836 environment wall dropped from clean to
-    22/24 STUCK on the same model. The wall is the shipped guarantee, so the
-    order stays; the one-attempt control is gated on ``mindshub_air`` and
-    recorded, not gated, on haiku (tests/test_verifier_verdict_live.py).
+    Field order (``status`` first) is load-bearing. Putting ``reason`` first
+    removed haiku's one-attempt label slip, 24/24, but dropped the ENG-836
+    environment wall to 22/24 STUCK on the same model; the wall is the
+    shipped guarantee, so the order stays.
     """
 
     status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
@@ -344,11 +340,10 @@ class _VerifierVerdict(BaseModel):
             "mark a turn incomplete just because an earlier tool call failed. A "
             "finished task followed by an optional 'want me to…?' offer is still "
             "COMPLETE. "
-            # The hallucinated-success safeguard was being laundered by a
-            # disclaimer: four invented airfares labelled "indicative", with a
-            # chat disclaimer that the engines had exposed no verifiable fare,
-            # passed as COMPLETE — the verifier's reason praised the reply for
-            # "correctly clarifying" they were not live quotes (ENG-2686).
+            # A disclaimer was laundering the hallucinated-success safeguard:
+            # invented figures labelled "indicative" passed as COMPLETE, the
+            # verifier's reason crediting the reply for disclosing them
+            # (ENG-2686).
             "NOT COMPLETE: values the assistant presents as the product of a "
             "search, lookup, build, or comparison that the tool results show "
             "did not succeed. Calling them 'indicative', 'estimated', or "
@@ -365,12 +360,9 @@ class _VerifierVerdict(BaseModel):
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
             "unfinished; the correct action is to wait for the user's reply. "
-            # Shadow replay of 214 production verdicts on an earlier wording of
-            # this schema: 8 of 31 WAITING turns were re-scored INCOMPLETE, every
-            # one an "I tried, it failed, please attach / connect / share it"
-            # reply — the early-stop sentence under INCOMPLETE was read as
-            # penalising the ask itself. That is ENG-716's incident (the agent
-            # answering its own question) re-opened; hence the carve-out.
+            # Without this carve-out INCOMPLETE's early-stop sentence reads as
+            # penalising the ask itself: 8 of 31 production WAITING turns
+            # re-scored INCOMPLETE on an earlier wording, which is ENG-716.
             "It includes asking the user to provide, attach, re-upload, share, "
             "connect, or authorise something the assistant needs (a file, a "
             "link, a Drive connection, credentials), or to make a decision — "
@@ -406,14 +398,10 @@ class _VerifierVerdict(BaseModel):
             "failed workarounds for the same underlying blocker mean STUCK, not "
             "INCOMPLETE — even if the assistant says it will try another "
             "approach. "
-            # The clauses above are keyed on thrashing. An honest assistant does
-            # not thrash: it reports the gap and stops, so it matched none of
-            # them and was filed INCOMPLETE with the blocker named in the
-            # verifier's own reason — then force-continued until it produced
-            # the requested shape anyway (ENG-2686: invented airfares written
-            # to a user's spreadsheet; an APK the nudge drove the assistant to
-            # build from a toolchain it downloaded into /tmp, which did not
-            # open on the user's phone).
+            # The clauses above are keyed on thrashing, which an honest
+            # assistant does not do: it reports the gap and stops, so it
+            # matched none of them and was force-continued into fabricating
+            # the requested shape (ENG-2686).
             "Likewise an honest, documented gap, once the transcript shows TWO OR "
             "MORE distinct failed approaches for data or a tool the task needs "
             # A bare "came back empty" claimed the shape COMPLETE carves out as
@@ -429,8 +417,7 @@ class _VerifierVerdict(BaseModel):
             "missing values marked as unavailable: the only way to 'keep going' "
             "would be to invent the values. "
             # Two failed approaches then an ask matches this clause and WAITING
-            # both; INCOMPLETE already defers, so STUCK has to defer the same way
-            # or the hand-back re-asks a question the assistant just asked.
+            # both, and the hand-back would re-ask what the assistant just did.
             "If the assistant instead asked the "
             "user to supply what it could not get, that is WAITING (above), not "
             "STUCK."
@@ -446,10 +433,8 @@ class _VerifierVerdict(BaseModel):
             "substantially more work, or where you aren't sure. Defaults to "
             "false, so an unsure model errs toward asking the user rather "
             "than assuming it's almost done. "
-            # Unqualified, this contradicted INCOMPLETE's one-attempt clause on
-            # the same turn: a failed fetch with an obvious alternative untried
-            # is small remaining work, and losing the grace there strands a turn
-            # at the ceiling one call short of done.
+            # Unqualified, this contradicted INCOMPLETE's one-attempt clause and
+            # stranded a turn at the spend ceiling one call short of done.
             "Always false when the remaining work "
             "depends on data or a tool the assistant already failed to obtain "
             "and has no untried route to — that is a blocker, not a small "

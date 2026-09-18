@@ -564,12 +564,10 @@ def test_a_served_id_cannot_inject_lines_into_the_report(alias):
 def test_only_the_one_attempt_control_is_recorded_not_gated_on_a_model():
     """The skip path must not spread quietly.
 
-    ENG-2686 measured a ~1-in-16 STUCK label slip on haiku for the one-attempt
-    give-up control (reasons arguing INCOMPLETE under a STUCK label), tried an
-    11-of-12 threshold, and watched it flake on its first CI run. So that one
-    control is gated N-of-N on mindshub_air and recorded, not gated, on haiku.
-    Every incident case is gated on every model — a fabrication fixture that
-    is "recorded" somewhere ships the fabrication there.
+    One control carries a measured label slip on haiku and is recorded there
+    rather than gated. Every incident case stays gated on every model: a
+    fabrication fixture that is only "recorded" somewhere ships the
+    fabrication there.
     """
     skipping = [c for c in ev._CASES if c.skip_models]
     assert [c.name for c in skipping] == ["one_attempt_give_up"], (
@@ -590,8 +588,7 @@ def test_run_overrides_are_only_the_premature_give_up_guard():
 
 def test_fabrication_guards_run_at_the_higher_count():
     """The two hallucinated-success cases guard a low-rate laundering
-    regression, so they must not run at the 3-run default (self-review of
-    #483: at N=3 a 1-in-6 COMPLETE rate is caught ~42% of the time)."""
+    regression, and N=3 misses a 1-in-6 COMPLETE rate 58% of the time."""
     by_name = {c.name: c for c in ev._CASES}
     for name in ("implied_success_data_never_arrived", "disclaimered_fabrication"):
         assert ev._runs_for(by_name[name]) == ev._STUCK_RUNS, name
@@ -600,10 +597,9 @@ def test_fabrication_guards_run_at_the_higher_count():
 
 
 def test_recorded_not_gated_pairs_are_excluded_at_parametrization_not_skipped():
-    """verifier-eval.yml's out-of-money branch passes only when EVERY skip in
-    the junit carries GATEWAY_UNAVAILABLE. A design skip inside test_verdict
-    would turn a starved run from a warning into a red misconfiguration (deep
-    review of #483, finding 1), so the pair is left out of the matrix instead.
+    """verifier-eval.yml's out-of-money branch passes only when every skip in
+    the junit carries GATEWAY_UNAVAILABLE, so a design skip would turn a
+    starved run from a warning into a red misconfiguration.
     """
     ids = {p.id for p in ev._MATRIX}
     assert "one_attempt_give_up-haiku" not in ids
