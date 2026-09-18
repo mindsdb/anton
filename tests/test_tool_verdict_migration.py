@@ -461,6 +461,8 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     "handle_read_image",
     "handle_recall_skill",
     "handle_scratchpad",          # partially migrated before this ticket
+    "handle_web_fetch_fallback",  # ENG-2677: 2xx only; non-2xx stays tier 3
+    "handle_web_search_fallback", # ENG-2677: hits only; no-results stays tier 3
 })
 
 

@@ -321,7 +321,13 @@ def _stamp_user_content(
 class _VerifierVerdict(BaseModel):
     """Structured verdict from the completion verifier (runs on the cheap
     coding model). The field descriptions below double as the verifier's
-    instructions — see LLMClient.generate_object_code (ENG-716)."""
+    instructions — see LLMClient.generate_object_code (ENG-716).
+
+    Field order (``status`` first) is load-bearing. Putting ``reason`` first
+    removed haiku's one-attempt label slip, 24/24, but dropped the ENG-836
+    environment wall to 22/24 STUCK on the same model; the wall is the
+    shipped guarantee, so the order stays.
+    """
 
     status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
         description=(
@@ -334,15 +340,51 @@ class _VerifierVerdict(BaseModel):
             "failed step wasn't essential to the answer — is still COMPLETE; do NOT "
             "mark a turn incomplete just because an earlier tool call failed. A "
             "finished task followed by an optional 'want me to…?' offer is still "
-            "COMPLETE.\n"
+            "COMPLETE. "
+            # A disclaimer was laundering the hallucinated-success safeguard:
+            # invented figures labelled "indicative" passed as COMPLETE, the
+            # verifier's reason crediting the reply for disclosing them
+            # (ENG-2686).
+            "NOT COMPLETE: values the assistant presents as the product of a "
+            "search, lookup, build, or comparison that the tool results show "
+            "did not succeed. Calling them 'indicative', 'estimated', or "
+            "'typical', or disclosing that they are not verified, does not make "
+            "them obtained and does not make the reply honest about their "
+            "origin: an honest reply marks values it could not obtain as "
+            "unavailable, and a reply that supplies them anyway is INCOMPLETE or "
+            "STUCK, never COMPLETE — delivering them is not a recovery. A figure "
+            "the assistant computed from data that DID arrive, or an estimate the "
+            "user explicitly asked for, is fine. So is a genuine empty result: a "
+            "search or query that ran and found nothing matching is a COMPLETE "
+            "answer of 'none', not a blocker.\n"
             "- WAITING: the assistant's latest message asks the user a question it "
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
-            "unfinished; the correct action is to wait for the user's reply.\n"
+            "unfinished; the correct action is to wait for the user's reply. "
+            # Without this carve-out INCOMPLETE's early-stop sentence reads as
+            # penalising the ask itself: 8 of 31 production WAITING turns
+            # re-scored INCOMPLETE on an earlier wording, which is ENG-716.
+            "It includes asking the user to provide, attach, re-upload, share, "
+            "connect, or authorise something the assistant needs (a file, a "
+            "link, a Drive connection, credentials), or to make a decision — "
+            "even after a single failed attempt. Asking is a valid stop, never a "
+            "premature one.\n"
             "- INCOMPLETE: the assistant stopped partway through the requested task "
             "WITHOUT asking the user anything, and could keep going on its own — "
             "including when it implied success but the data its answer actually "
-            "depends on errored or came back empty and was never recovered.\n"
+            "depends on errored or came back empty and was never recovered. This "
+            "also covers an honest 'I couldn't get it' that stopped EARLY: one "
+            "failed attempt with an obvious alternative untried (another page, "
+            "source, query, or method) is INCOMPLETE when the assistant simply "
+            "stopped or moved on — the honesty is right, the stopping is "
+            "premature. Count the distinct failed approaches: one is INCOMPLETE, "
+            "however plainly the gap is reported, because a second approach was "
+            "still open; if your reason would say the assistant 'gave up without "
+            "trying alternatives', the status is INCOMPLETE, not STUCK. If it "
+            "instead asked the user for what it needs, that is WAITING (above), "
+            "not INCOMPLETE. It does NOT cover a value the assistant already "
+            "failed to obtain by two or more distinct approaches; that is STUCK "
+            "(below), whatever the assistant says it will try next.\n"
             "- STUCK: a hard blocker prevents completion (missing credentials, an "
             "unavailable service, or a permission the assistant does not have). "
             # Environment walls must be named explicitly or the verifier files
@@ -356,7 +398,30 @@ class _VerifierVerdict(BaseModel):
             "this environment (no root/sudo, package manager blocked). Repeated "
             "failed workarounds for the same underlying blocker mean STUCK, not "
             "INCOMPLETE — even if the assistant says it will try another "
-            "approach."
+            "approach. "
+            # The clauses above are keyed on thrashing, which an honest
+            # assistant does not do: it reports the gap and stops, so it
+            # matched none of them and was force-continued into fabricating
+            # the requested shape (ENG-2686).
+            "Likewise an honest, documented gap, once the transcript shows TWO OR "
+            "MORE distinct failed approaches for data or a tool the task needs "
+            # A bare "came back empty" claimed the shape COMPLETE carves out as
+            # a genuine none-found answer, and STUCK is the later bullet.
+            "(blocked, no access, came back empty because the source failed "
+            "rather than because nothing matched, cannot be installed), or that "
+            "the required tool is absent from this environment, and the assistant "
+            "told the user plainly what it could not get instead of guessing — "
+            "judged on the failed attempts in the transcript, not on the "
+            "assistant's stated intent, so two distinct failures on the same "
+            "blocker are enough whatever it says it will try next. It stays STUCK "
+            "even when a partial or template result was delivered with the "
+            "missing values marked as unavailable: the only way to 'keep going' "
+            "would be to invent the values. "
+            # Two failed approaches then an ask matches this clause and WAITING
+            # both, and the hand-back would re-ask what the assistant just did.
+            "If the assistant instead asked the "
+            "user to supply what it could not get, that is WAITING (above), not "
+            "STUCK."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
@@ -368,7 +433,13 @@ class _VerifierVerdict(BaseModel):
             "nothing blocking or uncertain. False for anything that needs "
             "substantially more work, or where you aren't sure. Defaults to "
             "false, so an unsure model errs toward asking the user rather "
-            "than assuming it's almost done."
+            "than assuming it's almost done. "
+            # Unqualified, this contradicted INCOMPLETE's one-attempt clause and
+            # stranded a turn at the spend ceiling one call short of done.
+            "Always false when the remaining work "
+            "depends on data or a tool the assistant already failed to obtain "
+            "and has no untried route to — that is a blocker, not a small "
+            "remaining step."
         ),
     )
 
@@ -564,9 +635,17 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "the assistant's final answer depends on data that never arrived and was not "
     "recovered another way. A tool that failed but the assistant worked around — "
     "getting what it needed elsewhere, or the failed step being inessential — and "
-    "then answered from is COMPLETE. Conversely, an assistant that implied success "
+    "then answered from is COMPLETE. An assistant whose two or more distinct "
+    "approaches all failed, or that found the needed tool absent, and said plainly "
+    "what it could not obtain — leaving those values marked unavailable rather "
+    "than guessing — is STUCK, not INCOMPLETE, even if the rest was delivered and "
+    "whatever it says it will try next; one failed attempt with an obvious "
+    "alternative untried is INCOMPLETE — unless the assistant asked the user for "
+    "the file, link, access, or decision it needs, which is WAITING even after one "
+    "attempt. Conversely, an assistant that implied success "
     "while the data its answer relies on errored or came back empty is INCOMPLETE, "
-    "not COMPLETE."
+    "not COMPLETE — and supplying such values with a disclaimer that they are "
+    "indicative or unverified is still implying success, not honesty."
 )
 
 def _safe_error_detail(exc: BaseException) -> str:
