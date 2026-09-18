@@ -106,6 +106,16 @@ Visual design:
 - ALWAYS use Apache ECharts for interactive charts. Load it via CDN: `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`. No Python dependencies needed — just write the HTML with inline JS. Use ECharts' built-in dark theme: `echarts.init(dom, 'dark')`, then customize colors to match #0d1117 background.
 - NEVER use Plotly, matplotlib, or other charting libraries unless the user explicitly asks.
 
+Chart type by purpose (the same rule `generate_artifact` gives its generators):
+- Line for change over time; bar for comparing categories (horizontal bars when labels are long); stacked bar for composition across categories; scatter for the relation between two measures.
+- Pie or donut ONLY for a simple part-of-a-whole with few slices — never for comparison or change over time.
+- A value with no dimension is a KPI card, not a chart. Titles, legends and axis labels name what the data IS. No chart junk: 3D, gradients, decorative markers.
+
+Axes and units (critical — a number without a unit is a guess for the reader):
+- Every axis label names the measure AND its unit (`Revenue, USD`, `Latency, ms`, `Share, %`).
+- Every number in a tooltip, axis or KPI goes through a `formatter`: thousands separators, fixed decimals, currency or percent sign, unit suffix — never a raw float.
+- One date format per page, consistent between axes and tooltips. Say when a value is estimated, sampled or converted, and from which unit.
+
 Line smoothing (critical — smooth: true misrepresents volatile data):
 - DEFAULT: `smooth: false` on ALL line series. Straight segments between data points are the honest representation — they show actual volatility, drawdowns, and inflection points.
 - EXCEPTION: Use `smooth: true` ONLY for cumulative/monotonic series (cumulative returns, running totals, growth curves) where the trend matters more than point-to-point moves.

@@ -322,6 +322,38 @@ def test_verifier_contract_reaches_both_frontend_prompts():
         assert marker in rules, marker
 
 
+def test_design_rules_pick_the_chart_type_by_purpose():
+    """S-04: the rules set every ECharts option but never said which chart
+    fits which question; pie charts for comparisons and lines for categories
+    are the result. Both frontend prompts carry the block."""
+    rules = prompts._DESIGN_RULES
+    assert "Chart type by purpose" in rules
+    assert "line for change over time" in rules
+    assert "bar for comparing" in rules
+    assert "stacked bar for composition" in rules
+    assert "scatter for the relation" in rules
+    assert "donut ONLY for a simple part-of-a-whole" in rules
+    assert "KPI\n  card, not a chart" in rules
+    for text in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        assert "Chart type by purpose" in text
+
+
+def test_design_rules_require_units_and_formatters():
+    """S-05: axis labels name the unit, every displayed number is formatted,
+    one date format per page."""
+    rules = prompts._DESIGN_RULES
+    assert "Axes and units" in rules
+    assert "names the measure AND its unit" in rules
+    assert "`Revenue, USD`" in rules
+    assert "goes through a `formatter`" in rules
+    assert "never a raw float" in rules
+    assert "One date format per page" in rules
+    assert "estimated, sampled or converted" in rules
+
+
 def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
     """Tailwind via CDN is the recommended styling; a `<style>` block stays
     allowed, and no other library may be loaded. Both frontend prompts and

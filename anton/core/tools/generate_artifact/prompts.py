@@ -146,6 +146,19 @@ VISUAL DESIGN (for every HTML file you produce):
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
+- Chart type by purpose: line for change over time, bar for comparing
+  categories (horizontal when labels are long), stacked bar for composition
+  across categories, scatter for the relation between two measures. Pie or
+  donut ONLY for a simple part-of-a-whole with few slices — never for
+  comparison or change over time. Show a value with no dimension as a KPI
+  card, not a chart. Titles, legends and axis labels name what the data IS;
+  no chart junk (3D, gradients, decorative markers).
+- Axes and units: every axis label names the measure AND its unit
+  (`Revenue, USD`, `Latency, ms`, `Share, %`); every number in a tooltip,
+  axis or KPI goes through a `formatter` — thousands separators, fixed
+  decimals, currency or percent sign, unit suffix — never a raw float.
+  One date format per page, consistent between axes and tooltips. Say when
+  a value is estimated, sampled or converted, and from which unit.
 - Line smoothing: `smooth: false` on ALL line series by default.
   Use `smooth: true` ONLY for cumulative / monotonic series (running totals, growth curves).
   Line widths: 2.5 for primary, 1.5 for comparisons, 1 for reference lines.

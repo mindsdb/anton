@@ -629,6 +629,11 @@ class TestPipelineContractMirrored:
         "@tailwindcss/browser@4",
         "echarts@5",
         'primary="index.html"',
+        # S-04 / S-05: chart type by purpose, axes and units.
+        "Chart type by purpose",
+        "never for comparison or change over time",
+        "names the measure AND its unit",
+        "never a raw float",
     )
 
     def test_backend_skill_states_the_verifier_contract(self, store):
