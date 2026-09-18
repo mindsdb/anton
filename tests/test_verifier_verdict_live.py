@@ -13,6 +13,11 @@ Ground truth is anchored to the fixtures, not to live behaviour or drifting
 real-world facts (ENG-381 lesson): the transcript is the input, the expected
 status is the label.
 
+Scope: ``.github/workflows/verifier-eval.yml`` runs the full matrix only when the
+PR touches the verifier's criteria, request builder, transcript renderer, schema
+plumbing, or this module; other PRs on its trigger paths run only
+``test_narrating_model_reaches_a_verdict_at_shipped_budgets`` (ENG-2863).
+
 Gating: requires ``MINDSHUB_API_KEY`` in the environment (or repo-root
 ``.env``). Without it the module auto-skips, so the default CI unit run is
 unaffected — **unless** ``VERIFIER_EVAL_REQUIRE_LIVE=1``, which turns a missing
@@ -1184,7 +1189,9 @@ _ONE_ATTEMPT_GIVE_UP = Case(
     # each. An 11-of-12 threshold flaked on its first CI run, and a gate people
     # learn to re-run is not a gate. If haiku stops slipping, delete
     # `skip_models` and its pin and let it gate.
-    runs=12,
+    # Six, not twelve: 0 slips in 48+ runs on air, so twelve bought nothing
+    # over six except gateway calls (ENG-2863).
+    runs=6,
     skip_models=("haiku",),
 )
 

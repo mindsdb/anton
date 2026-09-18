@@ -602,7 +602,7 @@ def test_only_the_one_attempt_control_is_recorded_not_gated_on_a_model():
     assert case.skip_models == ("haiku",)
     # Still gated somewhere in the matrix, at the trade-off guard's count.
     assert ev._NARRATING_MODEL not in case.skip_models
-    assert ev._runs_for(case) == 12
+    assert ev._runs_for(case) == 6
 
 
 def test_run_overrides_are_only_the_premature_give_up_guard():
@@ -632,3 +632,68 @@ def test_recorded_not_gated_pairs_are_excluded_at_parametrization_not_skipped():
     import inspect
 
     assert "pytest.skip(" not in inspect.getsource(ev.test_verdict)
+
+
+# --- ENG-2863: the two-tier scope decision in verifier-eval.yml ------------
+
+import importlib.util as _ilu
+
+_SCOPE_PATH = Path(__file__).resolve().parent.parent / "scripts/verifier_eval_scope.py"
+_spec = _ilu.spec_from_file_location("verifier_eval_scope", _SCOPE_PATH)
+scope = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(scope)
+
+
+def test_every_scope_marker_resolves_to_a_span_in_the_code():
+    """A renamed function must fail here, not silently turn the matrix off.
+
+    The workflow decides full-matrix vs guard-only by intersecting the PR's
+    hunks with these symbols' line spans. A marker that resolves to nothing
+    would make every PR touching that code run the one-call guard, and the
+    rubric would be unguarded again (the ENG-1334 failure in a new coat).
+    """
+    root = Path(__file__).resolve().parent.parent
+    for path, names in scope.SPAN_MARKERS.items():
+        spans = scope.marker_spans((root / path).read_text(), names)
+        missing = [n for n in names if n not in spans]
+        assert not missing, f"{path}: scope markers resolve to nothing: {missing}"
+    # The symbols the incidents came from must be present by name.
+    assert {"_VerifierVerdict", "_render_verify_transcript", "_clip_keep_cause",
+            "_VERIFIER_JUDGMENT_RUBRIC"} <= set(scope.SPAN_MARKERS["anton/core/session.py"])
+    assert "tests/test_verifier_verdict_live.py" in scope.ALWAYS_FULL
+
+
+def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
+    src = (
+        "X = 1\n"
+        "def _render_verify_transcript(h):\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    return a + b\n"
+        "\n"
+        "async def turn_stream(self):\n"
+        "    y = _VERIFIER_TOKEN_BUDGETS\n"
+        "    return y\n"
+    )
+    spans = scope.marker_spans(src, ("_render_verify_transcript", "_VERIFIER_TOKEN_BUDGETS"))
+    assert spans == {"_render_verify_transcript": (2, 5)}  # the constant is only *used* here
+    inside = scope.parse_hunks("@@ -4 +4 @@\n-    b = 2\n+    b = 3\n")
+    outside = scope.parse_hunks("@@ -8 +8 @@\n-    y = _VERIFIER_TOKEN_BUDGETS\n+    y = 0\n")
+    assert scope.touched(inside, spans, spans) == {"_render_verify_transcript"}
+    assert scope.touched(outside, spans, spans) == set()
+    # A pure insertion (zero-length old side) inside the span counts too.
+    insertion = scope.parse_hunks("@@ -3,0 +4 @@\n+    c = 9\n")
+    assert scope.touched(insertion, spans, spans) == {"_render_verify_transcript"}
+
+
+def test_guard_mode_selects_exactly_the_truncation_guard():
+    workflow = _WORKFLOW.read_text()
+    assert "scripts/verifier_eval_scope.py" in workflow
+    assert "${{ steps.scope.outputs.pytest_args }}" in workflow
+    assert "fetch-depth: 0" in workflow
+    # The -k expression must select an existing test, and only one.
+    matches = [n for n in dir(ev) if n.startswith("test_") and scope.GUARD_K in n]
+    assert matches == ["test_narrating_model_reaches_a_verdict_at_shipped_budgets"]
+    # And the scope step never reaches for pytest.skip.
+    step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
+    assert "pytest.skip" not in step
