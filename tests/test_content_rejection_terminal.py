@@ -189,3 +189,88 @@ async def test_the_refusal_reaches_the_caller_instead_of_becoming_prose():
     assert "Please resize the image and try again." in str(err.value)
     text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert "An unexpected error occurred" not in text
+
+
+# ── the message's promise must be true for EVERY host (review of #484) ──────
+# anton tells the user the image "will be removed automatically so the
+# conversation can continue". cowork-server makes that true in its own store.
+# The standalone CLI has no store — it keeps ONE long-lived session — so
+# without an in-session repair the promise was false there and the next turn
+# re-sent the same image forever.
+
+
+def _image_history_turn(exc_factory, session, calls: list):
+    async def _gen(user_msg):
+        calls.append(user_msg)
+        raise exc_factory()
+        yield  # pragma: no cover
+
+    return _gen
+
+
+def _image_blocks(history) -> list:
+    return [
+        b
+        for m in history
+        if isinstance(m, dict) and isinstance(m.get("content"), list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") == "image"
+    ]
+
+
+async def test_the_offending_image_is_removed_from_history():
+    s = _session()
+    s._append_history({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what does this say?"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "AAAA"}},
+        ],
+    })
+    assert _image_blocks(s._history), "fixture did not seed an image"
+
+    calls: list = []
+    s._stream_and_handle_tools = _image_history_turn(
+        lambda: ContentTooLargeError(_PROVIDER_COPY), s, calls
+    )
+    with pytest.raises(ContentTooLargeError):
+        _ = [e async for e in s.turn_stream("what does this say?")]
+
+    assert not _image_blocks(s._history), (
+        "the image survived — the next turn would re-send it and fail identically"
+    )
+    text = " ".join(str(m.get("content", "")) for m in s._history if isinstance(m, dict))
+    assert "removed" in text.lower(), "no placeholder explaining the removal"
+
+
+async def test_an_image_in_a_tool_result_is_removed_too():
+    """A screenshot returned by a tool is as poisonous as an attached one, and
+    it hides one level deeper in the history."""
+    s = _session()
+    s._append_history({
+        "role": "user",
+        "content": [{
+            "type": "tool_result",
+            "tool_use_id": "toolu_x",
+            "content": [{"type": "image", "source": {"type": "base64",
+                                                     "media_type": "image/png",
+                                                     "data": "AAAA"}}],
+        }],
+    })
+    s._stream_and_handle_tools = _image_history_turn(
+        lambda: ContentTooLargeError(_PROVIDER_COPY), s, []
+    )
+    with pytest.raises(ContentTooLargeError):
+        _ = [e async for e in s.turn_stream("what does this say?")]
+
+    nested = [
+        b
+        for m in s._history
+        if isinstance(m, dict) and isinstance(m.get("content"), list)
+        for blk in m["content"]
+        if isinstance(blk, dict) and isinstance(blk.get("content"), list)
+        for b in blk["content"]
+        if isinstance(b, dict) and b.get("type") == "image"
+    ]
+    assert not nested, "an image nested in a tool_result survived the repair"

@@ -1197,6 +1197,32 @@ _CONTENT_SHAPE_PHRASES = (
     "does not match any of the expected tags",
 )
 
+# The shape phrases above are generic enum-validation prose: a provider emits
+# "Supported values are: ..." for ANY bad enum, `reasoning_effort` and
+# `tool_choice` included. On their own they are not evidence that the rejected
+# thing was CONTENT — and acting on them is destructive, because downstream a
+# content rejection strips every image block from the conversation's stored
+# history. A `reasoning_effort` typo must not cost the user their images while
+# leaving the real configuration error unfixed (review of #484).
+#
+# So a phrase must be corroborated: either the `param` points into a content
+# array, or the message names a content-block type. Quoted matching, because
+# these dialects quote the offending and permitted tags — and an unquoted
+# provider simply falls through to the old generic handling, which is the safe
+# direction to be wrong in.
+_CONTENT_BLOCK_TOKENS = (
+    "image", "image_url", "input_image", "input_file", "input_audio",
+    "input_text", "output_text", "refusal", "tool_use", "tool_result",
+    "document", "computer_screenshot",
+)
+
+
+def _names_a_content_block(message_low: str) -> bool:
+    return any(
+        f"'{tok}'" in message_low or f'"{tok}"' in message_low
+        for tok in _CONTENT_BLOCK_TOKENS
+    )
+
 # ...and a content-SIZE rejection (ENG-2689). Observed live as OpenAI's
 # "requires 32400 patches after processing, exceeding the limit of 30000.
 # Please resize the image and try again"; Anthropic phrases the same refusal as
@@ -1275,10 +1301,11 @@ def classify_content_rejection(
             "still need it."
         )
 
-    if (
-        ".content[" in par
-        or par.endswith(".content")
-        or any(phrase in low for phrase in _CONTENT_SHAPE_PHRASES)
+    # A param pointing into a content array is evidence on its own. A bare
+    # shape phrase is not — it needs the message to name a content-block type.
+    if (".content[" in par or par.endswith(".content")) or (
+        any(phrase in low for phrase in _CONTENT_SHAPE_PHRASES)
+        and _names_a_content_block(low)
     ):
         return ContentValidationError(
             "The model provider rejected part of this conversation's content "

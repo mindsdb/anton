@@ -2665,6 +2665,67 @@ class ChatSession:
         except asyncio.TimeoutError:
             return False  # slept the full delay
 
+    _IMAGE_REMOVED_PLACEHOLDER = (
+        "[An image here could not be sent to the model and was removed "
+        "automatically so this conversation could continue. Re-share it if you "
+        "still need it referenced.]"
+    )
+
+    def _strip_image_blocks_from_history(self) -> int:
+        """Replace every image block in history with a placeholder; return the
+        count removed.
+
+        Runs when the provider PERMANENTLY rejects content already in history.
+        Retrying is pointless because the request is rebuilt from this same
+        history every time — so unless the poison is removed, every later turn
+        re-sends it and fails identically. That is the difference between a
+        dead turn and a dead conversation.
+
+        cowork-server does this in its own store (ENG-1992) and rebuilds the
+        session each turn, so for that host this is a harmless no-op on a
+        history about to be discarded. The standalone CLI keeps ONE long-lived
+        session and has no such store: without this, its next turn re-sends the
+        same image forever (review of #484). Doing it here makes the error
+        message's promise true for every host rather than only the one that
+        happens to implement it.
+
+        Every image goes, not just the offending one: the provider's index is
+        request-relative and cannot be mapped back to a history entry reliably
+        across dialects. Blunt, and the same trade-off ENG-1992 already took.
+        """
+        removed = 0
+
+        def _strip(content):
+            nonlocal removed
+            if not isinstance(content, list):
+                return content, False
+            out, changed = [], False
+            for block in content:
+                if not isinstance(block, dict):
+                    out.append(block)
+                    continue
+                if block.get("type") == "image":
+                    out.append({"type": "text", "text": self._IMAGE_REMOVED_PLACEHOLDER})
+                    changed = True
+                    removed += 1
+                    continue
+                if block.get("type") == "tool_result":
+                    nested, nested_changed = _strip(block.get("content"))
+                    if nested_changed:
+                        out.append({**block, "content": nested})
+                        changed = True
+                        continue
+                out.append(block)
+            return (out if changed else content), changed
+
+        for msg in self._history:
+            if not isinstance(msg, dict):
+                continue
+            new_content, changed = _strip(msg.get("content"))
+            if changed:
+                msg["content"] = new_content
+        return removed
+
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
         `tool_use` blocks in the last assistant message.
@@ -4266,6 +4327,16 @@ class ChatSession:
                     # left in history would 400 the NEXT turn too — turning a
                     # repairable conversation into a differently-broken one.
                     if isinstance(_agent_exc, ContentValidationError):
+                        # Remove the poison before giving up, so the NEXT turn
+                        # isn't refused for the same content. Without this the
+                        # turn dies and the conversation dies with it.
+                        _removed = self._strip_image_blocks_from_history()
+                        if _removed:
+                            logger.info(
+                                "content rejected permanently — stripped %d image "
+                                "block(s) from history so the conversation can continue",
+                                _removed,
+                            )
                         _stamp_retry_terminal(
                             self._turn_cost, _agent_exc, "content_rejected"
                         )

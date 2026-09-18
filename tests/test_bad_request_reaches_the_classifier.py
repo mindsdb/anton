@@ -275,3 +275,81 @@ async def test_an_oversized_image_400_ends_the_turn_in_one_attempt():
     assert attempts == 1, f"expected a single provider request, got {attempts}"
     assert "Please resize the image and try again." in str(err.value)
     assert send.call_args.kwargs["retry_terminal_reason"] == "content_rejected"
+
+
+# ── the destructive false positive, on the real provider path (#484 review) ─
+# Classifying a 400 as a content rejection makes the host strip EVERY image
+# from the conversation's stored history and report it fixed. A bad enum value
+# on an unrelated parameter must therefore never qualify — otherwise a
+# `reasoning_effort` typo costs the user their images AND leaves the real
+# configuration error unfixed and unexplained.
+#
+# Verified against the real provider path, not the classifier in isolation:
+# that is where the old tests were blind, and this is the direction where being
+# wrong destroys data rather than merely showing worse copy.
+
+_UNRELATED_ENUM_400S = {
+    "reasoning_effort": {"error": {
+        "message": "Invalid value: 'ultra'. Supported values are: 'low', 'medium', 'high'.",
+        "type": "invalid_request_error", "param": "reasoning_effort",
+        "code": "invalid_value"}},
+    "tool_choice": {"error": {
+        "message": "Invalid value: 'always'. Supported values are: 'none', 'auto', 'required'.",
+        "type": "invalid_request_error", "param": "tool_choice",
+        "code": "invalid_value"}},
+    "service_tier": {"error": {
+        "message": "Invalid value: 'turbo'. Supported values are: 'auto', 'default', 'flex'.",
+        "type": "invalid_request_error", "param": "service_tier",
+        "code": "invalid_value"}},
+}
+
+
+@pytest.mark.parametrize("param", sorted(_UNRELATED_ENUM_400S))
+@pytest.mark.parametrize("flavor", _FLAVORS)
+async def test_an_unrelated_enum_400_never_triggers_image_repair(flavor, param):
+    provider = _provider(_UNRELATED_ENUM_400S[param], flavor)
+    try:
+        with pytest.raises(openai.BadRequestError) as err:
+            await provider.complete(model="m", system="s", messages=_MESSAGES)
+        assert not isinstance(err.value, ContentValidationError), (
+            f"a bad {param} enum was classified as a content rejection — the host "
+            "would delete every image in the conversation over a config typo"
+        )
+    finally:
+        await provider.aclose()
+
+
+async def test_an_unrelated_enum_400_does_not_strip_history_images():
+    """The consequence, end to end: the session must leave the user's images
+    alone when the 400 had nothing to do with content."""
+    from anton.chat import ChatSession
+    from anton.core.llm.client import LLMClient
+    from anton.core.session import ChatSessionConfig
+
+    provider = _provider(_UNRELATED_ENUM_400S["reasoning_effort"],
+                         OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+    client = LLMClient(planning_provider=provider, planning_model="m",
+                       coding_provider=provider, coding_model="m")
+    session = ChatSession(ChatSessionConfig(llm_client=client, session_id="conv-enum"))
+    session._append_history({
+        "role": "user",
+        "content": [{"type": "image", "source": {"type": "base64",
+                                                 "media_type": "image/png", "data": "AAAA"}}],
+    })
+    try:
+        # An unrelated 400 keeps its existing behaviour: retried, then ending as
+        # prose rather than a typed error. Not this PR's to change (ENG-1283
+        # owns it) — what matters here is that the images are untouched.
+        try:
+            _ = [e async for e in session.turn_stream("hello")]
+        except BaseException:
+            pass
+    finally:
+        await provider.aclose()
+
+    survived = [
+        b for m in session._history
+        if isinstance(m, dict) and isinstance(m.get("content"), list)
+        for b in m["content"] if isinstance(b, dict) and b.get("type") == "image"
+    ]
+    assert survived, "an unrelated config error destroyed the conversation's images"
