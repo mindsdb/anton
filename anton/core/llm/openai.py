@@ -42,6 +42,7 @@ from .provider import (
     origin_is_known_third_party,
     wallet_denial_code,
     raise_on_empty_response,
+    ensure_replayable_tool_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -1127,7 +1128,9 @@ class OpenAIProvider(LLMProvider):
                 # Both flags ride on the ToolCall for the session to act
                 # on. See `safe_parse_tool_input`.
                 parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
-                tool_calls.append(
+                # The SDK types `id` as a required `str`, which an empty string
+                # satisfies — a non-conforming server can still send one (ENG-2420).
+                tool_calls.append(ensure_replayable_tool_call(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
@@ -1135,7 +1138,7 @@ class OpenAIProvider(LLMProvider):
                         parse_error=parse_error,
                         repaired=repaired,
                     )
-                )
+                ))
 
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
@@ -1280,8 +1283,18 @@ class OpenAIProvider(LLMProvider):
                                 if tc_delta.function and tc_delta.function.name
                                 else "",
                                 "args_parts": [],
+                                # Whether a Start was actually emitted for this
+                                # call. Recorded rather than re-derived at the
+                                # End: id and name can BOTH be filled in by a
+                                # later chunk (the branch just below), so
+                                # re-testing them there would answer "are they
+                                # set now", not "did we announce this call" —
+                                # and emit an End for a step the consumer never
+                                # opened (ENG-2420).
+                                "started": False,
                             }
                             if tc_state[idx]["id"] and tc_state[idx]["name"]:
+                                tc_state[idx]["started"] = True
                                 yield StreamToolUseStart(
                                     id=tc_state[idx]["id"],
                                     name=tc_state[idx]["name"],
@@ -1388,11 +1401,20 @@ class OpenAIProvider(LLMProvider):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
             parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
-            tool_calls.append(ToolCall(
+            # `info["id"]` is seeded `tc_delta.id or ""` and only updated when a
+            # later chunk carries one, so a provider that never sends an id
+            # leaves it empty here (ENG-2420).
+            tool_calls.append(ensure_replayable_tool_call(ToolCall(
                 id=info["id"], name=info["name"], input=parsed,
                 parse_error=parse_error, repaired=repaired,
-            ))
-            yield StreamToolUseEnd(id=info["id"])
+            )))
+            # Gated on whether a Start was actually emitted, and carrying the
+            # ORIGINAL id rather than a minted one: a call that never announced
+            # a Start must not emit an End, or the consumer is left with a step
+            # it cannot retire (review: pnewsam on #471, reported against the
+            # Anthropic reader — this is the same shape).
+            if info["started"]:
+                yield StreamToolUseEnd(id=info["id"])
 
         # Missing finish_reason is ambiguous: it's a genuine truncation only when
         # the stream produced NOTHING (empty + no terminal marker). A stream that
@@ -1596,8 +1618,17 @@ class OpenAIProvider(LLMProvider):
                         idx = event.output_index
                         call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
                         name = getattr(item, "name", "") or ""
-                        fc_state[idx] = {"call_id": call_id, "name": name, "args_parts": []}
+                        # `started` for the same reason as the chat-completions
+                        # reader: an `output_item.added` carrying a good
+                        # `call_id` but a blank name emits no Start, and gating
+                        # the End on the id alone then closed a step that was
+                        # never opened (ENG-2420).
+                        fc_state[idx] = {
+                            "call_id": call_id, "name": name,
+                            "args_parts": [], "started": False,
+                        }
                         if call_id and name:
+                            fc_state[idx]["started"] = True
                             yield StreamToolUseStart(id=call_id, name=name)
 
                 # Function-call argument deltas
@@ -1607,7 +1638,10 @@ class OpenAIProvider(LLMProvider):
                     info = fc_state.get(idx)
                     if info is None:
                         # output_item.added didn't surface this call yet — buffer
-                        info = {"call_id": "", "name": "", "args_parts": []}
+                        info = {
+                            "call_id": "", "name": "", "args_parts": [],
+                            "started": False,
+                        }
                         fc_state[idx] = info
                     info["args_parts"].append(delta)
                     if info["call_id"]:
@@ -1626,13 +1660,17 @@ class OpenAIProvider(LLMProvider):
                     # a body cut mid-JSON must not raise out of this generator,
                     # and the flags are what let the session refuse the call.
                     parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
-                    tool_calls.append(
+                    # The three yields around this append were already guarded
+                    # on a truthy id; this append was not, which is how an
+                    # id-less call reached history and 400'd every later
+                    # request in the conversation (ENG-2420).
+                    tool_calls.append(ensure_replayable_tool_call(
                         ToolCall(
                             id=info["call_id"], name=info["name"], input=parsed,
                             parse_error=parse_error, repaired=repaired,
                         )
-                    )
-                    if info["call_id"]:
+                    ))
+                    if info["started"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
                 # Final completion event carries the resolved Response object
@@ -1768,10 +1806,11 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             # into `{}`: an empty dict cannot be told apart from a call the
             # model deliberately sent with no arguments.
             parsed, parse_error, repaired = safe_parse_tool_input(args_str)
-            tool_calls.append(ToolCall(
+            # Same `or ""` fallback as the streaming reader, same consequence.
+            tool_calls.append(ensure_replayable_tool_call(ToolCall(
                 id=call_id, name=name, input=parsed,
                 parse_error=parse_error, repaired=repaired,
-            ))
+            )))
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 
