@@ -307,13 +307,13 @@ def test_the_workflow_bounds_the_job_so_a_hang_cannot_hold_a_runner():
 
 
 def test_single_valued_cases_still_demand_that_exact_verdict():
-    """The acceptable-set change must not have loosened the other four cases.
+    """The acceptable-set change must not have loosened the single-valued cases.
 
-    Four of the five fixtures exist because the *wrong label is the bug* — a
-    recovered error judged INCOMPLETE force-continues (ENG-1134), a genuine
-    question judged INCOMPLETE makes the agent answer itself (ENG-716), an
-    environment wall judged INCOMPLETE walks into the wall (ENG-836). Those
-    must stay single-valued.
+    Every fixture but the two hallucinated-success ones exists because the
+    *wrong label is the bug* — a recovered error judged INCOMPLETE
+    force-continues (ENG-1134), a genuine question judged INCOMPLETE makes the
+    agent answer itself (ENG-716), an environment wall judged INCOMPLETE walks
+    into the wall (ENG-836). Those must stay single-valued.
     """
     by_name = {c.name: c for c in ev._CASES}
 
@@ -326,7 +326,22 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         # failed as "truncated" because the TRANSCRIPT was clipped, not
         # the answer.
         "long_complete_reply": "COMPLETE",
+        # ENG-2686: INCOMPLETE here IS the incident — the honest N/D reply
+        # was force-continued into invented fares. And the three risk
+        # controls guard the over-correction: a one-shot give-up must not
+        # become STUCK, a requested estimate and a computed total must not
+        # become "unsourced".
+        "honest_unobtainable_data": "STUCK",
+        "one_attempt_give_up": "INCOMPLETE",
+        "user_requested_estimate": "COMPLETE",
+        "computed_total_clipped_source": "COMPLETE",
+        # And the shadow-replay finding: a failed attempt followed by asking
+        # the user is WAITING. INCOMPLETE here IS ENG-716's incident.
+        "asks_user_after_one_failed_attempt": "WAITING",
     }
+    assert set(single) | {"implied_success_data_never_arrived", "disclaimered_fabrication"} == set(by_name), (
+        "a new case was added without deciding here whether it is single-valued"
+    )
     for name, verdict in single.items():
         assert by_name[name].acceptable == (verdict,), (
             f"{name} must accept only {verdict}; the alternative label IS the "
@@ -334,24 +349,32 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         )
 
 
-def test_only_the_hallucinated_success_case_accepts_two_verdicts():
-    """One deliberate exception, and it must not spread quietly.
+def test_only_the_hallucinated_success_cases_accept_two_verdicts():
+    """Two deliberate exceptions, both the same invariant, and it must not
+    spread quietly.
 
     ENG-1134's safeguard is "never accept a hallucinated success as done", which
-    both INCOMPLETE and STUCK satisfy. COMPLETE and WAITING must never be
-    acceptable there — those are the failure.
+    both INCOMPLETE and STUCK satisfy. ENG-2686 added the disclaimered variant
+    of the same incident (invented figures passed as COMPLETE behind an
+    "indicative" label). COMPLETE and WAITING must never be acceptable in
+    either — those are the failure.
     """
     multi = [c for c in ev._CASES if len(c.acceptable) > 1]
 
-    assert [c.name for c in multi] == ["implied_success_data_never_arrived"], (
-        f"exactly one case may accept multiple verdicts; found "
+    assert [c.name for c in multi] == [
+        "implied_success_data_never_arrived",
+        "disclaimered_fabrication",
+    ], (
+        f"exactly two cases may accept multiple verdicts; found "
         f"{[c.name for c in multi]}"
     )
-    acceptable = set(multi[0].acceptable)
-    assert acceptable == {"INCOMPLETE", "STUCK"}
-    assert not acceptable & {"COMPLETE", "WAITING"}, (
-        "accepting COMPLETE or WAITING here would delete the ENG-1134 safeguard"
-    )
+    for case in multi:
+        acceptable = set(case.acceptable)
+        assert acceptable == {"INCOMPLETE", "STUCK"}, case.name
+        assert not acceptable & {"COMPLETE", "WAITING"}, (
+            f"{case.name}: accepting COMPLETE or WAITING here would delete the "
+            "hallucinated-success safeguard"
+        )
 
 
 def test_the_recovered_case_asks_one_unambiguous_question():
@@ -536,3 +559,52 @@ def test_a_served_id_cannot_inject_lines_into_the_report(alias):
     assert recorded is not None, "a poisoned id must still be recorded, not dropped"
     assert "\n" not in recorded, f"newline survived sanitisation: {recorded!r}"
     assert len(recorded) <= 80, "the sanitiser's length cap did not apply"
+
+
+def test_only_the_one_attempt_control_is_recorded_not_gated_on_a_model():
+    """The skip path must not spread quietly.
+
+    One control carries a measured label slip on haiku and is recorded there
+    rather than gated. Every incident case stays gated on every model: a
+    fabrication fixture that is only "recorded" somewhere ships the
+    fabrication there.
+    """
+    skipping = [c for c in ev._CASES if c.skip_models]
+    assert [c.name for c in skipping] == ["one_attempt_give_up"], (
+        f"only the one-attempt control may skip a model; found "
+        f"{[c.name for c in skipping]}"
+    )
+    case = skipping[0]
+    assert case.skip_models == ("haiku",)
+    # Still gated somewhere in the matrix, at the trade-off guard's count.
+    assert ev._NARRATING_MODEL not in case.skip_models
+    assert ev._runs_for(case) == 12
+
+
+def test_run_overrides_are_only_the_premature_give_up_guard():
+    overridden = [c for c in ev._CASES if c.runs is not None]
+    assert [c.name for c in overridden] == ["one_attempt_give_up"]
+
+
+def test_fabrication_guards_run_at_the_higher_count():
+    """The two hallucinated-success cases guard a low-rate laundering
+    regression, and N=3 misses a 1-in-6 COMPLETE rate 58% of the time."""
+    by_name = {c.name: c for c in ev._CASES}
+    for name in ("implied_success_data_never_arrived", "disclaimered_fabrication"):
+        assert ev._runs_for(by_name[name]) == ev._STUCK_RUNS, name
+    # And the plain single-valued controls still run at the default.
+    assert ev._runs_for(by_name["stopped_partway"]) == ev._RUNS
+
+
+def test_recorded_not_gated_pairs_are_excluded_at_parametrization_not_skipped():
+    """verifier-eval.yml's out-of-money branch passes only when every skip in
+    the junit carries GATEWAY_UNAVAILABLE, so a design skip would turn a
+    starved run from a warning into a red misconfiguration.
+    """
+    ids = {p.id for p in ev._MATRIX}
+    assert "one_attempt_give_up-haiku" not in ids
+    assert "one_attempt_give_up-mindshub_air" in ids
+    assert len(ev._MATRIX) == len(ev._CASES) * len(ev._MODELS) - 1
+    import inspect
+
+    assert "pytest.skip(" not in inspect.getsource(ev.test_verdict)
