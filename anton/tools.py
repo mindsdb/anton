@@ -5,8 +5,11 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
+import urllib.error
 import uuid
 from typing import TYPE_CHECKING
+
+from rich.markup import escape
 
 from anton.core.tools.tool_defs import ToolDef
 
@@ -25,6 +28,20 @@ SECRET_NAME_TOKENS = (
 # User messages are scrubbed too, so the model may see these and echo them
 # back as known_variables — they must never be saved as real credentials.
 SCRUBBED_VALUE_RE = re.compile(r"^\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]$")
+
+
+def _report_missing_error(exc: Exception) -> bool:
+    """True when POST /upload itself answered 404 for the report_id we tried
+    to update.
+
+    Only this case justifies re-publishing without report_id. Anything else —
+    a 5xx, a failed or timed-out async job, and a 404 from the job status poll
+    (the record expired or publish_url is wrong while the job may still be
+    finishing) — must not: a second POST would create a duplicate artifact
+    and double the wait (ENG-1580). PublishJobFailed is therefore never a
+    retry trigger, whatever its status_code.
+    """
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 404
 
 
 def looks_secret(field_name: str) -> bool:
@@ -689,9 +706,11 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 access_version=access_version,
             )
         except Exception as e:
-            if report_id:
-                # The report may have been deleted server-side — retry
-                # without report_id to create a fresh one.
+            if report_id and _report_missing_error(e):
+                # The report may have been deleted server-side (404) — retry
+                # without report_id to create a fresh one. Note: the current
+                # upload lambda treats an unknown report_id as "new with this id"
+                # and never answers 404, so this branch is compatibility-only.
                 try:
                     result = publish(
                         publish_target,
@@ -703,11 +722,11 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                         access_version=access_version,
                     )
                 except Exception as e2:
-                    console.print(f"  [anton.error]Publish failed: {e2}[/]")
+                    console.print(f"  [anton.error]Publish failed: {escape(str(e2))}[/]")
                     console.print()
                     return f"PUBLISH FAILED: {e2}"
             else:
-                console.print(f"  [anton.error]Publish failed: {e}[/]")
+                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
                 console.print()
                 return f"PUBLISH FAILED: {e}"
 
