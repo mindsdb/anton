@@ -1174,3 +1174,80 @@ async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_
 
     assert await orchestrator._gen_verify_frontend(st) is None
     assert seen["api_paths"] == {"/api/items"}
+
+
+# ── S-03: skipped checks and accepted warnings reach the result ─────────────
+
+def test_result_shell_always_carries_warnings_and_checks_skipped(tmp_path: Path):
+    """Empty lists, not absent keys: the agent's instruction branches on
+    them, so a run with nothing to report must still show the fields."""
+    st = _state(tmp_path, artifact_type="html-app")
+    shell = orchestrator._result_shell(st)
+    assert shell["warnings"] == [] and shell["checks_skipped"] == []
+
+
+async def test_browser_skip_is_reported_as_a_skipped_check(tmp_path: Path, monkeypatch):
+    """The trace row alone is invisible to the user; the result has to say
+    the page was never loaded in a browser."""
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+
+    async def fake_loop(**kw):
+        (tmp_path / "index.html").write_text(_VALID_HTML)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry: None)
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert st.checks_skipped == [
+        "browser load of the page: no headless browser configured "
+        "(ANTON_HTML_LINT_BROWSER unset)"
+    ]
+    assert orchestrator._result_shell(st)["checks_skipped"] == st.checks_skipped
+
+
+async def test_fullstack_frontend_reports_the_browser_check_as_skipped(tmp_path: Path, monkeypatch):
+    """The fullstack page is never loaded in a browser (it needs its
+    backend); the result says so instead of implying the check passed."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = "{}"
+
+    async def fake_loop(**kw):
+        (tmp_path / "static").mkdir(exist_ok=True)
+        (tmp_path / "static" / "index.html").write_text(
+            _VALID_HTML.replace("</head>", '<meta name="api-base" content=""></head>')
+        )
+        return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert len(st.checks_skipped) == 1
+    assert st.checks_skipped[0].startswith("browser load of static/index.html: not run")
+
+
+def test_a_skipped_check_is_noted_once_per_reason(tmp_path: Path):
+    st = _state(tmp_path)
+    orchestrator._note_skipped(st, "browser load of the page: no browser")
+    orchestrator._note_skipped(st, "browser load of the page: no browser")
+    assert st.checks_skipped == ["browser load of the page: no browser"]
+
+
+async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+
+    async def fake_loop(**kw):
+        (tmp_path / "index.html").write_text(_VALID_HTML)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    def fake_verify(html, *, is_fullstack, api_paths=None):
+        return VerifyResult(errors=[], warnings=["Significant blocks have no stable `id` attributes."])
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", fake_verify)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry: VerifyResult(errors=[]))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert st.verify_warnings == ["frontend: Significant blocks have no stable `id` attributes."]
+    assert orchestrator._result_shell(st)["warnings"] == st.verify_warnings

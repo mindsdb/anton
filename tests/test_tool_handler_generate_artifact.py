@@ -608,3 +608,30 @@ def test_known_data_asks_the_outer_agent_to_name_the_scratchpad():
     schema_text = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["known_data"]["description"]
     assert "name the scratchpad" in schema_text
     assert "NAME THE SCRATCHPAD" in GENERATE_ARTIFACT_TOOL.description
+
+
+# ── S-03: the agent relays skipped checks and warnings ──────────────────────
+
+async def test_success_instruction_tells_the_agent_to_relay_skipped_checks(tmp_path: Path, monkeypatch):
+    """The same instruction that forbids re-verifying the files has to name
+    the two fields that say what the pipeline itself did not check — or a
+    skipped browser load is reported to the user as a passed one."""
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        return {
+            "files_written": ["index.html"], "summary": "ok", "trace": [],
+            "warnings": [], "checks_skipped": ["browser load of the page: no browser"],
+        }
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "a page"})
+    assert '"checks_skipped"' in out
+    assert "never present a skipped check as passed" in out
+
+
+def test_the_tool_description_names_the_two_report_fields():
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    assert "`checks_skipped`" in GENERATE_ARTIFACT_TOOL.description
+    assert "`warnings`" in GENERATE_ARTIFACT_TOOL.description

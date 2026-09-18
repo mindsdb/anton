@@ -178,6 +178,13 @@ class GenState:
     # Generation inputs (spec.md, openapi.json) rather than user-facing output:
     # reported in a separate field so the agent does not present them as artifacts.
     internal_files: list[str] = field(default_factory=list)
+    # What the verifiers flagged on the ACCEPTED attempt without failing it,
+    # and which checks never ran at all (no headless browser; a fullstack page
+    # that needs its backend). Both go into the result: the calling agent is
+    # told not to re-verify the files, so this is the one place the user can
+    # learn that a check was skipped rather than passed (S-03).
+    verify_warnings: list[str] = field(default_factory=list)
+    checks_skipped: list[str] = field(default_factory=list)
     # Where the launched backend answers (fullstack only, set by `run_app`).
     # Reported as the app's entry point: `static/index.html` opened from disk
     # cannot reach its `/api/*`, so the file path is not one.

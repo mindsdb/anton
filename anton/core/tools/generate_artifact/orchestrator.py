@@ -603,6 +603,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                 extra = _verification_feedback(verdict)
                 continue
             state.record("verify_backend", "ok", "; ".join(verdict.warnings))
+            state.verify_warnings.extend(f"backend: {w}" for w in verdict.warnings)
             await _declare_datasources(state, refs)
             return None
         state.record("verify_backend", "fail", "; ".join(verdict.errors))
@@ -750,10 +751,9 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                 # blocks for up to its 8-second timeout.
                 live = await asyncio.to_thread(verifiers.verify_frontend_live, entry_file)
                 if live is None:
-                    state.trace_log.node(
-                        "verify_frontend", "browser_skipped",
-                        verifiers.browser_check_skip_reason(),
-                    )
+                    reason = verifiers.browser_check_skip_reason()
+                    state.trace_log.node("verify_frontend", "browser_skipped", reason)
+                    _note_skipped(state, f"browser load of the page: {reason}")
                 else:
                     # `extend`, not `append`: the contract lock keys on
                     # `.append(...)` / `VerifyResult(...)` literals, and these
@@ -761,6 +761,12 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                     # builds them.
                     verdict.errors.extend(live.errors)
                     verdict.warnings.extend(live.warnings)
+            elif verdict.ok:
+                _note_skipped(
+                    state,
+                    f"browser load of {prompts.FULLSTACK_FRONTEND_TARGET}: not run for "
+                    "fullstack frontends (the page needs its backend to render)",
+                )
         state.trace_log.verifier(
             node="verify_frontend", ok=verdict.ok,
             errors=list(verdict.errors), warnings=list(verdict.warnings),
@@ -783,6 +789,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                         store.update(state.slug, primary=actual)
                     state.primary = actual
             state.record("verify_frontend", "ok", "; ".join(verdict.warnings))
+            state.verify_warnings.extend(f"frontend: {w}" for w in verdict.warnings)
             return None
         state.record("verify_frontend", "fail", "; ".join(verdict.errors))
         verify_failures += 1
@@ -977,12 +984,27 @@ async def _run_and_verify_app(state: GenState) -> str | None:
     return state.error
 
 
+def _note_skipped(state: GenState, text: str) -> None:
+    """Record a check that did not run, once per distinct reason.
+
+    A retry re-enters the same branch; the user needs to hear that the
+    browser never loaded the page, not how many attempts skipped it.
+    """
+    if text not in state.checks_skipped:
+        state.checks_skipped.append(text)
+
+
 def _result_shell(state: GenState) -> dict:
     shell = {
         "files_written": state.files_written,
         # Generation input, not output: it physically sits in the artifact folder
         # but is not an artifact for the user (see the design spec, 3.6).
         "internal_files": state.internal_files,
+        # Always present, empty lists included: the agent's instruction
+        # branches on them, and an absent key reads as "nothing to say"
+        # only if the agent knows the key exists (S-03).
+        "warnings": state.verify_warnings,
+        "checks_skipped": state.checks_skipped,
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }

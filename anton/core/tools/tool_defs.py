@@ -448,7 +448,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         '- `generated` — done. `files_written` are the artifact\'s own files '
         "(report those), `internal_files` are generation inputs like "
         "`spec.md` (do NOT present them as deliverables), `trace` lists the "
-        "steps and their outcomes.\n"
+        "steps and their outcomes, `warnings` what the verifier flagged "
+        "without failing, `checks_skipped` which checks could not run — "
+        "relay both to the user when non-empty.\n"
         "- `needs_confirmation` — a brief was drafted but the user could not "
         "be asked. Show `brief_summary`; if they agree, call again with the "
         "SAME `user_request`.\n"

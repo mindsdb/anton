@@ -631,7 +631,11 @@ _STATUS_INSTRUCTIONS = {
         "app's entry point: give the user the URL, not the path of "
         "`static/index.html` — opened from disk the page cannot reach its "
         "`/api/*`. Without `url` (html-app), the entry point is "
-        "`<path>/<primary>`."
+        "`<path>/<primary>`. `checks_skipped` lists verifier checks that "
+        "could not run (for example, no headless browser to load the page) "
+        "and `warnings` what the verifier flagged without failing the step: "
+        "when either is non-empty, tell the user in one sentence what was "
+        "not checked or flagged — never present a skipped check as passed."
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "
