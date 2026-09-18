@@ -1301,12 +1301,22 @@ def classify_content_rejection(
             "still need it."
         )
 
-    # A param pointing into a content array is evidence on its own. A bare
-    # shape phrase is not — it needs the message to name a content-block type.
-    if (".content[" in par or par.endswith(".content")) or (
-        any(phrase in low for phrase in _CONTENT_SHAPE_PHRASES)
+    # A param pointing into a content array is evidence on its own.
+    _content_param = ".content[" in par or par.endswith(".content")
+    # Otherwise the phrase needs the message to name a content-block type AND
+    # the provider not to have pointed at some other field. Both live dialects
+    # satisfy that: the OpenAI one carries a content-indexed `param`, the
+    # Anthropic one carries no `param` at all. A param that is present and is
+    # NOT a content path is positive evidence the rejected thing was not
+    # content — `modalities` legitimately takes the value 'image', so
+    # "Supported values are: 'image', 'audio'" for a bad `modalities` would
+    # otherwise still reach the repair that deletes the user's images.
+    _corroborated_phrase = (
+        not par
+        and any(phrase in low for phrase in _CONTENT_SHAPE_PHRASES)
         and _names_a_content_block(low)
-    ):
+    )
+    if _content_param or _corroborated_phrase:
         return ContentValidationError(
             "The model provider rejected part of this conversation's content "
             "(an attachment or image in an unsupported format). That content "

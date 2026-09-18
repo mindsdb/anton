@@ -301,6 +301,15 @@ _UNRELATED_ENUM_400S = {
         "message": "Invalid value: 'turbo'. Supported values are: 'auto', 'default', 'flex'.",
         "type": "invalid_request_error", "param": "service_tier",
         "code": "invalid_value"}},
+    # The nastiest of the family, and the one the first version of the guard
+    # still let through: `modalities` legitimately ACCEPTS the value 'image',
+    # so its enum message names a content-block token while having nothing to
+    # do with content. Found by adversarially reviewing the fix, not by the
+    # review that prompted it.
+    "modalities": {"error": {
+        "message": "Invalid value: 'text'. Supported values are: 'image', 'audio'.",
+        "type": "invalid_request_error", "param": "modalities",
+        "code": "invalid_value"}},
 }
 
 
