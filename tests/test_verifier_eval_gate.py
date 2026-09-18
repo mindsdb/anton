@@ -673,3 +673,15 @@ def test_guard_mode_selects_exactly_the_truncation_guard():
     # And the scope step never reaches for pytest.skip.
     step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
     assert "pytest.skip" not in step
+
+
+def test_a_failing_scope_decision_falls_back_to_the_full_matrix(tmp_path, monkeypatch):
+    """Fail CLOSED. If the decision cannot be made (bad revision, git error,
+    unparsable file), the answer is the full matrix — never a red job for an
+    unrelated reason, and never the one-call guard."""
+    out = tmp_path / "gh_output"
+    monkeypatch.setattr(scope, "decide", lambda b, h: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc = scope.main(["--base", "x", "--head", "y", "--github-output", str(out)])
+    assert rc == 0
+    text = out.read_text()
+    assert "scope=full" in text and "pytest_args=\n" in text
