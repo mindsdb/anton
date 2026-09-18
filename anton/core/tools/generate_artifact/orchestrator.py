@@ -666,6 +666,9 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
     loop_failures = 0
     verify_failures = 0
     extra = ""
+    # The `.html` files the previous attempt reported writing. Known on the
+    # verify-failure path only: a loop failure returns a message, not a result.
+    stale_html: list[str] = []
     for attempt in range(GEN_LOOP_MAX_RETRIES + GEN_VERIFY_MAX_RETRIES + 1):
         state.step_started("generate_frontend", attempt=attempt)
         if attempt > 0:
@@ -674,12 +677,21 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             # always mode=\"w\"" rule is in the prompt, but cannot be relied on.
             # Only for attempt > 0: before the first attempt the file may well be
             # a working previous version of the artifact.
-            entry = (
-                state.artifact_path / "static" / "index.html"
+            #
+            # Both the expected name AND what the failed attempt actually wrote
+            # go: with no `primary` set, an attempt that wrote `report.html`
+            # left it behind while a non-existent `index.html` was "deleted",
+            # and the next attempt's `mode="a"` extended the remains (I-44).
+            expected = (
+                prompts.FULLSTACK_FRONTEND_TARGET
                 if state.is_fullstack
-                else state.artifact_path / (state.primary or HTML_APP_DEFAULT_PRIMARY)
+                else (state.primary or HTML_APP_DEFAULT_PRIMARY)
             )
-            entry.unlink(missing_ok=True)
+            for rel in dict.fromkeys([expected, *stale_html]):
+                (state.artifact_path / rel).unlink(missing_ok=True)
+                if rel in state.files_written:
+                    state.files_written.remove(rel)
+            stale_html = []
         if state.is_fullstack:
             kickoff = prompts.build_frontend_kickoff(_spec_context(state), state.api_spec or "{}") + extra
         else:
@@ -707,6 +719,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             extra = f"\n\n## Previous attempt failed\n{result}\nFix it and try again."
             continue
         _absorb_files_written(state, result)
+        stale_html = [f for f in result["files_written"] if f.endswith(".html")]
         state.record("generate_frontend", "done", result.get("summary", ""))
 
         state.step_started("verify_frontend", attempt=attempt)
@@ -749,12 +762,13 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             # The model may have named the file differently — bring metadata in
             # line with the fact, or the renderer opens the wrong file. Only after
             # successful verification: if both attempts fail, the attempt-1 cleanup
-            # deletes the file and a primary written earlier would dangle.
+            # deletes the file and a primary written earlier would dangle. The
+            # name is the one that was just verified, not re-guessed from the
+            # list: with `partials.html` written before `index.html`, the first
+            # `.html` is a file no verifier opened (I-45).
             if not state.is_fullstack:
-                actual = next(
-                    (f for f in result["files_written"] if f.endswith(".html")), None
-                )
-                if actual and actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
+                actual = entry_file.relative_to(state.artifact_path).as_posix()
+                if actual != (state.primary or HTML_APP_DEFAULT_PRIMARY):
                     from anton.core.tools.tool_handlers import resolve_artifact_store
 
                     store = resolve_artifact_store(state.session)

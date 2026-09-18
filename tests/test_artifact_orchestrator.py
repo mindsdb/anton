@@ -603,6 +603,74 @@ async def test_frontend_retry_starts_from_a_clean_entry_file(tmp_path: Path, mon
     assert err is None
 
 
+_VALID_PAGE = (
+    '<html><head><meta name="viewport" content="width=device-width">'
+    '</head><body><div id="a"></div></body></html>'
+)
+
+
+async def test_frontend_retry_removes_what_the_failed_attempt_wrote(tmp_path: Path, monkeypatch):
+    """With no `primary`, the cleanup used to delete the expected `index.html`
+    (absent) and leave the failed attempt's `report.html` on disk for
+    `mode="a"` to extend (I-44). What the attempt reported writing goes too."""
+    from anton.core.tools import tool_handlers
+
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    st.primary = None
+    monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: None)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry: None)
+    calls = {"n": 0}
+    seen_before_second: dict = {}
+
+    async def fake_loop(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            (tmp_path / "report.html").write_text("<html><body><div")  # truncated
+            return {"files_written": ["report.html"], "rounds_used": 1, "summary": "s"}
+        seen_before_second["report_exists"] = (tmp_path / "report.html").exists()
+        (tmp_path / "index.html").write_text(_VALID_PAGE)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert calls["n"] == 2, "the first attempt should have failed verification"
+    assert seen_before_second["report_exists"] is False
+    assert err is None
+    assert st.files_written == ["index.html"], "a deleted file must not be reported as written"
+
+
+async def test_primary_follows_the_verified_entry_not_the_first_html(tmp_path: Path, monkeypatch):
+    """`partials.html` written before `report.html`: the verifier opened
+    `report.html` (it is `primary`), so metadata must keep saying so — the
+    first `.html` in the list is a file nobody checked (I-45)."""
+    from unittest.mock import Mock
+
+    from anton.core.tools import tool_handlers
+
+    st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
+    st.primary = "report.html"
+    store = Mock()
+    monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: store)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry: None)
+
+    async def fake_loop(**kw):
+        (tmp_path / "partials.html").write_text("<div>fragment</div>")
+        (tmp_path / "report.html").write_text(_VALID_PAGE)
+        return {
+            "files_written": ["partials.html", "report.html"], "rounds_used": 1, "summary": "s",
+        }
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    err = await orchestrator._gen_verify_frontend(st)
+
+    assert err is None
+    assert st.primary == "report.html"
+    store.update.assert_not_called()
+
+
 async def test_frontend_first_attempt_does_not_delete_anything(tmp_path: Path, monkeypatch):
     """Nothing is deleted before the FIRST attempt: an instant failure would wipe a working version."""
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
