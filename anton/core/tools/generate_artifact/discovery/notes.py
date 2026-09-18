@@ -174,7 +174,13 @@ def render_gathering_notes(inp: dict) -> str:
         lines = string_list(inp.get(key))
         if lines:
             parts.append(header + "\n" + "\n".join(f"- {line}" for line in lines))
-    if len(parts) > 1:
+    # The structured fields decide, not the count: `summary` is `parts[0]`
+    # only when present, so "more than one part" silently returned an empty
+    # string for a call that carried findings and constraints but no summary
+    # (I-46). Sections present → the rendered record; none → the legacy
+    # `notes`, then whatever summary there was.
+    has_sections = len(parts) > (1 if summary else 0)
+    if has_sections:
         return "\n\n".join(parts)
     legacy = str(inp.get("notes") or "").strip()
     return legacy or summary

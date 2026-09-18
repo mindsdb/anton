@@ -4,6 +4,7 @@ from __future__ import annotations
 from anton.core.tools.generate_artifact.discovery.notes import (
     WEB_EXCERPT_MAX,
     WEB_NOTES_MAX,
+    render_gathering_notes,
     render_web_notes,
 )
 
@@ -59,3 +60,31 @@ def test_the_full_page_body_never_reaches_the_notes():
     body = "PAGE BODY " * 5000
     out = render_web_notes([_call(excerpt=body)])
     assert len(out) < len(body) / 3
+
+
+# ── render_gathering_notes ──────────────────────────────────────────────────
+
+def test_sections_without_a_summary_are_not_dropped():
+    """`summary` is required by the schema, but the renderer is built on the
+    assumption that the model's JSON may not match it. Findings and
+    constraints with no summary used to render as an empty string (I-46)."""
+    out = render_gathering_notes({
+        "summary": "",
+        "data_findings": [{"source": "orders table", "shape": "504 rows"}],
+        "constraints": ["no external CDN"],
+    })
+    assert "### Data findings" in out
+    assert "- orders table\n  shape: 504 rows" in out
+    assert "### Constraints\n- no external CDN" in out
+
+
+def test_summary_alone_still_yields_to_legacy_notes():
+    """Unchanged path: only a summary and an old-style `notes` — notes win."""
+    assert render_gathering_notes({"summary": "s", "notes": "legacy body"}) == "legacy body"
+    assert render_gathering_notes({"summary": "s"}) == "s"
+    assert render_gathering_notes({}) == ""
+
+
+def test_summary_with_sections_renders_both():
+    out = render_gathering_notes({"summary": "Sum.", "open_points": ["colour?"]})
+    assert out == "Sum.\n\n### Open points\n- colour?"
