@@ -614,16 +614,25 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
 
 
 def _frontend_entry(state: GenState, written: list[str]) -> Path | None:
-    """The entry file this attempt produced, or None when it wrote none."""
+    """The entry file this attempt produced, or None when it wrote none.
+
+    Both branches pick ONLY among what this attempt actually wrote. The
+    expected name (`static/index.html`, or `primary`) is the expectation,
+    `written` is the fact, and the fact is what must be verified: a file of
+    the expected name left over from a previous generation would otherwise
+    pass the verifier on behalf of an attempt that never wrote it (I-43 for
+    the fullstack branch; the html-app branch had the same hole first).
+    """
     if state.is_fullstack:
-        entry = state.artifact_path / "static" / "index.html"
+        target = prompts.FULLSTACK_FRONTEND_TARGET
+        if not any(Path(rel).as_posix() == target for rel in written):
+            return None
+        entry = state.artifact_path / target
         return entry if entry.is_file() else None
-    # html-app: pick ONLY among what this run actually wrote. `primary` is the
-    # expectation, `written` is the fact, and the fact is what must be verified:
-    # otherwise, with no primary set, candidate #1 becomes the default
-    # `index.html`, and a leftover file of that name from a previous
-    # generation would shadow the fresh `report.html`. Within what was written,
-    # primary takes priority — for the case where the loop wrote several .html.
+    # html-app: with no primary set, candidate #1 becomes the default
+    # `index.html`, and a leftover file of that name would shadow the fresh
+    # `report.html`. Within what was written, primary takes priority — for the
+    # case where the loop wrote several .html.
     written_html = [rel for rel in written if rel.endswith(".html")]
     target = state.primary or HTML_APP_DEFAULT_PRIMARY
     for rel in [r for r in written_html if r == target] + written_html:

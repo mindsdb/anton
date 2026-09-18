@@ -522,6 +522,25 @@ def test_read_frontend_html_ignores_files_this_run_did_not_write(tmp_path: Path)
     assert html == "<body>written now</body>"
 
 
+def test_fullstack_entry_ignores_a_static_index_this_run_did_not_write(tmp_path: Path):
+    """Same discipline as the html-app branch (I-43): a `static/index.html`
+    left over from a previous generation must not pass the verifier on behalf
+    of an attempt that wrote only `static/app.js`."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    (tmp_path / "static").mkdir()
+    (tmp_path / "static" / "index.html").write_text("<body>stale</body>")
+    (tmp_path / "static" / "app.js").write_text("// fresh")
+
+    assert orchestrator._frontend_entry(st, ["static/app.js"]) is None
+    assert orchestrator._read_frontend_html(st, ["static/index.html"]) == "<body>stale</body>"
+
+
+def test_fullstack_entry_is_none_when_the_written_file_is_gone(tmp_path: Path):
+    """Listed as written but not on disk: no entry, not an exception."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    assert orchestrator._frontend_entry(st, ["static/index.html"]) is None
+
+
 async def test_frontend_terminal_error_carries_the_loop_reason(tmp_path: Path, monkeypatch):
     """The generic "did not produce a verifiable frontend" lost the recorded cause."""
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
