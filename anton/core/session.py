@@ -40,6 +40,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     CURATED_PROVIDER_ERRORS,
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
@@ -2664,6 +2665,73 @@ class ChatSession:
         except asyncio.TimeoutError:
             return False  # slept the full delay
 
+    _IMAGE_REMOVED_PLACEHOLDER = (
+        "[An image here could not be sent to the model and was removed "
+        "automatically so this conversation could continue. Re-share it if you "
+        "still need it referenced.]"
+    )
+
+    def _strip_image_blocks_from_history(self) -> int:
+        """Replace every image block in history with a placeholder; return the
+        count removed.
+
+        Runs when the provider PERMANENTLY rejects content already in history.
+        Retrying is pointless because the request is rebuilt from this same
+        history every time — so unless the poison is removed, every later turn
+        re-sends it and fails identically. That is the difference between a
+        dead turn and a dead conversation.
+
+        cowork-server does this in its own store (ENG-1992) and rebuilds the
+        session each turn, so for that host this is a harmless no-op on a
+        history about to be discarded. The standalone CLI keeps ONE long-lived
+        session and has no such store: without this, its next turn re-sends the
+        same image forever (review of #484). Doing it here makes the error
+        message's promise true for every host rather than only the one that
+        happens to implement it.
+
+        Every image goes, not just the offending one: the provider's index is
+        request-relative and cannot be mapped back to a history entry reliably
+        across dialects. Blunt, and the same trade-off ENG-1992 already took.
+        """
+        removed = 0
+
+        def _strip(content):
+            nonlocal removed
+            if not isinstance(content, list):
+                return content, False
+            out, changed = [], False
+            for block in content:
+                if not isinstance(block, dict):
+                    out.append(block)
+                    continue
+                # Both shapes, matching the pair this file already uses at
+                # its other two image sites. `turn_stream` accepts the
+                # OpenAI-style `image_url` as public input and the provider
+                # translates it onward, so stripping only `image` left that
+                # shape in history to be re-sent on the next turn — the exact
+                # failure this repair exists to stop (review of #484).
+                if block.get("type") in ("image", "image_url"):
+                    out.append({"type": "text", "text": self._IMAGE_REMOVED_PLACEHOLDER})
+                    changed = True
+                    removed += 1
+                    continue
+                if block.get("type") == "tool_result":
+                    nested, nested_changed = _strip(block.get("content"))
+                    if nested_changed:
+                        out.append({**block, "content": nested})
+                        changed = True
+                        continue
+                out.append(block)
+            return (out if changed else content), changed
+
+        for msg in self._history:
+            if not isinstance(msg, dict):
+                continue
+            new_content, changed = _strip(msg.get("content"))
+            if changed:
+                msg["content"] = new_content
+        return removed
+
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
         `tool_use` blocks in the last assistant message.
@@ -4248,6 +4316,54 @@ class ChatSession:
                     # the auto-retry below sends a malformed history
                     # and we get the same 400 forever.
                     self._seal_dangling_tool_uses("interrupted by error")
+
+                    # A permanent rejection of content already in history
+                    # (ENG-1992 shape, ENG-2689 size). The request is rebuilt
+                    # from the SAME stored history on every attempt, so it is
+                    # byte-identical each time and fails identically each time
+                    # — the provider's own docstring says so. Retrying it spent
+                    # four full requests on a refusal that was permanent by
+                    # construction, injected a "diagnose and fix the issue"
+                    # note the model cannot act on, and delayed by ~34s the
+                    # repair that actually unsticks the conversation.
+                    #
+                    # Raised HERE, after the seal above, rather than with the
+                    # other early-raise types at the top of this handler: the
+                    # failure can land mid-tool-round, and a dangling tool_use
+                    # left in history would 400 the NEXT turn too — turning a
+                    # repairable conversation into a differently-broken one.
+                    if isinstance(_agent_exc, ContentValidationError):
+                        # Remove the poison before giving up, so the NEXT turn
+                        # isn't refused for the same content. Without this the
+                        # turn dies and the conversation dies with it.
+                        _removed = self._strip_image_blocks_from_history()
+                        if _removed:
+                            logger.info(
+                                "content rejected permanently — stripped %d image "
+                                "block(s) from history so the conversation can continue",
+                                _removed,
+                            )
+                            # Save it NOW. The turn-end `_persist_history()` is
+                            # below this raise and never runs, and `close()`
+                            # does not save either — so without this the repair
+                            # lives only in memory and `/resume` reloads the
+                            # original image and repeats the refusal forever
+                            # (review of #484). Failure-safe: this runs on the
+                            # error path, where an escape would turn a handled
+                            # failure into a dead turn.
+                            try:
+                                self._persist_history()
+                            except Exception:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "could not persist the repaired history; a "
+                                    "resumed session may resend the rejected image",
+                                    exc_info=True,
+                                )
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "content_rejected"
+                        )
+                        raise
+
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to
                         # recover. A TransientProviderError reaching here is a
