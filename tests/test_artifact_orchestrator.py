@@ -309,7 +309,7 @@ async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
         return None
     async def fake_back(state):
         state.record("verify_backend", "ok"); return None
-    async def fake_front(state):
+    async def fake_front(state, extra_context=""):
         state.record("verify_frontend", "ok"); return None
     launched = {}
     async def fake_launch(**kw):
@@ -321,6 +321,8 @@ async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_front)
     monkeypatch.setattr(orchestrator, "_launch_backend", fake_launch)
     monkeypatch.setattr(orchestrator, "_probe_app", fake_probe)
+    # The served page loads cleanly (S-02); the browser itself is not needed here.
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url: VerifyResult(errors=[]))
 
     out = await orchestrator.run(st, entry=cp.ENTRY_SPEC)
     assert isinstance(out, dict)
@@ -1109,6 +1111,7 @@ async def test_relaunch_rebuilds_the_datasource_env_after_the_backend_is_regener
     async def fake_probe(state, port):
         return None
     monkeypatch.setattr(orchestrator, "_probe_app", fake_probe)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url: None)
 
     err = await orchestrator._run_and_verify_app(st)
 
@@ -1207,26 +1210,6 @@ async def test_browser_skip_is_reported_as_a_skipped_check(tmp_path: Path, monke
     assert orchestrator._result_shell(st)["checks_skipped"] == st.checks_skipped
 
 
-async def test_fullstack_frontend_reports_the_browser_check_as_skipped(tmp_path: Path, monkeypatch):
-    """The fullstack page is never loaded in a browser (it needs its
-    backend); the result says so instead of implying the check passed."""
-    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
-    st.api_spec = "{}"
-
-    async def fake_loop(**kw):
-        (tmp_path / "static").mkdir(exist_ok=True)
-        (tmp_path / "static" / "index.html").write_text(
-            _VALID_HTML.replace("</head>", '<meta name="api-base" content=""></head>')
-        )
-        return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
-
-    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
-
-    assert await orchestrator._gen_verify_frontend(st) is None
-    assert len(st.checks_skipped) == 1
-    assert st.checks_skipped[0].startswith("browser load of static/index.html: not run")
-
-
 def test_a_skipped_check_is_noted_once_per_reason(tmp_path: Path):
     st = _state(tmp_path)
     orchestrator._note_skipped(st, "browser load of the page: no browser")
@@ -1251,3 +1234,149 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
     assert await orchestrator._gen_verify_frontend(st) is None
     assert st.verify_warnings == ["frontend: Significant blocks have no stable `id` attributes."]
     assert orchestrator._result_shell(st)["warnings"] == st.verify_warnings
+
+
+# ── S-02: the served fullstack page is loaded in a browser after run_app ────
+
+def _served_state(tmp_path: Path):
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.app_url, st.app_port = "http://127.0.0.1:5555", 5555
+    st.trace_log = Mock()
+    return st
+
+
+async def test_served_page_check_notes_the_skip_when_no_browser_runs(tmp_path: Path, monkeypatch):
+    st = _served_state(tmp_path)
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url: None)
+
+    assert await orchestrator._verify_app_in_browser(st) is None
+    assert st.checks_skipped == [
+        "browser load of static/index.html via the running backend: "
+        "no headless browser configured (ANTON_HTML_LINT_BROWSER unset)"
+    ]
+    st.trace_log.node.assert_any_call(
+        "verify_fullstack", "browser_skipped",
+        "no headless browser configured (ANTON_HTML_LINT_BROWSER unset)",
+    )
+
+
+async def test_served_page_check_loads_the_backend_url_and_keeps_warnings(tmp_path: Path, monkeypatch):
+    st = _served_state(tmp_path)
+    seen: list[str] = []
+
+    def fake_live(url):
+        seen.append(url)
+        return VerifyResult(errors=[], warnings=["Loaded in a headless browser, the page rendered no visible text or elements."])
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", fake_live)
+
+    assert await orchestrator._verify_app_in_browser(st) is None
+    assert seen == ["http://127.0.0.1:5555"]
+    assert st.verify_warnings == [
+        "frontend (served): Loaded in a headless browser, the page rendered no visible text or elements."
+    ]
+    assert st.checks_skipped == []
+
+
+async def test_served_page_findings_regenerate_the_frontend_once_then_pass(tmp_path: Path, monkeypatch):
+    """The findings are the page's own (its /api/* resolve when served), so
+    they go back to the FRONTEND generator as kickoff context; the backend
+    keeps running and serves the rewritten file, no relaunch."""
+    st = _served_state(tmp_path)
+    verdicts = iter([
+        VerifyResult(errors=["Loaded in a headless browser from the running backend, the page requested a URL that failed: http://127.0.0.1:5555/logo.png — HTTP 404"]),
+        VerifyResult(errors=[]),
+    ])
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url: next(verdicts))
+    regen: list[dict] = []
+
+    async def fake_front(state, extra_context=""):
+        regen.append({"extra_context": extra_context})
+        return None
+    monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_front)
+
+    assert await orchestrator._verify_app_in_browser(st) is None
+    assert len(regen) == 1
+    assert "## Loaded in a browser from the running backend — fix these" in regen[0]["extra_context"]
+    assert "logo.png — HTTP 404" in regen[0]["extra_context"]
+    assert [r.outcome for r in st.trace if r.node == "verify_fullstack"] == ["fail"]
+
+
+async def test_served_page_that_stays_broken_fails_the_run_with_the_browser_message(tmp_path: Path, monkeypatch):
+    st = _served_state(tmp_path)
+    broken = VerifyResult(errors=["Loaded in a headless browser, the page logged a console error: TypeError: x is undefined (line 9)"])
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url: broken)
+
+    async def fake_front(state, extra_context=""):
+        return None
+    monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_front)
+
+    err = await orchestrator._verify_app_in_browser(st)
+    assert isinstance(err, str)
+    assert err.startswith("The page served at http://127.0.0.1:5555 does not load cleanly: ")
+    assert "TypeError: x is undefined (line 9)" in err
+
+
+async def test_served_page_regeneration_over_budget_propagates_the_sentinel(tmp_path: Path, monkeypatch):
+    st = _served_state(tmp_path)
+    broken = VerifyResult(errors=["Loaded in a headless browser, the page crashed the renderer process."])
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url: broken)
+
+    async def fake_front(state, extra_context=""):
+        return orchestrator.OVER_BUDGET
+    monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_front)
+
+    assert await orchestrator._verify_app_in_browser(st) is orchestrator.OVER_BUDGET
+
+
+async def test_run_app_runs_the_browser_gate_after_the_probe(tmp_path: Path, monkeypatch):
+    """Order: launch → probe → browser. A page that stays broken is the run's
+    error, with the browser's own message, and the trace shows the fail."""
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.session._workspace = None
+    st.api_spec = "{}"
+    order: list[str] = []
+
+    async def fake_launch(**kw):
+        order.append("launch")
+        return {"port": 5000, "url": "http://127.0.0.1:5000"}
+    async def fake_probe(state, port):
+        order.append("probe")
+        return None
+    def fake_live(url):
+        order.append(f"browser:{url}")
+        return VerifyResult(errors=["Loaded in a headless browser, the page logged a console error: boom (line 1)"])
+    async def fake_front(state, extra_context=""):
+        order.append("regen_frontend")
+        return None
+    async def fake_tail(state, limit=2000):
+        return ""
+    monkeypatch.setattr(orchestrator, "_launch_backend", fake_launch)
+    monkeypatch.setattr(orchestrator, "_probe_app", fake_probe)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", fake_live)
+    monkeypatch.setattr(orchestrator, "_gen_verify_frontend", fake_front)
+    monkeypatch.setattr(orchestrator, "_tail_log", fake_tail)
+
+    err = await orchestrator._run_and_verify_app(st)
+    assert err is not None and "does not load cleanly" in err
+    assert st.error == err
+    assert order == ["launch", "probe", "browser:http://127.0.0.1:5000", "regen_frontend", "browser:http://127.0.0.1:5000"]
+    # The backend was launched once: the frontend rewrite needs no relaunch.
+    assert order.count("launch") == 1
+
+
+async def test_run_app_passes_when_the_served_page_is_clean(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.session._workspace = None
+    st.api_spec = "{}"
+
+    async def fake_launch(**kw):
+        return {"port": 5000, "url": "http://127.0.0.1:5000"}
+    async def fake_probe(state, port):
+        return None
+    monkeypatch.setattr(orchestrator, "_launch_backend", fake_launch)
+    monkeypatch.setattr(orchestrator, "_probe_app", fake_probe)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url: VerifyResult(errors=[]))
+
+    assert await orchestrator._run_and_verify_app(st) is None
+    assert [r.outcome for r in st.trace if r.node == "verify_fullstack"] == ["ok"]

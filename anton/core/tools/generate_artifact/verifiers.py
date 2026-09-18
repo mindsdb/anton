@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from anton.core.artifacts import html_lint
-from anton.core.artifacts.html_lint import lint_html
+from anton.core.artifacts.html_lint import lint_html, lint_url
 from anton.core.utils.scratchpad import install_call_failed
 
 from .state import VerifyResult
@@ -248,13 +248,42 @@ def verify_frontend_live(entry: Path) -> VerifyResult | None:
     Single-file `html-app` pages only: `lint_html` loads through `file://`,
     where a fullstack frontend's relative `/api/*` fetches cannot resolve and
     surface as `TypeError: Failed to fetch` console errors that are the
-    harness's doing, not the page's (measured 2026-09-17). The path is
-    resolved here as well as in `lint_html`: Electron's `loadFile` reads a
-    relative path against its own app directory, not the cwd.
+    harness's doing, not the page's (measured 2026-09-17). The fullstack
+    page gets the same check from `verify_app_live`, through its running
+    backend, after `run_app` (S-02). The path is resolved here as well as in
+    `lint_html`: Electron's `loadFile` reads a relative path against its own
+    app directory, not the cwd.
     """
     findings = lint_html(entry.resolve())
     if findings is None:
         return None
+    return _browser_verdict(findings, served=False)
+
+
+def verify_app_live(url: str) -> VerifyResult | None:
+    """Load the fullstack page from its running backend in a headless browser.
+
+    The counterpart of `verify_frontend_live` for `static/index.html`: served
+    by the backend `run_app` just launched, the page's relative `/api/*`
+    fetches resolve, so a console error is the page's own. A 4xx/5xx from the
+    origin — an asset missing from `static/`, a `fetch()` to a route the
+    backend does not serve — is reported as a failed request. Same `None`
+    contract as the file-based check (no browser, timeout, garbage output).
+    """
+    findings = lint_url(url)
+    if findings is None:
+        return None
+    return _browser_verdict(findings, served=True)
+
+
+def _browser_verdict(findings, *, served: bool) -> VerifyResult:
+    """Browser findings as verifier errors and warnings.
+
+    Every literal below is a `.append(...)` on purpose: the contract lock
+    reads them from this file and requires each in the generator prompts.
+    `served` picks the wording for a failed request — a local file under
+    file://, a URL of the page's own origin over http.
+    """
     errors: list[str] = []
     warnings: list[str] = []
     for f in findings:
@@ -264,6 +293,11 @@ def verify_frontend_live(entry: Path) -> VerifyResult | None:
             )
         elif f.kind == "crashed":
             errors.append("Loaded in a headless browser, the page crashed the renderer process.")
+        elif f.kind == "failed_request" and served:
+            errors.append(
+                "Loaded in a headless browser from the running backend, the page "
+                f"requested a URL that failed: {f.detail}"
+            )
         elif f.kind == "failed_request":
             errors.append(
                 "Loaded in a headless browser, the page requested a local file that "

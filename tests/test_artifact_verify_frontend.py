@@ -7,6 +7,7 @@ from anton.core.tools.generate_artifact import verifiers
 from anton.core.tools.generate_artifact.verifiers import (
     browser_check_skip_reason,
     verify_frontend,
+    verify_app_live,
     verify_frontend_live,
 )
 
@@ -329,3 +330,46 @@ def test_no_contract_and_html_app_skip_the_comparison():
     assert verify_frontend(html, is_fullstack=True, api_paths=None).ok
     page = html.replace('<meta name="api-base" content="">', "")
     assert verify_frontend(page, is_fullstack=False, api_paths=_PATHS).ok
+
+
+# ── verify_app_live: the served fullstack page (S-02) ───────────────────────
+
+def test_served_check_is_skipped_when_no_browser_can_run(monkeypatch):
+    monkeypatch.setattr(verifiers, "lint_url", lambda url: None)
+    assert verify_app_live("http://127.0.0.1:5000") is None
+
+
+def test_served_check_hands_the_url_through_unchanged(monkeypatch):
+    seen: list[str] = []
+
+    def fake(url):
+        seen.append(url)
+        return []
+    monkeypatch.setattr(verifiers, "lint_url", fake)
+    verdict = verify_app_live("http://127.0.0.1:5000")
+    assert verdict is not None and verdict.ok
+    assert seen == ["http://127.0.0.1:5000"]
+
+
+def test_served_check_words_a_failed_request_as_a_url_not_a_local_file(monkeypatch):
+    """Over http a 404 from the page's own origin is a missing asset in
+    static/ or a route the backend does not serve — the message says URL,
+    and the console-error / crash / empty-page wording stays shared."""
+    monkeypatch.setattr(verifiers, "lint_url", lambda url: [
+        HtmlFinding(kind="failed_request", detail="http://127.0.0.1:5000/api/items — HTTP 404"),
+        HtmlFinding(kind="console_error", detail="Uncaught TypeError: rows is undefined (line 12)"),
+        HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page"),
+        HtmlFinding(kind="empty_page", detail="page rendered with no visible text or elements"),
+    ])
+    verdict = verify_app_live("http://127.0.0.1:5000")
+    assert verdict is not None and not verdict.ok
+    assert verdict.errors == [
+        "Loaded in a headless browser from the running backend, the page requested "
+        "a URL that failed: http://127.0.0.1:5000/api/items — HTTP 404",
+        "Loaded in a headless browser, the page logged a console error: "
+        "Uncaught TypeError: rows is undefined (line 12)",
+        "Loaded in a headless browser, the page crashed the renderer process.",
+    ]
+    assert verdict.warnings == [
+        "Loaded in a headless browser, the page rendered no visible text or elements."
+    ]

@@ -324,7 +324,10 @@ def test_squash_does_not_truncate_but_normalize_does():
 
 # ── Rule table ───────────────────────────────────────────────────────────────
 
-_VERIFIER_FUNCS = ("verify_frontend", "verify_frontend_live", "evaluate_backend", "verify_backend")
+_VERIFIER_FUNCS = (
+    "verify_frontend", "verify_frontend_live", "verify_app_live", "_browser_verdict",
+    "evaluate_backend", "verify_backend",
+)
 _ORCHESTRATOR_FUNCS = ("_gen_verify_backend", "_gen_verify_frontend")
 
 _ARTIFACT_PATH = Path("/tmp/artifact-lock-probe")
@@ -384,17 +387,20 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "stable `id`")),
     Rule("warnings", "Library CDN other than ECharts or Tailwind detected: ",
          _both(_FRONT_BOTH, "ECharts") + _both(_FRONT_BOTH, "Tailwind")),
-    # ── verify_frontend_live: html-app only. The page is loaded through
-    # file://, where a fullstack frontend's /api/* fetches cannot resolve, so
-    # the check is not run there and the frontend prompt need not carry it. ──
+    # ── verify_frontend_live (html-app, from disk) and verify_app_live
+    # (fullstack, from the running backend after run_app — S-02). Each prompt
+    # carries its own browser-gate bullet (`_BROWSER_GATE_HTML` /
+    # `_BROWSER_GATE_SERVED`); the failed-request wording differs per kind. ──
     Rule("errors", "Loaded in a headless browser, the page logged a console error: ",
-         (("html", "console error"),)),
+         _both(_FRONT_BOTH, "console error")),
     Rule("errors", "Loaded in a headless browser, the page crashed the renderer process.",
-         (("html", "crashed renderer"),)),
+         _both(_FRONT_BOTH, "crashed renderer")),
     Rule("errors", "Loaded in a headless browser, the page requested a local file that does not exist: ",
          (("html", "local file that does not exist"),)),
+    Rule("errors", "Loaded in a headless browser from the running backend, the page requested a URL that failed: ",
+         (("frontend", "a URL that failed"),)),
     Rule("warnings", "Loaded in a headless browser, the page rendered no visible text or elements.",
-         (("html", "no visible text"),)),
+         _both(_FRONT_BOTH, "no visible text")),
     # ── verify_frontend, fullstack only ──
     Rule("errors", 'Missing <meta name="api-base" content=""> (required for fullstack frontends).',
          (("frontend", 'name="api-base"'),)),

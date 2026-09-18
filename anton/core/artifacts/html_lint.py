@@ -51,20 +51,39 @@ def lint_html(path: Path) -> list[HtmlFinding] | None:
     read/cell that triggered it.
     """
     try:
-        return _lint_html(path)
+        # Absolute on purpose: Electron's `loadFile` resolves a relative path
+        # against its own app directory, not the cwd, and reports the page
+        # itself as ERR_FILE_NOT_FOUND — which the runner then returns as an
+        # empty page plus a failed request for the target (seen 2026-09-17).
+        return _lint_target(str(Path(path).resolve()))
     except Exception:
         return None
 
 
-def _lint_html(path: Path) -> list[HtmlFinding] | None:
+def lint_url(url: str) -> list[HtmlFinding] | None:
+    """Load a page served over http(s) — the fullstack frontend from its own
+    running backend — and flag the same things `lint_html` does (S-02).
+
+    Same `None` / `[]` contract. Over http the runner also reports a 4xx/5xx
+    response for the page's own origin as a failed request, so a missing
+    asset in `static/` or a `fetch()` to a route the backend does not serve
+    shows up the way a missing local file does under file://. Anything that
+    is not an http(s) URL is refused as `None`: a file path belongs to
+    `lint_html`, and nothing else is a page.
+    """
+    if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        return _lint_target(url)
+    except Exception:
+        return None
+
+
+def _lint_target(target: str) -> list[HtmlFinding] | None:
+    """Run the Electron runner on `target` (an absolute path or a URL)."""
     browser = discover_browser()
     if browser is None:
         return None
-    # Absolute on purpose: Electron's `loadFile` resolves a relative path
-    # against its own app directory, not the cwd, and reports the page itself
-    # as ERR_FILE_NOT_FOUND — which the runner then returns as an empty page
-    # plus a failed request for the target (seen 2026-09-17).
-    path = Path(path).resolve()
 
     # The runner goes through both argv and env on purpose:
     # - a bare `electron` binary loads argv[1] as the app to run;
@@ -72,7 +91,7 @@ def _lint_html(path: Path) -> list[HtmlFinding] | None:
     #   picks the runner up from the env instead, in its lint-mode entry point.
     env = {
         **os.environ,
-        "ANTON_HTML_LINT_TARGET": str(path),
+        "ANTON_HTML_LINT_TARGET": target,
         "ANTON_HTML_LINT_RUNNER": str(_RUNNER_SCRIPT),
     }
     try:

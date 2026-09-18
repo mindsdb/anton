@@ -655,7 +655,10 @@ def _read_frontend_html(state: GenState, written: list[str]) -> str | None:
     return entry.read_text(encoding="utf-8") if entry is not None else None
 
 
-async def _gen_verify_frontend(state: GenState) -> str | None:
+async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str | None:
+    """Generate and verify the page. `extra_context` rides on the first
+    kickoff — the browser findings from `_run_and_verify_app` when the
+    served fullstack page failed to load cleanly (S-02)."""
     if state.is_fullstack:
         system = prompts.build_frontend_system_prompt(state.artifact_path)
     else:
@@ -673,7 +676,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
     # checks break as soon as either is exhausted.
     loop_failures = 0
     verify_failures = 0
-    extra = ""
+    extra = ("\n\n" + extra_context) if extra_context else ""
     # The `.html` files the previous attempt reported writing. Known on the
     # verify-failure path only: a loop failure returns a message, not a result.
     stale_html: list[str] = []
@@ -764,12 +767,9 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
                     # builds them.
                     verdict.errors.extend(live.errors)
                     verdict.warnings.extend(live.warnings)
-            elif verdict.ok:
-                _note_skipped(
-                    state,
-                    f"browser load of {prompts.FULLSTACK_FRONTEND_TARGET}: not run for "
-                    "fullstack frontends (the page needs its backend to render)",
-                )
+            # The fullstack page is loaded later, from its running backend
+            # (`_run_and_verify_app`): under file:// its `/api/*` fetches
+            # cannot resolve.
         state.trace_log.verifier(
             node="verify_frontend", ok=verdict.ok,
             errors=list(verdict.errors), warnings=list(verdict.warnings),
@@ -953,6 +953,13 @@ async def _run_and_verify_app(state: GenState) -> str | None:
             state.step_started("verify_fullstack", attempt=attempt)
             probe_err = await _probe_app(state, port)
             if probe_err is None:
+                # The backend answers; now the page itself, served by it.
+                live_err = await _verify_app_in_browser(state)
+                if live_err is OVER_BUDGET:
+                    return OVER_BUDGET
+                if live_err is not None:
+                    state.error = live_err
+                    return live_err
                 state.record("verify_fullstack", "ok", f"port {port}")
                 return None
             state.record("verify_fullstack", "fail", probe_err)
@@ -985,6 +992,57 @@ async def _run_and_verify_app(state: GenState) -> str | None:
         f"--- backend.log tail ---\n{await _tail_log(state)}"
     )
     return state.error
+
+
+async def _verify_app_in_browser(state: GenState) -> "str | None | object":
+    """Load the served fullstack page in a headless browser (S-02).
+
+    `verify_frontend_live` cannot see this page: under file:// its `/api/*`
+    fetches fail for the harness's reasons. Served by the backend `run_app`
+    just launched, every finding is the page's own — a console error, a
+    missing asset in `static/` (an HTTP 404 from the origin), a `fetch()` to
+    a route the backend does not serve.
+
+    Findings go back to the FRONTEND generator, once, as kickoff context;
+    the backend keeps running and serves the rewritten file from disk, so
+    the second load needs no relaunch. No browser → the skip is noted for
+    the result (S-03) and the step rests on the probe. Returns None when the
+    page is clean or unchecked, an error string when it stays broken, or
+    `OVER_BUDGET` propagated from the regeneration.
+    """
+    target = prompts.FULLSTACK_FRONTEND_TARGET
+    for attempt in range(RUNAPP_MAX_RETRIES + 1):
+        live = await asyncio.to_thread(verifiers.verify_app_live, state.app_url)
+        if live is None:
+            reason = verifiers.browser_check_skip_reason()
+            state.trace_log.node("verify_fullstack", "browser_skipped", reason)
+            _note_skipped(state, f"browser load of {target} via the running backend: {reason}")
+            return None
+        state.trace_log.verifier(
+            node="verify_fullstack", ok=live.ok,
+            errors=list(live.errors), warnings=list(live.warnings),
+        )
+        if live.ok:
+            state.verify_warnings.extend(f"frontend (served): {w}" for w in live.warnings)
+            return None
+        state.record("verify_fullstack", "fail", "; ".join(live.errors))
+        if attempt >= RUNAPP_MAX_RETRIES:
+            break
+        regen_err = await _gen_verify_frontend(
+            state,
+            extra_context=(
+                "## Loaded in a browser from the running backend — fix these\n"
+                + "\n".join(f"- {e}" for e in live.errors)
+            ),
+        )
+        if regen_err is OVER_BUDGET:
+            return OVER_BUDGET
+        if regen_err is not None:
+            return regen_err
+    return (
+        f"The page served at {state.app_url} does not load cleanly: "
+        + "; ".join(live.errors)
+    )
 
 
 def _stage_attachments(state: GenState) -> None:

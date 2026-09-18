@@ -200,12 +200,35 @@ step and costs a regeneration:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them.
-- Where a headless browser is available (single-file `html-app` pages only),
-  the page is also loaded once: a console error, a crashed renderer or a
+  to them.\
+"""
+
+# The browser gate, one bullet per page kind: the html-app page is loaded
+# from disk right after the static checks (`verify_frontend_live`), the
+# fullstack page from its running backend after the launch
+# (`verify_app_live`, S-02). Two texts because the html-app prompt must not
+# speak of a fullstack app, and the failure it can see differs (a local file
+# under file://, a URL of the page's own origin over http).
+_BROWSER_GATE_HTML = """\
+- Where a headless browser is available, the page is also loaded once from
+  disk right after these checks: a console error, a crashed renderer or a
   request for a local file that does not exist fails the step; a page with
   no visible text or elements is a warning.\
 """
+
+_BROWSER_GATE_SERVED = """\
+- Where a headless browser is available, the page is also loaded once from
+  its running backend after the launch: a console error, a crashed renderer
+  or a request for a URL that failed (a missing asset in `static/`, a
+  `fetch()` to a route the backend does not serve) fails the step; a page
+  with no visible text or elements is a warning.\
+"""
+
+
+def _verifier_contract(*, served: bool) -> str:
+    return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
+        _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +706,7 @@ def build_subagent_system_prompt(
             _gen_html_workflow(target),
             _gen_html_output_protocol(target),
             _GEN_SIZE_RULES,
-            "## Verifier contract\n" + _VERIFIER_CONTRACT,
+            _verifier_contract(served=False),
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,
         ]
@@ -1070,7 +1093,7 @@ def build_frontend_system_prompt(artifact_path: Path) -> str:
             _gen_html_workflow(target, fullstack=True),
             _gen_html_output_protocol(target),
             _GEN_SIZE_RULES,
-            "## Verifier contract\n" + _VERIFIER_CONTRACT,
+            _verifier_contract(served=True),
             "## Fullstack rules\n" + _FRONTEND_RULES,
             "## Design rules\n" + _DESIGN_RULES,
             _GEN_TOOLS,

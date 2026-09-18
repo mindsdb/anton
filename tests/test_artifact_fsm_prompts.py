@@ -322,6 +322,25 @@ def test_verifier_contract_reaches_both_frontend_prompts():
         assert marker in rules, marker
 
 
+def test_verifier_contract_promises_the_browser_load_for_both_page_kinds():
+    """S-02: the served fullstack page is loaded from its running backend
+    after the launch. One bullet per page kind: the html-app prompt must not
+    speak of a fullstack app, and each names the failure its own check can
+    see (a local file under file://, a URL of the origin over http)."""
+    assert "headless browser" not in prompts._VERIFIER_CONTRACT  # shared head only
+    html = prompts.build_subagent_system_prompt(Path("/tmp/a"))
+    front = prompts.build_frontend_system_prompt(Path("/tmp/a"))
+    assert "loaded once from\n  disk right after these checks" in html
+    assert "local file that does not exist" in html
+    assert "running backend" not in html
+    assert "loaded once from\n  its running backend after the launch" in front
+    assert "a URL that failed" in front and "route the backend does not serve" in front
+    assert "local file that does not exist" not in front
+    for text in (html, front):
+        assert text.count("Where a headless browser is available") == 1
+        assert "single-file" not in text
+
+
 def test_design_rules_pick_the_chart_type_by_purpose():
     """S-04: the rules set every ECharts option but never said which chart
     fits which question; pie charts for comparisons and lines for categories
