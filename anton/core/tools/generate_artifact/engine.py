@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 # tree that silently never matches.
 import httpx2 as httpx
 
-from anton.core.artifacts.internal_files import PRD_FILENAME
+from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.llm.structured import looks_truncated
 
@@ -418,6 +418,35 @@ def _load_prd(state) -> None:
     state.record("read_prd", "done", f"{len(body)} chars from {PRD_FILENAME}")
 
 
+def _load_api_spec(state) -> None:
+    """Read `openapi.json` back into `state.api_spec` on a resumed generation.
+
+    `_make_api_spec` writes the file and sets the field in the same breath,
+    and nothing read it back: a run entering at `resume_generate` handed
+    both generators `{}` as the API specification, probed no GET route
+    after launch, and skipped the contract check as "no contract" (I-48).
+    Same failure discipline as `_load_prd`: a missing or unreadable file is
+    recorded and the run goes on with what it has — the file's absence at
+    this entry is itself the thing worth seeing in the trace.
+    """
+    path = state.artifact_path / API_SPEC_FILENAME
+    try:
+        if not path.is_file():
+            state.record("read_api_spec", "skipped", f"no {API_SPEC_FILENAME} in the artifact folder")
+            return
+        body = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        state.record("read_api_spec", "error", f"{API_SPEC_FILENAME} could not be read: {exc}")
+        return
+    if not body:
+        state.record("read_api_spec", "skipped", f"{API_SPEC_FILENAME} is empty")
+        return
+    state.api_spec = body
+    if API_SPEC_FILENAME not in state.internal_files:
+        state.internal_files.append(API_SPEC_FILENAME)
+    state.record("read_api_spec", "done", f"{len(body)} chars from {API_SPEC_FILENAME}")
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -495,6 +524,11 @@ async def generate(
     if entry != cp.ENTRY_FULL and stored is not None:
         _restore(state, stored)
         _load_prd(state)
+        # Only where the spec phase is skipped: every other entry rewrites
+        # the contract in `_make_api_spec`, and `_invalidate_specs` has
+        # already removed a stale one from disk before then.
+        if entry == cp.ENTRY_GENERATE and state.is_fullstack:
+            _load_api_spec(state)
 
     # `elicit()` is called from inside the FSM task while the tool handler is
     # draining the progress queue, so the two have to be told about each

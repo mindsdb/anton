@@ -112,6 +112,66 @@ async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, mon
     assert "Show the orders table." in seen["prd"]
 
 
+async def test_a_resumed_generation_reads_the_api_contract_back(tmp_path: Path, monkeypatch):
+    """`resume_generate` skips `_make_api_spec`, and nothing else set
+    `state.api_spec`: both generators got `{}` as the contract, `_probe_app`
+    probed nothing and the contract check saw no contract (I-48)."""
+    from anton.core.artifacts.internal_files import API_SPEC_FILENAME
+
+    _write_prd(tmp_path, "## Goal\nA clock.")
+    contract = '{"paths": {"/api/time": {"get": {"responses": {"200": {}}}}}}'
+    (tmp_path / API_SPEC_FILENAME).write_text(contract)
+    seen = {}
+
+    async def fake_run(state, *, entry):
+        seen["api_spec"] = state.api_spec
+        seen["internal"] = list(state.internal_files)
+        seen["entry"] = entry
+        return {"files_written": [], "internal_files": [], "summary": "", "trace": []}
+
+    cp.save(tmp_path, cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("a clock"),
+        pipeline_stage=cp.STAGE_SPEC_WRITTEN,
+        artifact_type="fullstack-stateless-app",
+    ))
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    await engine.generate(
+        session=AsyncMock(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
+        slug="a", user_request="a clock", agent_understanding="clock",
+    )
+    assert seen["entry"] == cp.ENTRY_GENERATE
+    assert seen["api_spec"] == contract
+    assert API_SPEC_FILENAME in seen["internal"]
+
+
+async def test_a_resumed_spec_phase_does_not_read_a_contract_it_will_rewrite(tmp_path: Path, monkeypatch):
+    """At `resume_spec` the contract is regenerated; a file on disk (a stale
+    one `_invalidate_specs` has not reached yet) must not pre-seed the state."""
+    from anton.core.artifacts.internal_files import API_SPEC_FILENAME
+
+    _write_prd(tmp_path, "## Goal\nA clock.")
+    (tmp_path / API_SPEC_FILENAME).write_text('{"paths": {"/api/old": {"get": {}}}}')
+    seen = {}
+
+    async def fake_run(state, *, entry):
+        seen["api_spec"] = state.api_spec
+        seen["entry"] = entry
+        return {"files_written": [], "internal_files": [], "summary": "", "trace": []}
+
+    cp.save(tmp_path, cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("a clock"),
+        pipeline_stage=cp.STAGE_PRD_WRITTEN,
+        artifact_type="fullstack-stateless-app",
+    ))
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    await engine.generate(
+        session=AsyncMock(), artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
+        slug="a", user_request="a clock", agent_understanding="clock",
+    )
+    assert seen["entry"] == cp.ENTRY_SPEC
+    assert seen["api_spec"] is None
+
+
 # ── reaching the nodes ──────────────────────────────────────────────────────
 
 def test_prd_section_states_its_own_standing(tmp_path: Path):
