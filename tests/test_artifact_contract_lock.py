@@ -333,7 +333,7 @@ _ARTIFACT_PATH = Path("/tmp/artifact-lock-probe")
 def _prompts() -> dict[str, str]:
     """The prompts exactly as the generator receives them."""
     return {
-        "html": prompts.build_subagent_system_prompt("html-app", _ARTIFACT_PATH),
+        "html": prompts.build_subagent_system_prompt(_ARTIFACT_PATH),
         "frontend": prompts.build_frontend_system_prompt(_ARTIFACT_PATH),
         "backend_stateless": prompts.build_backend_system_prompt(
             _ARTIFACT_PATH, stateless=True

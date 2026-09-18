@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import json
 from pathlib import Path
 
@@ -306,7 +308,7 @@ def test_verifier_contract_reaches_both_frontend_prompts():
     html-app builder and the fullstack frontend builder alike."""
     for rules in (
         prompts._VERIFIER_CONTRACT,
-        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
       for marker in (
@@ -335,7 +337,7 @@ def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
     assert "OFFLINE" in rules
     assert "offline" in prompts._TECH_SPEC_STACK
     for text in (
-        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
         prompts._TECH_SPEC_STACK,
     ):
@@ -412,23 +414,24 @@ def test_backend_rules_describe_requirements_line_format():
     assert "--index-url" in rules or "-r" in rules
 
 
-def test_subagent_prompt_serves_html_app_only():
-    """The only live caller is orchestrator.py:329, the non-fullstack branch."""
-    html = prompts.build_subagent_system_prompt("html-app", Path("/tmp/a"))
-    assert "single self-contained HTML file" in html or "ONE self-contained HTML" in html
+def test_html_prompt_builder_takes_no_artifact_type():
+    """One builder per artifact type. The type switch and its "unsupported"
+    stub used to keep a third role block alive that no live prompt used (I-09);
+    fullstack types go through `build_frontend_system_prompt`."""
+    import inspect
 
-    # The dead fullstack branches are gone: a third copy of the contract must not
-    # exist and silently drift away from _BACKEND_RULES.
-    for dead in ("fullstack-stateless-app", "fullstack-stateful-app"):
-        out = prompts.build_subagent_system_prompt(dead, Path("/tmp/a"))
-        assert "Unsupported artifact type" in out
-        assert "backend.py" not in out
+    params = inspect.signature(prompts.build_subagent_system_prompt).parameters
+    assert "artifact_type" not in params
+    html = prompts.build_subagent_system_prompt(Path("/tmp/a"))
+    assert "ONE self-contained HTML" in html or "single self-contained HTML file" in html
+    assert "backend.py" not in html
+    assert "Unsupported artifact type" not in html
 
 
 def test_html_prompt_pins_the_registered_primary():
     """Otherwise the model writes the default name while metadata promises another."""
     system = prompts.build_subagent_system_prompt(
-        "html-app", Path("/tmp/a"), primary="report.html"
+        Path("/tmp/a"), primary="report.html"
     )
     assert "report.html" in system
 
@@ -439,7 +442,7 @@ def test_html_prompt_falls_back_to_index_html():
     under that name."""
     for primary in (None, ""):
         system = prompts.build_subagent_system_prompt(
-            "html-app", Path("/tmp/a"), primary=primary
+            Path("/tmp/a"), primary=primary
         )
         assert "index.html" in system
         assert "dashboard.html" not in system
@@ -450,31 +453,41 @@ def test_size_rules_block_is_present_in_both_frontend_prompts():
     since 2026-09-17 both quote the one `_GEN_SIZE_RULES` block."""
     assert "mode=\"a\"" in prompts._GEN_SIZE_RULES
     for system in (
-        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
         assert "mode=\"a\"" in system
         assert "Split ONLY" in system
 
 
-def test_role_no_longer_forbids_splitting_a_file():
-    """HARD RULES outweigh any block below it — the old rule has to go."""
-    role = prompts._ROLE
-    assert "Do NOT split a single file across multiple calls" not in role
-    assert "exactly once per file" not in role
+def _generator_prompts() -> dict[str, str]:
+    """The three prompts that write files, as the model receives them."""
+    return {
+        "html": prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        "frontend": prompts.build_frontend_system_prompt(Path("/tmp/a")),
+        "backend": prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=True),
+    }
 
 
-def test_role_documents_the_mode_argument():
+def test_generator_prompts_no_longer_forbid_splitting_a_file():
+    """The old HARD RULE outweighed any block below it — it must stay gone."""
+    for name, system in _generator_prompts().items():
+        assert "Do NOT split a single file across multiple calls" not in system, name
+        assert "exactly once per file" not in system, name
+
+
+def test_generator_prompts_document_the_mode_argument():
     """`content` is gone from the signature — the body travels as text now."""
-    assert "write_file(path, mode" in prompts._ROLE
-    assert "write_file(path, content" not in prompts._ROLE
+    for name, system in _generator_prompts().items():
+        assert "write_file(path, mode" in system, name
+        assert "write_file(path, content" not in system, name
 
 
-def test_role_using_data_no_longer_demands_one_shot_embedding():
-    """The USING DATA paragraph told the model to embed data in a single call."""
-    role = prompts._ROLE
-    assert "EMBED the real data into the output file" not in role
-    assert "mode=\"a\"" in role
+def test_generator_prompts_no_longer_demand_one_shot_embedding():
+    """The old USING DATA paragraph told the model to embed data in one call."""
+    for name, system in _generator_prompts().items():
+        assert "EMBED the real data into the output file" not in system, name
+        assert "mode=\"a\"" in system, name
 
 
 def test_tech_spec_prompt_requires_an_insight_list_for_html_app():
@@ -505,9 +518,10 @@ def test_fetch_prompt_tolerates_missing_public_sources():
     assert isinstance(prompts.build_fetch_data_system_prompt(Path("/tmp/a")), str)
 
 
-def test_role_carries_the_scratchpad_discipline():
-    """The rules from the main agent's system prompt never reached the generator."""
-    role = prompts._ROLE
+def test_fetch_prompt_carries_the_scratchpad_discipline():
+    """The rules from the main agent's system prompt never reached the
+    pipeline's scratchpad user; `_ROLE_COMMON` is where they live now."""
+    system = prompts.build_fetch_data_system_prompt(Path("/tmp/a"))
     for marker in (
         "clean namespace",   # nothing is pre-imported
         "120",               # the hard per-cell timeout
@@ -516,12 +530,15 @@ def test_role_carries_the_scratchpad_discipline():
         "data_vault",         # must not be read directly
         "change strategy",   # switch approach after a repeated failure
     ):
-        assert marker in role, marker
+        assert marker in system, marker
 
 
-def test_role_does_not_duplicate_the_exec_field_requirement():
-    """`one_line_description` is already required in USING DATA — no second copy."""
-    assert prompts._ROLE.count("one_line_description") == 1
+def test_exec_field_requirement_is_stated_once_per_prompt():
+    """`one_line_description` is required once — no second copy anywhere."""
+    prompts_seen = _generator_prompts()
+    prompts_seen["fetch"] = prompts.build_fetch_data_system_prompt(Path("/tmp/a"))
+    for name, system in prompts_seen.items():
+        assert system.count("one_line_description") == 1, name
 
 
 def test_fetch_prompt_has_no_write_file_instructions():
@@ -542,18 +559,12 @@ def test_fetch_prompt_keeps_the_common_part():
 
 def test_generator_prompts_still_get_the_write_part():
     for system in (
-        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
         prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=True),
     ):
         assert "write_file" in system
         assert "finish(" in system
-
-
-def test_role_is_the_composition_of_both_halves():
-    """The _ROLE name is preserved: three stage-1c tests read it directly."""
-    assert prompts._ROLE_COMMON in prompts._ROLE
-    assert prompts._ROLE_WRITE in prompts._ROLE
 
 
 def test_tech_spec_instruction_refuses_to_restate_a_prd_it_has():
@@ -615,12 +626,14 @@ def test_cold_and_hot_tech_spec_paths_ask_for_the_same_document():
     assert user.endswith(prompts.build_tech_spec_instruction(st))
 
 
-def test_role_says_verification_is_not_the_models_job():
+def test_generator_prompts_say_verification_is_not_the_models_job():
     """Nine of twenty rounds of the 2026-08-27 live run went to self-checks the
-    deterministic verifier repeats anyway — and the round budget died of it."""
-    role = prompts._ROLE_WRITE
-    assert "VERIFICATION IS NOT YOUR JOB" in role
-    assert "finish" in role
+    deterministic verifier repeats anyway — and the round budget died of it.
+    The rule lives in the workflow block of every generator prompt."""
+    for name, system in _generator_prompts().items():
+        # "file" for the two single-file pages, "files" for the backend.
+        assert re.search(r"Do not read the files? back and do not run checks", system), name
+        assert "deterministic verifier" in system, name
 
 
 def test_role_forbids_new_scratchpad_names():
@@ -690,7 +703,7 @@ def test_the_markers_are_quoted_identically_on_every_surface():
     begin, end = sub_tools.FILE_BEGIN_MARKER, sub_tools.FILE_END_MARKER
     for surface in (
         sub_tools.WRITE_FILE_SCHEMA["description"],
-        prompts._ROLE,
+        *_generator_prompts().values(),
         engine._CONTENT_ARG_MSG,
     ):
         assert begin in surface and end in surface
@@ -722,7 +735,7 @@ def _write_loop_prompts() -> dict[str, str]:
     """
     return {
         "html-app": prompts.build_subagent_system_prompt(
-            "html-app", Path("/tmp/a"), primary="index.html"
+            Path("/tmp/a"), primary="index.html"
         ),
         "frontend": prompts.build_frontend_system_prompt(Path("/tmp/a")),
         "backend": prompts.build_backend_system_prompt(Path("/tmp/a")),
@@ -767,7 +780,7 @@ def test_the_write_result_is_advertised_as_the_cheaper_answer():
 
 def _html_prompt(primary: str = "index.html") -> str:
     return prompts.build_subagent_system_prompt(
-        "html-app", Path("/tmp/artifact-prompt-probe"), primary=primary
+        Path("/tmp/artifact-prompt-probe"), primary=primary
     )
 
 
@@ -834,7 +847,7 @@ def test_design_rules_do_not_restate_the_contract():
     builders, so a rule must live in exactly one of them."""
     assert 'name="viewport"' not in prompts._DESIGN_RULES
     for system in (
-        prompts.build_subagent_system_prompt("html-app", Path("/tmp/a")),
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
         assert "## Verifier contract\n" in system

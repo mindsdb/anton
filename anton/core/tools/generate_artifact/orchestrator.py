@@ -656,7 +656,7 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
         system = prompts.build_frontend_system_prompt(state.artifact_path)
     else:
         system = prompts.build_subagent_system_prompt(
-            state.artifact_type, state.artifact_path, primary=state.primary
+            state.artifact_path, primary=state.primary
         )
     verdict = None  # guards the terminal message when no attempt ever verified
     # The loop's failure reason (round budget, no tool calls) is kept separately:

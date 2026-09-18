@@ -76,8 +76,11 @@ digraph artifact_generation {
 # Role / tool contract (shared across all artifact types)
 # ---------------------------------------------------------------------------
 
-# Common half: fits both the nodes that write files and the fetch node, which
-# does not. Everything about write_file lives in _ROLE_WRITE below.
+# The role of the one node that writes no files: `fetch_data_sample`. The
+# three generators build their prompts from the `_gen_html_*` blocks below
+# and carry the write protocol in `_gen_html_output_protocol`; the write half
+# that used to be stacked on top of this block (`_ROLE_WRITE`, `_ROLE`)
+# reached no live prompt after 2026-09-17 and was removed (I-09).
 _ROLE_COMMON = """\
 You are a focused, single-purpose worker inside an artifact-generation pipeline.
 You do exactly the job your task section describes, then call `finish`.
@@ -115,71 +118,6 @@ USING DATA:
   or the PRD — a new name is an isolated empty environment with none of the
   existing variables, imports or connection code, and the call may be rejected.\
 """
-
-# Write half: only for nodes that actually produce files. NOT mixed into the
-# fetch node — there the role is immediately followed by "Do NOT write any
-# artifact files", and the full _ROLE would contradict that instruction.
-_ROLE_WRITE = f"""\
-YOUR OUTPUT IS FILES. A file is written in TWO parts of the SAME reply:
-
-  1. the file's content, as plain text between two marker lines;
-  2. a `write_file` call naming the path — with NO content argument.
-
-Like this, in one reply:
-
-{BEGIN}
-<!DOCTYPE html>
-<html lang="en">
-…the entire file…
-</html>
-{END}
-
-…and in the same reply, the tool call `write_file(path="index.html")`.
-
-HARD RULES:
-- Write the content as TEXT between the markers. `write_file` takes `path` and
-  `mode` only; there is no `content` argument.
-- ONE file per reply. A reply carries one body, so a second `write_file` in the
-  same reply has nothing to write and is refused.
-- Nothing but the file goes between the markers, and the closing marker ends
-  the file. If your reply has no closing marker, nothing is written.
-- All `path` values are RELATIVE to the artifact folder — never write outside it.
-- Call `finish(summary="<one line>")` exactly once when all files are written.
-- VERIFICATION IS NOT YOUR JOB. After you call `finish`, a deterministic
-  verifier checks your output (structure, required tags, forbidden patterns),
-  and on failure you get another attempt with the exact errors. Do NOT spend
-  rounds re-reading, re-counting or re-checking what you wrote — the moment the
-  last chunk closes every open tag, call `finish`.
-
-FILE TOOLS:
-- `write_file(path, mode="w"|"a")` — write the body from THIS reply to
-  `<artifact>/<path>`. `"w"` creates or overwrites, `"a"` appends (creating the
-  file when absent). Default is `"w"`. It reports back the CHARACTERS and
-  LINES the body added and the file's new totals, so after an append you
-  already know where your part landed without reading anything.
-- `read_file(path)` — check a file you already wrote. Returns its size, its
-  line count and its tail: enough to see that your chunk landed and that the
-  file is closed.
-- `read_file(path, full=true)` — pulls the ENTIRE file into your context and
-  keeps it there for every remaining round (a 25 KB page is ~7k tokens, re-sent
-  each round). Use it ONLY when you must re-read content in order to keep
-  WRITING. Never to check finished work: the tail plus what `write_file` told
-  you already answers "did it land and is it closed", and everything beyond
-  that is the verifier's job after `finish`.
-
-DATA INTO FILES:
-- For an html-app, the real data goes INTO the output file — but as its own
-  part: print the serialised data in a scratchpad cell, then send it as its own
-  body with `write_file(path, mode="a")` — a single `<script>` block, separate
-  from the markup parts. For a large dataset, aggregate it in the scratchpad
-  first; a dashboard almost never needs raw rows.
-- For a fullstack app, the generated backend queries the live source itself —
-  use the scratchpad mainly to confirm the schema and a sample.\
-"""
-
-# The name is kept: generator prompts mix it in whole, and three stage-1c tests
-# read `_ROLE` directly.
-_ROLE = _ROLE_COMMON + "\n\n" + _ROLE_WRITE
 
 
 # ---------------------------------------------------------------------------
@@ -698,34 +636,23 @@ raw strings. Writing the text directly between the markers avoids this.\
 
 
 def build_subagent_system_prompt(
-    artifact_type: str,
     artifact_path: Path,
     *,
     primary: str | None = None,
 ) -> str:
-    """System prompt for the single-generator path — html-app only.
+    """System prompt for the single-generator path — the `html-app` page.
 
-    The fullstack types never reach here: `orchestrator._gen_verify_frontend`
+    Serves one artifact type, so it takes none: `orchestrator._gen_verify_frontend`
     calls this only in its non-fullstack branch, and fullstack generation uses
-    `build_backend_system_prompt` / `build_frontend_system_prompt` instead. The
-    fullstack branches that used to live here were a third copy of the backend
-    contract that nothing executed and no test covered.
+    `build_backend_system_prompt` / `build_frontend_system_prompt`. The type
+    switch and its "unsupported" stub that used to sit here served no caller
+    (I-09).
 
     `primary` is the filename the artifact was registered with. It may be None
     (`Artifact.primary: str | None`, `artifacts/models.py:153`) — then the shared
     default applies, the same one the orchestrator's cleanup step uses, so the
     two never disagree about which file is the entry point.
     """
-    parts: list[str] = [_ROLE]
-
-    if artifact_type != "html-app":
-        parts.append(
-            f"## Unsupported artifact type: {artifact_type!r}\n"
-            "This builder serves `html-app` only. Fullstack types use "
-            "`build_backend_system_prompt` / `build_frontend_system_prompt`."
-        )
-        return "\n\n".join(parts)
-
     target = primary or HTML_APP_DEFAULT_PRIMARY
     # `artifact_path` is deliberately not quoted: every path the model writes
     # is relative to the artifact root, and an absolute path in the prompt is
