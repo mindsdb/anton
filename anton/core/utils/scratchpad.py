@@ -298,6 +298,9 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
                 "confirm_new_scratchpad=true."
             ),
             ok=True,
+            # Named so a caller that records executed cells can tell this
+            # guidance from a cell that ran (`discovery.engine`).
+            reason="new_scratchpad_challenged",
         )
     seen.add(name)
     if manager is not None and hasattr(manager, "record_agent_pad"):

@@ -142,6 +142,27 @@ class TestStreamDisplay:
         live.stop.assert_called_once()
         assert display._live is None
 
+    @patch("anton.chat_ui.Live")
+    def test_reasoning_start_restarts_the_spinner_after_interactive_stopped_it(self, MockLive):
+        """Live-testing feedback (ENG-969, generate_prd): `phase="interactive"`
+        tears the Live context down (`_live = None`). A `reasoning_start`
+        that follows it directly — with no tool-result line printed in
+        between to implicitly restart the spinner, as generate_prd's phase 1
+        (after ask_user) and phase 2 (after show_and_confirm) both do — must
+        not silently no-op on a `None` Live."""
+        display, console = self._make_display()
+        display.start()
+
+        display.update_progress("interactive", "")
+        assert display._live is None
+
+        display.update_progress("reasoning_start", "Thinking...")
+
+        assert display._live is not None
+        # `MockLive(...)` returns the same mock instance every call, so this
+        # is `display.start()`'s initial `.start()` plus the restart's.
+        assert MockLive.return_value.start.call_count == 2
+
     def test_phase_labels_cover_all_phases(self):
         # Also guards the tool_progress design decision: that phase returns
         # from update_progress() before reaching the PHASE_LABELS fallback
@@ -163,6 +184,29 @@ class TestStreamDisplay:
         # footer spinner gone for the rest of the turn without this check
         # catching it (the printed-line assertion alone wouldn't notice).
         assert MockLive.call_count == 2
+
+
+    @patch("anton.chat_ui.Live")
+    def test_tool_peek_lives_in_the_footer_and_a_step_line_clears_it(self, MockLive):
+        """The live tail of a streaming tool is transient: nothing is printed,
+        the footer shows it under an arrow with the extra lines indented, and
+        the next step line (or an empty peek) takes it down."""
+        display, console = self._make_display()
+        display.start()
+
+        display.update_progress("tool_peek", "<html>\n  <body>\n    <h1>Hi</h1>")
+        assert console.print.call_count == 0
+        assert display._line3_peek == "<html>\n  <body>\n    <h1>Hi</h1>"
+        footer = display._build_spinner_display()
+        peek_text = footer.renderables[1].plain
+        assert peek_text == "  \u21b3 <html>\n      <body>\n        <h1>Hi</h1>"
+
+        display.update_progress("tool_progress", "Verifying the page (step 4 of 4)")
+        assert display._line3_peek == ""
+        display.update_progress("tool_peek", "again")
+        display.update_progress("tool_peek", "")
+        assert display._line3_peek == ""
+        assert len(display._build_spinner_display().renderables) == 2
 
 
 class TestActivityTracking:

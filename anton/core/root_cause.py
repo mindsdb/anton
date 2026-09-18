@@ -142,6 +142,10 @@ _SENTINEL_REASONS = {
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own
     # bad argument, not an environment wall (ENG-1635).
     "package_install_rejected": (TIER_SELF, "invalid_argument"),
+    # The single-scratchpad guard's challenge to a NEW pad name. Guidance the
+    # agent acts on by reusing the pad it already has (the outcome is even
+    # `ok=True`), so it is the agent's own argument choice, never a wall.
+    "new_scratchpad_challenged": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),
@@ -169,6 +173,12 @@ _SENTINEL_REASONS = {
     # Could be environment or config and the sentinel does not say which, so it
     # stays out of every trip rung until something distinguishes them.
     "launch_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `generate_artifact` stopped somewhere inside its own pipeline. The
+    # single string it returns names the node, but the causes behind that
+    # node span everything from a truncated spec to a missing data source, so
+    # one sentinel cannot pick a tier honestly. Unclassified until the
+    # pipeline reports a cause rather than a location.
+    "pipeline": (TIER_UNCLASSIFIED, "unclassified"),
     # `read_image`'s catch-all read failure wraps a bare `except Exception`, so
     # one sentinel covers a permissions wall, a corrupt file the agent itself
     # wrote, and a decode bug. Nothing here distinguishes them, so it stays out

@@ -16,6 +16,7 @@ build their own launcher).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,59 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Protocol
+
+from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+
+
+_log = logging.getLogger(__name__)
+
+
+def build_datasource_env(vault, datasources, *, slug: str = "") -> dict[str, str]:
+    """The complete `DS_*` set a backend is entitled to: its declared sources only.
+
+    Shared by both launch paths on purpose (ENG-1382). `handle_launch_backend`
+    is what the agent calls; `generate_artifact` launches the backend itself at
+    the end of its pipeline and never goes through that handler. Building this
+    in only one of them means an artifact's credential exposure depends on WHO
+    started it — the generator's own launch would hand the subprocess every
+    `DS_*` in the process, which is the inheritance ENG-1382 removed.
+
+    Returns `{}` when nothing is declared or resolvable. That is still a
+    meaningful answer: passed as `ds_env` it strips the inherited `DS_*`, which
+    is the point for a backend that declared no datasource.
+    """
+    ds_env: dict[str, str] = {}
+    for ref in datasources or []:
+        if vault is None:
+            _log.warning("Artifact %s declares datasources but there is no vault", slug)
+            break
+        # Per-ref so one unreadable connection cannot deny the others, and
+        # env_for is the resolver a pad's own DS_* are built from.
+        try:
+            env = vault.env_for(ref.engine, ref.name)
+        except Exception:
+            _log.warning(
+                "Could not resolve %s/%s for backend %s", ref.engine, ref.name, slug,
+                exc_info=True,
+            )
+            continue
+        if env is None:
+            # Declared in metadata but gone from the vault: the backend would
+            # fail on its first query with nothing saying why.
+            _log.warning(
+                "Artifact %s declares %s/%s, which is not in the vault",
+                slug, ref.engine, ref.name,
+            )
+            continue
+        # Enforced here, not left to the vault: TurnKeyDataVault.env_for does
+        # not drop `_`-prefixed bookkeeping though its contract says it does.
+        field_prefix = f"{ref.env_prefix}__"
+        for key, value in env.items():
+            field = key[len(field_prefix):] if key.startswith(field_prefix) else key
+            if field.startswith("_"):
+                continue
+            ds_env[key] = value
+    return ds_env
 
 
 def _anton_state_pythonpath_dir() -> str:
@@ -57,14 +111,18 @@ def _anton_state_pythonpath_dir() -> str:
     return str(root)
 
 
-def _build_backend_env(
+def build_backend_env(
     extra_env: dict[str, str] | None,
     ds_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Subprocess env: inherited environ + extra_env, with anton_state on PYTHONPATH.
 
+    Public: `generate_artifact.verifiers.verify_backend` imports the artifact
+    backend in the same venv (introspection subprocess) and must see the same
+    `anton_state` injection, or a correct stateful backend fails its import.
+
     A non-None `ds_env` replaces the inherited DS_* entirely, so the backend
-    sees only the datasources it declared.
+    sees only the datasources it declared (ENG-1382).
     """
     env = {**os.environ}
     # Before the strip, so a caller's DS_* survive only when ds_env is None;
@@ -78,6 +136,32 @@ def _build_backend_env(
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = isolated + (os.pathsep + existing if existing else "")
     return env
+
+
+# Backwards-compatible name: pre-existing callers/tests import the underscored
+# form; the function went public when verify_backend became its second caller.
+
+def parse_requirements(text: str) -> list[str]:
+    """The installable lines of a requirements.txt.
+
+    Comments, blanks and pip options (`-r`, `--index-url`) are dropped, and so
+    is `anton_state`: the internal STATE SDK reaches the backend at runtime via
+    PYTHONPATH (see `_anton_state_pythonpath_dir`) and is published to no
+    registry, so a model that listed it would otherwise fail the install with
+    "anton-state was not found in the package registry". Shared with the
+    generator's `verify_backend`, so the verifier installs exactly what the
+    launch will.
+    """
+    packages: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        pkg_name = re.split(r"[<>=!~ \[]", line, maxsplit=1)[0].strip()
+        if pkg_name.replace("-", "_").lower() == "anton_state":
+            continue
+        packages.append(line)
+    return packages
 
 
 class ScratchpadPoolLike(Protocol):
@@ -156,20 +240,7 @@ async def launch_artifact_backend(
 
     req_path = folder / "requirements.txt"
     if req_path.is_file():
-        packages: list[str] = []
-        for raw_line in req_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.split("#", 1)[0].strip()
-            if not line or line.startswith("-"):
-                continue
-            # `anton_state` is the internal STATE SDK — it is provided to the
-            # backend at runtime via PYTHONPATH (see _anton_state_pythonpath_dir),
-            # not published to any package registry. Drop it if the model listed
-            # it in requirements.txt, otherwise the install step fails with
-            # "anton-state was not found in the package registry".
-            pkg_name = re.split(r"[<>=!~ \[]", line, maxsplit=1)[0].strip()
-            if pkg_name.replace("-", "_").lower() == "anton_state":
-                continue
-            packages.append(line)
+        packages = parse_requirements(req_path.read_text(encoding="utf-8"))
         if packages:
             from datetime import datetime, timezone
 
@@ -179,7 +250,7 @@ async def launch_artifact_backend(
                 f"\n=== requirements.txt install "
                 f"({datetime.now(timezone.utc).isoformat(timespec='seconds')}) ===\n"
             )
-            with open(folder / "backend.log", "ab", buffering=0) as install_log:
+            with open(folder / BACKEND_LOG_FILENAME, "ab", buffering=0) as install_log:
                 install_log.write(banner.encode("utf-8"))
                 install_log.write(install_result.encode("utf-8"))
                 install_log.write(b"\n")
@@ -214,7 +285,7 @@ async def launch_artifact_backend(
         port = s.getsockname()[1]
 
     cmd = [venv_python, str(script), "--port", str(port), *extra_args]
-    log_path = folder / "backend.log"
+    log_path = folder / BACKEND_LOG_FILENAME
     log_fd = open(log_path, "ab", buffering=0)
 
     # PR_SET_PDEATHSIG so the backend dies with the parent on Linux. macOS
@@ -241,7 +312,7 @@ async def launch_artifact_backend(
             stderr=log_fd,
             stdin=asyncio.subprocess.DEVNULL,
             preexec_fn=preexec_fn,
-            env=_build_backend_env(extra_env, ds_env),
+            env=build_backend_env(extra_env, ds_env),
         )
     except OSError as exc:
         log_fd.close()

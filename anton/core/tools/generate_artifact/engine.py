@@ -1,0 +1,1056 @@
+"""Async tool-call loop(s) that drive the inner generation LLM.
+
+For html-app: single loop.
+For fullstack-stateless-app and fullstack-stateful-app:
+  1. One-shot planning call → OpenAPI specification (JSON, kept in memory).
+  2. asyncio.gather → backend loop + frontend loop in parallel.
+
+The sub-generator reaches real data itself through the `scratchpad` sub-tool,
+guided by the free-form `## Data` section of the brief (which names the
+scratchpads/cells the main agent already used). The engine no longer fabricates
+test data or pre-pickles variables.
+
+The loop protocol is Anthropic tool-use / tool-result blocks, which both
+providers Anton ships (AnthropicProvider, OpenAIProvider) accept on input.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+# Same alias the rest of the codebase uses since the httpx2 migration: the
+# transport errors caught below must be the ones the LLM client's own HTTP
+# stack raises, and a second httpx install would give us a different class
+# tree that silently never matches.
+import httpx2 as httpx
+
+from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
+from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.llm.structured import looks_truncated
+
+from . import sub_tools
+from .debug_trace import NullTrace
+from .spend import WIND_DOWN_ROUNDS
+from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
+from .verifiers import normalise_api_path
+from .prompts import (
+    build_api_spec_instruction,
+    build_api_spec_prompt,
+    build_backend_kickoff,
+    build_backend_system_prompt,
+    build_frontend_kickoff,
+    build_frontend_system_prompt,
+    build_subagent_system_prompt,
+    build_user_kickoff,
+)
+
+if TYPE_CHECKING:
+    from anton.chat_session import ChatSession
+    from anton.core.llm.provider import LLMResponse
+
+logger = logging.getLogger(__name__)
+
+
+# Higher than the old 12 because the sub-generator also spends rounds on
+# scratchpad calls (pulling/rebuilding data) on top of writing files, and higher
+# than 16 because a file is now built in chunks (`mode="a"`) rather than in one
+# call — head, sections, scripts and closing tags each cost a round unless the
+# model batches them. One shared cap: it also gates `fetch_data_sample`, and a
+# runaway there is bounded by DATA_LOOP_MAX anyway.
+MAX_ROUNDS = 20
+
+
+# Rejections specific to the file-body protocol (see sub_tools.extract_file_body).
+# Every one of them says "nothing was written": the model's next move depends on
+# whether the file moved, and leaving that to inference is how `mode="a"`
+# duplicates content.
+#
+# The truncation wording lives in `extract_file_body` instead of here, because
+# only the parser knows whether the end marker is missing because the reply was
+# cut off or because the model forgot the line — and those need opposite
+# instructions (re-send smaller vs. add one line).
+
+_BODY_WITHOUT_CALL_MSG = (
+    "Your reply contained a file body but no `write_file` call, so nothing was "
+    "written. Both halves are required: the body as text between the markers, "
+    "and the call naming the path. The body you just produced is still in the "
+    "conversation above — do NOT repeat it. Just make the `write_file` call "
+    "for it now."
+)
+
+_ONE_WRITE_PER_REPLY_MSG = (
+    "Error: more than one `write_file` in this reply, and a reply carries only "
+    "one file body, so nothing was written. Write one file (or one appended "
+    "part) per reply."
+)
+
+_CONTENT_ARG_MSG = (
+    "Error: `write_file` takes no `content` argument, so nothing was written. "
+    f"Put the file content in your reply as text between "
+    f"`{sub_tools.FILE_BEGIN_MARKER}` and `{sub_tools.FILE_END_MARKER}`, and "
+    "call `write_file` with the path only."
+)
+
+
+async def _drain_stream(events, on_text=None) -> "LLMResponse":
+    """Consume a `plan_stream()`/`code_stream()` iterator and return the final
+    assembled response; hand each text delta to ``on_text`` when given.
+
+    Used in place of the one-shot `plan()`/`code()` calls. This pipeline runs
+    headless — its own progress surface is the step-level `ToolProgress`
+    protocol — so nothing needs the intermediate `StreamToolUse*` events,
+    only the terminal `StreamComplete`. The text deltas have one taker:
+    `GenState.peek_for` feeds them to the live tail in the spinner footer
+    (`progress.LivePeek`), so a minute-long write is not a frozen screen.
+    The reason to stream at all is transport, not UX: a
+    non-streaming call sends no bytes over the wire until the whole response
+    is ready, and `api.mindshub.ai` sits behind Cloudflare, which kills a
+    connection that has been silent for ~100s with a 524 — a real failure on
+    long spec/code generations.
+
+    For TEXT that works: bytes flow continuously and the proxy never observes
+    silence. For a large TOOL-CALL argument it does NOT, and the original
+    version of this docstring was wrong to claim otherwise. Measured
+    2026-08-28: generating a 59 000-character `write_file` argument produced
+    its first stream event at ~2s, then nothing for 112 seconds, then every
+    remaining event in a single burst. The same profile appears when talking
+    straight to `api.anthropic.com`, so it is not the gateway's doing and
+    cannot be fixed on our side — the argument simply is not streamed
+    incrementally.
+
+    Consequence: a long tool-call generation IS a silent connection, and
+    whether it survives is a race against the proxy's idle timeout. Hence
+    `_call_with_stream_retry` below.
+    """
+    from anton.core.llm.provider import StreamComplete, StreamTextDelta
+
+    result = None
+    async for event in events:
+        if isinstance(event, StreamComplete):
+            result = event.response
+        elif on_text is not None and isinstance(event, StreamTextDelta) and event.text:
+            on_text(event.text)
+    if result is None:
+        raise RuntimeError("LLM stream ended without a StreamComplete event")
+    return result
+
+
+# Mid-stream transport failures. `httpx` is not declared by anton directly but
+# is a hard requirement of both `openai` and `anthropic`, so it is always
+# installed; it is declared in pyproject alongside this use rather than relied
+# on transitively. The measured failure is RemoteProtocolError ("peer closed
+# connection without sending complete message body"); the neighbours are the
+# same class of half-open-connection death.
+_STREAM_DROP_ERRORS: tuple[type[BaseException], ...] = (
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+)
+
+# Floor for the halved retry budget — below this a chunk is too small to make
+# progress and the round is wasted either way.
+_RETRY_BUDGET_FLOOR = 2048
+
+
+async def _call_with_stream_retry(
+    llm_call,
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict] | None,
+    max_tokens: int | None,
+    default_cap: int | None,
+    on_text=None,
+) -> tuple["LLMResponse", int | None]:
+    """One LLM round, retried once if the connection dies mid-stream.
+
+    Returns the response and the budget it actually ran on — the caller needs
+    the latter to judge truncation, and the retry deliberately does not run on
+    the same budget as the first try.
+
+    Retrying with IDENTICAL parameters would mostly reproduce the failure: the
+    drop is a race between how long the generation stays silent (see
+    `_drain_stream`) and the proxy's idle timeout, and neither changes on a
+    re-run. So the retry halves the budget, which halves the silence. If the
+    shorter budget truncates instead, that is a strictly better outcome — the
+    loop already recovers from truncation by asking for a smaller chunk, while
+    a dropped connection propagates as a raw transport error and kills the
+    whole generation.
+
+    Nothing has been executed when a drop happens: tool calls run only after
+    the stream is fully drained, so a retry cannot double-apply a write.
+    """
+    budget = max_tokens
+    try:
+        return await _drain_stream(
+            llm_call(system=system, messages=messages, tools=tools, max_tokens=budget),
+            on_text,
+        ), budget
+    except _STREAM_DROP_ERRORS:
+        effective = budget or default_cap
+        retry_budget = max(_RETRY_BUDGET_FLOOR, effective // 2) if effective else None
+        logger.warning(
+            "generate_artifact: stream dropped mid-generation; retrying once "
+            "with a halved output budget (%s -> %s)", effective, retry_budget,
+        )
+    return await _drain_stream(
+        llm_call(system=system, messages=messages, tools=tools, max_tokens=retry_budget),
+        on_text,
+    ), retry_budget
+
+
+def _scratchpads_context(session) -> str:
+    """Render the pads the calling agent ran, for the gathering kickoff.
+
+    Names come from where the single-scratchpad guard looks
+    (`session._agent_scratchpad_names` plus the manager's persisted
+    `agent_pads()`), so the list is exactly the set a new name would be
+    refused against; system pads (the backend launcher's) are not in it.
+    Cell counts and the last description come from the loaded runtimes when
+    present. Best-effort: a session without a manager renders nothing.
+    """
+    names: set[str] = set()
+    seen = getattr(session, "_agent_scratchpad_names", None)
+    if isinstance(seen, set):
+        names |= {n for n in seen if isinstance(n, str)}
+    manager = getattr(session, "_scratchpads", None)
+    if manager is not None and hasattr(manager, "agent_pads"):
+        try:
+            persisted = manager.agent_pads()
+            if isinstance(persisted, set):
+                names |= persisted
+        except Exception:
+            pass
+    if not names:
+        return ""
+    try:
+        loaded = dict(getattr(manager, "pads", None) or {})
+    except Exception:
+        loaded = {}
+    pads: list[tuple[str, int, str]] = []
+    for name in sorted(names):
+        runtime = loaded.get(name)
+        cells = list(getattr(runtime, "cells", None) or []) if runtime is not None else []
+        last = ""
+        for cell in reversed(cells):
+            desc = getattr(cell, "description", "") or ""
+            if desc:
+                last = desc
+                break
+        pads.append((name, len(cells), last))
+    from .discovery.prompts import render_scratchpads_context
+
+    return render_scratchpads_context(pads)
+
+
+def _output_token_cap(session) -> int | None:
+    """The client's effective output cap, or None when it cannot be read.
+
+    Reads the public `max_tokens` property (`anton/core/llm/client.py:151`,
+    added by ENG-1042 for exactly this comparison). In tests the session is an
+    `AsyncMock` where the attribute exists and is truthy but is not a number,
+    so the type check is mandatory: without it the detection would fire on
+    every test.
+    """
+    cap = getattr(getattr(session, "_llm", None), "max_tokens", None)
+    return cap if isinstance(cap, int) and cap > 0 else None
+
+
+_WIND_DOWN_MSG = (
+    "This turn is out of budget. Close the file you are writing NOW: if a final "
+    "part is still needed, send it as one more body plus its `write_file` call, "
+    "then call `finish`. Do not start anything new and do not verify what you "
+    "wrote."
+)
+
+_SPEC_NO_TOOLS_NUDGE = (
+    "\n\nDo NOT call any tool on this step. The tools stay declared for the "
+    "conversation as a whole; here the only valid reply is the document "
+    "itself as text."
+)
+
+_SPEC_COMPACT_NUDGE = (
+    "\n\nIMPORTANT: your previous answer was cut off by the output limit "
+    "before it reached the end, so it was discarded. Write the whole "
+    "specification again, and make it fit: no preamble, no restating the "
+    "brief or the PRD back at me, no worked examples, short lines. A complete "
+    "structure matters far more than depth in any one section."
+)
+
+
+async def _plan_whole_document(
+    session: "ChatSession",
+    *,
+    system: str,
+    user: str,
+    node_label: str,
+    trace=None,
+    on_retry=None,
+    messages: list[dict] | None = None,
+    tools: list[dict] | None = None,
+    on_text=None,
+) -> tuple[str, str | None]:
+    """One planning call for a whole specification, retried once with more room.
+
+    Returns ``(body, error)``; exactly one of the two is set.
+
+    ``messages``, when given, is the shared history of phases A-D and this
+    call APPENDS its instruction to it rather than starting a conversation:
+    the spec nodes are the last ones that see the source material, and what
+    they carry forward is all the generation nodes will get. ``tools`` must
+    then be non-empty — the history contains tool_use/tool_result blocks and
+    the API rejects a request carrying those with no tools declared.
+
+    Without ``messages`` the call keeps its original one-message shape, which
+    is the cold-start path: the context was rebuilt from disk and there is no
+    history to continue.
+
+    A tool call is refused once and then fails the node. Availability is
+    enforced in code now (the array is fixed for the whole shared-prefix
+    region), so a spec node can be handed a call it must not run; letting it
+    argue costs a full re-send of the shared history per round, the most
+    expensive round in the pipeline. The refusal deliberately does NOT consume
+    a rung of the budget ladder — that ladder exists for cut answers, and
+    spending it here would leave a genuinely truncated spec with no room left
+    to retry.
+
+    A spec is produced by a single call, so — unlike the file-writing loop —
+    there is no chunk boundary to append at and a cut answer cannot be
+    continued. It has to be re-asked, and the re-ask must CHANGE the call or it
+    dies identically (measured for the main loop's own recovery,
+    ``session._recover_truncated_stream``): the budget goes up AND the model is
+    told to write compactly.
+
+    A truncated document is never returned. Both generators consume the spec as
+    their requirements, and `_spec_context` hands it to them verbatim, so half a
+    spec means half a system built with nothing anywhere reporting that
+    something was lost — which is the actual damage ENG-1116 describes, not the
+    missing length.
+
+    Truncation is detected with the shared `looks_truncated`, which also honours
+    ``stop_reason`` — the gateway reports it correctly since 2026-08-03, and a
+    token count alone cannot see a cut that stopped just under the cap.
+    """
+    trace = trace or NullTrace()
+    budgets = (SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)
+    response = None
+    extra = ""
+    attempt = 0
+    refused_once = False
+    while attempt < len(budgets):
+        budget = budgets[attempt]
+        if attempt > 0 and on_retry is not None:
+            on_retry()
+        instruction = {"role": "user", "content": user + extra}
+        call_messages = (
+            [*messages, instruction] if messages is not None else [instruction]
+        )
+        response = await _drain_stream(session._llm.plan_stream(
+            system=system, messages=call_messages, max_tokens=budget, tools=tools,
+        ), on_text)
+        trace.llm_call(
+            node=node_label, method="plan", system=system,
+            messages=call_messages, response=response, attempt=attempt,
+        )
+
+        if getattr(response, "tool_calls", None):
+            for tc in response.tool_calls:
+                trace.tool_rejected(
+                    node=node_label, tool=getattr(tc, "name", "?"),
+                    reason="tool calls are not available on a specification step",
+                    )
+            if refused_once:
+                return "", (
+                    f"{node_label}: the model kept calling tools instead of "
+                    "writing the document."
+                )
+            refused_once = True
+            extra = _SPEC_NO_TOOLS_NUDGE
+            continue  # same rung: a refusal is not a truncation
+
+        if not looks_truncated(response, budget):
+            return (response.content or "").strip(), None
+        extra = _SPEC_COMPACT_NUDGE
+        attempt += 1
+
+    used = getattr(getattr(response, "usage", None), "output_tokens", None)
+    return "", (
+        f"{node_label}: the specification hit the output limit "
+        f"({used} tokens against a {SPEC_MAX_TOKENS_RETRY} budget) and was "
+        "still incomplete after a retry asking for a compact version."
+    )
+
+
+def _load_prd(state) -> None:
+    """Load the confirmed PRD from the artifact folder, when there is one.
+
+    Read here rather than accepted as a tool parameter: the handler already
+    resolves the artifact folder from `slug`, so the file needs no addressing
+    and the LLM-facing schema stays at `slug` + `context`. The calling agent
+    cannot forget to pass it, mis-transcribe it, or paraphrase it — the
+    document the user accepted is the one that arrives.
+
+    Every failure mode degrades to "no PRD" instead of stopping the run:
+    an agent may legitimately skip the PRD step, artifacts created before
+    ENG-969 have no `prd.md`, and a file that cannot be read must not cost a
+    generation that `context` alone can still complete. Which of the two
+    modes ran is recorded, so a wrong-looking artifact can be traced back to
+    the requirements it was actually built from.
+    """
+    path = state.artifact_path / PRD_FILENAME
+    try:
+        if not path.is_file():
+            state.record("read_prd", "skipped", f"no {PRD_FILENAME} in the artifact folder")
+            return
+        body = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        state.record("read_prd", "error", f"{PRD_FILENAME} could not be read: {exc}")
+        return
+    if not body:
+        state.record("read_prd", "skipped", f"{PRD_FILENAME} is empty")
+        return
+    state.prd = body
+    state.record("read_prd", "done", f"{len(body)} chars from {PRD_FILENAME}")
+
+
+def _load_api_spec(state) -> None:
+    """Read `openapi.json` back into `state.api_spec` on a resumed generation.
+
+    `_make_api_spec` writes the file and sets the field in the same breath,
+    and nothing read it back: a run entering at `resume_generate` handed
+    both generators `{}` as the API specification, probed no GET route
+    after launch, and skipped the contract check as "no contract" (I-48).
+    Same failure discipline as `_load_prd`: a missing or unreadable file is
+    recorded and the run goes on with what it has — the file's absence at
+    this entry is itself the thing worth seeing in the trace.
+    """
+    path = state.artifact_path / API_SPEC_FILENAME
+    try:
+        if not path.is_file():
+            state.record("read_api_spec", "skipped", f"no {API_SPEC_FILENAME} in the artifact folder")
+            return
+        body = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        state.record("read_api_spec", "error", f"{API_SPEC_FILENAME} could not be read: {exc}")
+        return
+    if not body:
+        state.record("read_api_spec", "skipped", f"{API_SPEC_FILENAME} is empty")
+        return
+    state.api_spec = body
+    if API_SPEC_FILENAME not in state.internal_files:
+        state.internal_files.append(API_SPEC_FILENAME)
+    state.record("read_api_spec", "done", f"{len(body)} chars from {API_SPEC_FILENAME}")
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+async def generate(
+    *,
+    session: "ChatSession",
+    slug: str,
+    artifact_path: Path,
+    artifact_type: str,
+    user_request: str,
+    agent_understanding: str,
+    known_data: str = "",
+    user_preferences: str = "",
+    primary: str | None = None,
+    progress: "asyncio.Queue[str | None] | None" = None,
+    attachments: "list[str] | tuple[str, ...]" = (),
+) -> dict | str:
+    """Run the whole artifact pipeline: gather, agree, specify, build.
+
+    Returns a result dict carrying a ``status``, or a single error string
+    naming the node where the machine stopped.
+
+    Where the run STARTS is decided here, from what the artifact folder
+    already holds. Two independent checks, neither of which guesses intent
+    from free text: `user_request` says whether this is the same work, and
+    the recorded stage says how far the previous call got. See
+    `discovery/checkpoint.py`.
+
+    ``progress``, when given, receives one user-facing line per step start
+    (see ``GenState.step_started``). Optional so the non-streaming callers —
+    ``bench_generate.py``, tests — need no channel to drain.
+
+    ``attachments`` are absolute paths of files the user attached to the
+    conversation (S-01); see `attachments.py` for what happens to each kind.
+    """
+    from .attachments import resolve_attachments
+    from .discovery import checkpoint as cp
+    from .orchestrator import _datasource_context, run
+    from .spend import SpendGuard
+    from .state import GenState
+    from .debug_trace import make_trace
+
+    if artifact_type not in GENERATOR_ARTIFACT_TYPES:
+        return f"Error: unsupported artifact type: {artifact_type!r}"
+
+    trace = make_trace()
+    trace.run_start(
+        slug=slug,
+        artifact_type=artifact_type,
+        artifact_path=artifact_path,
+        user_request=user_request,
+        agent_understanding=agent_understanding,
+        is_fullstack=artifact_type != "html-app",
+    )
+
+    state = GenState(
+        session=session,
+        artifact_type=artifact_type,
+        artifact_path=artifact_path,
+        slug=slug,
+        primary=primary,
+        user_request=user_request,
+        agent_understanding=agent_understanding,
+        known_data=known_data,
+        user_preferences=user_preferences,
+        datasource_context=_datasource_context(session),
+        scratchpads_context=_scratchpads_context(session),
+        trace_log=trace,
+        progress=progress,
+        spend=SpendGuard(session=session),
+    )
+    kept, dropped = resolve_attachments(attachments)
+    state.attachments = kept
+    if kept or dropped:
+        state.record(
+            "attachments", "done" if kept else "skipped",
+            "; ".join([*(f"{a.name} ({a.kind})" for a in kept), *dropped]),
+        )
+
+    stored = cp.load(artifact_path)
+    entry = cp.decide_entry(
+        stored, request_fp=cp.request_fingerprint(user_request)
+    )
+    state.record("entry", entry, "" if stored is None else stored.pipeline_stage)
+    if entry != cp.ENTRY_FULL and stored is not None:
+        _restore(state, stored)
+        _load_prd(state)
+        # Only where the spec phase is skipped: every other entry rewrites
+        # the contract in `_make_api_spec`, and `_invalidate_specs` has
+        # already removed a stale one from disk before then.
+        if entry == cp.ENTRY_GENERATE and state.is_fullstack:
+            _load_api_spec(state)
+
+    # `elicit()` is called from inside the FSM task while the tool handler is
+    # draining the progress queue, so the two have to be told about each
+    # other; the channel is the only thing they share.
+    session._artifact_progress = progress
+    try:
+        result = await run(state, entry=entry)
+    except BaseException as exc:
+        # A crash is a run outcome too. Without this the trace file simply
+        # stops mid-run with no terminal record, and nothing reading it can
+        # tell a crash apart from a session that was killed — which is the
+        # one distinction you need when a run ends unexpectedly.
+        trace.run_result(ok=False, error=f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        session._artifact_progress = None
+    if isinstance(result, str):
+        trace.run_result(ok=False, error=result)
+    else:
+        trace.run_result(ok=True, result=result)
+    return result
+
+
+def _restore(state, stored) -> None:
+    """Rebuild in memory what the discovery phases produced last time.
+
+    Everything phase E reads has to come back, not just the PRD: the
+    pad-inspection step that used to reconstruct `data_notes` on a cold start
+    is gone, and the PRD no longer restates the data-access code.
+
+    `call_changed` is the only derived value — it says whether this call
+    brought a correction, and it decides whether the brief is redrawn or
+    reused verbatim. An optimization, never a confirmation signal.
+    """
+    from .discovery import checkpoint as cp
+
+    state.brief = stored.brief_markdown
+    state.data_notes = stored.data_notes
+    state.web_notes = stored.web_notes
+    state.declared_sources = list(stored.declared_sources)
+    state.unverified_sources = list(stored.unverified_sources)
+    state.assumptions = list(stored.assumptions)
+    state.open_points = list(stored.open_points)
+    state.gathering_complete = stored.gathering_complete
+    state.final_artifact_type = stored.artifact_type
+    # The call's own list wins: a repeat call that names files is the user
+    # adding or replacing them. Only a call naming none inherits the
+    # previous run's records (and their staged names).
+    if not state.attachments:
+        from .attachments import Attachment
+
+        state.attachments = [
+            a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
+        ]
+    state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
+        state.agent_understanding, state.known_data, state.user_preferences
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pre-generation steps
+# ---------------------------------------------------------------------------
+
+
+async def _generate_api_spec(
+    session: "ChatSession",
+    context: str,
+    *,
+    stateless: bool = False,
+    trace=None,
+    node_label: str = "make_api_spec",
+    on_retry=None,
+    messages: list[dict] | None = None,
+    tools: list[dict] | None = None,
+    system_override: str | None = None,
+    on_text=None,
+) -> str:
+    """One-shot planning call → OpenAPI specification (JSON).
+
+    ``messages`` and ``system_override`` are the hot path: the node continues
+    the shared history under the region's single system prompt, and the step
+    message is the instruction alone — the PRD and `spec.md` are already in
+    that history as the model's own replies. They travel together: a history
+    sent under a different system prompt would discard the prefix cache the
+    shared region exists to keep. Without ``messages`` the cold-start prompt
+    carries the assembled context in front of the same instruction.
+
+    The reply is parsed and checked for shape (`_api_spec_problem`), and its
+    paths against the ones `spec.md` lists under `## Backend` when ``context``
+    carries that section. A reply that is not a usable document is asked for
+    once more with the problem named; the second failure ends the node.
+    """
+    if messages is not None and system_override is not None:
+        system = system_override
+        user = build_api_spec_instruction(stateless=stateless)
+    else:
+        system, user = build_api_spec_prompt(context, stateless=stateless)
+    declared = _declared_api_paths(context)
+    extra = ""
+    for attempt in range(2):
+        if attempt and on_retry is not None:
+            on_retry()
+        body, error = await _plan_whole_document(
+            session, system=system, user=user + extra, node_label=node_label,
+            trace=trace, on_retry=on_retry, messages=messages, tools=tools,
+            on_text=on_text,
+        )
+        if error is not None:
+            # Already worded in terms of the output limit. Without this branch
+            # the cut JSON would fall through to `json.loads` below and be
+            # reported as "not valid JSON", pointing at the wrong cause.
+            return f"Error: {error}"
+        spec = _strip_code_fence(body)
+        if not spec:
+            problem = "the reply was empty"
+        else:
+            try:
+                parsed = json.loads(spec)
+            except json.JSONDecodeError as exc:
+                problem = f"the reply is not valid JSON ({exc})"
+            else:
+                problem = _api_spec_problem(parsed, declared)
+                if problem is None:
+                    return json.dumps(parsed, indent=2, ensure_ascii=False)
+        extra = (
+            "\n\n## Previous reply rejected\n"
+            f"It could not be used: {problem}. Reply with the corrected "
+            "OpenAPI JSON document only."
+        )
+    return f"Error: API spec is not a usable OpenAPI document: {problem}"
+
+
+_API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
+_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)]+)")
+_HEALTH_PATH = "/api/health"
+
+
+# One normaliser for every path comparison in the pipeline: spec.md against
+# openapi.json here, openapi.json against the generated code in `verifiers`.
+_normalise_api_path = normalise_api_path
+
+
+def _declared_api_paths(context: str) -> dict[str, str]:
+    """The paths `spec.md` lists under `## Backend`, normalised → as written.
+
+    Read from the assembled context, which carries `spec.md` on both the
+    cold and the hot path. The section runs to the next `##` heading; a line
+    counts when it names `METHOD /api/...`, in backticks or bare. Empty when
+    there is no such section — the instruction then lets the model derive
+    the endpoints from the PRD, and there is nothing to compare against.
+    """
+    match = re.search(r"^## Backend[^\n]*\n(.*?)(?=^#{1,2} |\Z)", context, re.M | re.S)
+    if not match:
+        return {}
+    found: dict[str, str] = {}
+    for path in _DECLARED_PATH_RE.findall(match.group(1)):
+        if _normalise_api_path(path) != _HEALTH_PATH:
+            found.setdefault(_normalise_api_path(path), path)
+    return found
+
+
+def _api_spec_problem(spec, declared: dict[str, str] | None = None) -> str | None:
+    """Why a parsed document cannot serve as the API contract, or None.
+
+    Cheap shape checks only — the generators read the document as prose, and
+    `_probe_app` reads its GET paths — so the cases caught are the ones that
+    would otherwise pass silently: no paths at all (nothing to probe, nothing
+    to build), a path outside `/api/` (the backend verifier rejects root
+    routes, so the frontend would call a path that never exists), an
+    operation with no `responses` (the frontend has no shape to render).
+
+    With ``declared`` (from `_declared_api_paths`) the document's paths must
+    be exactly those, `/api/health` aside. The twentieth live run renamed
+    `GET /api/rooms/{code}/state` to `GET /api/rooms/{code}`: both generators
+    followed the document, so the app was consistent — and `spec.md` no
+    longer described it. Parameter names may differ; segments may not.
+    """
+    if not isinstance(spec, dict):
+        return "the document is not a JSON object"
+    paths = spec.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        return "`paths` is missing or empty"
+    for path, ops in paths.items():
+        if not str(path).startswith("/api/"):
+            return f"path `{path}` is not under `/api/`"
+        if not isinstance(ops, dict):
+            return f"path `{path}` has no operations object"
+        for method in _API_SPEC_METHODS:
+            op = ops.get(method)
+            if op is None:
+                continue
+            if not isinstance(op, dict) or not isinstance(op.get("responses"), dict) or not op["responses"]:
+                return f"`{method.upper()} {path}` has no `responses`"
+    if declared:
+        present = {
+            _normalise_api_path(p): p for p in paths if _normalise_api_path(p) != _HEALTH_PATH
+        }
+        for key in sorted(set(declared) - set(present)):
+            return (
+                f"`spec.md` lists `{declared[key]}` but the document has no such path "
+                "(keep every path exactly as `spec.md` writes it)"
+            )
+        for key in sorted(set(present) - set(declared)):
+            return (
+                f"the document adds `{present[key]}`, which `spec.md` does not list "
+                "(keep every path exactly as `spec.md` writes it)"
+            )
+    return None
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strip a leading/trailing markdown code fence if present.
+
+    Models often wrap JSON in ```json ... ``` despite being asked for raw JSON.
+    """
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    lines = lines[1:]  # drop opening ```json / ``` line
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# Generic bounded tool-call loop
+# ---------------------------------------------------------------------------
+
+
+async def _run_loop(
+    *,
+    session: "ChatSession",
+    system: str,
+    kickoff: str,
+    artifact_path: Path,
+    node_label: str,
+    attempt: int | None = None,
+    trace=None,
+    step_injections: list[tuple[str, str]] | None = None,
+    require_files: bool = True,
+    spend=None,
+    on_text=None,
+) -> dict | str:
+    """Run one bounded sub-agent tool-call loop.
+
+    ``step_injections`` is an optional list of ``(trigger_filename, message)``
+    pairs. When a ``write_file`` call successfully writes ``trigger_filename``,
+    ``message`` is appended to the tool-result content so the model receives
+    the next-step instruction in the same turn. Each trigger fires at most once.
+
+    Returns a result dict ``{files_written, rounds_used, summary,
+    scratchpad_execs}`` on success, or a plain error string on failure.
+    ``scratchpad_execs`` records every scratchpad ``exec`` the loop made —
+    ``{name, code, output}`` per call — so callers can hand the exact
+    data-access code that ran to later FSM steps.
+
+    ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
+    is reached the loop tells the model to close its file and stop, and gives
+    it `WIND_DOWN_ROUNDS` to do so. That counter is LOCAL: the fullstack path
+    runs two of these loops at once over one guard, and a shared budget would
+    leave each with about one round — not enough to both emit a final chunk
+    and call `finish`.
+    """
+    trace = trace or NullTrace()
+    tools = sub_tools.tool_schemas()
+    default_cap = _output_token_cap(session)
+    messages: list[dict] = [{"role": "user", "content": kickoff}]
+
+    files_written: list[str] = []
+    scratchpad_execs: list[dict] = []
+    finished_summary: str | None = None
+    injected: set[str] = set()
+    closing_rounds_left = WIND_DOWN_ROUNDS
+    wind_down_announced = False
+    # A body generated in a reply that forgot its `write_file`. Kept so the
+    # retry only has to produce the call: re-generating 20 KB of markup to
+    # recover a missing tool call would pay twice for the same file.
+    pending_body: str | None = None
+
+    for round_idx in range(MAX_ROUNDS):
+        if spend is not None and spend.should_wind_down():
+            if closing_rounds_left <= 0:
+                return {
+                    "files_written": files_written,
+                    "rounds_used": round_idx,
+                    "summary": finished_summary or "",
+                    "scratchpad_execs": scratchpad_execs,
+                    "finished": False,
+                    "over_budget": True,
+                }
+            closing_rounds_left -= 1
+            if not wind_down_announced:
+                messages.append({"role": "user", "content": _WIND_DOWN_MSG})
+                wind_down_announced = True
+        # First round: use the planning model for highest-quality initial generation.
+        # Subsequent rounds (retries, read_file refinements) use the coding model.
+        first_round = round_idx == 0
+        llm_call = session._llm.plan_stream if first_round else session._llm.code_stream
+        # Every round gets the raised budget, round 0 included.
+        #
+        # It used to be withheld from round 0: that round runs on the slower
+        # planning model, and while the file body rode in a tool argument a long
+        # generation meant a silent connection (4 dropped connections out of 4
+        # at this budget, measured 2026-08-28). The default 8192 turned that
+        # drop into a mere truncation, which the loop survives.
+        #
+        # The body is streamed text now, so there is no silence to survive, and
+        # the low cap only did harm: measured 2026-09-15, round 0 hit exactly
+        # 8192 output tokens mid-body and cost a round to nothing. The planning
+        # model is also less token-efficient on this content (1.57 characters
+        # per token against the coding model's 2.62), so 8192 bought it barely
+        # 12 800 characters — less than an average artifact.
+        budget = GEN_WRITE_MAX_TOKENS
+        # Truncation must be judged against the budget THIS round ran on.
+        # Against the client default instead, every reply over 8192 tokens
+        # would be called truncated and its last tool call rejected — exactly
+        # the failure the raised budget exists to remove. `used_budget` is what
+        # the call settled on, which differs from `budget` when the round was
+        # retried after a dropped stream.
+        response, used_budget = await _call_with_stream_retry(
+            llm_call,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=budget,
+            default_cap=default_cap,
+            on_text=on_text,
+        )
+        cap = used_budget or default_cap
+
+        trace.llm_call(
+            node=node_label,
+            method="plan" if round_idx == 0 else "code",
+            system=system,
+            messages=messages,
+            response=response,
+            attempt=attempt,
+            round=round_idx,
+        )
+
+        # The file body rides in the reply's TEXT now, so it is parsed once per
+        # round and every `write_file` in the round reads the same result.
+        # Truncation is judged here too: a body cut off by the output cap has no
+        # end marker, which is a fact rather than the estimate
+        # `looks_truncated` makes from `stop_reason` and the budget.
+        attempted_body = sub_tools.FILE_BEGIN_MARKER in (response.content or "")
+        body, body_error, notes = sub_tools.extract_file_body(
+            response.content or "",
+            looks_truncated=looks_truncated(response, cap or 0),
+        )
+        for kind in notes:
+            trace.protocol_note(node=node_label, kind=kind)
+        if body is None and not attempted_body and pending_body is not None:
+            # The previous round produced a body and forgot the call; this is
+            # the retry that supplies the call.
+            body, body_error = pending_body, None
+
+        # The turn goes into the history BEFORE any early exit below. A retry
+        # has to see the body the model already produced, otherwise telling it
+        # "do not repeat it" asks for something it cannot do.
+        messages.append(
+            {"role": "assistant", "content": sub_tools.assistant_blocks(response)}
+        )
+
+        write_calls = [tc for tc in response.tool_calls if tc.name == "write_file"]
+
+        if attempted_body and not write_calls:
+            # A body with nothing to write it. Ask for the missing half instead
+            # of dropping what was generated — and skip the dispatch below,
+            # which would otherwise accept a `finish` in this same reply.
+            #
+            # That is not a hypothetical: "final chunk plus finish in one reply"
+            # is how the model normally ends. With files already written by
+            # earlier rounds, `require_files` at the bottom would pass, and the
+            # artifact would ship missing its last section, reported as success.
+            pending_body = body
+            messages.append({
+                "role": "user",
+                "content": _BODY_WITHOUT_CALL_MSG if body is not None else body_error,
+            })
+            continue
+
+        if not response.tool_calls:
+            tail = (response.content or "").strip()
+            return (
+                f"generator stopped without writing files "
+                f"(round {round_idx + 1}/{MAX_ROUNDS}). "
+                f"Last output: {tail[:300]!r}"
+            )
+
+        result_blocks: list[dict] = []
+        for tc in response.tool_calls:
+            if tc.parse_error:
+                result_blocks.append(sub_tools.malformed_input_result(tc))
+                continue
+
+            name = tc.name
+            inp = tc.input or {}
+
+            if name == "finish":
+                summary = str(inp.get("summary") or "").strip()
+                finished_summary = summary or "(no summary)"
+                result_blocks.append(sub_tools.tool_result(tc.id, "ok"))
+            elif name == "write_file":
+                if len(write_calls) > 1:
+                    # One reply carries one body, so a second call has nothing
+                    # to write. Refuse both rather than guess which one meant it.
+                    result_blocks.append(sub_tools.tool_result(tc.id, _ONE_WRITE_PER_REPLY_MSG))
+                    continue
+                if "content" in inp:
+                    result_blocks.append(sub_tools.tool_result(tc.id, _CONTENT_ARG_MSG))
+                    continue
+                if body is None:
+                    result_blocks.append(sub_tools.tool_result(tc.id, body_error))
+                    continue
+                res = sub_tools.write_file(
+                    artifact_path,
+                    inp.get("path", ""),
+                    body,
+                    mode=inp.get("mode", "w"),
+                )
+                msg = res["message"]
+                if res.get("ok"):
+                    pending_body = None
+                    written = res["written"]
+                    if written not in files_written:
+                        files_written.append(written)
+                    trace.file_written(node=node_label, path=written)
+                    for trigger, inject_msg in (step_injections or []):
+                        if written == trigger and inject_msg not in injected:
+                            injected.add(inject_msg)
+                            msg = f"{msg}\n\n{inject_msg}"
+                result_blocks.append(sub_tools.tool_result(tc.id, msg))
+            elif name == "read_file":
+                res = sub_tools.read_file(
+                    artifact_path, inp.get("path", ""),
+                    full=bool(inp.get("full", False)),
+                )
+                result_blocks.append(sub_tools.tool_result(tc.id, res["message"]))
+            elif name == "scratchpad":
+                # Full scratchpad access: the sub-generator pulls or rebuilds
+                # the data described in the brief's `## Data` section. Lazy
+                # import avoids a tool_handlers <-> generate_artifact cycle.
+                from anton.core.tools.tool_handlers import handle_scratchpad
+
+                content = sub_tools.unwrap_outcome(await handle_scratchpad(session, inp))
+                if inp.get("action") == "exec":
+                    scratchpad_execs.append(
+                        {
+                            "name": str(inp.get("name") or ""),
+                            "code": str(inp.get("code") or ""),
+                            "output": content if isinstance(content, str) else str(content),
+                        }
+                    )
+                trace.scratchpad(node=node_label, input=inp, output=content)
+                result_blocks.append(sub_tools.tool_result(tc.id, content))
+            else:
+                result_blocks.append(sub_tools.tool_result(
+                    tc.id,
+                    f"Error: unknown sub-tool `{name}`. "
+                    "Use write_file, read_file, or finish.",
+                ))
+
+        # Round accounting rides on the same user message as the tool results.
+        # The model has no other way to see the budget, and without it the
+        # measured failure mode is spending the last rounds on self-checks and
+        # dying at the cap with a finished file (live run 2026-08-27). Appended
+        # as a trailing text block: both providers accept text after
+        # tool_result blocks, and appending never invalidates the prefix cache.
+        rounds_left = MAX_ROUNDS - round_idx - 1
+        note = f"[{rounds_left} round(s) left in this task"
+        if 0 < rounds_left <= 5:
+            note += (
+                " — wrap up NOW: close any open tags and call `finish`. "
+                "Do not spend the remaining rounds on checks"
+            )
+        note += "]"
+        messages.append(
+            {"role": "user", "content": result_blocks + [{"type": "text", "text": note}]}
+        )
+
+        if finished_summary is not None:
+            break
+    else:
+        # Budget exhausted without `finish`. A missing `finish` call is not
+        # evidence the files are bad — when the loop DID write files, hand
+        # them to the caller and let the verifier judge them (live run
+        # 2026-08-27: a complete 48 KB page was deleted and regenerated
+        # because the model burned its last rounds self-checking). The
+        # `finished` flag tells the caller how the loop ended.
+        if not files_written:
+            return (
+                f"generator exceeded round budget ({MAX_ROUNDS}) without "
+                "writing any files."
+            )
+        return {
+            "files_written": files_written,
+            "rounds_used": MAX_ROUNDS,
+            "summary": f"(round budget {MAX_ROUNDS} exhausted before finish was called)",
+            "scratchpad_execs": scratchpad_execs,
+            "finished": False,
+        }
+
+    if require_files and not files_written:
+        return "generator finished without writing any files."
+
+    return {
+        "files_written": files_written,
+        "rounds_used": round_idx + 1,
+        "summary": finished_summary,
+        "scratchpad_execs": scratchpad_execs,
+        "finished": True,
+    }

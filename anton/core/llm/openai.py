@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import NoReturn
 
@@ -813,7 +814,6 @@ def _split_cached_input(usage) -> tuple[int, int, int]:
     return total - read - write, read, write
 
 
-
 async def _aclose_stream(stream: object) -> None:
     """Release a provider stream and its HTTP pool connection.
 
@@ -1390,6 +1390,7 @@ class OpenAIProvider(LLMProvider):
 
         finally:
             await _aclose_stream(stream)
+
 
         # Finalize tool calls. Same safe-parse protection as the
         # non-streaming path — a model cut off mid-JSON-arguments

@@ -14,6 +14,7 @@ import zipfile
 from pathlib import Path
 
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
+from anton.core.artifacts.store import _HOUSEKEEPING_DIRS, _HOUSEKEEPING_FILES
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
@@ -38,24 +39,14 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 # Artifact types that ship as a fullstack bundle (backend + static/ + secrets).
 FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
 
-# Filenames inside an artifact folder that are housekeeping — never bundled.
-# The .anton_state.db* entries are defensive: _zip_fullstack is allowlist-based
-# so root files are not bundled anyway, but this guards against future changes
-# (and covers the WAL side-files, where -wal holds the freshest data).
 # Local snapshot of the last-published state key schema (for the client-side
 # schema-change warning). Never bundled.
 _STATE_SNAPSHOT = ".state_manifest.published.json"
-_FULLSTACK_EXCLUDED = {
-    "metadata.json",
-    "README.md",
-    "backend.log",
-    ".published.json",
-    ".revisions",
-    ".anton_state.db",
-    ".anton_state.db-wal",
-    ".anton_state.db-shm",
-    _STATE_SNAPSHOT,
-}
+# Names inside an artifact folder that are housekeeping — never bundled. The
+# store's definition, so what the agent hides and what the bundle omits cannot
+# drift. `_zip_fullstack` is allowlist-based, so root files are not bundled
+# anyway; the set guards `_zip_html` and any future change to that allowlist.
+_FULLSTACK_EXCLUDED = _HOUSEKEEPING_FILES | _HOUSEKEEPING_DIRS
 
 
 class StatePublishBlocked(Exception):

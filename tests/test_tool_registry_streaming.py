@@ -112,3 +112,33 @@ class TestDispatchTool:
         reg.register_tool(_make_tool("multi", _multi_result_handler))
         outcome = await reg.dispatch_tool(None, "multi", {})
         assert outcome.content == "second candidate"
+
+
+async def _peeking_handler(_session, _input):
+    yield ToolProgress("step 1")
+    yield ToolProgress("<html>\n<body>", kind="peek")
+    yield "final result"
+
+
+class TestPeekRelay:
+    async def test_a_peek_marker_travels_as_its_own_phase(self):
+        """A step line is printed once and kept; a peek replaces itself in
+        the footer. The CLI tells them apart by phase, so the relay must."""
+        from types import SimpleNamespace
+
+        events = []
+
+        class _Emitter:
+            async def emit(self, event):
+                events.append(event)
+
+        reg = ToolRegistry()
+        reg.register_tool(_make_tool("peeking", _peeking_handler))
+        session = SimpleNamespace(emitter=_Emitter())
+        outcome = await reg.dispatch_tool(session, "peeking", {}, tool_call_id="tc1")
+        assert outcome.content == "final result"
+        assert [(e.phase, e.message, e.id) for e in events] == [
+            ("tool_progress", "step 1", "tc1"),
+            ("tool_peek", "<html>\n<body>", "tc1"),
+        ]
+        assert ToolProgress("x").kind == "step"
