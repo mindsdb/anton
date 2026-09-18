@@ -416,7 +416,10 @@ class _VerifierVerdict(BaseModel):
             # open on the user's phone).
             "Likewise an honest, documented gap, once the transcript shows TWO OR "
             "MORE distinct failed approaches for data or a tool the task needs "
-            "(blocked, no access, came back empty, cannot be installed), or that "
+            # A bare "came back empty" claimed the shape COMPLETE carves out as
+            # a genuine none-found answer, and STUCK is the later bullet.
+            "(blocked, no access, came back empty because the source failed "
+            "rather than because nothing matched, cannot be installed), or that "
             "the required tool is absent from this environment, and the assistant "
             "told the user plainly what it could not get instead of guessing — "
             "judged on the failed attempts in the transcript, not on the "
@@ -424,7 +427,13 @@ class _VerifierVerdict(BaseModel):
             "blocker are enough whatever it says it will try next. It stays STUCK "
             "even when a partial or template result was delivered with the "
             "missing values marked as unavailable: the only way to 'keep going' "
-            "would be to invent the values."
+            "would be to invent the values. "
+            # Two failed approaches then an ask matches this clause and WAITING
+            # both; INCOMPLETE already defers, so STUCK has to defer the same way
+            # or the hand-back re-asks a question the assistant just asked.
+            "If the assistant instead asked the "
+            "user to supply what it could not get, that is WAITING (above), not "
+            "STUCK."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
@@ -436,9 +445,15 @@ class _VerifierVerdict(BaseModel):
             "nothing blocking or uncertain. False for anything that needs "
             "substantially more work, or where you aren't sure. Defaults to "
             "false, so an unsure model errs toward asking the user rather "
-            "than assuming it's almost done. Always false when what remains is "
-            "data or a tool the assistant has already tried and failed to "
-            "obtain — that is a blocker, not a small remaining step."
+            "than assuming it's almost done. "
+            # Unqualified, this contradicted INCOMPLETE's one-attempt clause on
+            # the same turn: a failed fetch with an obvious alternative untried
+            # is small remaining work, and losing the grace there strands a turn
+            # at the ceiling one call short of done.
+            "Always false when the remaining work "
+            "depends on data or a tool the assistant already failed to obtain "
+            "and has no untried route to — that is a blocker, not a small "
+            "remaining step."
         ),
     )
 

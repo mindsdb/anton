@@ -106,6 +106,32 @@ def test_stuck_definition_covers_an_honest_documented_gap():
     assert "the only way to 'keep going' would be to invent the values" in stuck
     # The premature-give-up control: honesty alone must not read as a blocker.
     assert "instead of guessing" in stuck
+    # "came back empty" on its own also described the shape COMPLETE carves out
+    # as a genuine none-found answer, and STUCK is the bullet the model reads
+    # last. The qualifier is what keeps a search that ran and matched nothing
+    # out of this clause.
+    assert "came back empty because the source failed" in stuck
+    assert "rather than because nothing matched" in stuck
+    # Two failed approaches followed by an ask satisfies this clause and
+    # WAITING's carve-out at once. INCOMPLETE defers to WAITING explicitly, so
+    # STUCK must too, or the hand-back re-asks the question the assistant
+    # already asked.
+    assert "asked the user to supply what it could not get, that is WAITING" in stuck
+
+
+def test_no_bullet_claims_a_shape_another_bullet_carves_out():
+    """The four bullets are read in order and STUCK is last, so an overlap it
+    does not disclaim is an overlap STUCK wins by position."""
+    desc = _status_description()
+    complete = desc[desc.index("- COMPLETE:"):desc.index("- WAITING:")]
+    stuck = desc[desc.index("- STUCK:"):]
+    # A query that ran and matched nothing is COMPLETE's, and STUCK says so.
+    assert "a COMPLETE answer of 'none', not a blocker" in complete
+    assert "because nothing matched" in stuck
+    # An ask is WAITING's, and both other non-terminal-by-default bullets say so.
+    incomplete = desc[desc.index("- INCOMPLETE:"):desc.index("- STUCK:")]
+    assert "that is WAITING" in incomplete
+    assert "that is WAITING" in stuck
 
 
 def test_incomplete_names_the_early_honest_stop_and_hands_exhaustion_to_stuck():
@@ -158,8 +184,16 @@ def test_close_to_done_is_never_true_on_an_unobtainable_gap():
     # despite the field's own "nothing blocking or uncertain". Its only effect
     # is the spend-ceiling grace (ENG-1893), but it is the same misframing.
     desc = _VerifierVerdict.model_fields["close_to_done"].description
-    assert "already tried and failed to obtain" in desc
+    assert "already failed to obtain" in desc
     assert "a blocker, not a small remaining step" in desc
+    # Scoped to a gap with no way round it. Without "no untried route to" this
+    # also caught INCOMPLETE's one-attempt shape, where the bullet above says
+    # an obvious alternative is still open — i.e. small remaining work, which
+    # is exactly what the grace exists for.
+    assert "has no untried route to" in desc
+    incomplete = _status_description()
+    incomplete = incomplete[incomplete.index("- INCOMPLETE:"):incomplete.index("- STUCK:")]
+    assert "obvious alternative untried" in incomplete
 
 
 def test_waiting_covers_asking_for_input_after_a_failed_attempt():
