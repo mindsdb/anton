@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from anton.core.artifacts.models import ARTIFACT_TYPES
 
+from ..attachments import render_for_gathering
 from .state import PrdState
 
 
@@ -110,10 +111,12 @@ def build_call_kickoff(state: PrdState) -> str:
         f"{DATASOURCES_HEADER}\n(none)"
     )
     pads = (state.scratchpads_context or "").strip()
+    attached = render_for_gathering(state.attachments)
     return (
         f"## User request\n{state.user_request}\n\n"
         f"## Agent's understanding\n{state.agent_understanding}\n\n"
         f"## Known data\n{state.known_data or '(none provided)'}\n\n"
+        + (f"{attached}\n\n" if attached else "")
         + (f"{pads}\n\n" if pads else "")
         + f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
         f"{connections}\n"
@@ -168,8 +171,9 @@ _GATHERING_INSTRUCTION = (
     "obtain a real sample in this step (scratchpad for databases, files and "
     "APIs — in a pad listed under `## Scratchpads already in this session` "
     "when there is one; web_fetch for pages) and record its shape in "
-    "`data_findings`. If "
-    "the artifact reads no external data, say so in `summary`.\n"
+    "`data_findings`. A data file under `## Attached files` is such a "
+    "source: read it in the scratchpad from the absolute path listed there. "
+    "If the artifact reads no external data, say so in `summary`.\n"
     "3. Open points — places where the request itself is ambiguous and only "
     "the user can settle it. Not ideas for extra features: a feature nobody "
     "asked for is neither an open point nor an assumption — leave it out. "

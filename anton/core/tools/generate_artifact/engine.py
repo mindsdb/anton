@@ -464,6 +464,7 @@ async def generate(
     user_preferences: str = "",
     primary: str | None = None,
     progress: "asyncio.Queue[str | None] | None" = None,
+    attachments: "list[str] | tuple[str, ...]" = (),
 ) -> dict | str:
     """Run the whole artifact pipeline: gather, agree, specify, build.
 
@@ -479,7 +480,11 @@ async def generate(
     ``progress``, when given, receives one user-facing line per step start
     (see ``GenState.step_started``). Optional so the non-streaming callers —
     ``bench_generate.py``, tests — need no channel to drain.
+
+    ``attachments`` are absolute paths of files the user attached to the
+    conversation (S-01); see `attachments.py` for what happens to each kind.
     """
+    from .attachments import resolve_attachments
     from .discovery import checkpoint as cp
     from .orchestrator import _datasource_context, run
     from .spend import SpendGuard
@@ -515,6 +520,13 @@ async def generate(
         progress=progress,
         spend=SpendGuard(session=session),
     )
+    kept, dropped = resolve_attachments(attachments)
+    state.attachments = kept
+    if kept or dropped:
+        state.record(
+            "attachments", "done" if kept else "skipped",
+            "; ".join([*(f"{a.name} ({a.kind})" for a in kept), *dropped]),
+        )
 
     stored = cp.load(artifact_path)
     entry = cp.decide_entry(
@@ -574,6 +586,15 @@ def _restore(state, stored) -> None:
     state.open_points = list(stored.open_points)
     state.gathering_complete = stored.gathering_complete
     state.final_artifact_type = stored.artifact_type
+    # The call's own list wins: a repeat call that names files is the user
+    # adding or replacing them. Only a call naming none inherits the
+    # previous run's records (and their staged names).
+    if not state.attachments:
+        from .attachments import Attachment
+
+        state.attachments = [
+            a for a in (Attachment.from_dict(d) for d in stored.attachments) if a is not None
+        ]
     state.call_changed = stored.call_fingerprint != cp.call_fingerprint(
         state.agent_understanding, state.known_data, state.user_preferences
     )

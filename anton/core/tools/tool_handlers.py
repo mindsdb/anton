@@ -716,6 +716,12 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield "Error: `agent_understanding` is required."
         return
 
+    raw_attachments = tc_input.get("attachments") or []
+    if isinstance(raw_attachments, str):  # a single path, not wrapped in a list
+        raw_attachments = [raw_attachments]
+    attachments = [str(p).strip() for p in raw_attachments if str(p or "").strip()] \
+        if isinstance(raw_attachments, list) else []
+
     folder = store.folder_for(slug)
     from anton.core.tools.generate_artifact import generate
 
@@ -733,6 +739,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
                 user_preferences=(tc_input.get("user_preferences") or "").strip(),
                 primary=artifact.primary,
                 progress=queue,
+                attachments=attachments,
             ),
             queue,
         )

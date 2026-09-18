@@ -443,7 +443,13 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "- `user_preferences` (optional): preferences the user stated "
         "themselves, in this or an earlier conversation (language, style, "
         "preferred APIs). Never infer a preference from an artifact you "
-        "built before — its features were your choices, not theirs.\n\n"
+        "built before — its features were your choices, not theirs.\n"
+        "- `attachments` (optional): absolute paths of files the user "
+        "attached or pasted for this artifact, exactly as the conversation "
+        "shows them. Data files (csv, json, xlsx, ...) are read by the "
+        "pipeline's own data step; images and other assets are copied into "
+        "the artifact and referenced by name. Only files the user provided "
+        "— never a path you guessed or a file you produced.\n\n"
         "Returns a `status`:\n"
         '- `generated` — done. `files_written` are the artifact\'s own files '
         "(report those), `internal_files` are generation inputs like "
@@ -508,6 +514,18 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "before — its features were your choices, not theirs."
                 ),
             },
+            "attachments": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Absolute paths of files the user attached or pasted for "
+                    "this artifact, as they appear in the conversation "
+                    "(`.cowork/files/<uuid>/<name>`, `.anton/uploads/...`). "
+                    "Data files are read by the pipeline; images and other "
+                    "assets are copied into the artifact and referenced by "
+                    "name. Only files the user actually provided."
+                ),
+            },
         },
         "required": ["slug", "user_request", "agent_understanding"],
     },
@@ -522,7 +540,7 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "  1. Call `create_artifact` to register the slug and pick the type "
         "(one of html-app, fullstack-stateless-app, fullstack-stateful-app).\n"
         "  2. Call `generate_artifact(slug=<slug>, user_request=..., "
-        "agent_understanding=..., known_data?, user_preferences?)`. It asks "
+        "agent_understanding=..., known_data?, user_preferences?, attachments?)`. It asks "
         "the user anything it still needs, so do not pre-interview them for "
         "it.\n"
         "  3. Follow the `instruction` in the result. `needs_confirmation` "

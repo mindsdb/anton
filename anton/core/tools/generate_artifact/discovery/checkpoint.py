@@ -110,6 +110,9 @@ class DiscoveryCheckpoint:
     # proposals instead of silently promoting them to facts.
     assumptions: list[str] = field(default_factory=list)
     open_points: list[str] = field(default_factory=list)
+    # `Attachment.to_dict()` records (S-01): a resumed run must still know
+    # which files the user provided, and which assets were already staged.
+    attachments: list[dict] = field(default_factory=list)
 
 
 def load(artifact_path: Path) -> DiscoveryCheckpoint | None:

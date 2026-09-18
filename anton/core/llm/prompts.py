@@ -268,7 +268,7 @@ WORKFLOW:
 primary?)`. It claims the folder and returns `<artifact_path>`.
 2. THEN, for `html-app`, `fullstack-stateless-app` and \
 `fullstack-stateful-app` — call `generate_artifact(slug, user_request, \
-agent_understanding, known_data?, user_preferences?)` and let it produce every \
+agent_understanding, known_data?, user_preferences?, attachments?)` and let it produce every \
 file. It runs the whole thing: gathers what it needs, asks the user whatever \
 is still unclear, agrees a short brief with them, writes the requirements down \
 as `prd.md`, then a technical spec, then the code with static verification, \

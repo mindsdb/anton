@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .debug_trace import NullTrace, GenTrace  # noqa: F401  (GenTrace re-exported for typing)
 from .progress import PEEK_GROUPS, LivePeek, StepCounter, label_for, plan_steps
+from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
@@ -185,6 +186,10 @@ class GenState:
     # learn that a check was skipped rather than passed (S-03).
     verify_warnings: list[str] = field(default_factory=list)
     checks_skipped: list[str] = field(default_factory=list)
+    # Files the user attached to the conversation, as the tool call named
+    # them (S-01). Data files are read by the gathering step; assets are
+    # copied into the artifact by `orchestrator._stage_attachments`.
+    attachments: list["Attachment"] = field(default_factory=list)
     # Where the launched backend answers (fullstack only, set by `run_app`).
     # Reported as the app's entry point: `static/index.html` opened from disk
     # cannot reach its `/api/*`, so the file path is not one.

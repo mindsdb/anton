@@ -469,6 +469,9 @@ The user message carries these sections, in this order (some may be absent):
   name, code, printed output. The schema and samples you need are here.
 - `### Sources read from the web` — notes and quotes from web pages, when the
   task used any.
+- `## Attached files` — files the user provided, when any: assets already
+  copied next to the page (reference them by the relative name listed) and
+  data files whose content arrived as `## Data`.
 - `## Technical specification` — `spec.md`: insights and implementation notes
   that complement the PRD rather than repeat it.
 - `## Progress journal` — one line per pipeline step done so far.\
@@ -500,14 +503,17 @@ from the CDNs named in the design rules. The backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
-from the backend at run time."""
+from the backend at run time. The only local files the page may reference
+are the assets listed under `## Attached files`, already in `static/`, by
+the relative name given there."""
     else:
         body = f"""\
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
 of the artifact folder. Inline your own CSS and all JS and embed all data in
-the file. Do not reference any other file of the artifact; the only external
-resources allowed are the Tailwind and ECharts `<script>` tags from the CDNs
-named in the design rules."""
+the file. Do not reference any other file of the artifact, except the assets
+listed under `## Attached files` (already in the folder, referenced by the
+relative name given there); the only external resources allowed are the
+Tailwind and ECharts `<script>` tags from the CDNs named in the design rules."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.

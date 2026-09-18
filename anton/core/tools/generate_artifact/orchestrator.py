@@ -21,7 +21,7 @@ from anton.core.artifacts.internal_files import (
 )
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 
-from . import engine, prompts, verifiers
+from . import attachments, engine, prompts, verifiers
 from .discovery import checkpoint as cp
 from .discovery.orchestrator import CANCELLED, run_discovery
 from .discovery.notes import (  # noqa: F401  (EXEC_* re-exported: tests import them from here)
@@ -294,6 +294,9 @@ def _spec_context(state: GenState) -> str:
         parts.append("## Data\n" + state.data_notes.strip())
     if state.web_notes.strip():
         parts.append(state.web_notes.strip())
+    attached = attachments.render_for_generation(state.attachments)
+    if attached:
+        parts.append(attached)
     spec_path = state.artifact_path / TECH_SPEC_FILENAME
     if spec_path.is_file():
         parts.append("## Technical specification\n" + spec_path.read_text(encoding="utf-8"))
@@ -984,6 +987,31 @@ async def _run_and_verify_app(state: GenState) -> str | None:
     return state.error
 
 
+def _stage_attachments(state: GenState) -> None:
+    """Copy the user's asset files into the artifact before generation (S-01).
+
+    Here and not in the discovery phase: the destination depends on the
+    artifact type (`static/` for fullstack), which `write_prd` settles, and
+    a cancelled run must not leave copies behind. Deterministic on purpose —
+    the generators are told the relative names and never touch the bytes.
+    The copies are artifact files, so they join `files_written`.
+    """
+    if not state.attachments:
+        return
+    written = attachments.stage_assets(
+        state.attachments, state.artifact_path, static=bool(state.is_fullstack)
+    )
+    for rel in written:
+        if rel not in state.files_written:
+            state.files_written.append(rel)
+    skipped = [f"{a.name}: {a.skipped}" for a in state.attachments if a.skipped]
+    if written or skipped:
+        state.record(
+            "stage_attachments", "done" if written else "skipped",
+            "; ".join([*written, *skipped]),
+        )
+
+
 def _note_skipped(state: GenState, text: str) -> None:
     """Record a check that did not run, once per distinct reason.
 
@@ -1043,6 +1071,7 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
             web_notes=state.web_notes,
             assumptions=list(state.assumptions),
             open_points=list(state.open_points),
+            attachments=[a.to_dict() for a in state.attachments],
         ),
     )
 
@@ -1170,6 +1199,8 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
         return _stopped_over_budget(
             state, "budget reached before file generation started"
         )
+
+    _stage_attachments(state)
 
     if not state.is_fullstack:
         err = await _gen_verify_frontend(state)

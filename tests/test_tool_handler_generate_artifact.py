@@ -268,7 +268,7 @@ def test_the_tool_schema_has_no_context_parameter():
     }
     assert set(props) == {
         "slug", "user_request", "agent_understanding",
-        "known_data", "user_preferences",
+        "known_data", "user_preferences", "attachments",
     }
 
 
@@ -635,3 +635,79 @@ def test_the_tool_description_names_the_two_report_fields():
 
     assert "`checks_skipped`" in GENERATE_ARTIFACT_TOOL.description
     assert "`warnings`" in GENERATE_ARTIFACT_TOOL.description
+
+
+# ── S-01: attachments reach the generator ───────────────────────────────────
+
+async def test_handler_forwards_attachments_to_generate(monkeypatch, tmp_path):
+    import anton.core.tools.tool_handlers as th
+
+    captured = {}
+
+    async def fake_generate(**kw):
+        captured.update(kw)
+        return {"files_written": [], "summary": "s", "trace": []}
+
+    monkeypatch.setattr("anton.core.tools.generate_artifact.generate", fake_generate, raising=False)
+
+    class _Artifact:
+        type = "html-app"
+        slug = "a"
+        primary = "index.html"
+
+    class _Store:
+        def open(self, slug):
+            return _Artifact()
+
+        def folder_for(self, slug):
+            return tmp_path
+
+    monkeypatch.setattr(th, "resolve_artifact_store", lambda session: _Store())
+
+    await _collect(
+        object(),
+        {"slug": "a", "user_request": "build it", "agent_understanding": "a page",
+         "attachments": ["/tmp/u/logo.png", "  ", None, "/tmp/u/sales.csv"]},
+        handler=th.handle_generate_artifact,
+    )
+    assert captured["attachments"] == ["/tmp/u/logo.png", "/tmp/u/sales.csv"]
+
+
+async def test_handler_accepts_a_single_attachment_path_as_a_string(monkeypatch, tmp_path):
+    import anton.core.tools.tool_handlers as th
+
+    captured = {}
+
+    async def fake_generate(**kw):
+        captured.update(kw)
+        return {"files_written": [], "summary": "s", "trace": []}
+
+    monkeypatch.setattr("anton.core.tools.generate_artifact.generate", fake_generate, raising=False)
+
+    class _Artifact:
+        type = "html-app"
+        slug = "a"
+        primary = None
+
+    class _Store:
+        def open(self, slug):
+            return _Artifact()
+
+        def folder_for(self, slug):
+            return tmp_path
+
+    monkeypatch.setattr(th, "resolve_artifact_store", lambda session: _Store())
+    await _collect(
+        object(),
+        {"slug": "a", "user_request": "build it", "agent_understanding": "a page", "attachments": "/tmp/u/logo.png"},
+        handler=th.handle_generate_artifact,
+    )
+    assert captured["attachments"] == ["/tmp/u/logo.png"]
+
+
+def test_the_attachments_field_tells_the_agent_what_qualifies():
+    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
+
+    desc = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["attachments"]["description"]
+    assert "Only files the user actually provided" in desc
+    assert "`attachments` (optional)" in GENERATE_ARTIFACT_TOOL.description
