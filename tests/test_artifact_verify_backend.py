@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import sys
 from pathlib import Path
 
 import pytest
 
-from anton.core.tools.generate_artifact.verifiers import evaluate_backend, verify_backend
+from anton.core.tools.generate_artifact.verifiers import evaluate_backend, verify_backend, contract_operations, contract_paths
 
 GOOD_SOURCE = '''
 import os
@@ -268,6 +270,86 @@ class _FakePool:
     async def venv_python(self, name):
         return sys.executable
 
+
+
+# ── the API contract from the backend's side (I-34) ─────────────────────────
+
+CONTRACT_INTROSPECTION = {
+    **GOOD_INTROSPECTION,
+    "api_routes": ["/api/health", "/api/rooms", "/api/rooms/{room_id}"],
+    "api_operations": [
+        "GET /api/health", "GET /api/rooms", "POST /api/rooms", "GET /api/rooms/{room_id}",
+    ],
+}
+
+
+def test_contract_operations_are_read_from_openapi():
+    spec = json.dumps({"paths": {
+        "/api/health": {"get": {}},
+        "/api/rooms": {"get": {"responses": {}}, "post": {"responses": {}}},
+        "/api/rooms/{code}/": {"get": {"responses": {}}, "parameters": []},
+    }})
+    ops = contract_operations(spec)
+    assert ops == {"GET /api/rooms", "POST /api/rooms", "GET /api/rooms/{}"}
+    assert contract_paths(ops) == {"/api/rooms", "/api/rooms/{}"}
+
+
+def test_no_usable_contract_means_no_comparison():
+    for spec in (None, "", "not json", "{}", json.dumps({"paths": {}}),
+                 json.dumps({"paths": {"/api/health": {"get": {}}}})):
+        assert contract_operations(spec) is None, spec
+    assert contract_paths(None) is None
+    r, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, GOOD_REQS, api_operations=None)
+    assert r.ok, r.errors
+
+
+def test_backend_implementing_the_contract_passes_whatever_the_parameter_names():
+    ops = {"GET /api/rooms", "POST /api/rooms", "GET /api/rooms/{}"}
+    r, _ = evaluate_backend(CONTRACT_INTROSPECTION, GOOD_SOURCE, GOOD_REQS, api_operations=ops)
+    assert r.ok, r.errors
+    assert r.warnings == []
+
+
+def test_missing_contract_operation_is_error():
+    ops = {"GET /api/rooms", "POST /api/rooms", "GET /api/rooms/{}", "DELETE /api/rooms/{}"}
+    r, _ = evaluate_backend(CONTRACT_INTROSPECTION, GOOD_SOURCE, GOOD_REQS, api_operations=ops)
+    assert not r.ok
+    assert any("does not implement `DELETE /api/rooms/{}`" in e for e in r.errors)
+
+
+def test_route_outside_the_contract_is_only_a_warning():
+    ops = {"GET /api/rooms", "GET /api/rooms/{}"}
+    r, _ = evaluate_backend(CONTRACT_INTROSPECTION, GOOD_SOURCE, GOOD_REQS, api_operations=ops)
+    assert r.ok, r.errors
+    assert any("adds routes that openapi.json does not define: `POST /api/rooms`" in w
+               for w in r.warnings)
+
+
+def test_an_old_introspection_without_operations_reports_everything_missing():
+    """A contract with no `api_operations` in the introspection is not
+    silently passed: the missing key means the routes are unknown."""
+    r, _ = evaluate_backend(GOOD_INTROSPECTION, GOOD_SOURCE, GOOD_REQS,
+                            api_operations={"GET /api/items"})
+    assert not r.ok
+    assert any("does not implement `GET /api/items`" in e for e in r.errors)
+
+
+@_needs_asgi
+async def test_the_introspection_reports_the_routes_operations(tmp_path: Path):
+    """The real subprocess script emits `METHOD /path` per API route, so the
+    contract check sees the backend as FastAPI registered it."""
+    (tmp_path / "backend.py").write_text(BACKEND_OK)
+    (tmp_path / "requirements.txt").write_text("fastapi\nmangum\nuvicorn\n")
+    ok, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+        api_operations={"GET /api/items"},
+    )
+    assert ok.ok, ok.errors
+    bad, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+        api_operations={"GET /api/items", "POST /api/items"},
+    )
+    assert any("does not implement `POST /api/items`" in e for e in bad.errors)
 
 @_needs_asgi
 async def test_verify_backend_happy_path(tmp_path: Path):

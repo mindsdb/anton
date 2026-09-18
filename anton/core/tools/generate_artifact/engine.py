@@ -37,6 +37,7 @@ from . import sub_tools
 from .debug_trace import NullTrace
 from .spend import WIND_DOWN_ROUNDS
 from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY
+from .verifiers import normalise_api_path
 from .prompts import (
     build_api_spec_instruction,
     build_api_spec_prompt,
@@ -622,10 +623,9 @@ _DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,
 _HEALTH_PATH = "/api/health"
 
 
-def _normalise_api_path(path: str) -> str:
-    """`/api/rooms/{code}/` and `/api/rooms/{id}` compare equal: parameter
-    names are the contract writer's to choose, the segments are not."""
-    return re.sub(r"\{[^}]*\}", "{}", str(path).rstrip("/"))
+# One normaliser for every path comparison in the pipeline: spec.md against
+# openapi.json here, openapi.json against the generated code in `verifiers`.
+_normalise_api_path = normalise_api_path
 
 
 def _declared_api_paths(context: str) -> dict[str, str]:

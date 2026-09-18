@@ -577,6 +577,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
             scratchpad_pool=state.session._scratchpads,
             slug=state.slug, artifact_path=state.artifact_path,
             artifact_type=state.artifact_type,
+            api_operations=verifiers.contract_operations(state.api_spec),
         )
         state.trace_log.verifier(
             node="verify_backend", ok=verdict.ok,
@@ -737,7 +738,10 @@ async def _gen_verify_frontend(state: GenState) -> str | None:
             ])
         else:
             verdict = verifiers.verify_frontend(
-                entry_file.read_text(encoding="utf-8"), is_fullstack=state.is_fullstack
+                entry_file.read_text(encoding="utf-8"), is_fullstack=state.is_fullstack,
+                api_paths=verifiers.contract_paths(
+                    verifiers.contract_operations(state.api_spec)
+                ) if state.is_fullstack else None,
             )
             if verdict.ok and not state.is_fullstack:
                 # Second gate, only once the text checks pass and only for the

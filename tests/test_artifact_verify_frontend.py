@@ -289,3 +289,43 @@ def test_other_library_cdn_is_still_a_warning():
     assert len(r.warnings) == 1
     assert "other than ECharts or Tailwind" in r.warnings[0]
     assert "cdn.plot.ly" in r.warnings[0]
+
+
+# ── the API contract from the page's side (I-34) ────────────────────────────
+
+_PATHS = {"/api/items", "/api/rooms/{}", "/api/rooms/{}/moves"}
+
+
+def _page(script: str) -> str:
+    return GOOD.replace("fetch(api('/api/items'));", script)
+
+
+def test_calls_inside_the_contract_pass_in_every_literal_shape():
+    html = _page(
+        "fetch(api('/api/items'));\n"
+        'fetch(api("/api/items?limit=5"));\n'
+        "fetch(api(`/api/rooms/${code}`));\n"
+        "fetch(api(`/api/rooms/${code}/moves`), {method: 'POST'});\n"
+        "fetch(`${API_BASE}/api/items`);\n"
+        "fetch(api('/api/health'));\n"
+        "fetch(api(url));\n"
+    )
+    r = verify_frontend(html, is_fullstack=True, api_paths=_PATHS)
+    assert r.ok, r.errors
+
+
+def test_a_call_outside_the_contract_is_error_and_names_the_contract():
+    html = _page("fetch(api(`/api/rooms/${code}/state`));")
+    r = verify_frontend(html, is_fullstack=True, api_paths=_PATHS)
+    assert not r.ok
+    [err] = [e for e in r.errors if e.startswith("fetch() calls `")]
+    assert "`/api/rooms/${code}/state`" in err
+    assert "/api/rooms/{}/moves" in err
+
+
+def test_no_contract_and_html_app_skip_the_comparison():
+    html = _page("fetch(api('/api/anything'));")
+    assert verify_frontend(html, is_fullstack=True).ok
+    assert verify_frontend(html, is_fullstack=True, api_paths=None).ok
+    page = html.replace('<meta name="api-base" content="">', "")
+    assert verify_frontend(page, is_fullstack=False, api_paths=_PATHS).ok

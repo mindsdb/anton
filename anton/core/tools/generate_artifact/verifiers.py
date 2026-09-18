@@ -21,6 +21,73 @@ from anton.core.utils.scratchpad import install_call_failed
 from .state import VerifyResult
 
 _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
+# Every literal `fetch()` target, template literals included: the `api()`
+# helper is the documented shape, and a path with a parameter is written as
+# `fetch(api(`/api/rooms/${code}`))` — backticks, which `_FETCH_CALL` never
+# saw. A non-literal first argument (a variable) is not a match and is not
+# checked: there is nothing static to compare.
+_FETCH_TARGET = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?(['"`])(.*?)\1""", re.S)
+_API_METHODS = ("get", "post", "put", "patch", "delete")
+_HEALTH_PATH = "/api/health"
+
+
+def normalise_api_path(path: str) -> str:
+    """`/api/rooms/{code}/` and `/api/rooms/{id}` compare equal: parameter
+    names are the contract writer's to choose, the segments are not."""
+    return re.sub(r"\{[^}]*\}", "{}", str(path).rstrip("/"))
+
+
+def contract_operations(api_spec: str | None) -> set[str] | None:
+    """`METHOD /normalised/path` for every operation `openapi.json` defines.
+
+    None — not an empty set — when there is no usable contract (no document,
+    not JSON, no `paths`): the callers then skip the comparison instead of
+    reporting every route as undeclared. `/api/health` is left out on both
+    sides; it is a launcher requirement, not part of the contract.
+    """
+    if not api_spec:
+        return None
+    try:
+        spec = json.loads(api_spec)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    paths = spec.get("paths") if isinstance(spec, dict) else None
+    if not isinstance(paths, dict) or not paths:
+        return None
+    ops: set[str] = set()
+    for path, methods in paths.items():
+        key = normalise_api_path(path)
+        if key == _HEALTH_PATH or not isinstance(methods, dict):
+            continue
+        for method in _API_METHODS:
+            if isinstance(methods.get(method), dict):
+                ops.add(f"{method.upper()} {key}")
+    return ops or None
+
+
+def contract_paths(operations: set[str] | None) -> set[str] | None:
+    """The normalised paths behind `contract_operations`, or None with it."""
+    if operations is None:
+        return None
+    return {op.split(" ", 1)[1] for op in operations}
+
+
+def _fetch_path_key(raw: str) -> str | None:
+    """The contract key a literal `fetch()` target compares under, or None
+    when there is nothing to compare: an absolute URL (flagged elsewhere), a
+    call outside `/api/` (flagged elsewhere), the health route."""
+    target = raw.strip()
+    if target.lower().startswith("http"):
+        return None
+    # `${API_BASE}/api/items` — the base spliced in by hand instead of `api()`.
+    target = re.sub(r"^\$\{[^}]*\}", "", target)
+    target = target.split("?", 1)[0]
+    # `${code}` inside the path is a parameter, same as `{code}` in the contract.
+    target = re.sub(r"\$\{[^}]*\}", "{}", target)
+    if not target.startswith("/api/"):
+        return None
+    key = normalise_api_path(target)
+    return None if key == _HEALTH_PATH else key
 _BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
 # Libraries the design rules let a page load from the network. Matched as
 # substrings of the script URL so a different CDN host or version still
@@ -62,7 +129,12 @@ def _exempt_media_spans(html: str) -> list[tuple[int, int]]:
     return spans
 
 
-def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
+def verify_frontend(
+    html: str, *, is_fullstack: bool, api_paths: set[str] | None = None
+) -> VerifyResult:
+    """Static checks of the page. `api_paths` (from `contract_paths`) is the
+    set of normalised `openapi.json` paths a fullstack page may call; None
+    skips that comparison — html-app pages and callers without a contract."""
     errors: list[str] = []
     warnings: list[str] = []
     low = html.lower()
@@ -106,6 +178,22 @@ def verify_frontend(html: str, *, is_fullstack: bool) -> VerifyResult:
             if path.startswith("/") and not path.startswith("/api/"):
                 errors.append(f"Backend call must use the /api/* prefix, got: {path!r}")
                 break
+
+    # 5a. Every literal backend call names a path the contract defines
+    #     (fullstack only, and only when a contract is known). The backend is
+    #     held to the same document from its side, so a page that passes here
+    #     calls routes that exist (I-34). Reported once, with the whole
+    #     contract, so the retry has what it needs to fix the call.
+    if is_fullstack and api_paths is not None:
+        for _quote, raw in _FETCH_TARGET.findall(html):
+            key = _fetch_path_key(raw)
+            if key is None or key in api_paths:
+                continue
+            errors.append(
+                f"fetch() calls `{raw.strip()}`, which openapi.json does not define; "
+                "the contract's paths are: " + ", ".join(sorted(api_paths))
+            )
+            break
 
     # 5b. Script-tag integrity — the "JS never runs" class: an opening
     # `<script` with no closing `</script` anywhere.
@@ -336,6 +424,7 @@ def evaluate_backend(
     *,
     artifact_type: str = "",
     state_manifest: str | None = None,
+    api_operations: set[str] | None = None,
 ) -> tuple[VerifyResult, list[str]]:
     """Pure contract evaluation of a generated backend.
 
@@ -343,6 +432,8 @@ def evaluate_backend(
     keeps the pre-stateful call shape (and its direct-call tests) intact.
     `state_manifest` is the raw text of `state_manifest.json` (None = the file
     does not exist) — read by the async glue, validated here to stay pure.
+    `api_operations` (from `contract_operations`) is what `openapi.json`
+    promises; None skips the comparison.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -371,6 +462,35 @@ def evaluate_backend(
         )
     if "/api/health" not in api_routes:
         errors.append("backend.py must expose GET /api/health.")
+
+    if api_operations is not None:
+        # The contract from the backend's side (I-34): every operation the
+        # document promises has a route with that method and those segments.
+        # A route the document does not list is only a warning — it breaks
+        # nothing, and a regeneration costs rounds; a missing one is the page
+        # calling a 404.
+        implemented = {
+            f"{method} {normalise_api_path(path)}"
+            for method, _, path in (
+                op.partition(" ") for op in introspection.get("api_operations") or []
+            )
+            if normalise_api_path(path) != _HEALTH_PATH
+            and method.lower() in _API_METHODS
+        }
+        missing = sorted(api_operations - implemented)
+        if missing:
+            errors.append(
+                "backend.py does not implement " + ", ".join(f"`{op}`" for op in missing)
+                + " from openapi.json — every operation of the contract needs a "
+                "route with that method and path (parameter names may differ)."
+            )
+        extra = sorted(implemented - api_operations)
+        if extra:
+            warnings.append(
+                "backend.py adds routes that openapi.json does not define: "
+                + ", ".join(f"`{op}`" for op in extra)
+                + " — the frontend cannot know them."
+            )
 
     for name in _module_level_secret_copies(source):
         errors.append(
@@ -462,7 +582,7 @@ _INTROSPECT_SCRIPT = r'''
 import json, sys
 result = {"import_ok": False, "import_error": "", "handler_ok": False,
           "app_ok": False, "secrets_ok": False, "state_defined": False,
-          "api_routes": [], "root_routes": []}
+          "api_routes": [], "root_routes": [], "api_operations": []}
 try:
     import importlib.util
     spec = importlib.util.spec_from_file_location("artifact_backend", "backend.py")
@@ -486,6 +606,9 @@ try:
                 continue
             (result["api_routes"] if r.path.startswith("/api/")
              else result["root_routes"]).append(r.path)
+            if r.path.startswith("/api/"):
+                for m in sorted(r.methods or ()):
+                    result["api_operations"].append(f"{m} {r.path}")
 except Exception as exc:  # noqa: BLE001
     result["import_error"] = f"{type(exc).__name__}: {exc}"
 print(json.dumps(result))
@@ -499,6 +622,7 @@ async def verify_backend(
     artifact_path: Path,
     import_timeout: float = 15.0,
     artifact_type: str = "",
+    api_operations: set[str] | None = None,
 ) -> tuple[VerifyResult, list[str]]:
     backend_py = artifact_path / "backend.py"
     if not backend_py.is_file():
@@ -571,4 +695,5 @@ async def verify_backend(
     return evaluate_backend(
         introspection, source, req_text,
         artifact_type=artifact_type, state_manifest=state_manifest,
+        api_operations=api_operations,
     )

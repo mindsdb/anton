@@ -468,8 +468,9 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
 # ---------------------------------------------------------------------------
 
 _FRONTEND_RULES = """\
-Two of these are verifier checks as well: a page without the api-base meta
-tag, or one that calls the backend outside `/api/*`, fails the step.
+Three of these are verifier checks as well: a page without the api-base meta
+tag, one that calls the backend outside `/api/*`, or one whose `fetch()`
+names a path `openapi.json` does not define, fails the step.
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
@@ -488,6 +489,9 @@ tag, or one that calls the backend outside `/api/*`, fails the step.
   ```
 - NEVER hardcode an absolute URL in the source.
 - Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
+- Call ONLY the paths listed under `## API Specification`, spelled as the
+  document spells them; a `fetch()` to a path `openapi.json` does not define
+  fails the step.
 - `static/` is the ONLY folder the backend serves. ANY additional frontend asset
   (separate CSS, JS, images, fonts, large data payloads) MUST live under
   `static/` too — never at the artifact root, or it will 404 at runtime.\
@@ -951,6 +955,9 @@ and costs a regeneration:
   module-level variable at import time — read `SECRETS[...]` at point of use.
 - Every route lives under `/api/*` and `GET /api/health` exists; a route at
   the root fails the step.
+- Every operation of `openapi.json` has a route with the same method and
+  path segments (parameter names may differ); a missing one fails the step,
+  a route the document does not list is reported as a warning.
 - `requirements.txt` lists `fastapi`, `mangum` and `uvicorn`, and never
   `anton_state`.
 - Every `DS_*` key the code reads names a connection listed under

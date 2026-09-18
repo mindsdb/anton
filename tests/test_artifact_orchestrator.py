@@ -1130,3 +1130,47 @@ def test_map_datasources_survives_a_vault_that_raises(tmp_path: Path):
     refs, unmapped = orchestrator._map_datasources(session, ["DS_PG_MAIN__HOST"])
     assert refs == []
     assert unmapped == ["DS_PG_MAIN__HOST"]
+
+
+_CONTRACT = '{"paths": {"/api/items": {"get": {"responses": {"200": {}}}}}}'
+
+
+async def test_gen_verify_backend_hands_the_contract_to_the_verifier(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = _CONTRACT
+    seen: dict = {}
+
+    async def fake_loop(**kw):
+        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
+
+    async def fake_verify(**kw):
+        seen.update(kw)
+        return VerifyResult(errors=[]), []
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
+    monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
+
+    assert await orchestrator._gen_verify_backend(st) is None
+    assert seen["api_operations"] == {"GET /api/items"}
+
+
+async def test_gen_verify_frontend_hands_the_contract_paths_to_the_verifier(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
+    st.api_spec = _CONTRACT
+    seen: dict = {}
+
+    async def fake_loop(**kw):
+        (tmp_path / "static").mkdir(exist_ok=True)
+        (tmp_path / "static" / "index.html").write_text(_VALID_PAGE)
+        return {"files_written": ["static/index.html"], "rounds_used": 1, "summary": "s"}
+
+    def fake_verify(html, *, is_fullstack, api_paths=None):
+        seen["api_paths"] = api_paths
+        return VerifyResult(errors=[])
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", fake_verify)
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+    assert seen["api_paths"] == {"/api/items"}
