@@ -332,7 +332,7 @@ async def _make_api_spec(state: GenState) -> str | None:
 
 
 def _vault(session):
-    """The session's vault, or a local one. Mirrors _map_datasources and handle_update_artifact."""
+    """The session's vault, or a local one. Mirrors handle_update_artifact."""
     from anton.core.datasources.data_vault import LocalDataVault
 
     return getattr(session, "_data_vault", None) or LocalDataVault()
@@ -437,10 +437,13 @@ def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
     from anton.core.artifacts.models import DatasourceRef
     from anton.core.datasources.data_vault import _slug_env_prefix
 
-    vault = _vault(session)
+    # Through `_list_connections`, like the two neighbours: a vault that
+    # raises here — after the backend has been written and verified — used to
+    # escape as "generator crashed" and throw both loops' work away (I-47).
+    # With no connections every key is unmapped, and the loop is told so.
     conns = [
         (c["engine"], c["name"])
-        for c in vault.list_connections()
+        for c in _list_connections(_vault(session))
         if c.get("engine") and c.get("name")
     ]
     refs: list = []

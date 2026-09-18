@@ -1115,3 +1115,18 @@ async def test_relaunch_rebuilds_the_datasource_env_after_the_backend_is_regener
     assert err is None
     assert seen == [{"DS_PG_OLD__HOST": "a"}, {"DS_PG_NEW__HOST": "b"}]
     assert st.app_port == 5000
+
+
+def test_map_datasources_survives_a_vault_that_raises(tmp_path: Path):
+    """After the backend is written and verified, a vault error must be an
+    unmapped-keys verdict for the loop, not a crash of the whole run (I-47)."""
+    from types import SimpleNamespace
+
+    class _BrokenVault:
+        def list_connections(self):
+            raise RuntimeError("registry unreadable")
+
+    session = SimpleNamespace(_data_vault=_BrokenVault())
+    refs, unmapped = orchestrator._map_datasources(session, ["DS_PG_MAIN__HOST"])
+    assert refs == []
+    assert unmapped == ["DS_PG_MAIN__HOST"]
