@@ -49,6 +49,9 @@ dependencies = [
 clipboard = [
     "Pillow>=12.3.0",
 ]
+htmllint = [
+    "playwright>=1.49,<2",
+]
 
 [dependency-groups]
 dev = [

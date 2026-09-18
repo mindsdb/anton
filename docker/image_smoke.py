@@ -139,6 +139,35 @@ def check_venv_writable() -> list[str]:
     return []
 
 
+def check_html_lint_browser() -> list[str]:
+    """The cloud (Playwright) path for `.html` artifact lint can actually launch.
+
+    Proves the browser install and the /opt/playwright permissions under this
+    image's own uid. It runs under the BUILD runtime (runc), not gVisor, so a
+    green result here proves nothing about whether Chromium can start under
+    the sandbox runtime the pod actually uses — that is a separate, manual,
+    in-cluster check (see docs/ENG-1204-html-lint-cloud-plan.md step 8).
+    """
+    import tempfile
+    from pathlib import Path
+
+    from anton.core.artifacts.html_lint import lint_html
+
+    with tempfile.NamedTemporaryFile(suffix=".html", mode="w", delete=False) as f:
+        f.write("<!DOCTYPE html><html><body>ok</body></html>")
+        path = Path(f.name)
+    try:
+        findings = lint_html(path)
+    finally:
+        path.unlink(missing_ok=True)
+
+    if findings is None:
+        return ["html lint browser: lint_html returned None — Chromium did not launch or produce a result"]
+    if findings:
+        return [f"html lint browser: unexpected findings on a trivial clean page: {findings}"]
+    return []
+
+
 CHECKS = (
     check_runtime_user,
     check_version,
@@ -146,6 +175,7 @@ CHECKS = (
     check_scratchpad_boot,
     check_runtime_uv,
     check_venv_writable,
+    check_html_lint_browser,
 )
 
 

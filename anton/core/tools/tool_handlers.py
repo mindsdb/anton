@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -171,21 +172,31 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+@dataclass(frozen=True)
+class LintOutcome:
+    """A checker's per-file result, richer than the display-ready strings
+    alone so the `artifact_lint` telemetry event can break findings down by
+    kind without knowing any format's internals."""
+
+    messages: list[str]  # already display-ready, as today
+    kinds: tuple[str, ...]  # one per message, parallel
+
+
+def _artifact_linters(session: "ChatSession | None" = None) -> dict[str, Callable[[Path], LintOutcome | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
-    headless browser); `[]` means it ran and found nothing; a non-empty
-    list is real findings — only that last case is ever appended to the
-    agent-facing message list.
+    headless browser); a `LintOutcome` with empty `messages` means it ran and
+    found nothing; a non-empty one is real findings — only that last case is
+    ever appended to the agent-facing message list.
 
     Add a format by adding one entry here. Only `.xlsx`/`.html` are
     registered — every other extension is silently unchecked, which is
     honest as-is: nothing ever claimed to validate a `.csv`.
     """
-    from anton.core.artifacts.html_lint import lint_html
+    from anton.core.artifacts.html_lint import lint_html_run
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
-    def _xlsx_linter(path: Path) -> list[str] | None:
+    def _xlsx_linter(path: Path) -> LintOutcome | None:
         # Both always run — LibreOffice recalculates and catches any
         # formula error; the structural lint runs regardless (not only as
         # a fallback), because it names the actual fix ("missing cross-
@@ -205,53 +216,102 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         # noise. A cell only the oracle catches still gets through.
         structural_cells = {(f.sheet, f.cell) for f in (structural_findings or [])}
         messages = [f.message() for f in (structural_findings or [])]
-        messages += [
-            f.message() for f in (office_findings or [])
-            if (f.sheet, f.cell) not in structural_cells
-        ]
-        return messages
+        kinds = ["circular_ref" for _ in (structural_findings or [])]
+        for f in office_findings or []:
+            if (f.sheet, f.cell) in structural_cells:
+                continue
+            messages.append(f.message())
+            kinds.append("formula_error")
+        return LintOutcome(messages=messages, kinds=tuple(kinds))
 
-    def _html_linter(path: Path) -> list[str] | None:
-        findings = lint_html(path)
-        if findings is not None:
-            return [f.message() for f in findings]
-        return None
+    def _html_linter(path: Path) -> LintOutcome | None:
+        run = lint_html_run(path)
+        # Cloud only — scratchpad-controller injects this marker (live_pod.py).
+        # Desktop's Electron path is already verified, so this would be noise.
+        if os.environ.get("ANTON_CLOUD_WORKSPACE_PATH"):
+            _send_telemetry_event(session, "html_lint_browser", {
+                "engine": run.engine,
+                "outcome": run.outcome,
+                "duration_ms": str(_bucket_duration_ms(run.duration_ms)),
+            })
+        if run.findings is None:
+            return None
+        return LintOutcome(
+            messages=[f.message() for f in run.findings],
+            kinds=tuple(f.kind for f in run.findings),
+        )
 
     return {".xlsx": _xlsx_linter, ".html": _html_linter}
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
-    """Run the format-appropriate checker on artifact folders this cell
-    edited (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list().
+# Buckets, not raw milliseconds — a duration histogram in PostHog doesn't
+# need single-ms resolution, and a raw value is one more thing to scrub.
+_DURATION_BUCKETS_MS = (100, 500, 1_000, 2_000, 5_000, 10_000, 20_000)
+
+
+def _bucket_duration_ms(duration_ms: int) -> str:
+    for bucket in _DURATION_BUCKETS_MS:
+        if duration_ms <= bucket:
+            return f"<={bucket}"
+    return f">{_DURATION_BUCKETS_MS[-1]}"
+
+
+def lint_artifact_files(store, slug: str, session: "ChatSession | None" = None) -> list[str]:
+    """Run the format-appropriate checker over every current file in `slug`,
+    unconditionally — no mtime gating. The caller decides when an artifact
+    is worth (re)checking; this only answers "what does it look like now".
+
+    Shared by the write-time hook (`lint_changed_artifact_files`, scoped to
+    files a cell just touched) and `handle_open_artifact` (a re-check on
+    every later open, since a finding otherwise only ever reaches the agent
+    at the one cell that wrote it — an agent that doesn't act on the spot
+    would never see it again). Also the single point every checker
+    converges on, so the `artifact_lint` telemetry event lives here, not at
+    either call site.
     """
-    linters = _artifact_linters()
+    linters = _artifact_linters(session)
     if not linters:
         return []
+    messages: list[str] = []
+    for path in (store.root / slug).rglob("*"):
+        linter = linters.get(path.suffix.lower())
+        if linter is None or not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
+                continue
+        except OSError:
+            continue
+        outcome = linter(path)
+        _send_telemetry_event(session, "artifact_lint", {
+            "format": path.suffix.lower().lstrip("."),
+            "checked": str(outcome is not None),
+            "findings": str(len(outcome.messages) if outcome else 0),
+            "finding_kinds": ",".join(sorted(set(outcome.kinds))) if outcome else "",
+        })
+        if outcome is None or not outcome.messages:
+            # None (couldn't check) or no messages (checked, clean) — either
+            # way, nothing worth telling the agent about this file.
+            continue
+        for message in outcome.messages:
+            messages.append(f"{slug}/{path.name} — {message}")
+    return messages
+
+
+def lint_changed_artifact_files(
+    store, before: dict[str, float], session: "ChatSession | None" = None
+) -> list[str]:
+    """Run `lint_artifact_files` on artifact folders this cell edited
+    (mtime moved since `before`), so findings reach the agent as
+    tool-result text right away, not only via a later open()/list().
+    """
     after = snapshot_existing_artifact_mtimes(store)
     messages: list[str] = []
     for slug, prev_mtime in before.items():
         current = after.get(slug)
         if current is None or current <= prev_mtime:
             continue
-
-        for path in (store.root / slug).rglob("*"):
-            linter = linters.get(path.suffix.lower())
-            if linter is None or not path.is_file():
-                continue
-            try:
-                if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
-                    continue
-            except OSError:
-                continue
-            file_messages = linter(path)
-            if not file_messages:
-                # None (couldn't check) or [] (checked, clean) — either way,
-                # nothing worth telling the agent about this file.
-                continue
-            for message in file_messages:
-                messages.append(f"{slug}/{path.name} — {message}")
-
+        messages.extend(lint_artifact_files(store, slug, session))
     return messages
 
 
@@ -644,8 +704,7 @@ async def handle_open_artifact(
     # rather than at write time because the writes themselves happen in
     # scratchpad cells the tool layer never sees.
     _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
-    # Tier 1: the artifact was opened and its descriptor returned.
-    return ToolOutcome(content=json.dumps({
+    content = json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
         "name": artifact.name,
@@ -653,7 +712,23 @@ async def handle_open_artifact(
         "description": artifact.description,
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
-    }, indent=2), ok=True)
+    }, indent=2)
+    # Re-check on every open, not just at write time: a finding otherwise
+    # only ever reaches the agent in the one cell that wrote the file, and
+    # an agent that didn't act on it in that moment would never see it
+    # again. Off the loop for the same reason as the write-time hook — the
+    # checkers shell out with multi-second timeouts.
+    try:
+        import asyncio
+
+        lint_messages = await asyncio.to_thread(lint_artifact_files, store, artifact.slug, session)
+    except Exception:
+        lint_messages = []
+        _log.warning("artifact lint failed on open for %s", artifact.slug, exc_info=True)
+    if lint_messages:
+        content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
+    # Tier 1: the artifact was opened and its descriptor returned.
+    return ToolOutcome(content=content, ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
@@ -850,7 +925,7 @@ async def handle_scratchpad(
                     # the checkers might be with multi-second timeouts, run them async
                     lint_messages = await asyncio.to_thread(
                         lint_changed_artifact_files,
-                        artifact_store, before_artifact_mtimes,
+                        artifact_store, before_artifact_mtimes, session,
                     )
                 except Exception:
                     # Best-effort: a lint crash must never fail
@@ -1543,7 +1618,7 @@ _ASK_USER_LIMIT = (
 )
 
 
-def _ask_user_telemetry_settings(session: "ChatSession"):
+def _telemetry_settings(session: "ChatSession | None"):
     """Best-effort settings object for `send_event`, mirroring the pattern
     already used at every other call site (see `anton/tools.py`)."""
     settings = getattr(session, "_settings", None)
@@ -1557,10 +1632,10 @@ def _ask_user_telemetry_settings(session: "ChatSession"):
         return None
 
 
-def _send_ask_user_event(session: "ChatSession", action: str, props: dict) -> None:
+def _send_telemetry_event(session: "ChatSession | None", action: str, props: dict) -> None:
     """Fire one telemetry event. Never raises — analytics must not break a turn."""
     try:
-        settings = _ask_user_telemetry_settings(session)
+        settings = _telemetry_settings(session)
         if not settings:
             return
         from anton.analytics import send_event
@@ -1583,14 +1658,14 @@ async def handle_ask_user(session: "ChatSession", tc_input: dict) -> str:
 
     # send_event only accepts string extras (see every existing call site).
     props = {"select": request.select, "options": str(len(request.options))}
-    _send_ask_user_event(session, "ask_user_asked", props)
+    _send_telemetry_event(session, "ask_user_asked", props)
 
     # The question id doubles as the correlation key the host echoes back
     # with the answer. The originating tool_use.id is not visible here
     # (dispatch_tool passes only name + input), so mint one.
     question_id = f"ask:{uuid.uuid4().hex}"
     answer = await elicit(session, question_id, request)
-    _send_ask_user_event(session, f"ask_user_{answer.status}", props)
+    _send_telemetry_event(session, f"ask_user_{answer.status}", props)
 
     if answer.status == "limit":
         return _status("error", _ASK_USER_LIMIT)

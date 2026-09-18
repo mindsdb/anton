@@ -16,6 +16,7 @@
 'use strict';
 
 const { app, BrowserWindow } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
@@ -31,19 +32,8 @@ function emitAndExit(result) {
   app.exit(0);
 }
 
-// Heuristic, not authoritative: true only when the body has neither visible
-// text nor a non-script/style/meta child element. Catches "nothing rendered
-// at all" (e.g. a page whose entire markup got swallowed as text by an
-// unclosed <title>/<script>/<style> — real case found in testing) without
-// flaging a legitimately content-free page that fills in later (async data,
-// a splash screen). False negatives are expected (e.g. a blank <canvas>).
-const EMPTY_PAGE_CHECK = `(() => {
-  if (!document.body) return true;
-  const NON_VISUAL = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'LINK', 'META', 'NOSCRIPT', 'TITLE']);
-  const visibleChildren = Array.from(document.body.children).filter((el) => !NON_VISUAL.has(el.tagName));
-  const hasText = document.body.innerText.trim().length > 0;
-  return visibleChildren.length === 0 && !hasText;
-})()`;
+// Shared with _html_lint_runner.py — see that file's comment for the heuristic.
+const EMPTY_PAGE_CHECK = fs.readFileSync(path.join(__dirname, '_html_lint_empty_page.js'), 'utf8');
 
 app.whenReady().then(() => {
   const targetPath = process.env.ANTON_HTML_LINT_TARGET;

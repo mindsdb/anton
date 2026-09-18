@@ -256,6 +256,8 @@ _POSTHOG_EVENTS = frozenset(
         "rule_retrieval",
         "scratchpad_package_installed",
         "tool_completed",
+        "artifact_lint",
+        "html_lint_browser",
     }
 )
 
