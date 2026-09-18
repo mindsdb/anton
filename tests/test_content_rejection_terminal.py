@@ -274,3 +274,100 @@ async def test_an_image_in_a_tool_result_is_removed_too():
         if isinstance(b, dict) and b.get("type") == "image"
     ]
     assert not nested, "an image nested in a tool_result survived the repair"
+
+
+# ── the repair must cover every image shape, and outlive the process ────────
+# Two gaps found reviewing the repair above (#484).
+
+
+async def test_an_openai_shaped_image_url_block_is_removed_too():
+    """`turn_stream` accepts `image_url` as public input and the provider
+    translates it onward, so a repair that only knows the Anthropic `image`
+    shape leaves the OpenAI one in history to be re-sent next turn — the exact
+    failure the repair exists to stop. This file's own two other image sites
+    already treat ("image", "image_url") as the pair."""
+    s = _session()
+    s._append_history({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "read this"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    })
+    s._stream_and_handle_tools = _counting_raiser(
+        lambda: ContentTooLargeError(_PROVIDER_COPY), []
+    )
+    with pytest.raises(ContentTooLargeError):
+        _ = [e async for e in s.turn_stream("read this")]
+
+    left = [
+        b
+        for m in s._history
+        if isinstance(m, dict) and isinstance(m.get("content"), list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") in ("image", "image_url")
+    ]
+    assert not left, "an OpenAI-shaped image_url block survived the repair"
+
+
+async def test_the_repair_is_persisted_so_resume_does_not_resend_it():
+    """The turn-end `_persist_history()` sits below this raise and never runs,
+    and `close()` does not save — so without an explicit save the repair lives
+    only in memory and `/resume` reloads the original image and repeats the
+    refusal forever."""
+    saved: list = []
+
+    class _Store:
+        def save(self, session_id, history):
+            saved.append((session_id, [dict(m) for m in history]))
+
+        def load(self, session_id):
+            return saved[-1][1] if saved else []
+
+    s = _session()
+    s._history_store = _Store()
+    s._append_history({
+        "role": "user",
+        "content": [{"type": "image",
+                     "source": {"type": "base64", "media_type": "image/png",
+                                "data": "AAAA"}}],
+    })
+    s._stream_and_handle_tools = _counting_raiser(
+        lambda: ContentTooLargeError(_PROVIDER_COPY), []
+    )
+    with pytest.raises(ContentTooLargeError):
+        _ = [e async for e in s.turn_stream("what is this?")]
+
+    assert saved, "the repaired history was never saved"
+    resumed = saved[-1][1]
+    survived = [
+        b
+        for m in resumed
+        if isinstance(m, dict) and isinstance(m.get("content"), list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") in ("image", "image_url")
+    ]
+    assert not survived, "a resumed session would resend the rejected image"
+
+
+async def test_a_failing_history_store_does_not_change_the_raised_error():
+    """The save runs on the error path. An escape there would convert a
+    handled, card-mappable failure into an unexpected one."""
+    class _Broken:
+        def save(self, session_id, history):
+            raise OSError("disk full")
+
+    s = _session()
+    s._history_store = _Broken()
+    s._append_history({
+        "role": "user",
+        "content": [{"type": "image",
+                     "source": {"type": "base64", "media_type": "image/png",
+                                "data": "AAAA"}}],
+    })
+    s._stream_and_handle_tools = _counting_raiser(
+        lambda: ContentTooLargeError(_PROVIDER_COPY), []
+    )
+    with pytest.raises(ContentTooLargeError):
+        _ = [e async for e in s.turn_stream("what is this?")]

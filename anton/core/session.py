@@ -2704,7 +2704,13 @@ class ChatSession:
                 if not isinstance(block, dict):
                     out.append(block)
                     continue
-                if block.get("type") == "image":
+                # Both shapes, matching the pair this file already uses at
+                # its other two image sites. `turn_stream` accepts the
+                # OpenAI-style `image_url` as public input and the provider
+                # translates it onward, so stripping only `image` left that
+                # shape in history to be re-sent on the next turn — the exact
+                # failure this repair exists to stop (review of #484).
+                if block.get("type") in ("image", "image_url"):
                     out.append({"type": "text", "text": self._IMAGE_REMOVED_PLACEHOLDER})
                     changed = True
                     removed += 1
@@ -4337,6 +4343,22 @@ class ChatSession:
                                 "block(s) from history so the conversation can continue",
                                 _removed,
                             )
+                            # Save it NOW. The turn-end `_persist_history()` is
+                            # below this raise and never runs, and `close()`
+                            # does not save either — so without this the repair
+                            # lives only in memory and `/resume` reloads the
+                            # original image and repeats the refusal forever
+                            # (review of #484). Failure-safe: this runs on the
+                            # error path, where an escape would turn a handled
+                            # failure into a dead turn.
+                            try:
+                                self._persist_history()
+                            except Exception:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "could not persist the repaired history; a "
+                                    "resumed session may resend the rejected image",
+                                    exc_info=True,
+                                )
                         _stamp_retry_terminal(
                             self._turn_cost, _agent_exc, "content_rejected"
                         )
