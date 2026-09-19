@@ -41,6 +41,55 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+DATASOURCE_PROTOCOL_VERSION = 1
+MAX_DATASOURCE_CONNECTIONS = 100
+
+
+@dataclass(frozen=True)
+class DatasourceConnectionRefV1:
+    connection_id: int
+    credential_version: int
+
+
+@dataclass(frozen=True)
+class DatasourceBlockV1:
+    protocol_version: int
+    connections: tuple[DatasourceConnectionRefV1, ...]
+
+
+def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("datasource must be an object")
+    if set(value) != {"protocol_version", "connections"}:
+        raise ValueError("datasource contains unsupported fields")
+    if value.get("protocol_version") != DATASOURCE_PROTOCOL_VERSION:
+        raise ValueError("unsupported datasource protocol version")
+    connections = value.get("connections")
+    if not isinstance(connections, list) or not connections or len(connections) > MAX_DATASOURCE_CONNECTIONS:
+        raise ValueError("datasource connections are invalid")
+    refs: list[DatasourceConnectionRefV1] = []
+    seen: set[int] = set()
+    for connection in connections:
+        if not isinstance(connection, dict) or set(connection) != {"connection_id", "credential_version"}:
+            raise ValueError("datasource connection reference is invalid")
+        connection_id = connection.get("connection_id")
+        credential_version = connection.get("credential_version")
+        if (
+            isinstance(connection_id, bool)
+            or not isinstance(connection_id, int)
+            or connection_id < 1
+            or isinstance(credential_version, bool)
+            or not isinstance(credential_version, int)
+            or credential_version < 1
+            or connection_id in seen
+        ):
+            raise ValueError("datasource connection reference is invalid")
+        seen.add(connection_id)
+        refs.append(DatasourceConnectionRefV1(connection_id, credential_version))
+    return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
 
 @dataclass
 class TurnRequestV1:
@@ -49,6 +98,7 @@ class TurnRequestV1:
     protocol_version: int
     conversation_id: str
     input: str
+    correlation_id: str | None = None
     #: Mount path the controller passes; the pod uses its own trusted mount and
     #: does not act on this value (kept for wire-compatibility). See session.py.
     workspace_path: str | None = None
@@ -85,6 +135,9 @@ class TurnRequestV1:
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
     oauth: dict | None = None
+    #: Optional verified datasource references. Only IDs and immutable versions
+    #: cross the controller/pod boundary; gateway origin and capabilities do not.
+    datasource: DatasourceBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
     #: rows carry no timestamps. Without it the session dates the conversation
@@ -95,10 +148,14 @@ class TurnRequestV1:
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
         d = json.loads(raw)
+        protocol_version = int(d["protocol_version"])
+        if protocol_version != 1:
+            raise ValueError("unsupported cloud turn protocol version")
         return TurnRequestV1(
-            protocol_version=int(d["protocol_version"]),
+            protocol_version=protocol_version,
             conversation_id=str(d["conversation_id"]),
             input=str(d["input"]),
+            correlation_id=(d.get("correlation_id") if isinstance(d.get("correlation_id"), str) else None),
             workspace_path=d.get("workspace_path"),
             model=d.get("model"),
             history=d.get("history") or [],
@@ -110,6 +167,7 @@ class TurnRequestV1:
             trace=d.get("trace") if isinstance(d.get("trace"), dict) else None,
             # Same defensive isinstance check as trace, for the same reason.
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
+            datasource=_parse_datasource_block(d.get("datasource")),
             # The controller always sends the key and sends None when
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(

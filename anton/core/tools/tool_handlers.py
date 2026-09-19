@@ -519,9 +519,10 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
             ds_env[key] = value
 
     # Only-if-unset, like the scratchpad, so a project .env cannot override
-    # PATH or a key this process already has.
+    # PATH or a key this process already has. The cloud turn's own state (its
+    # bearer, its connection references) is for the scratchpad alone.
     overlay = getattr(session, "_workspace_env_overlay", None) or {}
-    extra_env = {k: v for k, v in overlay.items() if k not in os.environ}
+    extra_env = {k: v for k, v in overlay.items() if k not in os.environ and not k.startswith("ANTON_CLOUD_")}
 
     result = await launch_artifact_backend(
         slug=slug,
