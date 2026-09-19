@@ -375,6 +375,44 @@ def test_launch_backend_overlay_never_overrides_process_env(tmp_path, monkeypatc
     assert "PATH" not in extra_env
 
 
+def test_launch_backend_never_receives_the_turns_cloud_state(tmp_path, monkeypatch):
+    """The overlay carries the cloud turn's bearer and connection references for
+    the scratchpad only; a long-lived agent-authored process must not inherit them."""
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    sess = _Sess(tmp_path)
+    sess._data_vault = LocalDataVault(vault_dir=tmp_path / "vault")
+    sess._scratchpads = None
+    sess._workspace_env_overlay = {
+        "ANTON_CLOUD_TURN": "1",
+        "ANTON_CLOUD_DATASOURCE_TURN_KEY": "mdb_turn.secret",
+        "ANTON_CLOUD_DATASOURCE_CONNECTIONS": "[]",
+        "PROJECT_ONLY": "yes",
+    }
+    created = json.loads(
+        asyncio.run(
+            handle_create_artifact(
+                sess,
+                {"name": "OvApp", "description": "y", "type": "fullstack-stateless-app"},
+            )
+        ).content
+    )
+    slug = created["resource_id"]
+
+    captured: dict = {}
+
+    async def _fake_launch(**kwargs):
+        captured.update(kwargs)
+        return {"slug": slug, "port": 1, "pid": 2, "url": "u", "log_path": "l", "proc": object()}
+
+    monkeypatch.setattr(
+        "anton.core.artifacts.backend_launcher.launch_artifact_backend", _fake_launch
+    )
+    assert asyncio.run(handle_launch_backend(sess, {"slug": slug})).ok is True
+
+    assert captured["extra_env"] == {"PROJECT_ONLY": "yes"}
+
+
 def test_launch_backend_says_when_a_declared_datasource_is_gone(tmp_path, monkeypatch, caplog):
     """A connection deleted after the artifact declared it must be named in the
     log, or the backend just dies on its first query with no explanation."""
