@@ -28,6 +28,13 @@ Events written back on stdout (JSONL):
       own hidden `messages` rows so the NEXT turn's history replays a valid
       tool_use -> tool_result sequence. Omitted after a mid-turn compaction or
       on failure, in which case that turn replays text-only.
+  {"kind": "compaction", "summary": "...", "covered_through": N}  - pre-terminal;
+      this turn folded the first N messages of the REQUEST's `history` into
+      `summary`. cowork saves both and seeds `summary` + the uncovered tail next
+      turn, instead of resending (and re-summarizing) the whole conversation.
+      Mutually exclusive with `history` above, which the same compaction
+      suppresses. Omitted on failure too: the next turn re-seeds the same
+      history and compacts it again.
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
 
