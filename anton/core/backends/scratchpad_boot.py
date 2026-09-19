@@ -767,12 +767,13 @@ if _scratchpad_model:
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 
-# --- Inject query_minds_data() for Minds datasource access from scratchpad ---
+# --- Inject the legacy Minds helper only for desktop, never cloud turns ---
+_cloud_turn = os.environ.get("ANTON_CLOUD_TURN", "") == "1"
 _minds_datasource = os.environ.get("ANTON_MINDS_DATASOURCE", "")
 _minds_api_key = os.environ.get("ANTON_MINDS_API_KEY", "")
 _minds_url = os.environ.get("ANTON_MINDS_URL", "")
 _minds_engine = os.environ.get("ANTON_MINDS_DATASOURCE_ENGINE", "")
-if _minds_datasource and _minds_api_key and _minds_url:
+if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
     try:
         import ssl as _minds_ssl
         import urllib.request as _minds_urllib
@@ -853,6 +854,113 @@ if _minds_datasource and _minds_api_key and _minds_url:
         _inject_helper("query_minds_data", query_minds_data)
     except Exception:
         pass  # Minds query not available — not fatal
+
+# --- Inject the typed, turn-key-bound cloud helper ---
+if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
+    try:
+        import urllib.error as _cloud_error
+        import urllib.parse as _cloud_parse
+        import urllib.request as _cloud_request
+
+        _cloud_gateway_url = os.environ.get("ANTON_DATASOURCE_GATEWAY_URL", "").strip().rstrip("/")
+        _cloud_turn_key = os.environ.get("ANTON_CLOUD_DATASOURCE_TURN_KEY", "")
+        _cloud_correlation_id = os.environ.get("ANTON_CLOUD_DATASOURCE_CORRELATION_ID", "")
+        _cloud_refs = json.loads(os.environ["ANTON_CLOUD_DATASOURCE_CONNECTIONS"])
+        _cloud_versions = {
+            int(ref["connection_id"]): int(ref["credential_version"])
+            for ref in _cloud_refs
+            if isinstance(ref, dict)
+        }
+
+        def query_minds_data(connection_id, sql, parameters=None):
+            """Execute one typed, read-only datasource operation for this turn."""
+            try:
+                if (
+                    isinstance(connection_id, bool)
+                    or not isinstance(connection_id, int)
+                    or connection_id not in _cloud_versions
+                    or not isinstance(sql, str)
+                    or not sql.strip()
+                ):
+                    return {"type": "error", "error_code": "invalid_datasource_request"}
+                if parameters is None:
+                    parameters = {}
+                if not isinstance(parameters, dict):
+                    return {"type": "error", "error_code": "invalid_datasource_request"}
+                if len(sql.encode("utf-8")) > 65_536:
+                    return {"type": "error", "error_code": "query_too_large"}
+                try:
+                    parameters_size = len(json.dumps(parameters, separators=(",", ":")).encode("utf-8"))
+                except (TypeError, ValueError):
+                    return {"type": "error", "error_code": "invalid_datasource_request"}
+                if parameters_size > 262_144:
+                    return {"type": "error", "error_code": "parameters_too_large"}
+                parsed_url = _cloud_parse.urlsplit(_cloud_gateway_url)
+                if (
+                    parsed_url.scheme != "https"
+                    or not parsed_url.netloc
+                    or parsed_url.username is not None
+                    or parsed_url.password is not None
+                    or parsed_url.query
+                    or parsed_url.fragment
+                ):
+                    return {"type": "error", "error_code": "gateway_unavailable"}
+                payload = json.dumps(
+                    {
+                        "protocol_version": 1,
+                        "connection_id": connection_id,
+                        "credential_version": _cloud_versions[connection_id],
+                        "correlation_id": _cloud_correlation_id,
+                        "operation": {"kind": "query", "sql": sql, "parameters": parameters},
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                req = _cloud_request.Request(
+                    f"{_cloud_gateway_url}/v1/datasources/execute",
+                    data=payload,
+                    method="POST",
+                    headers={
+                        "Authorization": f"Bearer {_cloud_turn_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                )
+                with _cloud_request.urlopen(req, timeout=30) as response:
+                    body = response.read(8_388_609)
+                if len(body) > 8_388_608:
+                    return {"type": "error", "error_code": "result_too_large"}
+                result = json.loads(body.decode("utf-8"))
+                if not isinstance(result, dict):
+                    return {"type": "error", "error_code": "invalid_datasource_response"}
+                rows = result.get("rows")
+                columns = result.get("columns")
+                truncated = result.get("truncated", False)
+                if not isinstance(rows, list) or not isinstance(columns, list) or not isinstance(truncated, bool):
+                    return {"type": "error", "error_code": "invalid_datasource_response"}
+                if len(rows) > 10_000:
+                    return {"type": "error", "error_code": "result_too_large"}
+                if len(columns) > 256:
+                    return {"type": "error", "error_code": "result_too_large"}
+                for row in rows:
+                    if not isinstance(row, list):
+                        return {"type": "error", "error_code": "invalid_datasource_response"}
+                    if len(row) > 256:
+                        return {"type": "error", "error_code": "result_too_large"}
+                    for value in row:
+                        if len(json.dumps(value).encode("utf-8")) > 262_144:
+                            return {"type": "error", "error_code": "result_too_large"}
+                return {
+                    "type": "query",
+                    "columns": columns,
+                    "data": rows,
+                    "truncated": truncated,
+                }
+            except (_cloud_error.HTTPError, _cloud_error.URLError, TimeoutError, ValueError, OSError):
+                return {"type": "error", "error_code": "datasource_unavailable"}
+
+        _inject_helper("query_minds_data", query_minds_data)
+    except (KeyError, TypeError, ValueError):
+        pass
 
 # Read-execute loop
 _real_stdout = sys.stdout

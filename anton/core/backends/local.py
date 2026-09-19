@@ -594,10 +594,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
+        # These values are per-turn state. Never let a previous cloud runtime
+        # supply a bearer or connection refs to a later runtime with no block.
+        for key in list(env):
+            if key == "ANTON_CLOUD_TURN" or key.startswith("ANTON_CLOUD_DATASOURCE_"):
+                del env[key]
         # Only-if-unset, as apply_env_to_process was, and before the DS_* strip
         # so a project .env can neither replace PATH nor smuggle a credential.
         for key, value in (self._workspace_env_overlay or {}).items():
-            env.setdefault(key, value)
+            if key == "ANTON_CLOUD_TURN" or key.startswith("ANTON_CLOUD_DATASOURCE_"):
+                # Per-turn cloud datasource state must replace inherited values;
+                # retaining a previous turn's bearer or refs would cross scopes.
+                env[key] = value
+            else:
+                env.setdefault(key, value)
         if self._scratchpad_ds_env is not None:
             # Never trust inherited DS_* values — strip them, then overlay
             # exactly what this pad should see.

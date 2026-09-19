@@ -10,6 +10,7 @@ Two layers:
 
 from __future__ import annotations
 
+import json
 import os
 # Bound at import so the constants below are built from the real class, which
 # `_pin_today` later replaces on the module.
@@ -68,6 +69,40 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.tools == []               # no host connector/publish tools
     assert cfg.web_search_enabled is False
     assert cfg.web_fetch_enabled is False
+
+
+def test_datasource_turn_uses_only_trusted_pod_config_and_child_overlay(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_DATASOURCE_GATEWAY_URL", "https://datasource.internal/base")
+    request = TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+    _, cfg = _build(tmp_path, monkeypatch, **{
+        "correlation_id": request.correlation_id,
+        "llm": request.llm,
+        "datasource": request.datasource,
+    })
+    assert cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CORRELATION_ID"] == "corr_1"
+    assert json.loads(cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CONNECTIONS"])[0] == {
+        "connection_id": 7,
+        "credential_version": 3,
+    }
+    assert "GATEWAY_URL" not in cfg.workspace_env_overlay
+
+
+def test_datasource_turn_fails_closed_without_trusted_gateway_config(tmp_path, monkeypatch):
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.delenv("ANTON_DATASOURCE_GATEWAY_URL", raising=False)
+    request = TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+    with pytest.raises(ValueError, match="trusted datasource gateway"):
+        build_cloud_chat_session(request)
 
 
 def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):
