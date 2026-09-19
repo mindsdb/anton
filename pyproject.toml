@@ -43,6 +43,9 @@ dependencies = [
     "truststore>=0.10.4",
     # Reads .xlsx artifacts for the structural lint 
     "openpyxl>=3.1,<4",
+    # MCP client (anton/core/mcp/) — v2 renamed FastMCP to MCPServer and
+    # replaced the old in-memory test helper; pin the major version.
+    "mcp>=2,<3",
 ]
 
 [project.optional-dependencies]

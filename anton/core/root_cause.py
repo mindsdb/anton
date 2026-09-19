@@ -177,6 +177,19 @@ _SENTINEL_REASONS = {
     # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
     # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
     "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # MCP connectors (ENG-1816): a rejected/expired token needs a user
+    # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
+    # — the agent cannot fix this by retrying, so it's a genuine wall.
+    "mcp_permanent_error": (TIER_WALL, "auth_missing"),
+    # A rate limit or transport hiccup — already retried once inside
+    # McpSession.call_tool before this reason ever reaches a ToolOutcome, so
+    # reaching here means the provider is still down, not a one-off blip.
+    "mcp_transient_error": (TIER_TRANSIENT, "mcp_transient"),
+    # The MCP tool itself reported is_error=True. A bare "the tool failed" text
+    # covers both a bad argument the agent passed and a genuine provider-side
+    # wall, with nothing here to tell them apart — stays out of every trip
+    # rung, same reasoning as `read_failed`/`bmp_convert_failed` above.
+    "mcp_tool_error": (TIER_UNCLASSIFIED, "unclassified"),
 }
 
 # Identifier extraction, per class. Kept narrow on purpose: a wrong identifier

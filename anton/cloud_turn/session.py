@@ -682,12 +682,26 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     # Connectors ON only when this turn carries an oauth block (Google
     # Drive/Gmail today) — clears+reinjects DS_* env before the sandbox subprocess inherits it.
     data_vault = None
+    mcp_tool_defs: list = []
+    mcp_sessions: list = []
     if request.oauth:
         from anton.core.datasources.data_vault import TurnKeyDataVault
         from anton.utils.datasources import restore_namespaced_env
 
         data_vault = TurnKeyDataVault(request.oauth)
         restore_namespaced_env(data_vault)
+
+        # ENG-1816: discover any MCP-method connections' tools now, before
+        # ChatSessionConfig/ChatSession exist — see anton/core/mcp/wiring.py's
+        # module docstring for why this can't happen after construction.
+        # A no-op today: no `auth` Connection carries `_method == "mcp"` yet
+        # (Stage 3, not built), so this always returns ([], []) in production
+        # until then.
+        from anton.core.mcp.wiring import discover_mcp_tools
+
+        mcp_tool_defs, mcp_sessions = discover_mcp_tools(
+            data_vault, data_vault.list_connections()
+        )
     else:
         # No vault this turn — still clear, so a prior call's DS_* vars
         # can never survive into a turn with nothing of its own to reset them.
@@ -750,15 +764,36 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         self_awareness=None,
         data_vault=data_vault,              # connectors ON iff request.oauth is set
         history_store=None,                 # disk history OFF (DB authoritative)
-        tools=[],                           # no host connector/publish tools
-        tool_allowlist=CLOUD_TOOL_ALLOWLIST,  # only reviewed tools survive the build
+        tools=mcp_tool_defs,                 # ENG-1816: this turn's MCP connections, if any
+        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own discovered MCP
+        # tool names — _build_tools() re-enforces the allowlist on every
+        # call (not just the first), so an MCP tool left out of it would
+        # survive exactly one round then vanish on the turn's next rebuild.
+        tool_allowlist=CLOUD_TOOL_ALLOWLIST | {td.name for td in mcp_tool_defs},
+        mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
         background_memory=False,            # one turn per pod: no end-of-turn LLM passes
         runtime_factory=local_scratchpad_runtime_factory,
         web_search_enabled=False,
         web_fetch_enabled=False,
     )
 
-    session = ChatSession(config)
+    try:
+        session = ChatSession(config)
+    except Exception:
+        # discover_mcp_tools() above already opened these — if construction
+        # itself raises, there's no ChatSession yet to hang them on, so
+        # nothing else would ever close them (ChatSession.close() is the
+        # only other place that does). Synchronous cleanup: this whole
+        # function is a plain `def`, not async (see discover_mcp_tools's own
+        # sync wrapper for why asyncio.run() is safe here — no event loop of
+        # this function's own, it always runs inside run_in_executor).
+        if mcp_sessions:
+            import asyncio
+
+            from anton.core.mcp.wiring import close_mcp_sessions
+
+            asyncio.run(close_mcp_sessions(mcp_sessions))
+        raise
     # Baseline for `drain_pending_skills`, taken before the turn runs. Drafts
     # from earlier turns are already on the workspace, so without this every
     # turn would re-report all of them.
