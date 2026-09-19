@@ -43,6 +43,11 @@ def test_turn_request_rejects_unsupported_or_secret_bearing_datasource(datasourc
     assert "secret" not in str(exc_info.value)
 
 
+def test_turn_request_without_a_datasource_block_parses_to_none():
+    request = TurnRequestV1.from_json('{"protocol_version":1,"conversation_id":"c","input":"hi"}')
+    assert request.datasource is None
+
+
 def test_turn_request_rejects_unsupported_top_level_protocol():
     with pytest.raises(ValueError, match="unsupported cloud turn protocol version"):
         TurnRequestV1.from_json('{"protocol_version":2,"conversation_id":"c","input":"hi"}')

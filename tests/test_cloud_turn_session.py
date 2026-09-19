@@ -92,6 +92,26 @@ def test_datasource_turn_uses_only_trusted_pod_config_and_child_overlay(tmp_path
     assert "GATEWAY_URL" not in cfg.workspace_env_overlay
 
 
+def test_a_turn_without_a_datasource_block_carries_only_the_cloud_marker(tmp_path, monkeypatch):
+    """The old-job path: no bearer, no references, nothing for the pod child to act on."""
+    _, cfg = _build(tmp_path, monkeypatch, correlation_id="corr_1",
+                    llm={"api_key": "mdb_turn.secret", "provider": "minds-cloud", "base_url": "https://m/v1"})
+    assert cfg.workspace_env_overlay == {"ANTON_CLOUD_TURN": "1"}
+
+
+def test_legacy_minds_configuration_never_reaches_a_cloud_prompt(tmp_path, monkeypatch):
+    """A pod carrying the desktop Minds variables must not advertise the static-key
+    helper or its one-argument signature; the cloud helper is the only one offered."""
+    monkeypatch.setenv("ANTON_MINDS_DATASOURCE", "legacy-datasource")
+    monkeypatch.setenv("ANTON_MINDS_URL", "https://legacy.invalid")
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "legacy-static-key")
+    _, cfg = _build(tmp_path, monkeypatch)
+    context = cfg.system_prompt_context.runtime_context
+    assert "CONNECTED MIND" not in context
+    assert 'query_minds_data("SELECT' not in context
+    assert "legacy-datasource" not in context
+
+
 def test_datasource_turn_fails_closed_without_trusted_gateway_config(tmp_path, monkeypatch):
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
     monkeypatch.delenv("ANTON_DATASOURCE_GATEWAY_URL", raising=False)

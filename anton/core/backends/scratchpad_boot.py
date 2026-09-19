@@ -858,10 +858,9 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
 # --- Inject the typed, turn-key-bound cloud helper ---
 if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
     try:
-        import re as _cloud_re
-        import urllib.error as _cloud_error
+        import http.client as _cloud_http
+        import ssl as _cloud_ssl
         import urllib.parse as _cloud_parse
-        import urllib.request as _cloud_request
 
         _cloud_gateway_url = os.environ.get("ANTON_DATASOURCE_GATEWAY_URL", "").strip().rstrip("/")
         _cloud_turn_key = os.environ.get("ANTON_CLOUD_DATASOURCE_TURN_KEY", "")
@@ -872,19 +871,51 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
             for ref in _cloud_refs
             if isinstance(ref, dict)
         }
+        # The gateway's closed vocabulary. A body naming anything else, however
+        # well shaped, is not relayed: an error code must not become a channel
+        # into the agent's context.
+        _cloud_gateway_codes = frozenset({
+            "unauthorized", "gateway_disabled", "invalid_request", "invalid_connection",
+            "adapter_unavailable", "timed_out", "execution_failed", "authorization_unavailable",
+            "capability_denied", "capability_conflict", "concurrency_limited",
+            "authentication_failed", "connection_failed", "destination_forbidden",
+            "insufficient_privileges", "operation_refused", "parameters_too_large",
+            "query_too_large", "tls_failed", "unsupported_server",
+        })
 
-        def _gateway_error_code(exc):
-            """The gateway's own code when the body carries one shaped like a code;
-            any other body, including a proxy's page, is an outage to the agent."""
+        def _gateway_error_code(body):
+            """The gateway's own code when the body carries one of its codes; any
+            other body, including a proxy's page, is an outage to the agent."""
             try:
-                body = exc.read(65_537)
                 error = json.loads(body.decode("utf-8")) if len(body) <= 65_536 else None
-            except (OSError, ValueError):
+            except ValueError:
                 return "datasource_unavailable"
             code = error.get("code") if isinstance(error, dict) else None
-            if isinstance(code, str) and _cloud_re.fullmatch(r"[a-z_]{1,64}", code):
-                return code
-            return "datasource_unavailable"
+            return code if code in _cloud_gateway_codes else "datasource_unavailable"
+
+        def _post_execute(payload):
+            """One POST over a verified TLS connection. http.client never follows
+            a redirect, so the bearer cannot be replayed to wherever a response
+            points; a 3xx is just a failed status to the caller."""
+            parsed = _cloud_parse.urlsplit(_cloud_gateway_url)
+            connection = _cloud_http.HTTPSConnection(
+                parsed.hostname, parsed.port or 443, timeout=30, context=_cloud_ssl.create_default_context()
+            )
+            try:
+                connection.request(
+                    "POST",
+                    f"{parsed.path.rstrip('/')}/v1/datasources/execute",
+                    body=payload,
+                    headers={
+                        "Authorization": f"Bearer {_cloud_turn_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                )
+                response = connection.getresponse()
+                return response.status, response.read(8_388_609)
+            finally:
+                connection.close()
 
         def _echoes_the_request(result, connection_id):
             expected = {
@@ -940,18 +971,9 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
                     },
                     separators=(",", ":"),
                 ).encode("utf-8")
-                req = _cloud_request.Request(
-                    f"{_cloud_gateway_url}/v1/datasources/execute",
-                    data=payload,
-                    method="POST",
-                    headers={
-                        "Authorization": f"Bearer {_cloud_turn_key}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                )
-                with _cloud_request.urlopen(req, timeout=30) as response:
-                    body = response.read(8_388_609)
+                status, body = _post_execute(payload)
+                if status != 200:
+                    return {"type": "error", "error_code": _gateway_error_code(body)}
                 if len(body) > 8_388_608:
                     return {"type": "error", "error_code": "result_too_large"}
                 result = json.loads(body.decode("utf-8"))
@@ -974,6 +996,9 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
                     return {"type": "error", "error_code": "result_too_large"}
                 if len(columns) > 256:
                     return {"type": "error", "error_code": "result_too_large"}
+                for column in columns:
+                    if len(json.dumps(column).encode("utf-8")) > 262_144:
+                        return {"type": "error", "error_code": "result_too_large"}
                 for row in rows:
                     if not isinstance(row, list):
                         return {"type": "error", "error_code": "invalid_datasource_response"}
@@ -989,14 +1014,15 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
                     "truncated": truncated,
                     "truncation_reason": truncation_reason,
                 }
-            except _cloud_error.HTTPError as exc:
-                return {"type": "error", "error_code": _gateway_error_code(exc)}
-            except (_cloud_error.URLError, TimeoutError, ValueError, OSError):
+            except (_cloud_http.HTTPException, TimeoutError, ValueError, OSError):
                 return {"type": "error", "error_code": "datasource_unavailable"}
 
         _inject_helper("query_minds_data", query_minds_data)
-    except (KeyError, TypeError, ValueError):
-        pass
+    except (KeyError, TypeError, ValueError) as exc:
+        # The prompt still advertises the helper, so say on the controller's
+        # stderr why the agent will meet a NameError instead of it.
+        print(f"cloud datasource helper not injected: malformed connection references ({type(exc).__name__})",
+              file=sys.stderr)
 
 # Read-execute loop
 _real_stdout = sys.stdout
