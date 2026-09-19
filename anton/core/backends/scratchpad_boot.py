@@ -858,6 +858,7 @@ if not _cloud_turn and _minds_datasource and _minds_api_key and _minds_url:
 # --- Inject the typed, turn-key-bound cloud helper ---
 if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
     try:
+        import re as _cloud_re
         import urllib.error as _cloud_error
         import urllib.parse as _cloud_parse
         import urllib.request as _cloud_request
@@ -871,6 +872,30 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
             for ref in _cloud_refs
             if isinstance(ref, dict)
         }
+
+        def _gateway_error_code(exc):
+            """The gateway's own code when the body carries one shaped like a code;
+            any other body, including a proxy's page, is an outage to the agent."""
+            try:
+                body = exc.read(65_537)
+                error = json.loads(body.decode("utf-8")) if len(body) <= 65_536 else None
+            except (OSError, ValueError):
+                return "datasource_unavailable"
+            code = error.get("code") if isinstance(error, dict) else None
+            if isinstance(code, str) and _cloud_re.fullmatch(r"[a-z_]{1,64}", code):
+                return code
+            return "datasource_unavailable"
+
+        def _echoes_the_request(result, connection_id):
+            expected = {
+                "protocol_version": 1,
+                "operation": "query",
+                "connection_id": connection_id,
+                "credential_version": _cloud_versions[connection_id],
+            }
+            return all(
+                type(result.get(key)) is type(value) and result.get(key) == value for key, value in expected.items()
+            )
 
         def query_minds_data(connection_id, sql, parameters=None):
             """Execute one typed, read-only datasource operation for this turn."""
@@ -932,10 +957,18 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
                 result = json.loads(body.decode("utf-8"))
                 if not isinstance(result, dict):
                     return {"type": "error", "error_code": "invalid_datasource_response"}
+                # A result that does not echo this exact binding is not this query's answer.
+                if not _echoes_the_request(result, connection_id):
+                    return {"type": "error", "error_code": "datasource_unavailable"}
                 rows = result.get("rows")
                 columns = result.get("columns")
                 truncated = result.get("truncated", False)
+                truncation_reason = result.get("truncation_reason")
                 if not isinstance(rows, list) or not isinstance(columns, list) or not isinstance(truncated, bool):
+                    return {"type": "error", "error_code": "invalid_datasource_response"}
+                if truncation_reason is not None and not (
+                    isinstance(truncation_reason, str) and len(truncation_reason) <= 256
+                ):
                     return {"type": "error", "error_code": "invalid_datasource_response"}
                 if len(rows) > 10_000:
                     return {"type": "error", "error_code": "result_too_large"}
@@ -954,8 +987,11 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
                     "columns": columns,
                     "data": rows,
                     "truncated": truncated,
+                    "truncation_reason": truncation_reason,
                 }
-            except (_cloud_error.HTTPError, _cloud_error.URLError, TimeoutError, ValueError, OSError):
+            except _cloud_error.HTTPError as exc:
+                return {"type": "error", "error_code": _gateway_error_code(exc)}
+            except (_cloud_error.URLError, TimeoutError, ValueError, OSError):
                 return {"type": "error", "error_code": "datasource_unavailable"}
 
         _inject_helper("query_minds_data", query_minds_data)
