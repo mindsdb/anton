@@ -638,7 +638,7 @@ def test_recorded_not_gated_pairs_are_excluded_at_parametrization_not_skipped():
 
 import importlib.util as _ilu
 
-_SCOPE_PATH = Path(__file__).resolve().parent.parent / "scripts/verifier_eval_scope.py"
+_SCOPE_PATH = Path(__file__).resolve().parent.parent / ".github/scripts/verifier_eval_scope.py"
 _spec = _ilu.spec_from_file_location("verifier_eval_scope", _SCOPE_PATH)
 scope = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(scope)
@@ -674,7 +674,7 @@ def test_every_scope_marker_resolves_to_a_span_in_the_code():
     }
     assert set(scope.ALWAYS_FULL) == {
         "tests/test_verifier_verdict_live.py", "anton/core/llm/structured.py",
-        "scripts/verifier_eval_scope.py",
+        ".github/scripts/verifier_eval_scope.py",
     }
 
 
@@ -709,12 +709,20 @@ def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
 
 def test_guard_mode_selects_exactly_the_truncation_guard():
     workflow = _WORKFLOW.read_text()
-    assert "scripts/verifier_eval_scope.py" in workflow
+    assert ".github/scripts/verifier_eval_scope.py" in workflow
     assert "${{ steps.scope.outputs.pytest_args }}" in workflow
     assert "fetch-depth: 0" in workflow
-    # The -k expression must select an existing test, and only one.
+    # The -k expression must select an existing test, and only one function.
     matches = [n for n in dir(ev) if n.startswith("test_") and scope.GUARD_K in n]
     assert matches == ["test_narrating_model_reaches_a_verdict_at_shipped_budgets"]
+    # ...which must reach EVERY pinned alias, or a repoint of the unreached one
+    # goes unnoticed on guard runs (ENG-1687's latency guarantee; round-2
+    # review of #486, finding 6). It is parametrized over `_MODELS`.
+    import inspect
+
+    src = inspect.getsource(ev.test_narrating_model_reaches_a_verdict_at_shipped_budgets)
+    assert 'parametrize("model", _MODELS)' in src and "_client(model)" in src
+    assert set(ev._EXPECTED_SERVED) <= set(ev._MODELS)
     # And the scope step never reaches for pytest.skip.
     step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
     assert "pytest.skip" not in step
@@ -775,3 +783,19 @@ def test_decide_diffs_from_the_merge_base_not_the_base_tip(tmp_path, monkeypatch
     git("commit", "-q", "-am", "renderer edit")
     verdict, reasons = scope.decide(base_tip, git("rev-parse", "HEAD"))
     assert verdict == "full" and any("_render_verify_transcript" in r for r in reasons), reasons
+
+
+def test_the_workflow_fails_closed_and_lists_the_scope_script_as_a_trigger():
+    """The YAML half of the scope decision, pinned like the Python half
+    (round-2 review of #486, finding 8): the empty-payload fallback must be
+    the FULL matrix, never the guard; and the script must be a trigger path so
+    a change to the decision itself proves the eval still runs."""
+    workflow = _WORKFLOW.read_text()
+    step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
+    fallback = step.split("if [ -z")[1].split("fi")[0]
+    assert 'echo "scope=full"' in fallback
+    assert 'echo "pytest_args="' in fallback
+    assert "scope=guard" not in fallback
+    paths = workflow.split("paths:")[1].split("concurrency:")[0]
+    assert '- ".github/scripts/verifier_eval_scope.py"' in paths
+    assert '- "tests/test_verifier_verdict_live.py"' in paths

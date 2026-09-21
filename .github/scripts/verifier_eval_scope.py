@@ -56,7 +56,7 @@ SPAN_MARKERS: dict[str, tuple[str, ...]] = {
 ALWAYS_FULL: tuple[str, ...] = (
     "tests/test_verifier_verdict_live.py",
     "anton/core/llm/structured.py",
-    "scripts/verifier_eval_scope.py",
+    ".github/scripts/verifier_eval_scope.py",
 )
 GUARD_K = "narrating_model_reaches_a_verdict"
 

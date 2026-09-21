@@ -41,7 +41,7 @@ on:
       - "anton/core/llm/client.py"
       - "tests/test_verifier_verdict_live.py"
       # The scope decision itself: a change here must prove the eval still runs.
-      - "scripts/verifier_eval_scope.py"
+      - ".github/scripts/verifier_eval_scope.py"
 
 # One live run per PR at a time — a force-push cancels the superseded run
 # instead of stacking ~100 prod gateway calls per push.
@@ -103,7 +103,7 @@ jobs:
       # Two tiers, decided per PR (ENG-2863). The trigger paths above fire on
       # ~200 PRs a month, but only a small fraction touch anything the
       # verifier's judgment depends on; the rest paid the full ~100-call live
-      # matrix to guard code that did not change. `scripts/verifier_eval_scope.py`
+      # matrix to guard code that did not change. `.github/scripts/verifier_eval_scope.py`
       # intersects the PR's hunks with the line spans of the verifier's
       # criteria, request builder, transcript renderer and schema plumbing
       # (parsed with `ast` on both sides of the diff), so a body-only edit
@@ -131,7 +131,7 @@ jobs:
             exit 0
           fi
           git fetch --quiet origin "$BASE_SHA" "$HEAD_SHA" || true
-          python3 scripts/verifier_eval_scope.py --base "$BASE_SHA" --head "$HEAD_SHA" --github-output "$GITHUB_OUTPUT"
+          python3 .github/scripts/verifier_eval_scope.py --base "$BASE_SHA" --head "$HEAD_SHA" --github-output "$GITHUB_OUTPUT"
           if grep -q "^scope=guard" "$GITHUB_OUTPUT"; then
             {
               echo "### Verifier eval — guard only"
