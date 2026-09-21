@@ -126,7 +126,19 @@ def _time_limit(seconds: float):
 
     This works on a regex specifically because `sre` checks for pending
     signals while it matches — a plain thread could not interrupt it.
+
+    Where no alarm can be armed the block runs unguarded, because
+    `search` has already escaped the pattern to a literal and that is
+    what bounds the cost instead. Arming one anyway is not a stricter
+    reading of the same rule: `signal.signal` raises AttributeError on
+    Windows and ValueError off the main thread, and neither is a
+    TimeoutError, so the caller gets a crash where it expected a
+    degraded result.
     """
+    if not _can_interrupt():
+        yield
+        return
+
     def ring(*_):
         raise TimeoutError
 

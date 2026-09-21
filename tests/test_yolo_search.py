@@ -11,6 +11,7 @@ feed straight into the read set.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -171,6 +172,35 @@ def test_search_takes_a_regular_expression(tmp_path: Path):
 
 def test_a_plain_word_is_still_a_valid_pattern(tmp_path: Path):
     assert haystack(tmp_path).search("Old Title").matches
+
+
+def test_search_degrades_where_no_alarm_can_be_armed(tmp_path: Path):
+    """`search` already declines to arm an alarm it cannot arm — off the
+    main thread, or on Windows, where SIGALRM does not exist — and escapes
+    the pattern to a literal for exactly those cases. Entering the limit
+    anyway raised ValueError (or AttributeError on Windows) out of every
+    search there, which is a crash where a degraded result was promised.
+
+    A worker thread reproduces it on any platform, so this holds the
+    alarm's availability as the only variable.
+    """
+    workspace = haystack(tmp_path)
+    box: dict[str, object] = {}
+
+    def run():
+        try:
+            box["result"] = workspace.search("Old Title")
+        except BaseException as error:  # the bug is that anything is raised
+            box["error"] = error
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(timeout=30)
+
+    assert "error" not in box, f"search raised: {box['error']!r}"
+    result = box["result"]
+    assert [m.path for m in result.matches] == ["c.js"]
+    assert "searched literally" in result.note
 
 
 def test_an_invalid_pattern_comes_back_as_feedback_not_a_crash(tmp_path: Path):
