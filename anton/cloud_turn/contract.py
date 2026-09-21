@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
 
@@ -148,8 +149,10 @@ class TurnRequestV1:
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
         d = json.loads(raw)
-        protocol_version = int(d["protocol_version"])
-        if protocol_version != 1:
+        protocol_version = d["protocol_version"]
+        # Never a coercion: int(1.9) and int(True) are both 1, so a coercing
+        # guard reads a non-v1 envelope as v1. `type` because bool subclasses int.
+        if type(protocol_version) is not int or protocol_version != TURN_PROTOCOL_VERSION:
             raise ValueError("unsupported cloud turn protocol version")
         return TurnRequestV1(
             protocol_version=protocol_version,

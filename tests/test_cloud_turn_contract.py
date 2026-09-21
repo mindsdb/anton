@@ -48,6 +48,11 @@ def test_turn_request_without_a_datasource_block_parses_to_none():
     assert request.datasource is None
 
 
-def test_turn_request_rejects_unsupported_top_level_protocol():
+@pytest.mark.parametrize("version", ["2", "1.9", "true", '"1"', "null"])
+def test_turn_request_rejects_a_version_that_is_not_the_integer_one(version):
+    """A coercing guard accepts 1.9 and true as 1, then parses an envelope that
+    is not v1 with the v1 schema and silently drops what else it carried."""
     with pytest.raises(ValueError, match="unsupported cloud turn protocol version"):
-        TurnRequestV1.from_json('{"protocol_version":2,"conversation_id":"c","input":"hi"}')
+        TurnRequestV1.from_json(
+            f'{{"protocol_version":{version},"conversation_id":"c","input":"hi"}}'
+        )
