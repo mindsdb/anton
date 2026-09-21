@@ -308,7 +308,13 @@ def _check_served_model(alias: str, served: object) -> None:
     80-char cap would be truncated and then mismatch its pin — the longest id
     this catalog serves is 46 (`accounts/fireworks/models/deepseek-v4-pro-0813`).
 
-    Silent on two cases, both on purpose:
+    Silent on three cases, all on purpose:
+
+    - **The gateway echoes the alias.** Since the mindshub_inference release of
+      2026-09-21 the response ``model`` for these aliases is the alias itself,
+      not the resolved id. That carries no identity information, so it is
+      recorded as "not disclosed" and never asserted (ENG-2892). A genuine
+      repoint — a *different real id* — still fails.
 
     - **An alias not in the pin map.** The `VERIFIER_EVAL_*_MODEL` env vars exist
       for one-off runs against another alias; failing those would make the
@@ -319,6 +325,17 @@ def _check_served_model(alias: str, served: object) -> None:
     """
     served = sanitize_model_name(served)
     if served is None:
+        return
+    if served == alias:
+        # The gateway echoed the alias back instead of the model it resolved
+        # to (mindshub_inference release of 2026-09-21: the client-visible
+        # `model` became a configured "response model"). That is not a
+        # repoint — it is no information. Record it so the served-models
+        # report shows the identity check is BLIND for this slot, and do not
+        # raise: the behavioural half of the matrix still runs and still
+        # asserts. ENG-2892. If the gateway grows a header carrying the served
+        # id, read it here and this branch becomes dead.
+        _SERVED[alias] = f"{alias} (alias echoed — served model not disclosed)"
         return
     _SERVED[alias] = served
     expected = _EXPECTED_SERVED.get(alias)
