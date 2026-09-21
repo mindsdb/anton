@@ -12,6 +12,7 @@ import re
 import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
+from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -22,6 +23,7 @@ from anton.core.llm.endpoints import classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
+from anton.core.memory.prefix_pin import MemoryPrefixPin
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
 from anton.core.memory.base import Engram
@@ -1486,6 +1488,9 @@ class ChatSession:
             workspace_env_overlay=config.workspace_env_overlay,
         )
 
+        # Rendered memory text, fixed for the conversation (see prefix_pin).
+        self._memory_pin_obj: MemoryPrefixPin | None = None
+
         self.tool_registry = ToolRegistry()
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
         # Lives at ~/.anton/skills/<label>/. The recall_skill tool retrieves
@@ -2068,6 +2073,16 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    def _memory_pin(self) -> MemoryPrefixPin:
+        if self._memory_pin_obj is None:
+            path = None
+            conversation_file = getattr(self._scratchpads, "conversation_file", None)
+            if callable(conversation_file):
+                candidate = conversation_file("_memory_prefix.json")
+                path = candidate if isinstance(candidate, Path) else None
+            self._memory_pin_obj = MemoryPrefixPin(path)
+        return self._memory_pin_obj
+
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
@@ -2079,10 +2094,17 @@ class ChatSession:
         _started = self._started_at or _dt.datetime.now()
         _conversation_started = _started.strftime("%A, %B %d, %Y")
 
-        # Inject memory context (replaces old self_awareness)
+        # Inject memory context (replaces old self_awareness). Rendered once per
+        # conversation and pinned: rebuilding it every turn changed the cached
+        # prefix and re-wrote the whole conversation to cache.
         memory_section = ""
         if self._cortex is not None:
-            memory_section = await self._cortex.build_memory_context(user_message)
+            pin = self._memory_pin()
+            pinned = pin.get("system")
+            if pinned is None:
+                pinned = await self._cortex.build_memory_context(user_message)
+                pin.set("system", pinned)
+            memory_section = pinned
 
         sa_section = ""
         if self._self_awareness is not None and self._cortex is None:
@@ -2289,9 +2311,15 @@ class ChatSession:
                 extra = f"\n\nInstalled packages: {len(pkg_list)} total (standard library plus dependencies)."
             scratchpad_tool.description = scratchpad_tool.description + extra
 
-        # Inject scratchpad wisdom from memory (procedural priming)
+        # Inject scratchpad wisdom from memory (procedural priming). Pinned per
+        # conversation like the system memory section: tools come first in the
+        # request, so a changed description invalidates everything after it.
         if self._cortex is not None:
-            wisdom = self._cortex.get_scratchpad_context()
+            pin = self._memory_pin()
+            wisdom = pin.get("scratchpad")
+            if wisdom is None:
+                wisdom = self._cortex.get_scratchpad_context()
+                pin.set("scratchpad", wisdom)
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"

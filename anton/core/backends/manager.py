@@ -92,13 +92,20 @@ class ScratchpadManager:
         start challenging on names from unrelated past sessions. Unscoped callers keep the
         previous in-memory-only behaviour.
         """
+        return self.conversation_file("_agent_pads.json")
+
+    def conversation_file(self, name: str) -> Path | None:
+        """Path for a per-conversation state file, or None without a conversation scope.
+
+        Same directory and lifetime as the namespace snapshots (see _agent_pads_file).
+        """
         if not self._session_id:
             return None
         try:
             from anton.core.backends.local import default_venvs_base, snapshot_dir
 
             base = snapshot_dir(default_venvs_base(self._workspace_path), self._session_id)
-            return None if base is None else base / "_agent_pads.json"
+            return None if base is None else base / name
         except Exception:
             return None
 
