@@ -79,30 +79,11 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
     }
 )
 
-#: Appended to this turn's system prompt, and the whole of what this surface
-#: says about credentials. The shared base prompt still lists credentials among
-#: the things to ask the user for, deliberately: that text is also the CLI's and
-#: the desktop's, and narrowing this fix to web means not touching it. So the
-#: rule has to claim precedence in its own text rather than win it by position:
-#: the builder renders this suffix before the volatile memory tail, and a
-#: recalled skill body never passes through the prompt at all. That is a weaker
-#: guarantee than deleting the invitation, and it is the known cost of keeping
-#: this change web-only.
-#:
-#: The no-storing clause is load-bearing, not decoration. `memorize` and
-#: `create_skill_draft` are both allowlisted below, memory writes are applied
-#: org-side and replayed on later turns, and the relay's scrubber matches four
-#: shapes that a GitHub PAT, a WordPress application password and an SMTP
-#: password all miss. Without this clause, "get it out of the transcript" reads
-#: as "store it somewhere", which would turn one exposed trace into permanent
-#: exposure.
-#:
-#: Names no connector: which ones a deployment offers is decided by auth's
-#: OAuth configuration, which the pod cannot see. "Connect Apps and Data" is
-#: cowork's own sidebar label, and the one to use: "Connectors" also titles a
-#: different page whose web branch saves personal tokens into a vault no turn
-#: reads, so sending a user there would be this same dead end one step later.
-#: A rename in cowork has no test here to catch it.
+#: The whole of what a web turn is told about credentials. The shared base
+#: prompt still invites asking for them and is left alone to keep this fix
+#: web-only, so this text has to claim precedence instead of winning it by
+#: position, and it names no connector because the pod cannot see which ones
+#: auth offers.
 _CREDENTIAL_CONTEXT = (
     "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
     "none will appear mid-turn. Never ask the user to type a password, API "
@@ -693,14 +674,8 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
     "— never repeat a path."
 )
 
-#: `SystemPromptContext.suffix` is one string, and this surface has two things
-#: to say that the shared prompt cannot: where a finished file goes, and where
-#: a credential goes. Both are deployment facts the desktop harness injects for
-#: its own surface and the pod has to inject for this one. Kept as separate
-#: blocks rather than merged prose so each stays independently reviewable, and
-#: joined here rather than concatenated at the call site so the whole suffix
-#: has one definition a test can pin. Order is not load-bearing: each block
-#: names the instruction it overrides rather than relying on position.
+#: `suffix` is one string, so the two deployment facts this surface must state
+#: are joined here, where one definition covers the whole of it.
 _POD_PROMPT_SUFFIX = "\n\n".join(
     (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT)
 )
