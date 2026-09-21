@@ -106,42 +106,26 @@ _DISCOVERY_MAX_PADS = 10
 _DISCOVERY_MAX_ROOT_ENTRIES = 30
 
 
-def _age_label(mtime: float | None) -> str:
-    if mtime is None:
-        return ""
-    import time
-
-    mins = max(0, int((time.time() - mtime) / 60))
-    if mins < 60:
-        return f" (snapshot {mins}m old)"
-    if mins < 60 * 48:
-        return f" (snapshot {mins // 60}h old)"
-    return f" (snapshot {mins // (60 * 24)}d old)"
-
-
 def build_workspace_discovery_context(manager) -> str:
     """Compact turn-start block: known pads + project-root names (ENG-578).
 
     Cold-start blindness made the agent invent pad names and rebuild state it
-    already had on disk. Source of truth is agent_pads() — live pads only add
-    the "active" label, so system-created pads never leak in. Best-effort by
-    construction: any failure degrades to omitting that part or the whole
-    block, never to breaking the turn.
+    already had on disk. Source of truth is agent_pads(), so system-created
+    pads never leak in. Best-effort by construction: any failure degrades to
+    omitting that part or the whole block, never to breaking the turn.
+
+    This block sits inside the cached system prompt, ahead of the whole
+    conversation. Its bytes must depend only on the set of pad and file names:
+    anything that varies while that set is unchanged re-writes the conversation
+    cache on the next turn.
     """
     pads_line = ""
     try:
         known = sorted(manager.agent_pads())
         if known:
             shown = known[:_DISCOVERY_MAX_PADS]
-            live = set(manager.pads)
-            parts = []
-            for name in shown:
-                label = (
-                    " (active)"
-                    if name in live
-                    else _age_label(manager.pad_snapshot_mtime(name))
-                )
-                parts.append(f"{name}{label}")
+            # Names only: no snapshot age, no live/active flag. Both changed
+            # between turns without the workspace changing.
             more = (
                 f" … and {len(known) - len(shown)} more"
                 if len(known) > len(shown)
@@ -149,7 +133,7 @@ def build_workspace_discovery_context(manager) -> str:
             )
             pads_line = (
                 "\nScratchpads for this conversation: "
-                + ", ".join(parts)
+                + ", ".join(shown)
                 + more
                 + " — reuse via scratchpad exec with the same name; each name is a "
                 "separate environment."

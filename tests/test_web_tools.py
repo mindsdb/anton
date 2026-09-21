@@ -37,6 +37,16 @@ def _session_with_settings(**fields):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _text(out):
+    """The caller-facing text of a `web_search` / `web_fetch` result.
+
+    Since ENG-2677 both handlers return a `ToolOutcome` carrying the verdict on
+    the provider/fetch paths; the argument-validation and no-provider branches
+    still return a bare `str`.
+    """
+    return out.content if hasattr(out, "content") else out
+
+
 class TestWebSearchFallbackExa:
     async def test_returns_no_provider_message_when_unconfigured(self):
         session = _session_with_settings()
@@ -102,10 +112,10 @@ class TestWebSearchFallbackExa:
         # — the latter would also pass for "https://a.example.evil.com" and
         # CodeQL's incomplete-URL-substring-sanitization rule (correctly)
         # warns on that pattern even in tests.
-        out_lines = out.splitlines()
-        assert "Result A" in out
+        out_lines = _text(out).splitlines()
+        assert "Result A" in _text(out)
         assert "   https://a.example" in out_lines
-        assert "Result B" in out
+        assert "Result B" in _text(out)
 
     async def test_exa_non_200_response_returns_error_string(self):
         session = _session_with_settings(
@@ -119,8 +129,8 @@ class TestWebSearchFallbackExa:
 
         with patch.object(httpx.AsyncClient, "post", new=_post):
             out = await handle_web_search_fallback(session, {"query": "x"})
-        assert "Exa search failed" in out
-        assert "401" in out
+        assert "Exa search failed" in _text(out)
+        assert "401" in _text(out)
 
     async def test_caps_max_results_to_safe_range(self):
         session = _session_with_settings(
@@ -181,8 +191,8 @@ class TestWebSearchFallbackBrave:
         assert captured["url"] == "https://api.search.brave.com/res/v1/web/search"
         assert captured["headers"]["X-Subscription-Token"] == "brv-key"
         assert captured["params"] == {"q": "anton", "count": 5}
-        assert "Brave hit" in out
-        assert "A hit." in out
+        assert "Brave hit" in _text(out)
+        assert "A hit." in _text(out)
 
     async def test_brave_no_results(self):
         session = _session_with_settings(
@@ -196,7 +206,7 @@ class TestWebSearchFallbackBrave:
 
         with patch.object(httpx.AsyncClient, "get", new=_get):
             out = await handle_web_search_fallback(session, {"query": "obscure"})
-        assert "No results" in out
+        assert "No results" in _text(out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -207,11 +217,11 @@ class TestWebSearchFallbackBrave:
 class TestWebFetchFallback:
     async def test_rejects_non_http_urls(self):
         out = await handle_web_fetch_fallback(None, {"url": "ftp://x.example"})
-        assert "http(s)" in out
+        assert "http(s)" in _text(out)
 
     async def test_empty_url(self):
         out = await handle_web_fetch_fallback(None, {"url": "   "})
-        assert "requires" in out
+        assert "requires" in _text(out)
 
     async def test_strips_html_to_text(self):
         async def _get(self, url, headers=None):
@@ -233,11 +243,11 @@ class TestWebFetchFallback:
             )
 
         # Body text is preserved, script and tags are stripped.
-        assert "Hello" in out
-        assert "world" in out
-        assert "Second para" in out
-        assert "<script>" not in out
-        assert "var x = 1" not in out
+        assert "Hello" in _text(out)
+        assert "world" in _text(out)
+        assert "Second para" in _text(out)
+        assert "<script>" not in _text(out)
+        assert "var x = 1" not in _text(out)
 
     async def test_truncates_to_max_chars(self):
         big = "<html><body><p>" + ("x" * 5000) + "</p></body></html>"
@@ -255,9 +265,9 @@ class TestWebFetchFallback:
                 None, {"url": "https://example.com", "max_chars": 500}
             )
 
-        assert "[truncated]" in out
+        assert "[truncated]" in _text(out)
         # max_chars caps the body text we return; the header line is separate.
-        assert out.count("x") <= 600
+        assert _text(out).count("x") <= 600
 
     async def test_returns_error_for_4xx(self):
         async def _get(self, url, headers=None):
@@ -269,7 +279,7 @@ class TestWebFetchFallback:
             out = await handle_web_fetch_fallback(
                 None, {"url": "https://example.com/missing"}
             )
-        assert "404" in out
+        assert "404" in _text(out)
 
     async def test_handles_timeout(self):
         calls = {"n": 0}
@@ -286,7 +296,7 @@ class TestWebFetchFallback:
             )
         # Timeout is transient → retried up to the attempt cap before giving up.
         assert calls["n"] == 2
-        assert "timed out" in out.lower()
+        assert "timed out" in _text(out).lower()
 
 
 class TestWebFetchRetry:
@@ -314,7 +324,7 @@ class TestWebFetchRetry:
         ):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 2
-        assert "ok" in out
+        assert "ok" in _text(out)
 
     async def test_5xx_exhausts_retries(self):
         calls = {"n": 0}
@@ -328,7 +338,7 @@ class TestWebFetchRetry:
         ):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 2
-        assert "500" in out and "gave up" in out
+        assert "500" in _text(out) and "gave up" in _text(out)
 
     async def test_does_not_retry_non_retryable_5xx(self):
         # 511 Network Authentication Required is a permanent 5xx → no retry.
@@ -343,7 +353,7 @@ class TestWebFetchRetry:
         ):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 1
-        assert "511" in out
+        assert "511" in _text(out)
 
     async def test_does_not_retry_4xx(self):
         calls = {"n": 0}
@@ -357,7 +367,7 @@ class TestWebFetchRetry:
         ):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 1
-        assert "404" in out
+        assert "404" in _text(out)
 
     async def test_retries_connect_error(self):
         calls = {"n": 0}
@@ -371,7 +381,7 @@ class TestWebFetchRetry:
         ):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 2
-        assert "gave up" in out
+        assert "gave up" in _text(out)
 
     async def test_does_not_retry_ssl_error(self):
         calls = {"n": 0}
@@ -387,7 +397,7 @@ class TestWebFetchRetry:
         ):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 1
-        assert "cert fail" in out
+        assert "cert fail" in _text(out)
 
     async def test_retries_transient_dns(self):
         # EAI_AGAIN from the SSRF preflight's getaddrinfo → transient → retried.
@@ -404,7 +414,7 @@ class TestWebFetchRetry:
         ), patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 2
-        assert "gave up" in out
+        assert "gave up" in _text(out)
 
     async def test_does_not_retry_nxdomain(self):
         # EAI_NONAME → permanent NXDOMAIN → single attempt, no retry.
@@ -419,7 +429,7 @@ class TestWebFetchRetry:
         ), patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0):
             out = await handle_web_fetch_fallback(None, {"url": "https://example.com"})
         assert calls["n"] == 1
-        assert "Could not resolve" in out
+        assert "Could not resolve" in _text(out)
 
 
 class TestWebFetchLogging:
@@ -663,3 +673,336 @@ class TestToolDefShapes:
         # up with the native_web_tools set.
         assert WEB_SEARCH_FALLBACK_TOOL.name == "web_search"
         assert WEB_FETCH_FALLBACK_TOOL.name == "web_fetch"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# web_fetch verdicts (ENG-2677)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWebFetchVerdict:
+    """`ok` on the fetch path, and what it does to the per-tool error streak.
+
+    The bug this closes: on success the handler returns the PAGE CONTENT, and
+    the ENG-1276 substring fallback scanned that content for "failed" /
+    "timed out" / "[error]". Ordinary articles therefore counted as failed tool
+    calls, and five in a row told the agent to stop retrying an approach that
+    was working.
+    """
+
+    # A public address, so the SSRF pre-flight passes without a real lookup.
+    # Stubbing this is load-bearing, not tidiness: `_fetch_once` runs
+    # `socket.getaddrinfo` before any HTTP call, and on a resolver failure it
+    # returns status="blocked" -> ok=None. `test_4xx_...` would then be GREEN
+    # without ever exercising a 404 (verified by running it with the resolver
+    # patched to raise).
+    _PUBLIC_DNS = [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    async def _fetch(self, status, body="<p>hi</p>"):
+        async def _get(self, url, headers=None):
+            return httpx.Response(
+                status, text=body,
+                headers={"content-type": "text/html"},
+                request=httpx.Request("GET", url),
+            )
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ), patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo",
+            new=lambda *a, **k: self._PUBLIC_DNS,
+        ):
+            return await handle_web_fetch_fallback(None, {"url": "https://example.com"})
+
+    async def test_2xx_is_an_explicit_success(self):
+        out = await self._fetch(200)
+        assert out.ok is True
+
+    async def test_4xx_is_left_unverdicted_on_purpose(self):
+        # Tier 3: the tool worked, the answer was negative. Same category as
+        # recall_skill's NO MATCH family (ENG-2248). `ok=False` here would be a
+        # behaviour change with its own before/after, and gets its own ticket.
+        out = await self._fetch(404)
+        assert out.ok is None
+
+    async def test_no_branch_ever_declares_failure(self):
+        """The change can only REMOVE a nudge/breaker firing, never add one."""
+        for status in (200, 301, 403, 404, 410, 418, 451, 501):
+            out = await self._fetch(status)
+            assert out.ok is not False, f"status {status} newly declares failure"
+
+
+class TestWebFetchDoesNotPoisonTheErrorStreak:
+    """What the verdict DOES once the handler declares it.
+
+    These feed `_apply_error_tracking` directly, so they document the
+    consequence rather than guard the handler — reverting the handler to a bare
+    `str` leaves them all green (verified by mutation). The guard on the handler
+    itself is `TestWebFetchVerdict`; those three fail on that mutation.
+
+    Their job is to pin BOTH states so neither can drift unnoticed: what the bug
+    looked like (`..._unverdicted_are_what_the_bug_looked_like`, streak 5) and
+    what correct looks like (streak 0), plus the two paths ENG-2677
+    deliberately leaves alone.
+    """
+
+    # Real prose that happens to contain a marker word. All of these are
+    # successful HTTP 200 fetches.
+    PAGES = [
+        "Q3 results: the merger failed to clear regulatory review, revenue rose 12%",
+        "Postmortem: the deployment timed out after thirty minutes",
+        "Refunds apply whenever a payment failed, for any reason",
+        "Apollo 13's oxygen tank failed en route to the Moon",
+        "Troubleshooting: if the connection timed out, check your firewall",
+    ]
+
+    @staticmethod
+    def _session():
+        from types import SimpleNamespace
+        from anton.core.llm.prompts import RESILIENCE_NUDGE
+        return SimpleNamespace(
+            _resilience_nudge_at=2,
+            _max_consecutive_errors=5,
+            _select_resilience_nudge=lambda name, text: RESILIENCE_NUDGE,
+        )
+
+    def _run(self, results):
+        """Feed (text, ok) pairs through the REAL streak tracker."""
+        from anton.core.session import ChatSession
+        from anton.core.llm.prompts import RESILIENCE_NUDGE
+        sess, streak, nudged = self._session(), {}, set()
+        nudge = breaker = False
+        for text, ok in results:
+            out = ChatSession._apply_error_tracking(
+                sess, text, "web_fetch", streak, nudged, ok=ok
+            )
+            nudge = nudge or RESILIENCE_NUDGE in out
+            breaker = breaker or "SYSTEM: The 'web_fetch' tool has failed" in out
+        return streak.get("web_fetch", 0), nudge, breaker
+
+    def test_successful_pages_mentioning_failure_do_not_climb(self):
+        streak, nudge, breaker = self._run([(p, True) for p in self.PAGES])
+        assert (streak, nudge, breaker) == (0, False, False)
+
+    def test_the_same_pages_unverdicted_are_what_the_bug_looked_like(self):
+        """Pin the old behaviour so the fix cannot be silently reverted."""
+        streak, nudge, breaker = self._run([(p, None) for p in self.PAGES])
+        assert (streak, nudge, breaker) == (5, True, True)
+
+    def test_timeouts_still_count_exactly_as_before(self):
+        # Left ok=None, and "timed out" matches the legacy markers — so this
+        # path is unchanged by ENG-2677 and must stay that way.
+        msg = "Fetch timed out after 30.0s for https://x.example (gave up after 2 attempts)"
+        assert self._run([(msg, None)] * 5) == (5, True, True)
+
+    def test_4xx_still_does_not_count(self):
+        # Unchanged too: no marker word, left unverdicted. Whether it SHOULD
+        # count is the deferred question.
+        msg = "Fetch returned HTTP 403 for https://x.example"
+        assert self._run([(msg, None)] * 6) == (0, False, False)
+
+
+class TestWebFetchVerdictOnNonHttpFailures:
+    """The paths where no HTTP status is ever obtained (F4).
+
+    `TestWebFetchVerdict` only covers integer statuses. These cover the
+    `status="transient_giveup"` and `status="blocked"` branches, so a later
+    change that made a timeout or a resolver failure `ok=False` — a real
+    behaviour change — cannot pass unnoticed.
+    """
+
+    async def test_exhausted_timeout_is_left_unverdicted(self):
+        async def _get(self, url, headers=None):
+            raise httpx.TimeoutException("slow")
+
+        with patch.object(httpx.AsyncClient, "get", new=_get), patch(
+            "anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0
+        ), patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo",
+            new=lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+        ):
+            out = await handle_web_fetch_fallback(None, {"url": "https://x.example"})
+        assert out.ok is None
+        assert "timed out" in out.content.lower()
+
+    async def test_unresolvable_host_is_left_unverdicted(self):
+        def _boom(*a, **k):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        with patch("anton.core.tools.web_tools.socket.getaddrinfo", new=_boom):
+            out = await handle_web_fetch_fallback(None, {"url": "https://gone.example"})
+        assert out.ok is None
+        assert "Could not resolve host" in out.content
+
+
+class TestWebSearchVerdict:
+    """`ok` on the search path — the same defect as web_fetch had (F5).
+
+    On success the results block is up to 20 snippets of 600 characters of
+    arbitrary web prose, which the substring fallback scanned for "failed".
+    """
+
+    @staticmethod
+    def _session():
+        return _session_with_settings(
+            external_search_provider="exa", exa_api_key="k"
+        )
+
+    async def _search(self, response):
+        async def _post(self, url, json=None, headers=None):
+            return response(httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", new=_post):
+            return await handle_web_search_fallback(self._session(), {"query": "q"})
+
+    async def test_hits_are_an_explicit_success(self):
+        out = await self._search(lambda req: httpx.Response(
+            200,
+            json={"results": [{
+                "title": "Why the merger failed",
+                "url": "https://a.example",
+                "text": "The deal timed out before regulatory review closed.",
+            }]},
+            request=req,
+        ))
+        # Both marker words appear in the RESULTS — the exact shape that used
+        # to make a working search count as a failed tool call.
+        assert "failed" in out.content and "timed out" in out.content
+        assert out.ok is True
+
+    async def test_no_results_is_left_unverdicted(self):
+        out = await self._search(lambda req: httpx.Response(
+            200, json={"results": []}, request=req))
+        assert out.ok is None
+        assert "No results" in out.content
+
+    async def test_provider_error_is_left_unverdicted(self):
+        out = await self._search(lambda req: httpx.Response(
+            401, text="bad key", request=req))
+        assert out.ok is None
+        # Contains "failed", so the substring fallback still counts it — the
+        # behaviour this change deliberately leaves alone.
+        assert "Exa search failed" in out.content
+
+    async def test_no_configured_provider_still_returns_a_plain_string(self):
+        out = await handle_web_search_fallback(
+            _session_with_settings(), {"query": "q"}
+        )
+        assert isinstance(out, str)
+        assert "anton setup search" in out
+
+
+class TestTierThreePromiseIsPinnedToTheRealText:
+    """`ok=None` does NOT mean "not counted" — so pin the string property.
+
+    `_apply_error_tracking` short-circuits only on an explicit verdict
+    (`if ok is not None: is_error = not ok`); otherwise it falls through to the
+    ENG-1276 substring match. So for every non-2xx outcome the verdict is still
+    decided by scanning the text, and this handler's tier-3 promise — "a 404 is
+    not a tool failure" — holds only because `"Fetch returned HTTP 404 for ..."`
+    happens to contain none of `_LEGACY_FAILURE_MARKERS`.
+
+    That is a guarantee resting on phrasing. Rewording `_fetch_once`'s message
+    to `"Fetch failed with HTTP 404 for ..."` reinstates exactly the false
+    positive this ticket removed, and every other test in this file still
+    passes. Both halves of the ticket's before/after table are pinned below, so
+    a reword in EITHER direction fails.
+
+    Limit, stated rather than implied: this enumerates the outcomes that exist
+    today. A brand-new non-2xx branch added later with unlucky wording is not
+    caught by it.
+    """
+
+    _PUBLIC = [(2, 1, 6, "", ("93.184.216.34", 0))]
+    _PRIVATE = [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+    async def _outcome(self, *, dns=None, get=None):
+        cms = [
+            patch(
+                "anton.core.tools.web_tools.socket.getaddrinfo",
+                new=(dns or (lambda *a, **k: self._PUBLIC)),
+            ),
+            patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0),
+        ]
+        if get:
+            cms.append(patch.object(httpx.AsyncClient, "get", new=get))
+        for c in cms:
+            c.__enter__()
+        try:
+            return await handle_web_fetch_fallback(None, {"url": "https://x.example"})
+        finally:
+            for c in reversed(cms):
+                c.__exit__(None, None, None)
+
+    @staticmethod
+    def _status(code):
+        async def _get(self, url, headers=None):
+            return httpx.Response(code, text="body", request=httpx.Request("GET", url))
+        return _get
+
+    @pytest.mark.parametrize("code", [400, 403, 404, 410, 451, 500, 501, 505, 511])
+    async def test_http_errors_carry_no_legacy_marker(self, code):
+        """A non-2xx must not read as a failure to the substring fallback."""
+        from anton.core.session import _LEGACY_FAILURE_MARKERS
+
+        out = await self._outcome(get=self._status(code))
+        assert out.ok is None
+        hit = [m for m in _LEGACY_FAILURE_MARKERS if m in out.content]
+        assert not hit, (
+            f"HTTP {code} message now contains {hit} — it will trip the error "
+            f"streak, reinstating the ENG-2677 false positive: {out.content!r}"
+        )
+
+    async def test_unresolvable_and_blocked_hosts_carry_no_legacy_marker(self):
+        from anton.core.session import _LEGACY_FAILURE_MARKERS
+
+        def _nxdomain(*a, **k):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        for label, kwargs in (
+            ("NXDOMAIN at the SSRF pre-flight", {"dns": _nxdomain}),
+            ("SSRF-blocked private address", {"dns": lambda *a, **k: self._PRIVATE}),
+        ):
+            out = await self._outcome(**kwargs)
+            hit = [m for m in _LEGACY_FAILURE_MARKERS if m in out.content]
+            assert not hit, f"{label} now contains {hit}: {out.content!r}"
+
+    async def test_transport_failures_still_DO_carry_a_marker(self):
+        """The other half: these are meant to keep counting, unchanged.
+
+        If a reword ever made these marker-free they would stop reaching the
+        streak — a silent loss of the one failure signal web_fetch has today.
+        """
+        from anton.core.session import _LEGACY_FAILURE_MARKERS
+
+        async def _timeout(self, url, headers=None):
+            raise httpx.TimeoutException("slow")
+
+        async def _connect(self, url, headers=None):
+            # Retryable TransportError -> raised at web_tools.py:359, surfaced
+            # through the transient-giveup message. NOTE the exception text is
+            # deliberately marker-free: with a message like "getaddrinfo
+            # failed" the assertion below passes off the EXCEPTION rather than
+            # the template, and a reword of the template goes undetected.
+            # (That is how the first version of this test was green under
+            # mutation.)
+            raise httpx.ConnectError("connection refused")
+
+        async def _ssl(self, url, headers=None):
+            # NON-retryable: a ConnectError wrapping an SSLError returns
+            # directly at web_tools.py:360. A separate line with its own
+            # wording, so it needs its own case — covering only _connect left
+            # that line free to lose its marker unnoticed (caught by mutation).
+            err = httpx.ConnectError("certificate verify error")
+            err.__cause__ = ssl.SSLError("bad certificate")
+            raise err
+
+        for label, get in (
+            ("timeout", _timeout),
+            ("retryable transport error", _connect),
+            ("non-retryable SSL error", _ssl),
+        ):
+            out = await self._outcome(get=get)
+            assert any(m in out.content for m in _LEGACY_FAILURE_MARKERS), (
+                f"{label} no longer contains a legacy marker, so it will stop "
+                f"counting toward the streak: {out.content!r}"
+            )

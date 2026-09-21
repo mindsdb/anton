@@ -10,7 +10,11 @@ Two layers:
 
 from __future__ import annotations
 
+import json
 import os
+# Bound at import so the constants below are built from the real class, which
+# `_pin_today` later replaces on the module.
+from datetime import datetime as _stdlib_datetime
 
 import pytest
 
@@ -19,8 +23,10 @@ import anton.core.session as session_mod
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.session import (
     CLOUD_TOOL_ALLOWLIST,
+    _ARTIFACTS_ROOT_ENV,
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
+    resolve_trusted_artifacts_root,
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -63,6 +69,60 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.tools == []               # no host connector/publish tools
     assert cfg.web_search_enabled is False
     assert cfg.web_fetch_enabled is False
+
+
+def test_datasource_turn_uses_only_trusted_pod_config_and_child_overlay(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_DATASOURCE_GATEWAY_URL", "https://datasource.internal/base")
+    request = TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+    _, cfg = _build(tmp_path, monkeypatch, **{
+        "correlation_id": request.correlation_id,
+        "llm": request.llm,
+        "datasource": request.datasource,
+    })
+    assert cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CORRELATION_ID"] == "corr_1"
+    assert json.loads(cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CONNECTIONS"])[0] == {
+        "connection_id": 7,
+        "credential_version": 3,
+    }
+    assert "GATEWAY_URL" not in cfg.workspace_env_overlay
+
+
+def test_a_turn_without_a_datasource_block_carries_only_the_cloud_marker(tmp_path, monkeypatch):
+    """The old-job path: no bearer, no references, nothing for the pod child to act on."""
+    _, cfg = _build(tmp_path, monkeypatch, correlation_id="corr_1",
+                    llm={"api_key": "mdb_turn.secret", "provider": "minds-cloud", "base_url": "https://m/v1"})
+    assert cfg.workspace_env_overlay == {"ANTON_CLOUD_TURN": "1"}
+
+
+def test_legacy_minds_configuration_never_reaches_a_cloud_prompt(tmp_path, monkeypatch):
+    """A pod carrying the desktop Minds variables must not advertise the static-key
+    helper or its one-argument signature; the cloud helper is the only one offered."""
+    monkeypatch.setenv("ANTON_MINDS_DATASOURCE", "legacy-datasource")
+    monkeypatch.setenv("ANTON_MINDS_URL", "https://legacy.invalid")
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "legacy-static-key")
+    _, cfg = _build(tmp_path, monkeypatch)
+    context = cfg.system_prompt_context.runtime_context
+    assert "CONNECTED MIND" not in context
+    assert 'query_minds_data("SELECT' not in context
+    assert "legacy-datasource" not in context
+
+
+def test_datasource_turn_fails_closed_without_trusted_gateway_config(tmp_path, monkeypatch):
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.delenv("ANTON_DATASOURCE_GATEWAY_URL", raising=False)
+    request = TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+    with pytest.raises(ValueError, match="trusted datasource gateway"):
+        build_cloud_chat_session(request)
 
 
 def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):
@@ -144,6 +204,52 @@ def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
     _build(tmp_path, monkeypatch)
     assert (tmp_path / ".anton").is_dir()  # the rest of the workspace is set up
     assert not (tmp_path / ".anton" / "anton.md").exists()
+
+
+# ── the conversation's start date, which this pod cannot derive ──────────────
+
+def test_both_stored_timestamp_shapes_reach_the_session(tmp_path, monkeypatch):
+    """The server sends `created_at.isoformat()`. On the Postgres cloud path
+    that column is timezone-aware so the string carries an offset; on SQLite it
+    does not. Both have to arrive, since the naive shape is what a developer
+    and CI actually run against."""
+    from datetime import datetime, timedelta, timezone
+
+    aware = "2026-09-01T08:15:00+00:00"
+    _, cfg = _build(tmp_path, monkeypatch, started_at=aware)
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15, tzinfo=timezone.utc)
+
+    naive = "2026-09-01T08:15:00"
+    _, cfg = _build(tmp_path, monkeypatch, started_at=naive)
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15)
+
+    # Trailing Z is accepted too, so a server that formats UTC that way is not
+    # silently discarded.
+    _, cfg = _build(tmp_path, monkeypatch, started_at="2026-09-01T08:15:00Z")
+    assert cfg.started_at == datetime(2026, 9, 1, 8, 15, tzinfo=timezone.utc)
+    # Pinned explicitly: datetime equality compares instants, so the assertion
+    # above alone would also accept a wrong offset with a matching wall clock.
+    assert cfg.started_at.utcoffset() == timedelta(0)
+
+
+def test_a_missing_start_time_leaves_the_session_to_fall_back(tmp_path, monkeypatch):
+    """A controller too old to forward the field, or a server that could not
+    resolve it, must not fail the turn: None is what every cloud turn used
+    before this existed."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.started_at is None
+
+
+def test_an_unparsable_start_time_degrades_but_is_logged(tmp_path, monkeypatch, caplog):
+    """Degrading in silence would make a server sending a shape anton cannot
+    read look identical to a controller that stopped sending the field, and the
+    only symptom either way is a date quietly reverting to today."""
+    with caplog.at_level("WARNING"):
+        _, cfg = _build(tmp_path, monkeypatch, started_at="2026/09/01 08:15")
+
+    assert cfg.started_at is None
+    assert "started_at" in caplog.text
+    assert "2026/09/01 08:15" in caplog.text
 
 
 def test_db_history_is_seeded_not_loaded(tmp_path, monkeypatch):
@@ -242,6 +348,63 @@ def test_resolver_rejects_parent_traversal(monkeypatch):
         resolve_trusted_workspace_path()
 
 
+# ── project artifacts root (ENG-2056, never from the wire) ──────────────────
+
+def test_project_artifacts_root_overrides_derived_default(tmp_path, monkeypatch):
+    # ENG-2056: the workspace mount is per-conversation, so the derived
+    # `<workspace>/.anton/artifacts` hides sibling tasks' artifacts. With the
+    # controller's project-artifacts mount announced via env, the session must
+    # use it — for the settings AND the workspace the artifact tools read.
+    root = tmp_path / "project-artifacts"
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(root))
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.settings.artifacts_dir == str(root.resolve())
+    assert cfg.workspace.artifacts_dir == root.resolve()
+    assert cfg.settings.artifacts_dir != str(tmp_path.resolve() / ".anton" / "artifacts")
+
+
+def test_project_artifacts_root_created_when_missing(tmp_path, monkeypatch):
+    root = tmp_path / "mounts" / "project-artifacts"
+    assert not root.exists()
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(root))
+    _build(tmp_path, monkeypatch)
+    assert root.is_dir()
+
+
+def test_artifacts_default_unchanged_when_env_unset(tmp_path, monkeypatch):
+    # Desktop and current cloud installs: no env var, behaviour identical to
+    # before — artifacts derive under the workspace's .anton dir.
+    monkeypatch.delenv(_ARTIFACTS_ROOT_ENV, raising=False)
+    _, cfg = _build(tmp_path, monkeypatch)
+    derived = tmp_path.resolve() / ".anton" / "artifacts"
+    assert cfg.settings.artifacts_dir == str(derived)
+    assert cfg.workspace.artifacts_dir == derived
+
+
+def test_artifacts_resolver_unset_or_blank_is_none(monkeypatch):
+    monkeypatch.delenv(_ARTIFACTS_ROOT_ENV, raising=False)
+    assert resolve_trusted_artifacts_root() is None
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "  ")
+    assert resolve_trusted_artifacts_root() is None
+
+
+def test_artifacts_resolver_uses_env(tmp_path, monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(tmp_path))
+    assert resolve_trusted_artifacts_root() == tmp_path.resolve()
+
+
+def test_artifacts_resolver_rejects_relative_path(monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "not/absolute")
+    with pytest.raises(ValueError, match="absolute"):
+        resolve_trusted_artifacts_root()
+
+
+def test_artifacts_resolver_rejects_parent_traversal(monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "/project-artifacts/../etc")
+    with pytest.raises(ValueError, match=r"\.\."):
+        resolve_trusted_artifacts_root()
+
+
 def test_artifact_tools_cannot_escape_workspace(tmp_path):
     from anton.core.artifacts.store import ArtifactStore
 
@@ -318,6 +481,92 @@ def _real_session_with_workspace(tmp_path, **cfg_overrides):
     )
     session._scratchpads = MagicMock(available_packages=[])
     return session
+
+
+#: Two pod boots either side of a midnight, for the across-days assertion.
+_DAY_ONE = _stdlib_datetime(2030, 1, 1, 23, 55)
+_DAY_TWO = _stdlib_datetime(2030, 1, 2, 0, 5)
+
+
+def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
+    """A REAL ChatSession off the cloud builder, not a captured config.
+
+    The date is rendered inside `ChatSession._build_system_prompt`, so a test
+    that calls the prompt builder directly would supply `conversation_started`
+    itself and pass with the whole fix reverted.
+    """
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: _mock_llm()),
+    )
+    body = dict(protocol_version=1, conversation_id="conv_1", input="hi")
+    body.update(req_overrides)
+    session = build_cloud_chat_session(TurnRequestV1(**body))
+    session._scratchpads = MagicMock(available_packages=[])
+    return session
+
+
+def _pin_today(monkeypatch, moment):
+    """Pin what the session sees as "now".
+
+    Patches the class on the `datetime` module rather than on the module that
+    imports it: `_build_system_prompt` does `import datetime as _dt` in the
+    function body, so it re-resolves the module every call and only a patch
+    there is visible to it.
+    """
+    import datetime as _dt
+
+    class _PinnedNow(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment
+
+    monkeypatch.setattr(_dt, "datetime", _PinnedNow)
+
+
+async def test_two_pods_on_different_days_render_the_same_prompt(
+    tmp_path, monkeypatch,
+):
+    """The ticket's acceptance, stated as it asks for it. Every turn runs in a
+    fresh pod, so the date used to come from whichever day that pod happened to
+    boot, and a conversation open across midnight got a different prompt the
+    next morning — taking the cached history with it.
+    """
+    started = "2026-09-01T08:15:00+00:00"
+
+    _pin_today(monkeypatch, _DAY_ONE)
+    first = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at=started,
+    )._build_system_prompt()
+
+    _pin_today(monkeypatch, _DAY_TWO)
+    second = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at=started,
+    )._build_system_prompt()
+
+    assert first == second
+    assert "Tuesday, September 01, 2026" in first
+
+
+async def test_the_clock_is_only_the_fallback(tmp_path, monkeypatch):
+    """Both halves of the rule, since the equality above holds trivially if the
+    date is wrong in the same way on both days: a stored value is used instead
+    of today, and today is what renders when there is no stored value.
+    """
+    _pin_today(monkeypatch, _DAY_TWO)
+    pinned_today = _DAY_TWO.strftime("%A, %B %d, %Y")
+
+    stored = await _real_cloud_session(
+        tmp_path, monkeypatch, started_at="2026-09-01T08:15:00+00:00",
+    )._build_system_prompt()
+    assert "Tuesday, September 01, 2026" in stored
+    assert pinned_today not in stored
+
+    fallback = await _real_cloud_session(tmp_path, monkeypatch)._build_system_prompt()
+    assert pinned_today in fallback
 
 
 def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch):
@@ -617,7 +866,7 @@ def skills_tmp(tmp_path_factory, monkeypatch):
 
 def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
     """The point of the feature: a server-sent skill is retrievable in the pod
-    through the same SkillStore that recall_skill and the thalamus preload use."""
+    through the same SkillStore that recall_skill uses."""
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     skill = session._skill_store.load("csv-summary")
     assert skill is not None
