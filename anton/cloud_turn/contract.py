@@ -46,6 +46,16 @@ DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
 
 
+def _is_version(value: object, expected: int) -> bool:
+    """Whether ``value`` is the JSON integer ``expected``, and not merely equal to it.
+
+    `True == 1` and `1.0 == 1`, and `int(1.9)` is 1, so an equality check or a
+    coercion reads an envelope that is not this version as if it were, then
+    parses it with this version's schema and drops whatever else it carried.
+    """
+    return not isinstance(value, bool) and isinstance(value, int) and value == expected
+
+
 @dataclass(frozen=True)
 class DatasourceConnectionRefV1:
     connection_id: int
@@ -65,7 +75,7 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
         raise ValueError("datasource must be an object")
     if set(value) != {"protocol_version", "connections"}:
         raise ValueError("datasource contains unsupported fields")
-    if value.get("protocol_version") != DATASOURCE_PROTOCOL_VERSION:
+    if not _is_version(value.get("protocol_version"), DATASOURCE_PROTOCOL_VERSION):
         raise ValueError("unsupported datasource protocol version")
     connections = value.get("connections")
     if not isinstance(connections, list) or not connections or len(connections) > MAX_DATASOURCE_CONNECTIONS:
@@ -150,9 +160,7 @@ class TurnRequestV1:
     def from_json(raw: str) -> "TurnRequestV1":
         d = json.loads(raw)
         protocol_version = d["protocol_version"]
-        # Never a coercion: int(1.9) and int(True) are both 1, so a coercing
-        # guard reads a non-v1 envelope as v1. `type` because bool subclasses int.
-        if type(protocol_version) is not int or protocol_version != TURN_PROTOCOL_VERSION:
+        if not _is_version(protocol_version, TURN_PROTOCOL_VERSION):
             raise ValueError("unsupported cloud turn protocol version")
         return TurnRequestV1(
             protocol_version=protocol_version,

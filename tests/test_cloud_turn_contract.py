@@ -26,6 +26,8 @@ def test_turn_request_parses_versioned_datasource_refs():
 
 @pytest.mark.parametrize("datasource", [
     {"protocol_version": 2, "connections": [{"connection_id": 7, "credential_version": 3}]},
+    {"protocol_version": True, "connections": [{"connection_id": 7, "credential_version": 3}]},
+    {"protocol_version": 1.0, "connections": [{"connection_id": 7, "credential_version": 3}]},
     {"protocol_version": 1, "connections": [{"connection_id": 7, "credential_version": 3}], "gateway_url": "https://evil"},
     {"protocol_version": 1, "connections": [{"connection_id": 7, "credential_version": 3}], "capability": "secret"},
     {"protocol_version": 1, "connections": [{"connection_id": 7, "credential_version": 0}]},
