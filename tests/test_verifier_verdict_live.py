@@ -154,8 +154,9 @@ _THROTTLE_RETRY_CAP_S = 60.0
 
 # Total throttle retries allowed across the whole session, not per call.
 #
-# The per-call retry alone was not enough: `_verdicts` invokes `_verdict` 18
-# times per model (4 cases x 3 runs + STUCK x 6), so 37 calls per session, each
+# The per-call retry alone was not enough: `_verdicts` invokes `_verdict` ~45-51
+# times per model (12 cases at 3 runs, four at 6, one at 6 on air only), ~97
+# calls per full session (ENG-2863 recount; it was 37 when this was written), each
 # entitled to its own pause. Under a SUSTAINED throttle that is 12 minutes at
 # the default and 37 at the cap — and it still ends green with zero cases
 # executed. The retry fixed the common case (a short window that clears) while

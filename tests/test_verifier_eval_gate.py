@@ -657,10 +657,25 @@ def test_every_scope_marker_resolves_to_a_span_in_the_code():
         spans = scope.marker_spans((root / path).read_text(), names)
         missing = [n for n in names if n not in spans]
         assert not missing, f"{path}: scope markers resolve to nothing: {missing}"
-    # The symbols the incidents came from must be present by name.
-    assert {"_VerifierVerdict", "_render_verify_transcript", "_clip_keep_cause",
-            "_VERIFIER_JUDGMENT_RUBRIC"} <= set(scope.SPAN_MARKERS["anton/core/session.py"])
-    assert "tests/test_verifier_verdict_live.py" in scope.ALWAYS_FULL
+    # Pinned by EQUALITY, not subset: review of #486 deleted six entries one
+    # at a time and the subset asserts passed every time. Removing a marker is
+    # a deliberate edit to this test, with a reason.
+    assert set(scope.SPAN_MARKERS) == {"anton/core/session.py", "anton/core/llm/client.py"}
+    assert set(scope.SPAN_MARKERS["anton/core/session.py"]) == {
+        "_VerifierVerdict", "_VERIFIER_TOKEN_BUDGETS", "_VERIFIER_NO_PREAMBLE",
+        "_VERIFIER_JUDGMENT_RUBRIC", "_build_verify_request", "_render_verify_transcript",
+        "_render_tool_result_content", "_clip_keep_cause",
+    }
+    # The forced-tool-call body, not only the delegators that call it: a
+    # tool_choice mutation inside _generate_object_with read "guard" before.
+    assert set(scope.SPAN_MARKERS["anton/core/llm/client.py"]) == {
+        "_generate_object_with", "_call_with_auth_confirmation",
+        "generate_object", "generate_object_code",
+    }
+    assert set(scope.ALWAYS_FULL) == {
+        "tests/test_verifier_verdict_live.py", "anton/core/llm/structured.py",
+        "scripts/verifier_eval_scope.py",
+    }
 
 
 def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
@@ -684,6 +699,12 @@ def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
     # A pure insertion (zero-length old side) inside the span counts too.
     insertion = scope.parse_hunks("@@ -3,0 +4 @@\n+    c = 9\n")
     assert scope.touched(insertion, spans, spans) == {"_render_verify_transcript"}
+    # And a pure DELETION whose zero-length new side lands on the span's first
+    # line: old side is outside the span, so only the max(length, 1) treatment
+    # of the new side can catch it (review of #486: the insertion case above
+    # passed via the non-empty new side and never exercised that guard).
+    deletion = scope.parse_hunks("@@ -7 +2,0 @@\n-    gone = 1\n")
+    assert scope.touched(deletion, spans, spans) == {"_render_verify_transcript"}
 
 
 def test_guard_mode_selects_exactly_the_truncation_guard():
@@ -709,3 +730,48 @@ def test_a_failing_scope_decision_falls_back_to_the_full_matrix(tmp_path, monkey
     assert rc == 0
     text = out.read_text()
     assert "scope=full" in text and "pytest_args=\n" in text
+
+
+def test_decide_diffs_from_the_merge_base_not_the_base_tip(tmp_path, monkeypatch):
+    """pull_request.base.sha is the base branch TIP. After the PR branched, the
+    base gained a commit touching an ALWAYS_FULL file; the PR itself touched only
+    turn_stream. Against the tip that reads "full" (the base's own change shows
+    up as a reverse hunk); against the merge base it is "guard"."""
+    import subprocess
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q", "-b", "staging")
+    git("config", "user.email", "t@example.com"); git("config", "user.name", "t")
+    (tmp_path / "anton/core/llm").mkdir(parents=True); (tmp_path / "tests").mkdir(); (tmp_path / "scripts").mkdir()
+    session = tmp_path / "anton/core/session.py"
+    session.write_text(
+        "def _render_verify_transcript(h):\n    return h\n\n"
+        "async def turn_stream(self):\n    return 1\n"
+    )
+    (tmp_path / "anton/core/llm/client.py").write_text("def generate_object():\n    pass\n")
+    (tmp_path / "tests/test_verifier_verdict_live.py").write_text("# eval\n")
+    git("add", "."); git("commit", "-q", "-m", "base")
+    branch_point = git("rev-parse", "HEAD")
+    # The PR: touches turn_stream only.
+    git("checkout", "-q", "-b", "pr")
+    session.write_text(session.read_text().replace("return 1", "return 2"))
+    git("commit", "-q", "-am", "pr edit")
+    pr_head = git("rev-parse", "HEAD")
+    # The base moves on and touches an ALWAYS_FULL file.
+    git("checkout", "-q", "staging")
+    (tmp_path / "tests/test_verifier_verdict_live.py").write_text("# eval changed on staging\n")
+    git("commit", "-q", "-am", "verifier work landed on staging")
+    base_tip = git("rev-parse", "HEAD")
+    assert base_tip != branch_point
+
+    monkeypatch.chdir(tmp_path)
+    verdict, reasons = scope.decide(base_tip, pr_head)
+    assert verdict == "guard", reasons
+    # And a PR that really touches a marker still reads full from the same base tip.
+    git("checkout", "-q", "pr")
+    session.write_text(session.read_text().replace("return h", "return list(h)"))
+    git("commit", "-q", "-am", "renderer edit")
+    verdict, reasons = scope.decide(base_tip, git("rev-parse", "HEAD"))
+    assert verdict == "full" and any("_render_verify_transcript" in r for r in reasons), reasons

@@ -42,6 +42,12 @@ SPAN_MARKERS: dict[str, tuple[str, ...]] = {
         "_clip_keep_cause",
     ),
     "anton/core/llm/client.py": (
+        # The public entry points are 5-line delegators; the forced-tool-call
+        # body they delegate to is where the verdict call actually happens
+        # (tool_choice, budget, truncation classification). Review of #486
+        # mutated tool_choice inside it and the first cut said "guard".
+        "_generate_object_with",
+        "_call_with_auth_confirmation",
         "generate_object",
         "generate_object_code",
     ),
@@ -139,8 +145,19 @@ def _show(rev: str, path: str) -> str:
 
 
 def decide(base: str, head: str) -> tuple[str, list[str]]:
-    """Return ("full" | "guard", reasons)."""
+    """Return ("full" | "guard", reasons).
+
+    `base` is reduced to the MERGE BASE with `head` first. The workflow passes
+    `pull_request.base.sha`, which is the base branch's *tip*, and a two-dot
+    diff against the tip includes everything the base gained since the branch
+    point as a reverse change. Measured on #486's review: five real
+    guard-eligible PRs flipped to "full" purely because staging had gained an
+    ALWAYS_FULL commit after they branched — the saving evaporating exactly
+    when verifier work is active. The error is in the safe direction, but cost
+    is the whole point of this script.
+    """
     head_arg = [] if head == "WORKTREE" else [head]
+    base = _git("merge-base", base, "HEAD" if head == "WORKTREE" else head).strip()
     changed = _git("diff", "--name-only", base, *head_arg, "--").split()
     reasons: list[str] = []
     for path in ALWAYS_FULL:
