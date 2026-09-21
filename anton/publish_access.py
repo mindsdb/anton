@@ -17,7 +17,7 @@ from typing import Any
 # content (backend.log, the STATE driver's SQLite files, the publisher's schema
 # snapshot, the revision journal). Matching here is against the path's first
 # component, so directories are a separate set, same as in the store.
-from anton.core.artifacts.store import _HOUSEKEEPING_DIRS, _HOUSEKEEPING_FILES
+from anton.core.artifacts.store import _EXCLUDED_FROM_FILES, _HOUSEKEEPING_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +187,12 @@ def _load_metadata(folder: Path) -> dict | None:
 
 
 def _user_files(folder: Path) -> list[Path]:
-    """All non-housekeeping files inside an artifact folder, mtime desc."""
+    """All user-facing files inside an artifact folder, mtime desc.
+
+    Skips the store's housekeeping files and the generation inputs (prd.md,
+    discovery.json, ...): otherwise `_pick_primary`'s `files[0]` fallback
+    could name an internal document as the artifact's entry point.
+    """
     out: list[Path] = []
     try:
         for p in folder.rglob("*"):
@@ -195,7 +200,7 @@ def _user_files(folder: Path) -> list[Path]:
                 continue
             rel = p.relative_to(folder)
             top = rel.parts[0] if rel.parts else ""
-            if top in _HOUSEKEEPING_FILES or top in _HOUSEKEEPING_DIRS:
+            if top in _EXCLUDED_FROM_FILES or top in _HOUSEKEEPING_DIRS:
                 continue
             out.append(p)
     except OSError:

@@ -504,11 +504,14 @@ def test_housekeeping_set_still_mirrors_cowork_server():
 
 
 def test_publisher_excludes_exactly_the_housekeeping_set():
-    """The bundle omits what the store hides: one definition, two consumers."""
-    from anton.core.artifacts.store import _HOUSEKEEPING_DIRS, _HOUSEKEEPING_FILES
-    from anton.publisher import _FULLSTACK_EXCLUDED
+    """The bundle omits what the store hides from files[] (housekeeping and
+    generation inputs): one definition, three consumers."""
+    from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
+    from anton.core.artifacts.store import _EXCLUDED_FROM_FILES, _HOUSEKEEPING_DIRS
+    from anton.publisher import _BUNDLE_SKIP_NAMES, _FULLSTACK_EXCLUDED
 
-    assert _FULLSTACK_EXCLUDED == _HOUSEKEEPING_FILES | _HOUSEKEEPING_DIRS
+    assert _FULLSTACK_EXCLUDED == _EXCLUDED_FROM_FILES | _HOUSEKEEPING_DIRS
+    assert GENERATION_INPUT_FILES <= _BUNDLE_SKIP_NAMES
     assert ".revisions" in _HOUSEKEEPING_DIRS
 
 

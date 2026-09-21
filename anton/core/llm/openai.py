@@ -4,7 +4,6 @@ import inspect
 import json
 import logging
 import os
-import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import NoReturn
 
