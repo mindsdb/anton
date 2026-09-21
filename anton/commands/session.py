@@ -9,7 +9,7 @@ from rich.console import Console
 from anton.config.settings import AntonSettings
 from anton.utils.prompt import prompt_or_cancel
 from anton.chat_session import rebuild_session
-from anton.memory.history_store import is_user_turn
+from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
@@ -121,8 +121,20 @@ async def restore_session(
         history_store=history_store,
         session_id=sid,
     )
-    new_session._history = list(history)
-    new_session._turn_count = sum(1 for m in history if is_user_turn(m))
+    # Repaired here as well as at `ChatSessionConfig.initial_history`: this
+    # path assigns `_history` directly and so reaches none of the constructor's
+    # work. It is also the path that matters most for ENG-2420 — `/resume` is
+    # what a user types after a conversation stops working, so the surface most
+    # likely to meet a poisoned history was the one the repair did not cover
+    # (review: pnewsam on #471).
+    new_session._history = repair_replayed_tool_ids(list(history))[0]
+    # Counted off the REPAIRED list, matching `ChatSession.__init__`, which
+    # reads `self._history` rather than `config.initial_history` for the same
+    # reason: the repair can turn an unpairable `tool_result` into text, and
+    # the two lists then disagree about what is a user turn.
+    new_session._turn_count = sum(
+        1 for m in new_session._history if is_user_turn(m)
+    )
 
     console.print()
     console.print(

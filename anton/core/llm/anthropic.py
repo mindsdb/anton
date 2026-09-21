@@ -31,6 +31,7 @@ from .provider import (
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
+    ensure_replayable_tool_call,
     wallet_denial_code,
     raise_on_empty_response,
 )
@@ -280,9 +281,14 @@ class AnthropicProvider(LLMProvider):
             if block.type == "text":
                 content_text += block.text
             elif block.type == "tool_use":
-                tool_calls.append(
+                # Anthropic's reader has no empty-id BUFFER path — a missing
+                # `content_block_start` appends nothing at all — but `block.id`
+                # is written straight through, so a relay that sends a blank id
+                # produces the identical poisoned history (ENG-2420). The guard
+                # belongs on the VALUE, not on the missing-start case.
+                tool_calls.append(ensure_replayable_tool_call(
                     ToolCall(id=block.id, name=block.name, input=block.input)
-                )
+                ))
 
         # The SDK hands back an already-parsed `input`, so unlike the streaming
         # path there is no raw JSON to check: `stop_reason` is the only evidence
@@ -379,8 +385,22 @@ class AnthropicProvider(LLMProvider):
                                 "id": block.id,
                                 "name": block.name,
                                 "json_parts": [],
+                                # Same record-don't-re-derive rule as both
+                                # OpenAI readers. Nothing updates id/name after
+                                # this on the Anthropic path, so the two are
+                                # equivalent here today — the flag keeps them
+                                # equivalent if that ever changes.
+                                "started": False,
                             }
-                            yield StreamToolUseStart(id=block.id, name=block.name)
+                            # Gated like both OpenAI readers, which this path
+                            # did not match. Unguarded, a blank id opened a UI
+                            # step keyed "" that nothing could retire: the
+                            # marker that actually closes a step carries the
+                            # call's id, which is now the MINTED one
+                            # (review: pnewsam on #471).
+                            if block.id and block.name:
+                                blocks[idx]["started"] = True
+                                yield StreamToolUseStart(id=block.id, name=block.name)
                         elif block.type in ("thinking", "redacted_thinking"):
                             # Adaptive thinking (triggered by output_config.effort,
                             # set above when self._reasoning_effort is configured)
@@ -416,13 +436,17 @@ class AnthropicProvider(LLMProvider):
                             # the session what the body was missing. See
                             # `safe_parse_tool_input`.
                             parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
-                            tool_calls.append(
+                            tool_calls.append(ensure_replayable_tool_call(
                                 ToolCall(
                                     id=info["id"], name=info["name"], input=parsed_input,
                                     parse_error=parse_error, repaired=repaired,
                                 )
-                            )
-                            yield StreamToolUseEnd(id=info["id"])
+                            ))
+                            # Gated on whether a Start was emitted, and on the
+                            # ORIGINAL id rather than the minted one — an End
+                            # with no Start is a worse event stream than neither.
+                            if info.get("started"):
+                                yield StreamToolUseEnd(id=info["id"])
 
                     elif event.type == "message_delta":
                         stop_reason = event.delta.stop_reason

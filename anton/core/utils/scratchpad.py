@@ -110,22 +110,22 @@ def build_workspace_discovery_context(manager) -> str:
     """Compact turn-start block: known pads + project-root names (ENG-578).
 
     Cold-start blindness made the agent invent pad names and rebuild state it
-    already had on disk. Source of truth is agent_pads() — live pads only add
-    the "active" label, so system-created pads never leak in. Best-effort by
-    construction: any failure degrades to omitting that part or the whole
-    block, never to breaking the turn.
+    already had on disk. Source of truth is agent_pads(), so system-created
+    pads never leak in. Best-effort by construction: any failure degrades to
+    omitting that part or the whole block, never to breaking the turn.
+
+    This block sits inside the cached system prompt, ahead of the whole
+    conversation. Its bytes must depend only on the set of pad and file names:
+    anything that varies while that set is unchanged re-writes the conversation
+    cache on the next turn.
     """
     pads_line = ""
     try:
         known = sorted(manager.agent_pads())
         if known:
             shown = known[:_DISCOVERY_MAX_PADS]
-            live = set(manager.pads)
-            parts = []
-            # Names and the active flag only. A snapshot age would tick every
-            # minute and change the prompt bytes on every turn.
-            for name in shown:
-                parts.append(f"{name} (active)" if name in live else name)
+            # Names only: no snapshot age, no live/active flag. Both changed
+            # between turns without the workspace changing.
             more = (
                 f" … and {len(known) - len(shown)} more"
                 if len(known) > len(shown)
@@ -133,7 +133,7 @@ def build_workspace_discovery_context(manager) -> str:
             )
             pads_line = (
                 "\nScratchpads for this conversation: "
-                + ", ".join(parts)
+                + ", ".join(shown)
                 + more
                 + " — reuse via scratchpad exec with the same name; each name is a "
                 "separate environment."

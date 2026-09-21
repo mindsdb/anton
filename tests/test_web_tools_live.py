@@ -62,6 +62,15 @@ def _has_https_url_line(text: str) -> bool:
     return any(line.lstrip().startswith("https://") for line in text.splitlines())
 
 
+def _text(out):
+    """The caller-facing text of a `web_search` / `web_fetch` result.
+
+    Since ENG-2677 both handlers return a `ToolOutcome` on the provider/fetch
+    paths; the argument-validation and no-provider branches still return `str`.
+    """
+    return out.content if hasattr(out, "content") else out
+
+
 anthropic_only = pytest.mark.skipif(
     not _have("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set — live test skipped",
@@ -493,11 +502,13 @@ class TestExaLive:
         """Direct adapter call — the format helper formats real hits."""
         from anton.core.tools.web_tools import _search_exa
 
-        out = await _search_exa(
+        # `_search_exa` returns a `_SearchResult` since ENG-2677; the
+        # assertions below are about the formatted text.
+        out = (await _search_exa(
             query="Anthropic Claude",
             api_key=os.environ["EXA_API_KEY"],
             max_results=3,
-        )
+        )).text
 
         assert "Web search results for: 'Anthropic Claude'" in out
         # At least one https:// URL should appear in the formatted output.
@@ -521,8 +532,8 @@ class TestExaLive:
         out = await handle_web_search_fallback(
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
-        assert _has_https_url_line(out)
-        assert "Anthropic Claude" in out  # query echoed in the header
+        assert _has_https_url_line(_text(out))
+        assert "Anthropic Claude" in _text(out)  # query echoed in the header
 
     @pytest.mark.asyncio
     async def test_setup_probe_endpoint_contract(self):
@@ -552,11 +563,12 @@ class TestBraveLive:
     async def test_search_returns_real_results(self):
         from anton.core.tools.web_tools import _search_brave
 
-        out = await _search_brave(
+        # `_search_brave` returns a `_SearchResult` since ENG-2677.
+        out = (await _search_brave(
             query="Anthropic Claude",
             api_key=os.environ["BRAVE_API_KEY"],
             max_results=3,
-        )
+        )).text
 
         assert "Web search results for: 'Anthropic Claude'" in out
         assert _has_https_url_line(out)
@@ -575,8 +587,8 @@ class TestBraveLive:
         out = await handle_web_search_fallback(
             session, {"query": "Anthropic Claude", "max_results": 2}
         )
-        assert _has_https_url_line(out)
-        assert "Anthropic Claude" in out
+        assert _has_https_url_line(_text(out))
+        assert "Anthropic Claude" in _text(out)
 
     @pytest.mark.asyncio
     async def test_setup_probe_endpoint_contract(self):
@@ -613,10 +625,10 @@ class TestWebFetchLive:
             None, {"url": "https://example.com", "max_chars": 5000}
         )
         # The header line includes status + byte count.
-        assert "HTTP 200" in out
+        assert "HTTP 200" in _text(out)
         # Signature text from the canonical example.com page.
-        assert "Example Domain" in out
+        assert "Example Domain" in _text(out)
         # Confirms the HTML stripper actually ran (the live page has
         # <html>/<body>/<a> tags that should not survive in our output).
-        assert "<html" not in out.lower()
-        assert "<body" not in out.lower()
+        assert "<html" not in _text(out).lower()
+        assert "<body" not in _text(out).lower()
