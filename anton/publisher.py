@@ -129,6 +129,13 @@ def _poll_interval(raw, fallback: float) -> float:
     return min(max(value, 0.5), 15.0)
 
 
+def _post_upload(publish_url: str, api_key: str, payload_dict: dict, ssl_verify: bool) -> tuple[int, bytes]:
+    """POST /upload; the encoded request body lives only in this frame."""
+    url = f"{publish_url.rstrip('/')}/upload"
+    payload = json.dumps(payload_dict).encode()
+    return minds_request_with_status(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+
+
 def _wait_for_publish_job(
     publish_url: str,
     job_id: str,
@@ -153,14 +160,13 @@ def _wait_for_publish_job(
     which (clamped the same way) replaces the interval for the next iteration.
     """
     url = f"{publish_url.rstrip('/')}/upload/jobs/{job_id}"
-    started = _monotonic()
-    deadline = started + budget_s
+    deadline = _monotonic() + budget_s
     poll = _poll_interval(poll_after_s, _DEFAULT_POLL_AFTER_S)
     while True:
         remaining = deadline - _monotonic()
         if remaining <= 0:
             raise PublishJobTimeout(job_id=job_id, report_id=report_id, waited_s=budget_s)
-        time.sleep(min(poll, max(remaining, 0)))
+        time.sleep(min(poll, remaining))
         remaining = deadline - _monotonic()
         request_timeout = max(1, int(min(PUBLISH_JOB_POLL_TIMEOUT_S, remaining)))
         try:
@@ -610,6 +616,7 @@ def publish(
                 artifact_key = artifact_key_for(owner.id)
 
     payload_dict["file_payload"] = base64.b64encode(zipped).decode()
+    del zipped  # the base64 copy in payload_dict is the one that ships
     if report_id:
         payload_dict["report_id"] = report_id
     if artifact_key:
@@ -625,13 +632,12 @@ def publish(
     payload_dict["access"] = build_access_payload(
         access, pwd_version=pwd_version, access_version=access_version
     )
-    payload = json.dumps(payload_dict).encode()
 
-    url = f"{publish_url.rstrip('/')}/upload"
-    status, raw = minds_request_with_status(url, api_key, method="POST", payload=payload, verify=ssl_verify)
-    # The encoded bundle is no longer needed; drop it before a poll that may
-    # hold this frame for minutes (cowork-server runs publishes in threads).
-    del payload, payload_dict
+    status, raw = _post_upload(publish_url, api_key, payload_dict, ssl_verify)
+    # The encoded bundle is no longer needed; drop the last reference before a
+    # poll that may hold this frame for minutes (cowork-server publishes in
+    # threads).
+    del payload_dict
     if status == 202:
         accepted = json.loads(raw)
         if on_job_accepted is not None:

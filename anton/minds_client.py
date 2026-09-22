@@ -103,19 +103,10 @@ def minds_request_with_status(
         return resp.status, resp.read()
 
 
-def minds_request(
-    url: str,
-    api_key: str,
-    *,
-    method: str = "GET",
-    payload: bytes | None = None,
-    verify: bool = True,
-    timeout: int = DEFAULT_REQUEST_TIMEOUT_S,
-) -> bytes:
-    """Body-only wrapper over minds_request_with_status (the historical API)."""
-    return minds_request_with_status(
-        url, api_key, method=method, payload=payload, verify=verify, timeout=timeout,
-    )[1]
+def minds_request(url: str, api_key: str, **kwargs) -> bytes:
+    """Body-only wrapper over minds_request_with_status (the historical API);
+    takes the same keyword arguments."""
+    return minds_request_with_status(url, api_key, **kwargs)[1]
 
 
 def normalize_minds_url(url: str) -> str:
