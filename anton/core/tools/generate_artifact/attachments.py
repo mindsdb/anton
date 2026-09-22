@@ -21,6 +21,15 @@ Two kinds, handled differently:
   name to reference. The copy is a deterministic step, not a model action:
   a model cannot emit a binary file, and base64 in a reply is exactly the
   size problem the write protocol exists to avoid.
+
+Which paths are accepted is decided here too, and strictly: the path comes
+from the calling model, and a wrong one is not a failed run but a leak. A
+path like `.anton/.env` has no data suffix, so without a fence it would be
+copied into the artifact folder and published with it; `.anton/secrets.json`
+would be read by the gathering step and its content carried into the PRD.
+`accept_reason` below says what qualifies — an upload the host staged, or a
+plain file inside the workspace outside any dot-directory. Everything else
+is dropped with the reason, for both kinds of file.
 """
 
 from __future__ import annotations
@@ -44,6 +53,21 @@ KIND_DATA = "data"
 KIND_ASSET = "asset"
 
 ATTACHMENTS_HEADER = "## Attached files"
+
+# Where each host stages a conversation upload, relative to the workspace:
+# the CLI's clipboard/paste directory and the cloud turn's shared mount.
+# The cowork app keeps its uploads OUTSIDE the workspace, under
+# `<COWORK_HOME>/files/<uuid>/<name>` where COWORK_HOME is `~/.cowork` or a
+# `~/.cowork-<kind>` dev variant — matched by that layout instead.
+UPLOAD_ROOTS_IN_WORKSPACE: tuple[tuple[str, ...], ...] = (
+    (".anton", "uploads"),
+    ("attachments",),
+)
+_COWORK_HOME_PREFIX = ".cowork"
+_COWORK_FILES_DIRNAME = "files"
+
+REFUSED_OUTSIDE = "outside the workspace and not a conversation upload"
+REFUSED_HIDDEN = "a dot-file or inside a dot-directory, which only a conversation upload may be"
 
 
 @dataclass
@@ -79,13 +103,58 @@ def _kind(path: Path) -> str:
     return KIND_DATA if path.suffix.lower() in DATA_SUFFIXES else KIND_ASSET
 
 
-def resolve_attachments(paths) -> tuple[list[Attachment], list[str]]:
-    """Turn the tool's `attachments` argument into records, dropping what is
-    not a readable file. Returns (kept, reasons for the dropped ones).
+def _is_cowork_upload(resolved: Path) -> bool:
+    """`.../.cowork[-<kind>]/files/<...>/<name>` — the cowork app's upload
+    store, which lives outside any workspace."""
+    parts = resolved.parts
+    for i in range(len(parts) - 2):
+        if parts[i].startswith(_COWORK_HOME_PREFIX) and parts[i + 1] == _COWORK_FILES_DIRNAME:
+            return True
+    return False
 
-    Duplicates collapse on the resolved path. Nothing here raises: a wrong
-    path is the calling agent's mistake, recorded in the trace, and must not
-    cost the run.
+
+def refusal_reason(resolved: Path, workspace: Path | None) -> str | None:
+    """Why a RESOLVED file path may not be attached, or None when it may.
+
+    Checked on the resolved path so a symlink inside the workspace cannot
+    point the copy at something outside it. Three ways in:
+
+    - a cowork upload, by layout (see `_is_cowork_upload`);
+    - a file under one of `UPLOAD_ROOTS_IN_WORKSPACE`;
+    - a file inside the workspace with no dot-component in its relative
+      path — a user's own project file, never `.anton/`, `.git/`, `.env`.
+
+    Without a workspace only the first applies: there is nothing to be
+    "inside" of, and guessing would be the leak this function exists to
+    stop.
+    """
+    if _is_cowork_upload(resolved):
+        return None
+    if workspace is None:
+        return REFUSED_OUTSIDE
+    try:
+        rel = resolved.relative_to(workspace.resolve())
+    except (ValueError, OSError):
+        return REFUSED_OUTSIDE
+    for root in UPLOAD_ROOTS_IN_WORKSPACE:
+        if rel.parts[: len(root)] == root and len(rel.parts) > len(root):
+            return None
+    if any(part.startswith(".") for part in rel.parts):
+        return REFUSED_HIDDEN
+    return None
+
+
+def resolve_attachments(
+    paths, *, workspace: Path | None = None
+) -> tuple[list[Attachment], list[str]]:
+    """Turn the tool's `attachments` argument into records, dropping what is
+    not a readable, attachable file. Returns (kept, reasons for the dropped
+    ones).
+
+    `workspace` is the session's workspace base; `refusal_reason` says which
+    paths pass. Duplicates collapse on the resolved path. Nothing here
+    raises: a wrong path is the calling agent's mistake, recorded in the
+    trace, and must not cost the run.
     """
     kept: list[Attachment] = []
     dropped: list[str] = []
@@ -96,7 +165,7 @@ def resolve_attachments(paths) -> tuple[list[Attachment], list[str]]:
             continue
         p = Path(text).expanduser()
         try:
-            resolved = str(p.resolve())
+            resolved = p.resolve()
             if not p.is_file():
                 dropped.append(f"{text}: not a file")
                 continue
@@ -104,10 +173,15 @@ def resolve_attachments(paths) -> tuple[list[Attachment], list[str]]:
         except OSError as exc:
             dropped.append(f"{text}: {exc.__class__.__name__}")
             continue
-        if resolved in seen:
+        reason = refusal_reason(resolved, workspace)
+        if reason is not None:
+            dropped.append(f"{text}: {reason}")
             continue
-        seen.add(resolved)
-        kept.append(Attachment(path=resolved, name=p.name, size=size, kind=_kind(p)))
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(Attachment(path=key, name=p.name, size=size, kind=_kind(p)))
     return kept, dropped
 
 
@@ -201,6 +275,7 @@ def render_for_generation(attachments: list[Attachment]) -> str:
 
 __all__ = [
     "ASSET_MAX_BYTES", "ATTACHMENTS_HEADER", "Attachment", "DATA_SUFFIXES",
-    "KIND_ASSET", "KIND_DATA", "render_for_gathering", "render_for_generation",
-    "resolve_attachments", "stage_assets",
+    "KIND_ASSET", "KIND_DATA", "REFUSED_HIDDEN", "REFUSED_OUTSIDE",
+    "UPLOAD_ROOTS_IN_WORKSPACE", "refusal_reason", "render_for_gathering",
+    "render_for_generation", "resolve_attachments", "stage_assets",
 ]

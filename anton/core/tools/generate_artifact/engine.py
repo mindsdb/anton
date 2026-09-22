@@ -520,7 +520,13 @@ async def generate(
         progress=progress,
         spend=SpendGuard(session=session),
     )
-    kept, dropped = resolve_attachments(attachments)
+    # The fence in `resolve_attachments` needs the workspace the paths are
+    # supposed to be inside of; a session without one (bench, some tests)
+    # gets the strict reading, not a permissive one.
+    ws_base = getattr(getattr(session, "_workspace", None), "base", None)
+    kept, dropped = resolve_attachments(
+        attachments, workspace=ws_base if isinstance(ws_base, Path) else None
+    )
     state.attachments = kept
     if kept or dropped:
         state.record(

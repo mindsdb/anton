@@ -45,7 +45,7 @@ def _files(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_resolve_keeps_files_and_classifies_them(tmp_path: Path):
     csv, png = _files(tmp_path)
-    kept, dropped = resolve_attachments([str(csv), str(png)])
+    kept, dropped = resolve_attachments([str(csv), str(png)], workspace=tmp_path)
     assert dropped == []
     assert [(a.name, a.kind) for a in kept] == [("sales.csv", KIND_DATA), ("logo.png", KIND_ASSET)]
     assert kept[1].size == png.stat().st_size
@@ -53,14 +53,83 @@ def test_resolve_keeps_files_and_classifies_them(tmp_path: Path):
 
 def test_resolve_drops_missing_paths_and_directories_with_a_reason(tmp_path: Path):
     csv, _ = _files(tmp_path)
-    kept, dropped = resolve_attachments([str(tmp_path / "nope.png"), str(tmp_path / "uploads"), "", None])
+    kept, dropped = resolve_attachments([str(tmp_path / "nope.png"), str(tmp_path / "uploads"), "", None], workspace=tmp_path)
     assert kept == []
     assert dropped == [f"{tmp_path / 'nope.png'}: not a file", f"{tmp_path / 'uploads'}: not a file"]
 
 
+def test_resolve_refuses_a_dot_directory_file_inside_the_workspace(tmp_path: Path):
+    """Review of PR #335: `.anton/.env` has no data suffix, so without a
+    fence it was an asset and got copied into the published artifact."""
+    secret = tmp_path / ".anton" / ".env"
+    secret.parent.mkdir()
+    secret.write_text("DS_PG_PASSWORD=hunter2\n")
+    data_secret = tmp_path / ".anton" / "secrets.json"
+    data_secret.write_text("{}")
+    kept, dropped = resolve_attachments([str(secret), str(data_secret)], workspace=tmp_path)
+    assert kept == []
+    assert dropped == [
+        f"{secret}: {att_mod.REFUSED_HIDDEN}",
+        f"{data_secret}: {att_mod.REFUSED_HIDDEN}",
+    ]
+
+
+def test_resolve_refuses_a_file_outside_the_workspace(tmp_path: Path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "elsewhere.png"
+    outside.write_bytes(b"x")
+    kept, dropped = resolve_attachments([str(outside)], workspace=ws)
+    assert kept == []
+    assert dropped == [f"{outside}: {att_mod.REFUSED_OUTSIDE}"]
+
+
+def test_resolve_refuses_everything_but_cowork_uploads_without_a_workspace(tmp_path: Path):
+    csv, _ = _files(tmp_path)
+    kept, dropped = resolve_attachments([str(csv)], workspace=None)
+    assert kept == [] and dropped == [f"{csv}: {att_mod.REFUSED_OUTSIDE}"]
+
+
+def test_resolve_accepts_the_upload_roots_each_host_stages_into(tmp_path: Path):
+    """CLI paste dir and the cloud turn's shared mount sit inside the
+    workspace (the first under a dot-directory); the cowork app's store is
+    `<COWORK_HOME>/files/<uuid>/<name>` outside any workspace."""
+    cli = tmp_path / ".anton" / "uploads" / "paste.png"
+    cloud = tmp_path / "attachments" / "report.csv"
+    cowork = tmp_path / "home" / ".cowork-dev" / "files" / "3f2a" / "logo.svg"
+    for f in (cli, cloud, cowork):
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+    kept, dropped = resolve_attachments([str(cli), str(cloud), str(cowork)], workspace=tmp_path)
+    assert dropped == []
+    assert [a.name for a in kept] == ["paste.png", "report.csv", "logo.svg"]
+    # Without a workspace the cowork layout is still recognised.
+    kept, dropped = resolve_attachments([str(cowork)], workspace=None)
+    assert [a.name for a in kept] == ["logo.svg"] and dropped == []
+
+
+def test_resolve_checks_the_resolved_path_not_the_symlink(tmp_path: Path):
+    secret = tmp_path / ".anton" / ".env"
+    secret.parent.mkdir()
+    secret.write_text("x")
+    link = tmp_path / "innocent.txt"
+    link.symlink_to(secret)
+    kept, dropped = resolve_attachments([str(link)], workspace=tmp_path)
+    assert kept == [] and dropped == [f"{link}: {att_mod.REFUSED_HIDDEN}"]
+
+
+def test_the_upload_root_itself_is_not_a_file_to_attach(tmp_path: Path):
+    """`len(rel.parts) > len(root)`: a stray file NAMED like a root
+    (`<ws>/attachments` as a file) is judged by the plain-file rule."""
+    stray = tmp_path / "attachments"
+    stray.write_text("x")
+    kept, _ = resolve_attachments([str(stray)], workspace=tmp_path)
+    assert [a.name for a in kept] == ["attachments"]
+
+
 def test_resolve_collapses_duplicates(tmp_path: Path):
     csv, _ = _files(tmp_path)
-    kept, _ = resolve_attachments([str(csv), str(csv.parent / "." / "sales.csv")])
+    kept, _ = resolve_attachments([str(csv), str(csv.parent / "." / "sales.csv")], workspace=tmp_path)
     assert len(kept) == 1
 
 
@@ -70,7 +139,7 @@ def test_stage_copies_assets_to_the_root_for_an_html_app_and_leaves_data_alone(t
     csv, png = _files(tmp_path)
     art = tmp_path / "art"
     art.mkdir()
-    kept, _ = resolve_attachments([str(csv), str(png)])
+    kept, _ = resolve_attachments([str(csv), str(png)], workspace=tmp_path)
     written = stage_assets(kept, art, static=False)
     assert written == ["logo.png"]
     assert (art / "logo.png").read_bytes() == png.read_bytes()
@@ -82,7 +151,7 @@ def test_stage_copies_assets_into_static_for_a_fullstack_app(tmp_path: Path):
     _, png = _files(tmp_path)
     art = tmp_path / "art"
     art.mkdir()
-    kept, _ = resolve_attachments([str(png)])
+    kept, _ = resolve_attachments([str(png)], workspace=tmp_path)
     assert stage_assets(kept, art, static=True) == ["static/logo.png"]
     assert (art / "static" / "logo.png").is_file()
 
@@ -101,7 +170,7 @@ def test_stage_is_idempotent(tmp_path: Path):
     _, png = _files(tmp_path)
     art = tmp_path / "art"
     art.mkdir()
-    kept, _ = resolve_attachments([str(png)])
+    kept, _ = resolve_attachments([str(png)], workspace=tmp_path)
     stage_assets(kept, art, static=False)
     assert stage_assets(kept, art, static=False) == ["logo.png"]
 
@@ -110,7 +179,7 @@ def test_stage_is_idempotent(tmp_path: Path):
 
 def test_gathering_section_lists_absolute_paths_and_roles(tmp_path: Path):
     csv, png = _files(tmp_path)
-    kept, _ = resolve_attachments([str(csv), str(png)])
+    kept, _ = resolve_attachments([str(csv), str(png)], workspace=tmp_path)
     text = render_for_gathering(kept)
     assert text.startswith("## Attached files")
     assert f"`{csv.resolve()}`" in text and "read it in the scratchpad" in text
@@ -123,7 +192,7 @@ def test_gathering_section_is_empty_without_attachments():
 
 def test_generation_section_names_staged_assets_by_relative_name_only(tmp_path: Path):
     csv, png = _files(tmp_path)
-    kept, _ = resolve_attachments([str(csv), str(png)])
+    kept, _ = resolve_attachments([str(csv), str(png)], workspace=tmp_path)
     kept[1].staged = "logo.png"
     text = render_for_generation(kept)
     assert '<img src="logo.png">' in text
@@ -133,7 +202,7 @@ def test_generation_section_names_staged_assets_by_relative_name_only(tmp_path: 
 
 def test_generation_section_forbids_an_asset_that_was_not_copied(tmp_path: Path):
     _, png = _files(tmp_path)
-    kept, _ = resolve_attachments([str(png)])
+    kept, _ = resolve_attachments([str(png)], workspace=tmp_path)
     kept[0].skipped = "larger than 15 MB, not copied"
     text = render_for_generation(kept)
     assert "NOT available" in text and "Do not reference it" in text
@@ -145,7 +214,7 @@ def test_call_kickoff_carries_the_attached_files_only_when_there_are_any(tmp_pat
     csv, _ = _files(tmp_path)
     st = _state(tmp_path, session=SimpleNamespace(question_count=0))
     assert "## Attached files" not in build_call_kickoff(st)
-    st.attachments, _ = resolve_attachments([str(csv)])
+    st.attachments, _ = resolve_attachments([str(csv)], workspace=tmp_path)
     kickoff = build_call_kickoff(st)
     assert "## Attached files" in kickoff and str(csv.resolve()) in kickoff
 
@@ -153,7 +222,7 @@ def test_call_kickoff_carries_the_attached_files_only_when_there_are_any(tmp_pat
 def test_spec_context_carries_the_generation_section(tmp_path: Path):
     _, png = _files(tmp_path)
     st = _state(tmp_path)
-    st.attachments, _ = resolve_attachments([str(png)])
+    st.attachments, _ = resolve_attachments([str(png)], workspace=tmp_path)
     st.attachments[0].staged = "logo.png"
     assert '<img src="logo.png">' in orchestrator._spec_context(st)
 
@@ -163,7 +232,7 @@ def test_stage_step_copies_assets_and_records_them_as_artifact_files(tmp_path: P
     art = tmp_path / "art"
     art.mkdir()
     st = _state(tmp_path, artifact_path=art)
-    st.attachments, _ = resolve_attachments([str(csv), str(png)])
+    st.attachments, _ = resolve_attachments([str(csv), str(png)], workspace=tmp_path)
     orchestrator._stage_attachments(st)
     assert (art / "logo.png").is_file()
     assert st.files_written == ["logo.png"]
@@ -175,7 +244,7 @@ def test_stage_step_uses_static_for_fullstack(tmp_path: Path):
     art = tmp_path / "art"
     art.mkdir()
     st = _state(tmp_path, artifact_path=art, artifact_type="fullstack-stateless-app", is_fullstack=True)
-    st.attachments, _ = resolve_attachments([str(png)])
+    st.attachments, _ = resolve_attachments([str(png)], workspace=tmp_path)
     orchestrator._stage_attachments(st)
     assert st.files_written == ["static/logo.png"]
 
@@ -207,7 +276,7 @@ def test_checkpoint_persists_attachment_records(tmp_path: Path):
     art = tmp_path / "art"
     art.mkdir()
     st = _state(tmp_path, artifact_path=art)
-    st.attachments, _ = resolve_attachments([str(png)])
+    st.attachments, _ = resolve_attachments([str(png)], workspace=tmp_path)
     st.attachments[0].staged = "logo.png"
     orchestrator._save_checkpoint(st, cp.STAGE_PRD_WRITTEN)
     stored = cp.load(art)
@@ -226,7 +295,7 @@ def test_restore_inherits_the_stored_records_only_when_the_call_named_none(tmp_p
     assert st.attachments[0].staged == "logo.png"
 
     fresh = _state(tmp_path)
-    fresh.attachments, _ = resolve_attachments([str(csv)])
+    fresh.attachments, _ = resolve_attachments([str(csv)], workspace=tmp_path)
     engine._restore(fresh, stored)
     assert [a.name for a in fresh.attachments] == ["sales.csv"]
 
@@ -255,15 +324,42 @@ async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, mon
     monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
     monkeypatch.setattr(orchestrator, "_datasource_context", lambda session: "")
     session = AsyncMock()
+    session._workspace = SimpleNamespace(base=tmp_path)
+    secret = tmp_path / ".anton" / ".env"
+    secret.parent.mkdir()
+    secret.write_text("x")
     out = await engine.generate(
         session=session, slug="a", artifact_path=art, artifact_type="html-app",
         user_request="r", agent_understanding="u",
-        attachments=[str(csv), str(tmp_path / "missing.png")],
+        attachments=[str(csv), str(tmp_path / "missing.png"), str(secret)],
     )
     assert out["status"] == "generated"
     assert [a.name for a in seen["attachments"]] == ["sales.csv"]
     rec = [r for r in seen["trace"] if r.node == "attachments"][0]
     assert rec.outcome == "done" and "sales.csv (data)" in rec.detail and "missing.png: not a file" in rec.detail
+    assert f"{secret}: {att_mod.REFUSED_HIDDEN}" in rec.detail
+
+
+async def test_generate_without_a_workspace_refuses_plain_files(tmp_path: Path, monkeypatch):
+    """An `AsyncMock` session has a Mock `_workspace.base`, not a Path: that
+    must read as "no workspace", i.e. strict, never as a permissive fence."""
+    csv, _ = _files(tmp_path)
+    art = tmp_path / "art"
+    art.mkdir()
+    seen = {}
+
+    async def fake_run(state, *, entry):
+        seen["attachments"] = list(state.attachments)
+        return {"status": "generated", "files_written": [], "internal_files": [], "trace": []}
+
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
+    monkeypatch.setattr(orchestrator, "_datasource_context", lambda session: "")
+    await engine.generate(
+        session=AsyncMock(), slug="a", artifact_path=art, artifact_type="html-app",
+        user_request="r", agent_understanding="u", attachments=[str(csv)],
+    )
+    assert seen["attachments"] == []
 
 
 def test_module_constants_are_the_ones_the_docs_quote():

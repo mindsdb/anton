@@ -523,7 +523,10 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "(`.cowork/files/<uuid>/<name>`, `.anton/uploads/...`). "
                     "Data files are read by the pipeline; images and other "
                     "assets are copied into the artifact and referenced by "
-                    "name. Only files the user actually provided."
+                    "name. Only files the user actually provided: a path "
+                    "outside the workspace, or under a dot-directory such "
+                    "as `.anton/`, is refused unless it is one of those "
+                    "upload locations."
                 ),
             },
         },

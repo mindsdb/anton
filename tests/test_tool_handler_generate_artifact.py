@@ -709,5 +709,6 @@ def test_the_attachments_field_tells_the_agent_what_qualifies():
     from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
 
     desc = GENERATE_ARTIFACT_TOOL.input_schema["properties"]["attachments"]["description"]
+    assert "outside the workspace" in desc and "`.anton/`" in desc
     assert "Only files the user actually provided" in desc
     assert "`attachments` (optional)" in GENERATE_ARTIFACT_TOOL.description
