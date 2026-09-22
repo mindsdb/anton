@@ -26,6 +26,7 @@ dependencies = [
     # Declared, not inherited: it arrived transitively via anthropic/openai.
     # Same range those SDKs require, so the client we hand them matches theirs.
     "httpx2>=2.7,<3",
+    "mcp>=2,<3",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     # Declared, not inherited: it arrives transitively via pydantic-settings.

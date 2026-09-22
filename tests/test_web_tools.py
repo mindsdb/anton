@@ -16,6 +16,7 @@ import pytest
 from anton.core.tools.web_tools import (
     WEB_FETCH_FALLBACK_TOOL,
     WEB_SEARCH_FALLBACK_TOOL,
+    _search_parallel,
     _strip_html,
     handle_web_fetch_fallback,
     handle_web_search_fallback,
@@ -48,16 +49,52 @@ def _text(out):
 
 
 class TestWebSearchFallbackExa:
-    async def test_returns_no_provider_message_when_unconfigured(self):
+    async def test_uses_parallel_when_unconfigured(self):
         session = _session_with_settings()
-        result = await handle_web_search_fallback(session, {"query": "anything"})
-        assert "anton setup search" in result
-        assert "No search provider" in result
+        with patch("anton.core.tools.web_tools._search_parallel", new_callable=AsyncMock) as search:
+            search.return_value = SimpleNamespace(text="Parallel result", served=True)
+            result = await handle_web_search_fallback(session, {"query": "anything"})
+        search.assert_awaited_once_with("anything", 5)
+        assert result.content == "Parallel result"
+        assert result.ok is True
+
+    async def test_parallel_mcp_discovery_call_and_result_mapping(self):
+        transport = MagicMock()
+        transport.__aenter__ = AsyncMock(return_value=(None, None))
+        transport.__aexit__ = AsyncMock(return_value=None)
+        mcp_session = MagicMock()
+        mcp_session.__aenter__ = AsyncMock(return_value=mcp_session)
+        mcp_session.__aexit__ = AsyncMock(return_value=None)
+        mcp_session.initialize = AsyncMock()
+        mcp_session.list_tools = AsyncMock(
+            return_value=SimpleNamespace(tools=[SimpleNamespace(name="web_search")])
+        )
+        mcp_session.call_tool = AsyncMock(return_value=SimpleNamespace(
+            is_error=False,
+            structured_content={"results": [
+                {"title": "First", "url": "https://a.example", "excerpts": ["Evidence A"]},
+                {"title": "Second", "url": "https://b.example", "excerpts": ["Evidence B"]},
+            ]},
+            content=[],
+        ))
+        with patch("anton.core.tools.web_tools.streamable_http_client", return_value=transport), \
+             patch("anton.core.tools.web_tools.ClientSession", return_value=mcp_session):
+            result = await _search_parallel("recent evidence", 1)
+        mcp_session.initialize.assert_awaited_once()
+        mcp_session.list_tools.assert_awaited_once()
+        mcp_session.call_tool.assert_awaited_once_with(
+            "web_search",
+            {"objective": "recent evidence", "search_queries": ["recent evidence"]},
+        )
+        assert result.served is True
+        assert "https://a.example" in result.text
+        assert "Evidence A" in result.text
+        assert "https://b.example" not in result.text
 
     async def test_returns_no_provider_when_provider_set_but_no_key(self):
         session = _session_with_settings(external_search_provider="exa")
         result = await handle_web_search_fallback(session, {"query": "x"})
-        assert "anton setup search" in result
+        assert "setup-search" in result
 
     async def test_empty_query_short_circuits(self):
         session = _session_with_settings(
@@ -585,15 +622,22 @@ class TestSessionWebToolResolution:
         assert "web_search" in names
         assert "web_fetch" in names
 
-    def test_fallback_web_search_not_registered_without_credential(self):
-        # A model offered a tool that can only fail (no Exa/Brave key
-        # configured) will call it anyway — don't register it at all.
+    def test_fallback_web_search_uses_parallel_without_credential(self):
         session = self._build_session(provider_native=set())
         tools = session._build_tools()
         names = {t["name"] for t in tools}
-        assert "web_search" not in names
-        # web_fetch needs no credential, so it's unaffected.
+        assert "web_search" in names
         assert "web_fetch" in names
+
+    def test_explicit_skip_does_not_register_search(self):
+        from anton.config.settings import AntonSettings
+
+        session = self._build_session(
+            provider_native=set(),
+            cfg_kwargs={"settings": AntonSettings(external_search_provider="")},
+        )
+        names = {t["name"] for t in session._build_tools()}
+        assert "web_search" not in names
 
     def test_fallback_toolDefs_not_registered_when_provider_is_native(self):
         session = self._build_session(provider_native={"web_search", "web_fetch"})
@@ -883,12 +927,12 @@ class TestWebSearchVerdict:
         # behaviour this change deliberately leaves alone.
         assert "Exa search failed" in out.content
 
-    async def test_no_configured_provider_still_returns_a_plain_string(self):
+    async def test_explicit_skip_still_returns_a_plain_string(self):
         out = await handle_web_search_fallback(
-            _session_with_settings(), {"query": "q"}
+            _session_with_settings(external_search_provider=""), {"query": "q"}
         )
         assert isinstance(out, str)
-        assert "anton setup search" in out
+        assert "setup-search" in out
 
 
 class TestTierThreePromiseIsPinnedToTheRealText:

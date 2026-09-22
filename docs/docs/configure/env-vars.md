@@ -48,7 +48,7 @@ to the local one.
 | --- | --- | --- |
 | `ANTON_WEB_SEARCH_ENABLED` | `true` | Enable the `web_search` tool — see [Web search](/connect/web-search) |
 | `ANTON_WEB_FETCH_ENABLED` | `true` | Enable the `web_fetch` tool — see [Web fetch](/connect/web-fetch) |
-| `ANTON_EXTERNAL_SEARCH_PROVIDER` | unset | External search provider for generic endpoints: `exa` or `brave` |
+| `ANTON_EXTERNAL_SEARCH_PROVIDER` | unset | Generic endpoint search: unset or `parallel` uses free Parallel Search; `exa` or `brave` uses a key; empty disables search |
 | `ANTON_EXA_API_KEY` | unset | Exa.ai API key |
 | `ANTON_BRAVE_API_KEY` | unset | Brave Search API key |
 

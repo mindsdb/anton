@@ -8,9 +8,9 @@ this module is dormant.
 
 For generic OpenAI-compatible third-party endpoints (Case 3 in the design):
 
-- ``web_search`` is dispatched to Exa.ai or Brave Search using a key the user
-  configured via ``anton setup search``. Without a configured key the handler
-  returns a clear error message pointing at that command.
+- ``web_search`` uses free Parallel Search MCP by default. Users can select
+  Exa.ai or Brave Search with their own keys through ``anton setup-search``,
+  or explicitly disable search.
 - ``web_fetch`` always works — it is a stdlib-style HTTP GET (via httpx, which
   Anton already depends on transitively through the LLM SDKs) plus a
   lightweight HTML→text stripper, so it does not need a third-party key.
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import ipaddress
 import logging
 import os
@@ -39,7 +40,11 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx2 as httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from mcp.types import Implementation
 
+from anton import __version__
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 
@@ -55,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search"
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+PARALLEL_SEARCH_ENDPOINT = "https://search.parallel.ai/mcp"
 
 _HTTP_TIMEOUT = 30.0
 
@@ -255,6 +261,53 @@ async def _search_brave(query: str, api_key: str, max_results: int) -> _SearchRe
         url = r.get("url") or ""
         snippet = (r.get("description") or "").strip()
         lines.append(f"{i}. **{title}**\n   {url}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return _SearchResult("\n".join(lines), served=True)
+
+
+async def _search_parallel(query: str, max_results: int) -> _SearchResult:
+    """Use the free Streamable HTTP search tool through the MCP client."""
+    async with httpx.AsyncClient(
+        headers={"User-Agent": f"Anton/{__version__}"}, timeout=_HTTP_TIMEOUT
+    ) as client:
+        async with streamable_http_client(
+            PARALLEL_SEARCH_ENDPOINT, http_client=client
+        ) as (read, write):
+            async with ClientSession(
+                read, write, read_timeout_seconds=_HTTP_TIMEOUT,
+                client_info=Implementation(name="Anton", version=__version__),
+            ) as session:
+                await session.initialize()
+                available = await session.list_tools()
+                if not any(tool.name == "web_search" for tool in available.tools):
+                    raise RuntimeError("Parallel MCP did not offer web_search")
+                result = await session.call_tool(
+                    "web_search",
+                    {"objective": query, "search_queries": [query]},
+                )
+    if result.is_error:
+        raise RuntimeError("Parallel MCP returned a tool error")
+    payload = result.structured_content
+    if payload is None:
+        text_blocks = [block.text for block in result.content if block.type == "text"]
+        if not text_blocks:
+            raise RuntimeError("Parallel MCP returned no search payload")
+        payload = json.loads(text_blocks[0])
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        raise RuntimeError("Parallel MCP returned an invalid search payload")
+    hits = payload["results"][:max_results]
+    if not hits:
+        return _SearchResult(f"No results for query: {query!r}", served=False)
+    lines = [f"Web search results for: {query!r} (Parallel, {len(hits)} hits)\n"]
+    for index, hit in enumerate(hits, 1):
+        if not isinstance(hit, dict):
+            raise RuntimeError("Parallel MCP returned an invalid search result")
+        url = hit.get("url") or ""
+        title = hit.get("title") or url or "(untitled)"
+        excerpts = hit.get("excerpts") or []
+        snippet = " ".join(part for part in excerpts if isinstance(part, str))[:600]
+        lines.append(f"{index}. **{title}**\n   {url}")
         if snippet:
             lines.append(f"   {snippet}")
     return _SearchResult("\n".join(lines), served=True)
@@ -470,21 +523,20 @@ async def _fetch_url(url: str, max_chars: int) -> _FetchResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-_NO_PROVIDER_MSG = (
-    "No search provider configured for this LLM endpoint. Web search is "
-    "unavailable in this session; if you're running the anton CLI standalone, "
-    "run `anton setup search` to configure Exa.ai or Brave Search."
-)
+_NO_PROVIDER_MSG = "Web search is disabled. Run `anton setup-search` to choose a provider."
 
 
-def has_search_credential(settings: object) -> bool:
-    """Whether ``settings`` has a usable Exa/Brave key for the fallback handler.
+def has_search_provider(settings: object) -> bool:
+    """Whether the selected fallback can execute a search.
 
     Shared by the registration gate (``ChatSession.__init__`` skips registering
     ``WEB_SEARCH_FALLBACK_TOOL`` when this is False) and the handler itself, so
     the two can't drift out of sync.
     """
-    provider = (getattr(settings, "external_search_provider", None) or "").lower()
+    selected = getattr(settings, "external_search_provider", None)
+    provider = selected.lower() if isinstance(selected, str) else "parallel"
+    if provider == "parallel":
+        return True
     if provider == "exa":
         return bool(getattr(settings, "exa_api_key", None))
     if provider == "brave":
@@ -520,16 +572,21 @@ async def handle_web_search_fallback(
     max_results = max(1, min(max_results, 20))
 
     settings = session._settings
-    if not has_search_credential(settings):
+    if not has_search_provider(settings):
         return _NO_PROVIDER_MSG
 
-    provider = (getattr(settings, "external_search_provider", None) or "").lower()
-    if provider == "exa":
-        found = await _search_exa(query, settings.exa_api_key, max_results)
-    elif provider == "brave":
-        found = await _search_brave(query, settings.brave_api_key, max_results)
-    else:
-        return _NO_PROVIDER_MSG
+    provider = (getattr(settings, "external_search_provider", None) or "parallel").lower()
+    try:
+        if provider == "parallel":
+            found = await _search_parallel(query, max_results)
+        elif provider == "exa":
+            found = await _search_exa(query, settings.exa_api_key, max_results)
+        elif provider == "brave":
+            found = await _search_brave(query, settings.brave_api_key, max_results)
+        else:
+            return _NO_PROVIDER_MSG
+    except Exception as exc:
+        return ToolOutcome(content=f"Web search failed: {exc}", ok=None)
     return ToolOutcome(content=found.text, ok=True if found.served else None)
 
 
@@ -589,7 +646,8 @@ WEB_SEARCH_FALLBACK_TOOL = ToolDef(
         "Search the web for up-to-date information. Returns a ranked list of "
         "results with title, URL, and a short excerpt. Use this when you need "
         "facts that may have changed recently, breaking news, or to discover "
-        "URLs to fetch in detail. Backed by Exa.ai or Brave Search."
+        "URLs to fetch in detail. Uses Parallel Search by default, or a "
+        "configured Exa.ai or Brave Search key."
     ),
     input_schema={
         "type": "object",
