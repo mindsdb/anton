@@ -112,6 +112,30 @@ def test_main_reports_success_only_when_nothing_failed(smoke, monkeypatch):
     assert smoke.main() == 1
 
 
+def test_html_lint_browser_passes_on_a_clean_page(smoke, monkeypatch):
+    monkeypatch.setattr("anton.core.artifacts.html_lint.lint_html", lambda _path: [])
+    assert smoke.check_html_lint_browser() == []
+
+
+def test_html_lint_browser_fails_when_the_engine_cannot_produce_a_result(smoke, monkeypatch):
+    """`None` means Chromium never launched or never printed a parseable
+    result — exactly the failure this check exists to catch before push."""
+    monkeypatch.setattr("anton.core.artifacts.html_lint.lint_html", lambda _path: None)
+    (failure,) = smoke.check_html_lint_browser()
+    assert "did not launch" in failure
+
+
+def test_html_lint_browser_fails_on_unexpected_findings(smoke, monkeypatch):
+    from anton.core.artifacts.html_lint import HtmlFinding
+
+    monkeypatch.setattr(
+        "anton.core.artifacts.html_lint.lint_html",
+        lambda _path: [HtmlFinding(kind="console_error", detail="x")],
+    )
+    (failure,) = smoke.check_html_lint_browser()
+    assert "unexpected findings" in failure
+
+
 def test_the_dockerfile_runs_the_smoke_below_the_runtime_user(smoke):
     """The layer's position is the whole premise: above `USER 1000` every check
     runs as root and passes for an image the pod still cannot use."""

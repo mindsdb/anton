@@ -45,10 +45,12 @@ def _make_artifact(store: _FakeStore, slug: str) -> Path:
     return folder
 
 
-def test_no_browser_configured_produces_no_messages(monkeypatch, store: _FakeStore):
-    """No browser configured (cloud/web) means the checker can't run at
-    all — silent, same as an unregistered extension, not a finding."""
+def test_no_engine_available_produces_no_messages(monkeypatch, store: _FakeStore):
+    """Neither engine available (no Electron, Playwright not importable)
+    means the checker can't run at all — silent, same as an unregistered
+    extension, not a finding."""
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    monkeypatch.setattr("anton.core.artifacts.html_lint.find_spec", lambda _name: None)
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}

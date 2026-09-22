@@ -59,13 +59,15 @@ def empty_body_page(tmp_path: Path) -> Path:
     return path
 
 
-def test_no_browser_configured_yields_none(monkeypatch, broken_page: Path):
+def test_no_engine_available_yields_none(monkeypatch, broken_page: Path):
     monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    monkeypatch.setattr("anton.core.artifacts.html_lint.find_spec", lambda _name: None)
     assert lint_html(broken_page) is None
 
 
-def test_browser_path_that_does_not_exist_yields_none(monkeypatch, broken_page: Path):
+def test_browser_path_that_does_not_exist_falls_back_to_playwright_when_importable(monkeypatch, broken_page: Path):
     monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", "/no/such/binary-xyz")
+    monkeypatch.setattr("anton.core.artifacts.html_lint.find_spec", lambda _name: None)
     assert lint_html(broken_page) is None
 
 

@@ -1,27 +1,38 @@
 """Headless-browser lint for `.html` artifacts.
 
 Catches a page that throws on load or references a missing local script —
-things nothing else in the pipeline ever checks. Reuses cowork's own
-bundled Electron/Chromium via `ANTON_HTML_LINT_BROWSER` (set by cowork's
-Electron main process to `process.execPath`) instead of a new dependency.
-Desktop only; silently no-ops wherever the env var isn't set (cloud has no
-browser to find).
+things nothing else in the pipeline ever checks. Two engines: desktop reuses
+cowork's own bundled Electron/Chromium via `ANTON_HTML_LINT_BROWSER` (set by
+cowork's Electron main process to `process.execPath`); the cloud sandbox pod
+has no Electron/Node, so it falls back to Playwright's Python binding when
+that env var isn't set. `_resolve_command` picks between them.
 
-Page load + network policy live in `_html_lint_runner.js` (checked in, not
-agent-authored) — see that file for details.
+Page load + network policy live in `_html_lint_runner.js` (Electron,
+checked in, not agent-authored) and `_html_lint_runner.py` (Playwright) —
+see those files for details. Both emit the same JSON contract on stdout.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
+from importlib.util import find_spec
 from pathlib import Path
 
-_RUNNER_SCRIPT = Path(__file__).with_name("_html_lint_runner.js")
-_TIMEOUT_SECONDS = 8
+_log = logging.getLogger(__name__)
+
+_RUNNER_JS = Path(__file__).with_name("_html_lint_runner.js")
+_RUNNER_PY = Path(__file__).with_name("_html_lint_runner.py")
+_TIMEOUT_SECONDS_ELECTRON = 8
+# Placeholder — a cold Chromium start under gVisor is slower than desktop;
+# replace with the real cold-start measurement from plan step 8 before release.
+_TIMEOUT_SECONDS_PLAYWRIGHT = 20
 _RESULT_START = "RESULT_JSON_START"
 _RESULT_END = "RESULT_JSON_END"
 
@@ -37,6 +48,18 @@ class HtmlFinding:
         return f"{self.kind}: {self.detail}"
 
 
+@dataclass(frozen=True)
+class HtmlLintRun:
+    """Diagnostic detail behind a `lint_html` call — for logging/telemetry, never
+    exposed to the agent (the tool-facing contract is `lint_html`'s bare findings).
+    """
+
+    engine: str  # "electron" | "playwright" | "none"
+    outcome: str  # "clean" | "findings" | "no_result" | "timeout" | "launch_failed"
+    findings: list[HtmlFinding] | None
+    duration_ms: int
+
+
 def lint_html(path: Path) -> list[HtmlFinding] | None:
     """Load the page headless and flag console errors + failed local assets.
 
@@ -46,41 +69,82 @@ def lint_html(path: Path) -> list[HtmlFinding] | None:
     this ever raises, so a checker failure can't fail the artifact
     read/cell that triggered it.
     """
+    return lint_html_run(path).findings
+
+
+def lint_html_run(path: Path) -> HtmlLintRun:
+    """Same contract as `lint_html`, plus which engine ran and why it didn't
+    if it didn't. Never raises, for the same reason `lint_html` never does.
+    """
     try:
-        return _lint_html(path)
+        run = _lint_html_run(path)
     except Exception:
-        return None
+        run = HtmlLintRun(engine="none", outcome="no_result", findings=None, duration_ms=0)
+    _log.info("html lint run: engine=%s outcome=%s duration_ms=%d", run.engine, run.outcome, run.duration_ms)
+    return run
 
 
-def _lint_html(path: Path) -> list[HtmlFinding] | None:
-    browser = _discover_browser()
-    if browser is None:
-        return None
+def _lint_html_run(path: Path) -> HtmlLintRun:
+    resolved = _resolve_command(path)
+    if resolved is None:
+        return HtmlLintRun(engine="none", outcome="no_result", findings=None, duration_ms=0)
+    engine, argv, extra_env, timeout_seconds = resolved
 
-    # The runner goes through both argv and env on purpose:
-    # - a bare `electron` binary loads argv[1] as the app to run;
-    # - a packaged app ignores argv[1] (it always loads its own app.asar) and
-    #   picks the runner up from the env instead, in its lint-mode entry point.
-    env = {
-        **os.environ,
-        "ANTON_HTML_LINT_TARGET": str(path),
-        "ANTON_HTML_LINT_RUNNER": str(_RUNNER_SCRIPT),
-    }
+    env = {**os.environ, **extra_env}
+    start = time.monotonic()
     try:
         proc = subprocess.run(
-            [browser, str(_RUNNER_SCRIPT), "--headless=new", "--disable-gpu"],
+            argv,
             env=env,
             capture_output=True,
-            timeout=_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             text=True,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    except subprocess.TimeoutExpired:
+        return HtmlLintRun(engine=engine, outcome="timeout", findings=None, duration_ms=_elapsed_ms(start))
+    except OSError:
+        return HtmlLintRun(engine=engine, outcome="launch_failed", findings=None, duration_ms=_elapsed_ms(start))
+    duration_ms = _elapsed_ms(start)
 
     result = _extract_result(proc.stdout)
     if result is None:
-        return None
-    return _findings_from_result(result)
+        return HtmlLintRun(engine=engine, outcome="no_result", findings=None, duration_ms=duration_ms)
+
+    findings = _findings_from_result(result)
+    outcome = "findings" if findings else "clean"
+    return HtmlLintRun(engine=engine, outcome=outcome, findings=findings, duration_ms=duration_ms)
+
+
+def _elapsed_ms(start: float) -> int:
+    return int((time.monotonic() - start) * 1000)
+
+
+def _resolve_command(path: Path) -> tuple[str, list[str], dict[str, str], int] | None:
+    """(engine, argv, extra_env, timeout_seconds), or None when no engine is usable.
+
+    Electron is probed first, so a developer machine that happens to have
+    Playwright installed keeps using the already-verified desktop path.
+    """
+    browser = _discover_browser()
+    if browser is not None:
+        # Runner goes through both argv and env on purpose: a bare `electron`
+        # binary loads argv[1] as the app to run, but a packaged app ignores
+        # argv[1] (always loads its own app.asar) and picks the runner up
+        # from the env instead, in its lint-mode entry point.
+        return (
+            "electron",
+            [browser, str(_RUNNER_JS), "--headless=new", "--disable-gpu"],
+            {"ANTON_HTML_LINT_TARGET": str(path), "ANTON_HTML_LINT_RUNNER": str(_RUNNER_JS)},
+            _TIMEOUT_SECONDS_ELECTRON,
+        )
+    if find_spec("playwright") is not None:
+        return (
+            "playwright",
+            [sys.executable, str(_RUNNER_PY)],
+            {"ANTON_HTML_LINT_TARGET": str(path)},
+            _TIMEOUT_SECONDS_PLAYWRIGHT,
+        )
+    return None
 
 
 def _discover_browser() -> str | None:
