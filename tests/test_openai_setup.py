@@ -766,12 +766,39 @@ class TestCurrentSearchLabel:
     different number of key characters into the chat output.
     """
 
-    def test_none_when_unconfigured(self):
+    def test_parallel_when_unconfigured(self):
         from anton.cli import _current_search_label
         from types import SimpleNamespace
 
         s = SimpleNamespace(external_search_provider=None, exa_api_key=None, brave_api_key=None)
-        assert _current_search_label(s) == "none"
+        assert _current_search_label(s) == "Parallel Search (no key)"
+
+    def test_setup_default_persists_parallel_selection(self):
+        from anton.cli import _setup_search_provider
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        settings = SimpleNamespace(external_search_provider=None)
+        workspace = MagicMock()
+        with patch("anton.cli._setup_prompt", return_value="1"):
+            _setup_search_provider(settings, workspace)
+        assert settings.external_search_provider == "parallel"
+        workspace.set_secret.assert_called_once_with(
+            "ANTON_EXTERNAL_SEARCH_PROVIDER", "parallel"
+        )
+
+    def test_skip_preserves_explicit_disabled_choice(self):
+        from anton.cli import _skip_search_provider
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        settings = SimpleNamespace(external_search_provider=None)
+        workspace = MagicMock()
+        _skip_search_provider(settings, workspace)
+        assert settings.external_search_provider == ""
+        workspace.set_secret.assert_called_once_with(
+            "ANTON_EXTERNAL_SEARCH_PROVIDER", ""
+        )
 
     def test_exa_with_full_key_masks_to_last_four(self):
         from anton.cli import _current_search_label
