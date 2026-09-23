@@ -975,15 +975,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "either way the next exec call starts from an empty "
                     "namespace."
                 )
-            error_msg = (
-                f"{exc}. {state_note}\n\n"
-                "If a database query was running, it may still be executing server-side.\n"
-                "To check and cancel: run SHOW PROCESSLIST (MySQL) or\n"
-                "SELECT * FROM information_schema.processlist WHERE status='running' "
-                "and cancel with KILL <id>.\n"
-                "For Snowflake: use SHOW RUNNING QUERIES and "
-                "SELECT SYSTEM$CANCEL_ALL_QUERIES(<session_id>)."
-            )
+            error_msg = f"{exc}. {state_note}"
             salvaged = "".join(self._salvage)
             if salvaged:
                 if self._salvage_truncated:

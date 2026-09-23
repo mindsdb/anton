@@ -1170,6 +1170,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     )
 
     from anton.core.backends.base import Cell
+    from anton.core.utils.scratchpad import cell_error_headline
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
@@ -1210,7 +1211,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     if cell is None or cell.error:
         err = cell.error if cell else "No result"
         console.print()
-        err_line = err.strip().split("\n")[-1] if err else err
+        err_line = cell_error_headline(err)
         console.print(f"[anton.error]  Demo encountered an issue: {err_line}[/]")
         console.print("[anton.muted]  You can still use Anton normally.[/]")
         console.print()

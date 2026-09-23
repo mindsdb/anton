@@ -68,12 +68,33 @@ def reject_invalid_packages(packages: list[str]) -> str | None:
     )
 
 
-def cell_failure_reason(error: str | None) -> str:
-    """The machine-comparable failure key (ENG-1286/ENG-1492): the traceback's
-    LAST line — the cause — never a hint prepended above it. Tests call this
-    rather than restating the extraction (ENG-1635 review)."""
+# Heads of the runtime's own kill messages (`backends/local.py`). These lead
+# with the cause and append recovery notes after it, the reverse of a
+# traceback — and the ACC kill events, nudge routing and kill-loop detector
+# all key on the head.
+KILL_ERROR_PREFIXES = ("Cancelled", "Cell timed out", "Cell killed")
+
+
+def cell_error_headline(error: str | None) -> str:
+    """The one line of a cell error that names the cause.
+
+    A traceback ends with its cause, so that is the LAST line — never a hint
+    prepended above it. A runtime kill message starts with its cause, so
+    there it is the FIRST line; its last line is a recovery note that says
+    nothing about why the cell died.
+    """
     error = (error or "").strip()
-    return error.splitlines()[-1][:160] if error else ""
+    if not error:
+        return ""
+    lines = error.splitlines()
+    return lines[0] if error.startswith(KILL_ERROR_PREFIXES) else lines[-1]
+
+
+def cell_failure_reason(error: str | None) -> str:
+    """The machine-comparable failure key (ENG-1286/ENG-1492): the cell
+    error's headline, capped. Tests call this rather than restating the
+    extraction (ENG-1635 review)."""
+    return cell_error_headline(error)[:160]
 
 
 def install_call_installed_something(result: str) -> bool:
@@ -185,7 +206,7 @@ def observe_scratchpad_cell(session, name: str, cell) -> None:
     if cell is None:
         return
     err = (cell.error or "").strip()
-    if err.startswith(("Cancelled", "Cell timed out", "Cell killed")):
+    if err.startswith(KILL_ERROR_PREFIXES):
         _acc_observe(session, "scratchpad_killed", {"name": name, "reason": err[:120]}, severity=6)
     else:
         success = not err and not (cell.stderr or "").strip()
