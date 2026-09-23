@@ -35,10 +35,14 @@ Consequences worth knowing before adding a caller:
   arrives with its properties stripped unless they are the five above, and
   does not arrive at all unless its name carries one of the two prefixes.
 * **``distinct_id`` is the ``aid`` fingerprint on both paths, so these events
-  are per-INSTALL, not per-user.**  They do not join to the Keycloak ``sub``
-  that the console, the desktop renderer's PostHog client, and the billing
-  mirror all key on.  Per-user questions need either that identified client
-  or the ``conversation_id`` -> Langfuse -> user hop.
+  are per-INSTALL, not per-user** — with one exception.  A PostHog-routed
+  event that carries a non-empty ``user_id`` (today only ``turn_completed``,
+  when the host supplied the account; ENG-2121) is keyed on that instead: the
+  Keycloak ``sub`` that the console, the desktop renderer's PostHog client and
+  the billing mirror all key on, so the turn joins the person who signed up
+  and paid.  Every other event, and a turn whose host did not say who the user
+  is, stays per-install and needs the ``conversation_id`` -> Langfuse -> user
+  hop for per-user questions.
 * PostHog additionally enriches server-side with IP and GeoIP.
 
 Identifier policy
@@ -51,6 +55,12 @@ its trace when investigating a runaway.  The id carries no personal data on
 its own; resolving it to a person requires Langfuse access, and Langfuse
 already holds the full conversation content for the same session, so this
 adds no disclosure that path doesn't already have.
+
+``turn_completed`` also carries the **account key** when the host knows it
+(ENG-2121): ``user_id`` (the Keycloak ``sub``) and ``organization_id``, both
+opaque UUIDs, validated as such before they get here.  They add no disclosure
+PostHog lacks: the same ``sub`` is already the ``distinct_id`` of every
+identified event in project 424726.
 
 Still never sent, by any caller: message text, prompts, tool output, file
 paths, credentials, hostnames, or email addresses.
@@ -177,6 +187,9 @@ _pending_lock = threading.Lock()
 #                    content-free exception type; "" on verified turns; ENG-1858),
 #                    harness, surface (desktop / web / cli — WHERE
 #                    the user was, "" when the host did not say; ENG-1945),
+#                    user_id + organization_id (WHO: Keycloak sub and active
+#                    org, opaque UUIDs, "" when the host did not say; a
+#                    non-empty user_id is also the distinct_id; ENG-2121),
 #                    anton_version, conversation_id, turn_index,
 #                    turn_attempt_id (unique per turn EXECUTION — `turn_index`
 #                    is only a position in the history and REPEATS across a
@@ -385,7 +398,13 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
     """Build the PostHog Capture API payload for one event.
 
     ``aid`` becomes ``distinct_id`` and is kept as a property too, so a query
-    can group on the install without touching person data.  ``timestamp`` is
+    can group on the install without touching person data.  A non-empty
+    ``user_id`` wins over it (ENG-2121): that is the Keycloak ``sub`` every
+    identified emitter in this project keys on, so the event lands on the
+    existing Person.  ``$process_person_profile`` stays False either way, and
+    PostHog attaches a personless event to a Person that already exists for
+    its distinct_id without creating or updating one, so this joins identities
+    without minting any.  ``timestamp`` is
     promoted to PostHog's own field: it is the moment the turn ended, not the
     moment a queued daemon thread got around to sending, and for a cost event
     that difference is the one you would go on to plot.
@@ -420,7 +439,7 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
         {
             "api_key": key,
             "event": action,
-            "distinct_id": params.get("aid") or "unknown",
+            "distinct_id": params.get("user_id") or params.get("aid") or "unknown",
             "timestamp": params.get("timestamp"),
             "properties": properties,
         }

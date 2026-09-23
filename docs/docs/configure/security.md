@@ -49,7 +49,9 @@ Three things, and only three:
 2. **Anonymous analytics**, to MindsDB and to PostHog Inc. (a US analytics
    processor). Event names, timestamps, and for some events anonymous
    measurements of the action — token counts, model names, durations, opaque
-   ids. Never query content and never personal data. Opt out any time: see
+   ids. Never query content. Inside MindsHub Cowork, the per-turn event also
+   carries your opaque MindsHub account and organisation ids; never your
+   email or name. Opt out any time: see
    [Analytics](/configure/analytics).
 3. **Whatever you ask Anton to send.** Emails, API calls, published
    dashboards — actions you request.

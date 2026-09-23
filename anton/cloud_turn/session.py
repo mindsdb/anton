@@ -792,6 +792,12 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # driven directly rather than by cowork; an unset surface reads as
         # "nobody declared one", which is the honest answer for a standalone run.
         surface=(request.trace or {}).get("surface"),
+        # WHO the user is, for the analytics event only (ENG-2121). Same reason
+        # as `surface`: the pod cannot know, cowork-server can (the gateway's
+        # verified principal). Validated as UUIDs by the session; absent when
+        # the pod is driven directly or by an older cowork-server.
+        user_id=(request.trace or {}).get("user_id"),
+        organization_id=(request.trace or {}).get("organization_id"),
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless

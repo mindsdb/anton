@@ -1096,6 +1096,31 @@ def test_a_trace_block_without_a_surface_leaves_it_unset(tmp_path, monkeypatch):
 # TurnKeyDataVault instead of None, and DS_* env is (re)populated for it the
 # same way desktop's harness.py does for LocalDataVault.
 
+# ── account key (ENG-2121) ───────────────────────────────────────────────────
+# The pod cannot know who the user is; cowork-server does (the gateway's
+# verified principal) and sends it in the same trace block as `surface`.
+
+_SUB = "0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30"
+_ORG = "7c6a1d2e-5f30-4d18-bb44-0f2b5c719e3a"
+
+
+def test_the_account_from_the_trace_block_reaches_the_config(tmp_path, monkeypatch):
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        trace={"surface": "web", "user_id": _SUB, "organization_id": _ORG},
+    )
+    assert cfg.user_id == _SUB
+    assert cfg.organization_id == _ORG
+
+
+def test_no_account_in_the_trace_block_leaves_it_unset(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, trace={"surface": "web"})
+    assert cfg.user_id is None
+    assert cfg.organization_id is None
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.user_id is None
+
+
 def test_no_oauth_block_leaves_data_vault_none(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
     assert cfg.data_vault is None

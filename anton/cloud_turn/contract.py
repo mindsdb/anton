@@ -129,7 +129,9 @@ class TurnRequestV1:
     #: never writes skills back (agent-built skills are a desktop draft flow).
     skills: dict | None = None
     #: Optional trace-attribution block cowork resolved for this turn:
-    #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``.
+    #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``,
+    #: plus ``user_id`` / ``organization_id`` (Keycloak UUIDs, ENG-2121) for the
+    #: ``turn_completed`` analytics event.
     #: Observability only — nothing here may affect what the turn DOES.
     #:
     #: It has to travel because the pod cannot derive any of it: cowork-server is
