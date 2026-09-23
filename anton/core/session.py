@@ -12,6 +12,7 @@ import re
 import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
+import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -1203,6 +1204,33 @@ def _validated_surface(value: str | None) -> str | None:
     return cleaned
 
 
+def _validated_account_id(value: str | None) -> str | None:
+    """Keep only a UUID-shaped account id, in canonical lowercase form (ENG-2121).
+
+    Hosts supply this, so it is untrusted like ``surface``. The ids it carries
+    (the Keycloak ``sub`` and the active organisation) are UUIDs everywhere
+    they are minted, and nothing else may pass: an email address or other free
+    text in this field would reach PostHog as a ``distinct_id``, which is new
+    personal data on the event and a key that joins nothing.
+
+    The rejected value is deliberately NOT logged, unlike ``_validated_surface``:
+    the likeliest wrong value here is an email address, and logging it would
+    put personal data in the user's log file for the sake of a warning.
+
+    Never raises. Telemetry must not be able to fail a turn.
+    """
+    if value is None:
+        return None
+    try:
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        return str(uuid.UUID(cleaned))
+    except Exception:
+        logger.warning("ignoring an account id that is not a UUID")
+        return None
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -1264,6 +1292,19 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # WHO the user is, for analytics attribution only (ENG-2121): the Keycloak
+    # ``sub`` and the active organisation id, both UUIDs. ``turn_completed``
+    # is keyed on ``user_id`` when it is set, which is the same distinct_id the
+    # console, the desktop renderer and the auth service's billing mirror use,
+    # so a completed turn joins the person who signed up and paid. None when
+    # the host did not say (the CLI, an older host); the event then stays keyed
+    # on the install fingerprint, as before.
+    #
+    # Never an email address or a name: anything that is not a UUID is dropped
+    # at construction (``_validated_account_id``). Nothing in the turn reads
+    # these; they only ride the analytics event.
+    user_id: str | None = None
+    organization_id: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
     # assumptions inline instead of stopping to ask ("do first, ask later").
@@ -1439,6 +1480,8 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self._user_id = _validated_account_id(config.user_id)
+        self._organization_id = _validated_account_id(config.organization_id)
         # Per-turn token cost books (ENG-1288). Created and armed at each
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
@@ -3354,6 +3397,14 @@ class ChatSession:
                 # (ENG-1945). "" when the host did not say; never a guess —
                 # `_validated_surface` already rejected anything unrecognised.
                 surface=str(getattr(self, "_surface", None) or ""),
+                # WHO ran the turn (ENG-2121). `user_id` becomes the event's
+                # distinct_id in `anton.analytics._posthog_body`, so the turn
+                # lands on the same PostHog person as sign-up, install and
+                # payment and the staff/test exclusion reaches it. Opaque UUIDs
+                # only, already validated at construction; "" when the host did
+                # not say, and then the event stays keyed on the install.
+                user_id=str(getattr(self, "_user_id", None) or ""),
+                organization_id=str(getattr(self, "_organization_id", None) or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
                 # trace headers carry, so an analytics row links back to

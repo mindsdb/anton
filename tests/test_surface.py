@@ -167,3 +167,45 @@ class TestThePodReceivesItsAttribution:
         req = self._req(trace={"surface": "web"})
         assert (req.trace or {}).get("surface") == SURFACE_WEB
         assert (self._req().trace or {}).get("surface") is None
+
+
+# ── account key (ENG-2121) ───────────────────────────────────────────────────
+
+
+class TestValidatedAccountId:
+    """The host supplies the account key, so it is untrusted like `surface`.
+
+    Only a UUID gets through. The failure this guards is an email address (or
+    any other free text) arriving in the field and being sent to PostHog as a
+    distinct_id, which is new personal data on the event and an identity key
+    that joins nothing.
+    """
+
+    SUB = "0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30"
+
+    def test_a_uuid_is_kept_in_canonical_form(self):
+        from anton.core.session import _validated_account_id
+
+        assert _validated_account_id(self.SUB) == self.SUB
+        assert _validated_account_id(" " + self.SUB.upper() + " ") == self.SUB
+
+    @pytest.mark.parametrize(
+        "value", [None, "", "   ", "someone@example.com", "not-a-uuid", "12345"]
+    )
+    def test_anything_else_is_dropped(self, value):
+        from anton.core.session import _validated_account_id
+
+        assert _validated_account_id(value) is None
+
+    def test_a_rejected_value_is_never_logged(self, caplog):
+        from anton.core.session import _validated_account_id
+
+        with caplog.at_level(logging.DEBUG):
+            _validated_account_id("someone@example.com")
+        assert "someone@example.com" not in caplog.text
+
+    def test_the_session_keeps_only_validated_ids(self, make_session):
+        s = make_session(user_id=self.SUB.upper(), organization_id="acme")
+        assert s._user_id == self.SUB
+        assert s._organization_id is None
+        assert make_session()._user_id is None
