@@ -12,6 +12,7 @@ import re
 import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
+import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -19,7 +20,7 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm.endpoints import classify_endpoint
-from anton.core.llm.identity import serving_model_lines
+from anton.core.llm.identity import product_lines, serving_model_lines
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -29,7 +30,7 @@ from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
-from anton.memory.history_store import is_user_turn
+from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
@@ -40,6 +41,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     CURATED_PROVIDER_ERRORS,
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
@@ -62,11 +64,6 @@ from anton.core.llm.provider import (
     provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
-from anton.core.llm.thalamus import (
-    ACTION_RESPOND,
-    ThalamicDecision,
-    gate_turn,
-)
 from anton.core.llm.tracing import (
     VALID_SURFACES,
     TraceContext,
@@ -98,6 +95,15 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+)
+# Artifact-edit tracking + lint: shared with handle_scratchpad's
+# own exec branch (tool_handlers.py) rather than duplicated here, since this
+# inline streaming exec bypasses that handler entirely.
+from anton.core.tools.tool_handlers import (
+    resolve_artifact_store,
+    snapshot_existing_artifact_mtimes,
+    track_edits_since,
+    lint_changed_artifact_files,
 )
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
@@ -316,7 +322,13 @@ def _stamp_user_content(
 class _VerifierVerdict(BaseModel):
     """Structured verdict from the completion verifier (runs on the cheap
     coding model). The field descriptions below double as the verifier's
-    instructions — see LLMClient.generate_object_code (ENG-716)."""
+    instructions — see LLMClient.generate_object_code (ENG-716).
+
+    Field order (``status`` first) is load-bearing. Putting ``reason`` first
+    removed haiku's one-attempt label slip, 24/24, but dropped the ENG-836
+    environment wall to 22/24 STUCK on the same model; the wall is the
+    shipped guarantee, so the order stays.
+    """
 
     status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
         description=(
@@ -329,15 +341,51 @@ class _VerifierVerdict(BaseModel):
             "failed step wasn't essential to the answer — is still COMPLETE; do NOT "
             "mark a turn incomplete just because an earlier tool call failed. A "
             "finished task followed by an optional 'want me to…?' offer is still "
-            "COMPLETE.\n"
+            "COMPLETE. "
+            # A disclaimer was laundering the hallucinated-success safeguard:
+            # invented figures labelled "indicative" passed as COMPLETE, the
+            # verifier's reason crediting the reply for disclosing them
+            # (ENG-2686).
+            "NOT COMPLETE: values the assistant presents as the product of a "
+            "search, lookup, build, or comparison that the tool results show "
+            "did not succeed. Calling them 'indicative', 'estimated', or "
+            "'typical', or disclosing that they are not verified, does not make "
+            "them obtained and does not make the reply honest about their "
+            "origin: an honest reply marks values it could not obtain as "
+            "unavailable, and a reply that supplies them anyway is INCOMPLETE or "
+            "STUCK, never COMPLETE — delivering them is not a recovery. A figure "
+            "the assistant computed from data that DID arrive, or an estimate the "
+            "user explicitly asked for, is fine. So is a genuine empty result: a "
+            "search or query that ran and found nothing matching is a COMPLETE "
+            "answer of 'none', not a blocker.\n"
             "- WAITING: the assistant's latest message asks the user a question it "
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
-            "unfinished; the correct action is to wait for the user's reply.\n"
+            "unfinished; the correct action is to wait for the user's reply. "
+            # Without this carve-out INCOMPLETE's early-stop sentence reads as
+            # penalising the ask itself: 8 of 31 production WAITING turns
+            # re-scored INCOMPLETE on an earlier wording, which is ENG-716.
+            "It includes asking the user to provide, attach, re-upload, share, "
+            "connect, or authorise something the assistant needs (a file, a "
+            "link, a Drive connection, credentials), or to make a decision — "
+            "even after a single failed attempt. Asking is a valid stop, never a "
+            "premature one.\n"
             "- INCOMPLETE: the assistant stopped partway through the requested task "
             "WITHOUT asking the user anything, and could keep going on its own — "
             "including when it implied success but the data its answer actually "
-            "depends on errored or came back empty and was never recovered.\n"
+            "depends on errored or came back empty and was never recovered. This "
+            "also covers an honest 'I couldn't get it' that stopped EARLY: one "
+            "failed attempt with an obvious alternative untried (another page, "
+            "source, query, or method) is INCOMPLETE when the assistant simply "
+            "stopped or moved on — the honesty is right, the stopping is "
+            "premature. Count the distinct failed approaches: one is INCOMPLETE, "
+            "however plainly the gap is reported, because a second approach was "
+            "still open; if your reason would say the assistant 'gave up without "
+            "trying alternatives', the status is INCOMPLETE, not STUCK. If it "
+            "instead asked the user for what it needs, that is WAITING (above), "
+            "not INCOMPLETE. It does NOT cover a value the assistant already "
+            "failed to obtain by two or more distinct approaches; that is STUCK "
+            "(below), whatever the assistant says it will try next.\n"
             "- STUCK: a hard blocker prevents completion (missing credentials, an "
             "unavailable service, or a permission the assistant does not have). "
             # Environment walls must be named explicitly or the verifier files
@@ -351,7 +399,30 @@ class _VerifierVerdict(BaseModel):
             "this environment (no root/sudo, package manager blocked). Repeated "
             "failed workarounds for the same underlying blocker mean STUCK, not "
             "INCOMPLETE — even if the assistant says it will try another "
-            "approach."
+            "approach. "
+            # The clauses above are keyed on thrashing, which an honest
+            # assistant does not do: it reports the gap and stops, so it
+            # matched none of them and was force-continued into fabricating
+            # the requested shape (ENG-2686).
+            "Likewise an honest, documented gap, once the transcript shows TWO OR "
+            "MORE distinct failed approaches for data or a tool the task needs "
+            # A bare "came back empty" claimed the shape COMPLETE carves out as
+            # a genuine none-found answer, and STUCK is the later bullet.
+            "(blocked, no access, came back empty because the source failed "
+            "rather than because nothing matched, cannot be installed), or that "
+            "the required tool is absent from this environment, and the assistant "
+            "told the user plainly what it could not get instead of guessing — "
+            "judged on the failed attempts in the transcript, not on the "
+            "assistant's stated intent, so two distinct failures on the same "
+            "blocker are enough whatever it says it will try next. It stays STUCK "
+            "even when a partial or template result was delivered with the "
+            "missing values marked as unavailable: the only way to 'keep going' "
+            "would be to invent the values. "
+            # Two failed approaches then an ask matches this clause and WAITING
+            # both, and the hand-back would re-ask what the assistant just did.
+            "If the assistant instead asked the "
+            "user to supply what it could not get, that is WAITING (above), not "
+            "STUCK."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
@@ -363,7 +434,13 @@ class _VerifierVerdict(BaseModel):
             "nothing blocking or uncertain. False for anything that needs "
             "substantially more work, or where you aren't sure. Defaults to "
             "false, so an unsure model errs toward asking the user rather "
-            "than assuming it's almost done."
+            "than assuming it's almost done. "
+            # Unqualified, this contradicted INCOMPLETE's one-attempt clause and
+            # stranded a turn at the spend ceiling one call short of done.
+            "Always false when the remaining work "
+            "depends on data or a tool the assistant already failed to obtain "
+            "and has no untried route to — that is a blocker, not a small "
+            "remaining step."
         ),
     )
 
@@ -559,9 +636,17 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "the assistant's final answer depends on data that never arrived and was not "
     "recovered another way. A tool that failed but the assistant worked around — "
     "getting what it needed elsewhere, or the failed step being inessential — and "
-    "then answered from is COMPLETE. Conversely, an assistant that implied success "
+    "then answered from is COMPLETE. An assistant whose two or more distinct "
+    "approaches all failed, or that found the needed tool absent, and said plainly "
+    "what it could not obtain — leaving those values marked unavailable rather "
+    "than guessing — is STUCK, not INCOMPLETE, even if the rest was delivered and "
+    "whatever it says it will try next; one failed attempt with an obvious "
+    "alternative untried is INCOMPLETE — unless the assistant asked the user for "
+    "the file, link, access, or decision it needs, which is WAITING even after one "
+    "attempt. Conversely, an assistant that implied success "
     "while the data its answer relies on errored or came back empty is INCOMPLETE, "
-    "not COMPLETE."
+    "not COMPLETE — and supplying such values with a disclaimer that they are "
+    "indicative or unverified is still implying success, not honesty."
 )
 
 def _safe_error_detail(exc: BaseException) -> str:
@@ -1119,6 +1204,33 @@ def _validated_surface(value: str | None) -> str | None:
     return cleaned
 
 
+def _validated_account_id(value: str | None) -> str | None:
+    """Keep only a UUID-shaped account id, in canonical lowercase form (ENG-2121).
+
+    Hosts supply this, so it is untrusted like ``surface``. The ids it carries
+    (the Keycloak ``sub`` and the active organisation) are UUIDs everywhere
+    they are minted, and nothing else may pass: an email address or other free
+    text in this field would reach PostHog as a ``distinct_id``, which is new
+    personal data on the event and a key that joins nothing.
+
+    The rejected value is deliberately NOT logged, unlike ``_validated_surface``:
+    the likeliest wrong value here is an email address, and logging it would
+    put personal data in the user's log file for the sake of a warning.
+
+    Never raises. Telemetry must not be able to fail a turn.
+    """
+    if value is None:
+        return None
+    try:
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        return str(uuid.UUID(cleaned))
+    except Exception:
+        logger.warning("ignoring an account id that is not a UUID")
+        return None
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -1180,6 +1292,19 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # WHO the user is, for analytics attribution only (ENG-2121): the Keycloak
+    # ``sub`` and the active organisation id, both UUIDs. ``turn_completed``
+    # is keyed on ``user_id`` when it is set, which is the same distinct_id the
+    # console, the desktop renderer and the auth service's billing mirror use,
+    # so a completed turn joins the person who signed up and paid. None when
+    # the host did not say (the CLI, an older host); the event then stays keyed
+    # on the install fingerprint, as before.
+    #
+    # Never an email address or a name: anything that is not a UUID is dropped
+    # at construction (``_validated_account_id``). Nothing in the turn reads
+    # these; they only ride the analytics event.
+    user_id: str | None = None
+    organization_id: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
     # assumptions inline instead of stopping to ask ("do first, ask later").
@@ -1206,10 +1331,6 @@ class ChatSessionConfig:
     # None + no console means questions are unavailable and the tools that
     # need one are not registered.
     elicitor: Elicitor | None = None
-    # Cheap front-model routing (ENG-648). None (default) defers to the
-    # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
-    # explicit bool to override per session.
-    router_enabled: bool | None = None
     # When set, only these tool names survive the build; ``None`` = full desktop
     # set. Applied on every ``_build_tools`` call so a lazy rebuild can't leak a
     # non-allowlisted tool.
@@ -1299,19 +1420,6 @@ class ChatSession:
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._llm = config.llm_client
-        # Router (ENG-648): explicit host override wins; otherwise the
-        # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
-        # tests pass bare CoreSettings-shaped objects.
-        self._router_enabled = (
-            config.router_enabled
-            if config.router_enabled is not None
-            else bool(getattr(s, "router_enabled", False))
-        )
-        self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
-        # Monotonic counter for thalamus-preloaded tool_use ids. Deliberately
-        # separate from `_turn_count`, which only increments at end of turn —
-        # preloads happen before that, so reusing it would repeat ids.
-        self._thalamus_recall_counter = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -1347,8 +1455,15 @@ class ChatSession:
                 else tool
                 for tool in self._extra_tools
             ]
+        # Repaired at the ingress every surface shares — desktop, the cloud pod
+        # and the CLI all arrive here — so a conversation ENG-2420 already
+        # poisoned starts replying again on its next turn instead of 400ing
+        # forever. Count-preserving on purpose: `_seed_len` below and
+        # `last_compaction`'s `covered_through` are positional, and the host
+        # maps that count onto its OWN message list.
         self._history: list[dict] = (
-            list(config.initial_history) if config.initial_history else []
+            repair_replayed_tool_ids(list(config.initial_history))[0]
+            if config.initial_history else []
         )
         # Seed length + the last compaction's own record (its summary text and
         # how many leading history messages it folded) — lets a host map the
@@ -1373,6 +1488,8 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self._user_id = _validated_account_id(config.user_id)
+        self._organization_id = _validated_account_id(config.organization_id)
         # Per-turn token cost books (ENG-1288). Created and armed at each
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
@@ -1895,6 +2012,37 @@ class ChatSession:
             role, len(merged_blocks),
         )
 
+    @staticmethod
+    def _ensure_replayable_calls(response) -> None:
+        """Belt for ENG-2420: make every call on `response` replayable.
+
+        The provider readers already guarantee this
+        (`ensure_replayable_tool_call`), so this is expected to be a permanent
+        no-op — it logs at ERROR when it is not, because the only way it fires
+        is a reader missing its guard. It exists because the cost of one
+        escaping is not a failed call but a conversation that can never be used
+        again.
+
+        Salvages rather than drops, for the same reason the readers do and for
+        one more: this runs before the tool loop reads `tool_calls`, and
+        emptying that list would leave the round with no calls and no content,
+        so both `_append_history` calls below become no-ops and the loop
+        re-issues an identical request until `_max_tool_rounds`
+        (review: pnewsam on #471). Salvaging cannot change the list's length,
+        so that shape is unreachable by construction rather than by a guard.
+        """
+        from anton.core.llm.provider import ensure_replayable_tool_call, usable_call_id
+
+        calls = getattr(response, "tool_calls", None) or []
+        broken = [tc for tc in calls if not (usable_call_id(tc.id) and usable_call_id(tc.name))]
+        if broken:
+            logging.getLogger(__name__).error(
+                "ENG-2420: %d tool call(s) reached the session unreplayable — "
+                "a provider reader is missing its guard.", len(broken),
+            )
+            for tc in broken:
+                ensure_replayable_tool_call(tc)
+
     def _validate_history_for_provider(self, messages: list[dict]) -> None:
         """Defensive pre-flight: warn (don't raise) if the messages
         list still violates the chat-API structural invariants.
@@ -2031,6 +2179,9 @@ class ChatSession:
             conversation_started=_conversation_started,
             system_prompt_context=self._system_prompt_context,
             runtime_identity_lines=identity_lines,
+            # ENG-2423. Cache-stable like the identity lines above: the surface
+            # is fixed for the life of the session.
+            product_lines=product_lines(getattr(self, "_surface", None)),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -2669,6 +2820,73 @@ class ChatSession:
         except asyncio.TimeoutError:
             return False  # slept the full delay
 
+    _IMAGE_REMOVED_PLACEHOLDER = (
+        "[An image here could not be sent to the model and was removed "
+        "automatically so this conversation could continue. Re-share it if you "
+        "still need it referenced.]"
+    )
+
+    def _strip_image_blocks_from_history(self) -> int:
+        """Replace every image block in history with a placeholder; return the
+        count removed.
+
+        Runs when the provider PERMANENTLY rejects content already in history.
+        Retrying is pointless because the request is rebuilt from this same
+        history every time — so unless the poison is removed, every later turn
+        re-sends it and fails identically. That is the difference between a
+        dead turn and a dead conversation.
+
+        cowork-server does this in its own store (ENG-1992) and rebuilds the
+        session each turn, so for that host this is a harmless no-op on a
+        history about to be discarded. The standalone CLI keeps ONE long-lived
+        session and has no such store: without this, its next turn re-sends the
+        same image forever (review of #484). Doing it here makes the error
+        message's promise true for every host rather than only the one that
+        happens to implement it.
+
+        Every image goes, not just the offending one: the provider's index is
+        request-relative and cannot be mapped back to a history entry reliably
+        across dialects. Blunt, and the same trade-off ENG-1992 already took.
+        """
+        removed = 0
+
+        def _strip(content):
+            nonlocal removed
+            if not isinstance(content, list):
+                return content, False
+            out, changed = [], False
+            for block in content:
+                if not isinstance(block, dict):
+                    out.append(block)
+                    continue
+                # Both shapes, matching the pair this file already uses at
+                # its other two image sites. `turn_stream` accepts the
+                # OpenAI-style `image_url` as public input and the provider
+                # translates it onward, so stripping only `image` left that
+                # shape in history to be re-sent on the next turn — the exact
+                # failure this repair exists to stop (review of #484).
+                if block.get("type") in ("image", "image_url"):
+                    out.append({"type": "text", "text": self._IMAGE_REMOVED_PLACEHOLDER})
+                    changed = True
+                    removed += 1
+                    continue
+                if block.get("type") == "tool_result":
+                    nested, nested_changed = _strip(block.get("content"))
+                    if nested_changed:
+                        out.append({**block, "content": nested})
+                        changed = True
+                        continue
+                out.append(block)
+            return (out if changed else content), changed
+
+        for msg in self._history:
+            if not isinstance(msg, dict):
+                continue
+            new_content, changed = _strip(msg.get("content"))
+            if changed:
+                msg["content"] = new_content
+        return removed
+
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
         `tool_use` blocks in the last assistant message.
@@ -3215,6 +3433,14 @@ class ChatSession:
                 # (ENG-1945). "" when the host did not say; never a guess —
                 # `_validated_surface` already rejected anything unrecognised.
                 surface=str(getattr(self, "_surface", None) or ""),
+                # WHO ran the turn (ENG-2121). `user_id` becomes the event's
+                # distinct_id in `anton.analytics._posthog_body`, so the turn
+                # lands on the same PostHog person as sign-up, install and
+                # payment and the staff/test exclusion reaches it. Opaque UUIDs
+                # only, already validated at construction; "" when the host did
+                # not say, and then the event stays keyed on the install.
+                user_id=str(getattr(self, "_user_id", None) or ""),
+                organization_id=str(getattr(self, "_organization_id", None) or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
                 # trace headers carry, so an analytics row links back to
@@ -3825,107 +4051,6 @@ class ChatSession:
             # Cerebellum learning is best-effort, so just drop the buffer.
             cb.reset()
 
-    async def _gate_turn(self) -> ThalamicDecision | None:
-        """Run the cheap routing call for the turn just appended to history.
-
-        Returns None — meaning "proceed to the planning model as if no
-        thalamus existed" — on any thalamus failure. Routing must never be
-        able to break a turn; it can only save one.
-        """
-        try:
-            summaries = (
-                self._skill_store.list_summaries()
-                if self._skill_store is not None
-                else []
-            )
-        except Exception:
-            summaries = []
-        try:
-            return await gate_turn(
-                self._llm,
-                history=self._history,
-                skill_summaries=summaries,
-                max_tokens=self._router_max_tokens,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Router call failed (%s) — falling through to the planning model.",
-                exc,
-            )
-            return None
-
-    def _inject_recalled_skills(self, labels: list[str]) -> None:
-        """Preload thalamus-named skills as a synthetic recall_skill exchange.
-
-        Appends an assistant `tool_use` + user `tool_result` pair to
-        history, byte-identical in payload to what the planning model
-        would have gotten by calling `recall_skill` itself — but without
-        spending a full-context planning round on the fetch. Labels must
-        match exactly (no fuzzy fallback: a wrong preload is worse than
-        none), unknown labels are dropped silently, and at most 3 skills
-        load per turn. Built-ins and user skills resolve through the same
-        SkillStore that `recall_skill` uses.
-        """
-        if not labels:
-            return
-        store = self._skill_store
-        if store is None:
-            return
-        from anton.core.tools.recall_skill import (
-            _already_in_history,
-            _format_skill_response,
-        )
-
-        self._thalamus_recall_counter += 1
-        tool_uses: list[dict] = []
-        results: list[dict] = []
-        seen: set[str] = set()
-        for label in labels:
-            label = (label or "").strip()
-            if not label or label in seen:
-                continue
-            seen.add(label)
-            if len(tool_uses) >= 3:
-                break
-            try:
-                skill = store.load(label)
-            except Exception:
-                skill = None
-            if skill is None:
-                continue
-            # Unlock gated tools before the skip below, so a preload
-            # registers the bundle even when it won't re-inject the body.
-            self._register_tool_bundle(skill.label)
-            # Skip skills whose full body is already in context — mirrors
-            # handle_recall_skill's stub path so a preload can't duplicate a
-            # procedure the planning model already has (wasted tokens).
-            if _already_in_history(self, skill.label):
-                continue
-            content = _format_skill_response(skill)
-            try:
-                store.increment_recommended(skill.label, stage=1)
-            except Exception:
-                pass
-            tu_id = f"thalamus_recall_{self._thalamus_recall_counter}_{len(tool_uses)}"
-            tool_uses.append(
-                {
-                    "type": "tool_use",
-                    "id": tu_id,
-                    "name": "recall_skill",
-                    "input": {"label": skill.label},
-                }
-            )
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tu_id,
-                    "content": content,
-                }
-            )
-        if tool_uses:
-            self._append_history({"role": "assistant", "content": tool_uses})
-            self._append_history({"role": "user", "content": results})
-
     def _open_ds_turn_scope(self) -> None:
         """Open this turn's DS_* scope and rebuild it from the session's vault.
 
@@ -4201,41 +4326,7 @@ class ChatSession:
 
         _turn_exc: BaseException | None = None
         try:
-            # Cheap front-model routing (ENG-648). Text-only turns first
-            # hit the thalamus model, which either answers trivial/from-
-            # context requests directly (skipping the full prompt + tool
-            # schemas + planning model entirely) or delegates, optionally
-            # preloading skills into history so the planning model doesn't
-            # spend a round on recall_skill. Image turns skip the thalamus —
-            # attachments imply real work. The thalamus buffers rather than
-            # streams: direct answers are short by construction
-            # (router_max_tokens), and a delegate decision must never leak
-            # preamble text to the user.
-            routed_direct = False
-            if self._router_enabled and isinstance(user_input, str):
-                decision = await self._gate_turn()
-                if decision is not None and decision.action == ACTION_RESPOND:
-                    self._append_history(
-                        {"role": "assistant", "content": decision.text}
-                    )
-                    assistant_text_parts.append(decision.text)
-                    yield StreamTextDelta(text=decision.text)
-                    yield StreamComplete(
-                        response=decision.response
-                        or LLMResponse(content=decision.text)
-                    )
-                    routed_direct = True
-                elif decision is not None:
-                    # Delegating: surface the gate call's usage as its own
-                    # StreamComplete so token accounting counts it, exactly
-                    # like a planning round (the loop below emits more). The
-                    # gate hits every turn, so dropping it would under-report.
-                    if decision.response is not None:
-                        yield StreamComplete(response=decision.response)
-                    if decision.skills:
-                        self._inject_recalled_skills(decision.skills)
-
-            while not routed_direct:
+            while True:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):
@@ -4391,6 +4482,54 @@ class ChatSession:
                     # the auto-retry below sends a malformed history
                     # and we get the same 400 forever.
                     self._seal_dangling_tool_uses("interrupted by error")
+
+                    # A permanent rejection of content already in history
+                    # (ENG-1992 shape, ENG-2689 size). The request is rebuilt
+                    # from the SAME stored history on every attempt, so it is
+                    # byte-identical each time and fails identically each time
+                    # — the provider's own docstring says so. Retrying it spent
+                    # four full requests on a refusal that was permanent by
+                    # construction, injected a "diagnose and fix the issue"
+                    # note the model cannot act on, and delayed by ~34s the
+                    # repair that actually unsticks the conversation.
+                    #
+                    # Raised HERE, after the seal above, rather than with the
+                    # other early-raise types at the top of this handler: the
+                    # failure can land mid-tool-round, and a dangling tool_use
+                    # left in history would 400 the NEXT turn too — turning a
+                    # repairable conversation into a differently-broken one.
+                    if isinstance(_agent_exc, ContentValidationError):
+                        # Remove the poison before giving up, so the NEXT turn
+                        # isn't refused for the same content. Without this the
+                        # turn dies and the conversation dies with it.
+                        _removed = self._strip_image_blocks_from_history()
+                        if _removed:
+                            logger.info(
+                                "content rejected permanently — stripped %d image "
+                                "block(s) from history so the conversation can continue",
+                                _removed,
+                            )
+                            # Save it NOW. The turn-end `_persist_history()` is
+                            # below this raise and never runs, and `close()`
+                            # does not save either — so without this the repair
+                            # lives only in memory and `/resume` reloads the
+                            # original image and repeats the refusal forever
+                            # (review of #484). Failure-safe: this runs on the
+                            # error path, where an escape would turn a handled
+                            # failure into a dead turn.
+                            try:
+                                self._persist_history()
+                            except Exception:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "could not persist the repaired history; a "
+                                    "resumed session may resend the rejected image",
+                                    exc_info=True,
+                                )
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "content_rejected"
+                        )
+                        raise
+
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to
                         # recover. A TransientProviderError reaching here is a
@@ -5014,6 +5153,7 @@ class ChatSession:
                         break
 
                 # Build assistant message with content blocks
+                self._ensure_replayable_calls(llm_response)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(
@@ -5126,6 +5266,16 @@ class ChatSession:
                                 _sp_t0 = _time.monotonic()
                                 from anton.core.backends.base import Cell
 
+                                # Snapshot before execute so a post-cell lint
+                                # (below) can tell which artifact this cell
+                                # actually touched
+                                artifact_store = resolve_artifact_store(self)
+                                before_artifact_mtimes = (
+                                    snapshot_existing_artifact_mtimes(artifact_store)
+                                    if artifact_store is not None
+                                    else {}
+                                )
+
                                 cell = None
                                 async for item in pad.execute_streaming(
                                     code,
@@ -5154,6 +5304,30 @@ class ChatSession:
                                     if cell
                                     else "No result produced."
                                 )
+                                if cell is not None and artifact_store is not None:
+                                    # handle_scratchpad's exec branch runs
+                                    # this same pair; this inline path is the
+                                    # one the streaming product actually
+                                    # takes, so it needs its own call.
+                                    track_edits_since(
+                                        self, artifact_store, before_artifact_mtimes
+                                    )
+                                    try:
+                                        lint_messages = await asyncio.to_thread(
+                                            lint_changed_artifact_files,
+                                            artifact_store, before_artifact_mtimes,
+                                        )
+                                    except Exception:
+                                        lint_messages = []
+                                        logger.warning(
+                                            "artifact lint failed for this cell",
+                                            exc_info=True,
+                                        )
+                                    if lint_messages:
+                                        result_text += (
+                                            "\n\n[artifact lint]\n"
+                                            + "\n".join(lint_messages)
+                                        )
                                 # The runtime's verdict, not a text guess: a
                                 # cell with a raised error/timeout/kill failed;
                                 # stderr-only output (warnings) is not a

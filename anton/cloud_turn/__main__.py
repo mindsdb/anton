@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 #: Bound step-event payloads (tool args / results) on the wire. Matches the
 #: cap cowork's SSE formatter applies to the same content.
+# Trace-block keys the pod applies to the session config rather than forwarding
+# as per-turn Langfuse metadata (see `stream_turn`).
+_SESSION_CONFIG_TRACE_KEYS = frozenset({"surface", "user_id", "organization_id"})
+
 MAX_STEP_CHARS = 65536
 MAX_PROGRESS_CHARS = 2000
 #: Per-string-field cap when shrinking a cell-result JSON to fit the wire.
@@ -225,11 +229,15 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         # per turn and only it knows the server version / install channel (this
         # image has no cowork-server). `surface` is handled on the session
         # config instead, so it is dropped here to avoid stamping it twice.
+        # So are the account ids (ENG-2121): they ride the session config for
+        # the analytics event, and the gateway already records the verified
+        # user and org on the trace itself, so a client-supplied copy in
+        # Langfuse-Metadata would only be a second, weaker source.
         # Observability only — a malformed block must never affect the turn.
         _trace_md = {
             str(k): str(v)
             for k, v in (req.trace or {}).items()
-            if k != "surface" and v is not None
+            if k not in _SESSION_CONFIG_TRACE_KEYS and v is not None
         } or None
         async for event in session.turn_stream(turn_content, trace_metadata=_trace_md):
             if isinstance(event, StreamTextDelta):

@@ -16,7 +16,6 @@ from anton.utils.datasources import scrub_credentials
 
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
-    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMProvider,
@@ -36,17 +35,73 @@ from .provider import (
     TransientProviderError,
     Usage,
     classify_404,
+    classify_content_rejection,
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
     wallet_denial_code,
     raise_on_empty_response,
+    ensure_replayable_tool_call,
 )
 
 logger = logging.getLogger(__name__)
 
 AsyncAPIKeyProvider = Callable[[], Awaitable[str]]
+
+
+def _error_body(exc: "openai.APIStatusError") -> tuple[object, dict, dict]:
+    """``(raw_body, body, envelope)`` off an SDK error, Gemini's list wrapper undone.
+
+    ``raw_body`` is the unwrapped value even when it is not a dict, because
+    ``wallet_denial_code`` inspects it directly; ``body`` is the dict-or-empty
+    form every structured check below uses.
+
+    Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-element
+    ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare object, and
+    the SDK stores whatever it parsed. Shared by the 400 path and the full status
+    ladder so the two cannot read the wire differently — missing this unwrap is
+    what made ENG-1145 surface as an opaque 404.
+    """
+    raw = exc.body
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        raw = raw[0]
+    body = raw if isinstance(raw, dict) else {}
+    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+    return raw, body, envelope
+
+
+def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
+    """Classify the 400s we can name. Returns when we cannot, so the caller
+    re-raises the SDK error exactly as it does today.
+
+    **A 400 never reaches ``_raise_for_status_error``.** ``BadRequestError``
+    subclasses ``APIStatusError``, so the ``except openai.BadRequestError``
+    clause at each call site matches first, and its bare ``raise`` re-raises out
+    of the whole ``try`` — a sibling ``except`` cannot catch an exception
+    re-raised from its own handler. The content classifier was therefore
+    unreachable on exactly the path ENG-2689's incident came from, and ENG-1992's
+    branch had the same problem before it: that fix only ever worked because
+    cowork-server independently matched the provider's message text.
+
+    Deliberately NOT "route 400s through the full ladder": ``classify_transient``
+    maps a 400 carrying ``type: api_error`` to a retryable TransientProviderError
+    (verified), so doing that would silently make some 400s retry that are
+    terminal today. Naming only what we can name leaves every other 400
+    byte-identical; the generic-fallback question is ENG-1283's.
+    """
+    msg = str(exc).lower()
+    if "context_length_exceeded" in msg or "maximum context length" in msg:
+        raise ContextOverflowError(str(exc)) from exc
+
+    _, body, envelope = _error_body(exc)
+    content = classify_content_rejection(
+        error_type=envelope.get("type") or body.get("type"),
+        message=envelope.get("message") or body.get("message"),
+        param=envelope.get("param") or body.get("param"),
+    )
+    if content is not None:
+        raise content from exc
 
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
@@ -108,11 +163,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # structured check below (auth / quota / model) silently misses on Gemini
     # and the error falls through to the generic "temporarily unavailable"
     # message — the exact reason ENG-1145 surfaced as an opaque 404.
-    raw_body = exc.body
-    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
-        raw_body = raw_body[0]
-    body = raw_body if isinstance(raw_body, dict) else {}
-    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
+    raw_body, body, envelope = _error_body(exc)
     detail = body.get("detail") or envelope.get("detail")
     # str-only: FastAPI validation errors put a LIST in detail — rendering
     # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
@@ -221,30 +272,23 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             model, message=provider_msg, code=code, status=status_str,
         ) from exc
 
-    # A permanent, content-SHAPED rejection: some block in conversation history
-    # reached the provider in a shape it doesn't parse — not a provider-
-    # availability issue, so retrying the identical request fails identically
-    # every time (ENG-1992). Two dialects recognized: OpenAI Responses' "Invalid
-    # value: 'x'. Supported values are: ..." (param names the offending content
-    # index) and Anthropic's "Input tag 'x' found using 'type' does not match
-    # any of the expected tags". cowork-server's turn-error mapping detects this
-    # type (or its scrubbed class name on the remote path) and repairs the
-    # offending content in the conversation's stored history so the next turn
-    # doesn't resend the same poison — see ContentValidationError's docstring.
-    if etype == "invalid_request_error":
-        provider_msg = str(envelope.get("message") or body.get("message") or "").lower()
-        param = str(envelope.get("param") or body.get("param") or "").lower()
-        _content_shape_error = (
-            (".content[" in param or param.endswith(".content"))
-            or "supported values are" in provider_msg
-            or "does not match any of the expected tags" in provider_msg
-        )
-        if _content_shape_error:
-            raise ContentValidationError(
-                "The model provider rejected part of this conversation's content "
-                "(an attachment or image in an unsupported format). That content "
-                "will be removed automatically so the conversation can continue."
-            ) from exc
+    # A permanent rejection of the request's OWN content — either the wrong
+    # SHAPE (ENG-1992) or too large (ENG-2689). Neither is a provider-
+    # availability issue: retrying the identical request fails identically
+    # every time, because the translation that built the bad block runs fresh
+    # from the same stored history on every call. cowork-server's turn-error
+    # mapping detects the resulting type (or its scrubbed class name on the
+    # remote path) and repairs the conversation's stored history so the next
+    # turn doesn't resend the same poison. The heuristic lives in provider.py
+    # so this mapper and the Anthropic one can't drift apart — before ENG-2689
+    # only this one had the branch, and BYOK Anthropic had the bug untreated.
+    _content = classify_content_rejection(
+        error_type=etype,
+        message=envelope.get("message") or body.get("message"),
+        param=envelope.get("param") or body.get("param"),
+    )
+    if _content is not None:
+        raise _content from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
@@ -1100,9 +1144,7 @@ class OpenAIProvider(LLMProvider):
         try:
             response = await self._client.chat.completions.create(**kwargs)
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1127,7 +1169,9 @@ class OpenAIProvider(LLMProvider):
                 # Both flags ride on the ToolCall for the session to act
                 # on. See `safe_parse_tool_input`.
                 parsed_input, parse_error, repaired = safe_parse_tool_input(tc.function.arguments or "")
-                tool_calls.append(
+                # The SDK types `id` as a required `str`, which an empty string
+                # satisfies — a non-conforming server can still send one (ENG-2420).
+                tool_calls.append(ensure_replayable_tool_call(
                     ToolCall(
                         id=tc.id,
                         name=tc.function.name,
@@ -1135,7 +1179,7 @@ class OpenAIProvider(LLMProvider):
                         parse_error=parse_error,
                         repaired=repaired,
                     )
-                )
+                ))
 
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
@@ -1280,8 +1324,18 @@ class OpenAIProvider(LLMProvider):
                                 if tc_delta.function and tc_delta.function.name
                                 else "",
                                 "args_parts": [],
+                                # Whether a Start was actually emitted for this
+                                # call. Recorded rather than re-derived at the
+                                # End: id and name can BOTH be filled in by a
+                                # later chunk (the branch just below), so
+                                # re-testing them there would answer "are they
+                                # set now", not "did we announce this call" —
+                                # and emit an End for a step the consumer never
+                                # opened (ENG-2420).
+                                "started": False,
                             }
                             if tc_state[idx]["id"] and tc_state[idx]["name"]:
+                                tc_state[idx]["started"] = True
                                 yield StreamToolUseStart(
                                     id=tc_state[idx]["id"],
                                     name=tc_state[idx]["name"],
@@ -1303,9 +1357,7 @@ class OpenAIProvider(LLMProvider):
                                 json_delta=tc_delta.function.arguments,
                             )
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1388,11 +1440,20 @@ class OpenAIProvider(LLMProvider):
             info = tc_state[idx]
             raw_json = "".join(info["args_parts"])
             parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
-            tool_calls.append(ToolCall(
+            # `info["id"]` is seeded `tc_delta.id or ""` and only updated when a
+            # later chunk carries one, so a provider that never sends an id
+            # leaves it empty here (ENG-2420).
+            tool_calls.append(ensure_replayable_tool_call(ToolCall(
                 id=info["id"], name=info["name"], input=parsed,
                 parse_error=parse_error, repaired=repaired,
-            ))
-            yield StreamToolUseEnd(id=info["id"])
+            )))
+            # Gated on whether a Start was actually emitted, and carrying the
+            # ORIGINAL id rather than a minted one: a call that never announced
+            # a Start must not emit an End, or the consumer is left with a step
+            # it cannot retire (review: pnewsam on #471, reported against the
+            # Anthropic reader — this is the same shape).
+            if info["started"]:
+                yield StreamToolUseEnd(id=info["id"])
 
         # Missing finish_reason is ambiguous: it's a genuine truncation only when
         # the stream produced NOTHING (empty + no terminal marker). A stream that
@@ -1508,9 +1569,7 @@ class OpenAIProvider(LLMProvider):
         try:
             response = await self._client.responses.create(**kwargs)
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1596,8 +1655,17 @@ class OpenAIProvider(LLMProvider):
                         idx = event.output_index
                         call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
                         name = getattr(item, "name", "") or ""
-                        fc_state[idx] = {"call_id": call_id, "name": name, "args_parts": []}
+                        # `started` for the same reason as the chat-completions
+                        # reader: an `output_item.added` carrying a good
+                        # `call_id` but a blank name emits no Start, and gating
+                        # the End on the id alone then closed a step that was
+                        # never opened (ENG-2420).
+                        fc_state[idx] = {
+                            "call_id": call_id, "name": name,
+                            "args_parts": [], "started": False,
+                        }
                         if call_id and name:
+                            fc_state[idx]["started"] = True
                             yield StreamToolUseStart(id=call_id, name=name)
 
                 # Function-call argument deltas
@@ -1607,7 +1675,10 @@ class OpenAIProvider(LLMProvider):
                     info = fc_state.get(idx)
                     if info is None:
                         # output_item.added didn't surface this call yet — buffer
-                        info = {"call_id": "", "name": "", "args_parts": []}
+                        info = {
+                            "call_id": "", "name": "", "args_parts": [],
+                            "started": False,
+                        }
                         fc_state[idx] = info
                     info["args_parts"].append(delta)
                     if info["call_id"]:
@@ -1626,13 +1697,17 @@ class OpenAIProvider(LLMProvider):
                     # a body cut mid-JSON must not raise out of this generator,
                     # and the flags are what let the session refuse the call.
                     parsed, parse_error, repaired = safe_parse_tool_input(raw_json)
-                    tool_calls.append(
+                    # The three yields around this append were already guarded
+                    # on a truthy id; this append was not, which is how an
+                    # id-less call reached history and 400'd every later
+                    # request in the conversation (ENG-2420).
+                    tool_calls.append(ensure_replayable_tool_call(
                         ToolCall(
                             id=info["call_id"], name=info["name"], input=parsed,
                             parse_error=parse_error, repaired=repaired,
                         )
-                    )
-                    if info["call_id"]:
+                    ))
+                    if info["started"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
                 # Final completion event carries the resolved Response object
@@ -1653,9 +1728,7 @@ class OpenAIProvider(LLMProvider):
                         stop_reason = getattr(final_response, "status", None)
                         served_model = getattr(final_response, "model", None) or served_model
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1768,10 +1841,11 @@ def _parse_response_object(response, model: str) -> LLMResponse:
             # into `{}`: an empty dict cannot be told apart from a call the
             # model deliberately sent with no arguments.
             parsed, parse_error, repaired = safe_parse_tool_input(args_str)
-            tool_calls.append(ToolCall(
+            # Same `or ""` fallback as the streaming reader, same consequence.
+            tool_calls.append(ensure_replayable_tool_call(ToolCall(
                 id=call_id, name=name, input=parsed,
                 parse_error=parse_error, repaired=repaired,
-            ))
+            )))
         # Other item types (web_search_call, reasoning, etc.) are skipped —
         # the model's output_text already incorporates their effects.
 

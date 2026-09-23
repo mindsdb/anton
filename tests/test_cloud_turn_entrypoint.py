@@ -662,6 +662,18 @@ def test_surface_is_not_duplicated_into_the_turn_metadata():
     assert "surface" not in kwargs["trace_metadata"]
 
 
+def test_the_account_key_is_not_forwarded_into_the_turn_metadata():
+    # ENG-2121: it rides the session config, like `surface`. Kept out of the
+    # gateway's Langfuse-Metadata too: the gateway already records the verified
+    # user and org itself, and a client-supplied copy is a second source.
+    kwargs = _drive_with_trace(
+        '{"surface":"web","install_channel":"hosted",'
+        '"user_id":"0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30",'
+        '"organization_id":"7c6a1d2e-5f30-4d18-bb44-0f2b5c719e3a"}'
+    )
+    assert kwargs["trace_metadata"] == {"install_channel": "hosted"}
+
+
 def test_a_surface_only_block_forwards_no_metadata():
     kwargs = _drive_with_trace('{"surface":"web"}')
     assert kwargs["trace_metadata"] is None

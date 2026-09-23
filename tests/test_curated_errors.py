@@ -23,6 +23,7 @@ from anton.core.llm import provider as provider_mod
 from anton.core.llm.provider import (
     CURATED_PROVIDER_ERRORS,
     PROVIDER_FAILURE_KINDS,
+    ContentTooLargeError,
     ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
@@ -253,6 +254,7 @@ _CURATED_SAMPLES = {
         "no such model", code="model_not_found", model="x"
     ),
     ContentValidationError: lambda: ContentValidationError("bad image block"),
+    ContentTooLargeError: lambda: ContentTooLargeError("image too big"),
     EndpointConfigurationError: lambda: EndpointConfigurationError("bad base url"),
 }
 

@@ -10,6 +10,7 @@ Two layers:
 
 from __future__ import annotations
 
+import json
 import os
 # Bound at import so the constants below are built from the real class, which
 # `_pin_today` later replaces on the module.
@@ -22,8 +23,10 @@ import anton.core.session as session_mod
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.session import (
     CLOUD_TOOL_ALLOWLIST,
+    _ARTIFACTS_ROOT_ENV,
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
+    resolve_trusted_artifacts_root,
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -66,6 +69,60 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.tools == []               # no host connector/publish tools
     assert cfg.web_search_enabled is False
     assert cfg.web_fetch_enabled is False
+
+
+def test_datasource_turn_uses_only_trusted_pod_config_and_child_overlay(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_DATASOURCE_GATEWAY_URL", "https://datasource.internal/base")
+    request = TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+    _, cfg = _build(tmp_path, monkeypatch, **{
+        "correlation_id": request.correlation_id,
+        "llm": request.llm,
+        "datasource": request.datasource,
+    })
+    assert cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CORRELATION_ID"] == "corr_1"
+    assert json.loads(cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CONNECTIONS"])[0] == {
+        "connection_id": 7,
+        "credential_version": 3,
+    }
+    assert "GATEWAY_URL" not in cfg.workspace_env_overlay
+
+
+def test_a_turn_without_a_datasource_block_carries_only_the_cloud_marker(tmp_path, monkeypatch):
+    """The old-job path: no bearer, no references, nothing for the pod child to act on."""
+    _, cfg = _build(tmp_path, monkeypatch, correlation_id="corr_1",
+                    llm={"api_key": "mdb_turn.secret", "provider": "minds-cloud", "base_url": "https://m/v1"})
+    assert cfg.workspace_env_overlay == {"ANTON_CLOUD_TURN": "1"}
+
+
+def test_legacy_minds_configuration_never_reaches_a_cloud_prompt(tmp_path, monkeypatch):
+    """A pod carrying the desktop Minds variables must not advertise the static-key
+    helper or its one-argument signature; the cloud helper is the only one offered."""
+    monkeypatch.setenv("ANTON_MINDS_DATASOURCE", "legacy-datasource")
+    monkeypatch.setenv("ANTON_MINDS_URL", "https://legacy.invalid")
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "legacy-static-key")
+    _, cfg = _build(tmp_path, monkeypatch)
+    context = cfg.system_prompt_context.runtime_context
+    assert "CONNECTED MIND" not in context
+    assert 'query_minds_data("SELECT' not in context
+    assert "legacy-datasource" not in context
+
+
+def test_datasource_turn_fails_closed_without_trusted_gateway_config(tmp_path, monkeypatch):
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.delenv("ANTON_DATASOURCE_GATEWAY_URL", raising=False)
+    request = TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+    with pytest.raises(ValueError, match="trusted datasource gateway"):
+        build_cloud_chat_session(request)
 
 
 def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):
@@ -285,6 +342,63 @@ def test_resolver_rejects_parent_traversal(monkeypatch):
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, "/workspace/../etc")
     with pytest.raises(ValueError, match=r"\.\."):
         resolve_trusted_workspace_path()
+
+
+# ── project artifacts root (ENG-2056, never from the wire) ──────────────────
+
+def test_project_artifacts_root_overrides_derived_default(tmp_path, monkeypatch):
+    # ENG-2056: the workspace mount is per-conversation, so the derived
+    # `<workspace>/.anton/artifacts` hides sibling tasks' artifacts. With the
+    # controller's project-artifacts mount announced via env, the session must
+    # use it — for the settings AND the workspace the artifact tools read.
+    root = tmp_path / "project-artifacts"
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(root))
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.settings.artifacts_dir == str(root.resolve())
+    assert cfg.workspace.artifacts_dir == root.resolve()
+    assert cfg.settings.artifacts_dir != str(tmp_path.resolve() / ".anton" / "artifacts")
+
+
+def test_project_artifacts_root_created_when_missing(tmp_path, monkeypatch):
+    root = tmp_path / "mounts" / "project-artifacts"
+    assert not root.exists()
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(root))
+    _build(tmp_path, monkeypatch)
+    assert root.is_dir()
+
+
+def test_artifacts_default_unchanged_when_env_unset(tmp_path, monkeypatch):
+    # Desktop and current cloud installs: no env var, behaviour identical to
+    # before — artifacts derive under the workspace's .anton dir.
+    monkeypatch.delenv(_ARTIFACTS_ROOT_ENV, raising=False)
+    _, cfg = _build(tmp_path, monkeypatch)
+    derived = tmp_path.resolve() / ".anton" / "artifacts"
+    assert cfg.settings.artifacts_dir == str(derived)
+    assert cfg.workspace.artifacts_dir == derived
+
+
+def test_artifacts_resolver_unset_or_blank_is_none(monkeypatch):
+    monkeypatch.delenv(_ARTIFACTS_ROOT_ENV, raising=False)
+    assert resolve_trusted_artifacts_root() is None
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "  ")
+    assert resolve_trusted_artifacts_root() is None
+
+
+def test_artifacts_resolver_uses_env(tmp_path, monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, str(tmp_path))
+    assert resolve_trusted_artifacts_root() == tmp_path.resolve()
+
+
+def test_artifacts_resolver_rejects_relative_path(monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "not/absolute")
+    with pytest.raises(ValueError, match="absolute"):
+        resolve_trusted_artifacts_root()
+
+
+def test_artifacts_resolver_rejects_parent_traversal(monkeypatch):
+    monkeypatch.setenv(_ARTIFACTS_ROOT_ENV, "/project-artifacts/../etc")
+    with pytest.raises(ValueError, match=r"\.\."):
+        resolve_trusted_artifacts_root()
 
 
 def test_artifact_tools_cannot_escape_workspace(tmp_path):
@@ -748,7 +862,7 @@ def skills_tmp(tmp_path_factory, monkeypatch):
 
 def test_skills_reach_the_skill_store(tmp_path, monkeypatch, skills_tmp):
     """The point of the feature: a server-sent skill is retrievable in the pod
-    through the same SkillStore that recall_skill and the thalamus preload use."""
+    through the same SkillStore that recall_skill uses."""
     session = _real_cloud_session(tmp_path, monkeypatch, skills=_SKILLS)
     skill = session._skill_store.load("csv-summary")
     assert skill is not None
@@ -981,6 +1095,31 @@ def test_a_trace_block_without_a_surface_leaves_it_unset(tmp_path, monkeypatch):
 # Turn-Key Token Handoff: a cloud turn with connectors gets a live
 # TurnKeyDataVault instead of None, and DS_* env is (re)populated for it the
 # same way desktop's harness.py does for LocalDataVault.
+
+# ── account key (ENG-2121) ───────────────────────────────────────────────────
+# The pod cannot know who the user is; cowork-server does (the gateway's
+# verified principal) and sends it in the same trace block as `surface`.
+
+_SUB = "0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30"
+_ORG = "7c6a1d2e-5f30-4d18-bb44-0f2b5c719e3a"
+
+
+def test_the_account_from_the_trace_block_reaches_the_config(tmp_path, monkeypatch):
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        trace={"surface": "web", "user_id": _SUB, "organization_id": _ORG},
+    )
+    assert cfg.user_id == _SUB
+    assert cfg.organization_id == _ORG
+
+
+def test_no_account_in_the_trace_block_leaves_it_unset(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, trace={"surface": "web"})
+    assert cfg.user_id is None
+    assert cfg.organization_id is None
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.user_id is None
+
 
 def test_no_oauth_block_leaves_data_vault_none(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)

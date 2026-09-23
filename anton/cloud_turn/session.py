@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.core.llm.tracing import HARNESS_ANTON
@@ -42,6 +44,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_CLOUD_WORKSPACE_PATH = "/workspace"
 #: Operator/CI override for the mount path (pod-side env var, not request data).
 _WORKSPACE_PATH_ENV = "ANTON_CLOUD_WORKSPACE_PATH"
+
+#: Pod-side mount of the PROJECT's shared artifacts directory (ENG-2056). The
+#: workspace mount is per-CONVERSATION, so the derived
+#: ``<workspace>/.anton/artifacts`` only ever shows a task its own artifacts.
+#: The scratchpad controller mounts the project-level artifacts dir as a second
+#: mount OUTSIDE the workspace (so it can never land on sys.path) and sets this
+#: env var to tell anton where it is. When set, it replaces the derived default
+#: so sibling tasks in one project share a single artifacts tree. Same trust
+#: posture as _WORKSPACE_PATH_ENV: pod-side config, never from the wire request.
+_ARTIFACTS_ROOT_ENV = "ANTON_CLOUD_ARTIFACTS_ROOT"
 
 #: The only tools exposed in a cloud turn: scratchpad + the workspace-scoped
 #: artifact tools. Everything else core registers is dropped.
@@ -92,6 +104,48 @@ _SKILLS_DIR_PREFIX = "anton-cloud-skills-"
 #: directly and the wire payload's `skills` block is ignored: cowork-server owns
 #: that tree and the pod sees the live copy, not a per-turn snapshot.
 _SKILLS_ROOT_ENV = "ANTON_CLOUD_SKILLS_ROOT"
+_DATASOURCE_GATEWAY_URL_ENV = "ANTON_DATASOURCE_GATEWAY_URL"
+_CLOUD_TURN_ENV = "ANTON_CLOUD_TURN"
+_DATASOURCE_TURN_KEY_ENV = "ANTON_CLOUD_DATASOURCE_TURN_KEY"
+_DATASOURCE_CORRELATION_ENV = "ANTON_CLOUD_DATASOURCE_CORRELATION_ID"
+_DATASOURCE_CONNECTIONS_ENV = "ANTON_CLOUD_DATASOURCE_CONNECTIONS"
+
+
+def _datasource_workspace_env(request: TurnRequestV1) -> dict[str, str]:
+    """Build pod-child configuration without putting capabilities on the wire."""
+    overlay = {_CLOUD_TURN_ENV: "1"}
+    if request.datasource is None:
+        return overlay
+    gateway_url = os.environ.get(_DATASOURCE_GATEWAY_URL_ENV, "").strip().rstrip("/")
+    parsed = urlsplit(gateway_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("trusted datasource gateway configuration is unavailable")
+    if not request.correlation_id or not request.llm or not isinstance(request.llm.get("api_key"), str):
+        raise ValueError("datasource turn credentials are unavailable")
+    overlay.update(
+        {
+            _DATASOURCE_TURN_KEY_ENV: request.llm["api_key"],
+            _DATASOURCE_CORRELATION_ENV: request.correlation_id,
+            _DATASOURCE_CONNECTIONS_ENV: json.dumps(
+                [
+                    {
+                        "connection_id": ref.connection_id,
+                        "credential_version": ref.credential_version,
+                    }
+                    for ref in request.datasource.connections
+                ],
+                separators=(",", ":"),
+            ),
+        }
+    )
+    return overlay
 
 
 def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
@@ -426,6 +480,32 @@ def resolve_trusted_workspace_path() -> Path:
     return resolved
 
 
+def resolve_trusted_artifacts_root() -> Path | None:
+    """Resolve the project-artifacts mount (ENG-2056), or None when not set.
+
+    Reads :data:`_ARTIFACTS_ROOT_ENV`, set by the same scratchpad controller
+    that sets :data:`_WORKSPACE_PATH_ENV` (pod-side config, never from the wire
+    request), so it gets the same validation: absolute, no ``..``, then
+    canonicalised and created. None — desktop, CI, older controllers — leaves
+    the derived ``<workspace>/.anton/artifacts`` default untouched.
+    """
+    raw = (os.environ.get(_ARTIFACTS_ROOT_ENV) or "").strip()
+    if not raw:
+        return None
+    if not os.path.isabs(raw):
+        raise ValueError(
+            f"trusted artifacts root must be absolute, got {raw!r} "
+            f"(set {_ARTIFACTS_ROOT_ENV} to an absolute path)"
+        )
+    if ".." in Path(raw).parts:
+        raise ValueError(f"trusted artifacts root must not contain '..': {raw!r}")
+    resolved = Path(raw).resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    if not resolved.is_dir():
+        raise ValueError(f"trusted artifacts root is not a directory: {resolved}")
+    return resolved
+
+
 #: Attachments cowork-server stages into the workspace for this conversation.
 _ATTACHMENTS_DIRNAME = "attachments"
 
@@ -603,6 +683,22 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         if llm.get("coding_model"):
             settings_kwargs["coding_model"] = llm["coding_model"]
     settings = AntonSettings(**settings_kwargs)
+    # Cloud turns do not inherit the desktop Minds datasource configuration. A
+    # short-lived LLM key alone must never advertise or enable the static-key
+    # helper in a pod.
+    settings.minds_mind_name = None
+    settings.minds_datasource = None
+    settings.minds_datasource_engine = None
+    # ENG-2056: the workspace mount is per-conversation, so deriving
+    # `<workspace>/.anton/artifacts` hides sibling tasks' artifacts. When the
+    # controller mounts the PROJECT's shared artifacts dir (outside the
+    # workspace, so it can't land on sys.path) and points _ARTIFACTS_ROOT_ENV
+    # at it, use that instead. Must be set BEFORE resolve_workspace, which only
+    # derives artifacts_dir when the value is relative and leaves an absolute
+    # one alone; unset env var keeps today's derivation byte-identical.
+    artifacts_root = resolve_trusted_artifacts_root()
+    if artifacts_root is not None:
+        settings.artifacts_dir = str(artifacts_root)
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
@@ -684,7 +780,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # configured block is the same one desktop injects; the serving-model
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
-            runtime_context=build_runtime_context(settings),
+            runtime_context=build_runtime_context(settings, cloud_datasource=request.datasource),
             # The delivery half of the prompt context (ENG-2421) — the desktop
             # harness injects its own via `_turn_style_context`; this is the
             # web-worded equivalent, which the pod owns because only it runs
@@ -696,6 +792,12 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # driven directly rather than by cowork; an unset surface reads as
         # "nobody declared one", which is the honest answer for a standalone run.
         surface=(request.trace or {}).get("surface"),
+        # WHO the user is, for the analytics event only (ENG-2121). Same reason
+        # as `surface`: the pod cannot know, cowork-server can (the gateway's
+        # verified principal). Validated as UUIDs by the session; absent when
+        # the pod is driven directly or by an older cowork-server.
+        user_id=(request.trace or {}).get("user_id"),
+        organization_id=(request.trace or {}).get("organization_id"),
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
@@ -708,6 +810,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         tool_allowlist=CLOUD_TOOL_ALLOWLIST,  # only reviewed tools survive the build
         background_memory=False,            # one turn per pod: no end-of-turn LLM passes
         runtime_factory=local_scratchpad_runtime_factory,
+        workspace_env_overlay=_datasource_workspace_env(request),
         web_search_enabled=False,
         web_fetch_enabled=False,
     )
