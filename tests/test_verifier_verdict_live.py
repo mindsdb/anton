@@ -308,7 +308,16 @@ def _check_served_model(alias: str, served: object) -> None:
     80-char cap would be truncated and then mismatch its pin — the longest id
     this catalog serves is 46 (`accounts/fireworks/models/deepseek-v4-pro-0813`).
 
-    Silent on two cases, both on purpose:
+    Silent on three cases, all on purpose:
+
+    - **The gateway echoes the alias.** Since the mindshub_inference release of
+      2026-09-21 (ENG-2751, a decided product change, not a defect) the
+      response ``model`` for every alias is the alias itself, not the resolved
+      id, on primary and failover routes alike. That carries no identity
+      information, so it is recorded as "not disclosed" and never asserted
+      (ENG-2892). A genuine repoint — a *different real id* — still fails, and
+      a confirmed pin match is recorded verbatim even when the alias is itself
+      a real id.
 
     - **An alias not in the pin map.** The `VERIFIER_EVAL_*_MODEL` env vars exist
       for one-off runs against another alias; failing those would make the
@@ -320,9 +329,32 @@ def _check_served_model(alias: str, served: object) -> None:
     served = sanitize_model_name(served)
     if served is None:
         return
-    _SERVED[alias] = served
     expected = _EXPECTED_SERVED.get(alias)
-    if expected is None or served == expected:
+    if served == expected:
+        # A confirmed match is recorded verbatim FIRST — before the echo test
+        # below — so a one-off run whose alias IS a real id
+        # (`VERIFIER_EVAL_*_MODEL=gpt-5.6-luna`) is not misreported as blind
+        # when the gateway did disclose (#490 self-review, finding 2).
+        _SERVED[alias] = served
+        return
+    if served == alias:
+        # The gateway echoes the alias back instead of the model it resolved
+        # to. This is a DECIDED product behaviour, not a gap: ENG-2751 ("hide
+        # it", 2026-09-15; mindshub_inference#553; live since the 2026-09-21
+        # release) — an alias is published as a moving target, and the
+        # provider id was a value our own API rejected. It covers the whole
+        # catalog and failover routes alike, so the eval can neither name the
+        # served model nor tell when a fallback backend served a matrix call.
+        # Not a repoint; no information. Record it so the served-models report
+        # shows the identity check is BLIND for this slot, and do not raise:
+        # the behavioural half of the matrix still runs and still asserts.
+        # ENG-2892. Re-arming ENG-1687 needs a channel customers cannot see
+        # (Langfuse still records the resolved id server-side); a response
+        # header would undo ENG-2751 and is not the route.
+        _SERVED[alias] = f"{alias} (alias echoed — served model not disclosed)"
+        return
+    _SERVED[alias] = served
+    if expected is None:
         return
     raise AliasRepointed(
         f"alias {alias!r} now serves {served!r}, but this eval's matrix slot "
