@@ -276,6 +276,22 @@ def test_an_empty_account_falls_back_to_the_install(monkeypatch):
     assert captured[0][1]["distinct_id"] == "abc123def456abcd"
 
 
+def test_a_non_uuid_account_is_never_a_distinct_id(monkeypatch):
+    """The sink checks the account id itself rather than trusting every caller:
+    free text such as an email address must never become the distinct_id or a
+    property, whoever passes it."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_cached_aid", "abc123def456abcd")
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(_PosthogSettings(), "turn_completed", user_id="someone@example.com")
+
+    _, body = captured[0]
+    assert body["distinct_id"] == "abc123def456abcd"
+    assert "user_id" not in body["properties"]
+    assert "someone@example.com" not in json.dumps(body)
+
+
 def test_every_property_survives(monkeypatch):
     """The collector allowlisted five names and dropped the other 26. The
     direct path must carry all of them, so assert on ones the collector is

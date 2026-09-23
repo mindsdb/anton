@@ -394,6 +394,16 @@ def get_installation_id() -> str:
     return _cached_aid
 
 
+def _account_id(value: str | None) -> str | None:
+    """A UUID-shaped account id in canonical form, or None for anything else."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value).strip()))
+    except ValueError:
+        return None
+
+
 def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
     """Build the PostHog Capture API payload for one event.
 
@@ -427,6 +437,12 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
         k: v for k, v in params.items()
         if k not in (_CACHE_BUSTER_KEY, "action", "timestamp")
     }
+    # Checked here as well as at the emit site, so no future caller can turn
+    # free text (an email address, say) into a distinct_id or a property.
+    user_id = _account_id(params.get("user_id"))
+    for name in ("user_id", "organization_id"):
+        if name in properties and _account_id(properties[name]) is None:
+            del properties[name]
     properties["$lib"] = _LIB
     # Store the event without creating a Person for the install fingerprint.
     # Without this every `aid` becomes a "person" in project 424726, which is
@@ -439,7 +455,7 @@ def _posthog_body(key: str, action: str, params: dict[str, str]) -> bytes:
         {
             "api_key": key,
             "event": action,
-            "distinct_id": params.get("user_id") or params.get("aid") or "unknown",
+            "distinct_id": user_id or params.get("aid") or "unknown",
             "timestamp": params.get("timestamp"),
             "properties": properties,
         }

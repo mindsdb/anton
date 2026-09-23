@@ -46,7 +46,7 @@ Three things, and only three:
 1. **Prompts to your LLM provider.** Whatever you type, plus the context
    Anton assembles, goes to the provider you configured (Anthropic, OpenAI,
    Minds, or your own endpoint) and is governed by that provider's terms.
-2. **Anonymous analytics**, to MindsDB and to PostHog Inc. (a US analytics
+2. **Pseudonymous analytics**, to MindsDB and to PostHog Inc. (a US analytics
    processor). Event names, timestamps, and for some events anonymous
    measurements of the action — token counts, model names, durations, opaque
    ids. Never query content. Inside MindsHub Cowork, the per-turn event also
