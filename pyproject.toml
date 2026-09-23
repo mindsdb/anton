@@ -26,6 +26,13 @@ dependencies = [
     # Declared, not inherited: it arrived transitively via anthropic/openai.
     # Same range those SDKs require, so the client we hand them matches theirs.
     "httpx2>=2.7,<3",
+    # Floor for GHSA-8bx3-mgpq-m8m9 (IDNA 2003 vs IDNA 2009 host-name encoding
+    # mismatch in TLSStream/connect_tcp() lets a hijacked connection to an
+    # internationalized domain present a certificate that validates against
+    # the IDNA-2003 encoding while the client meant the IDNA-2009 one).
+    # Transitive via anthropic/openai/httpx2, none of which pin it
+    # themselves, so it floats to whatever the resolver picks without this.
+    "anyio>=4.14.2",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     # Declared, not inherited: it arrives transitively via pydantic-settings.
