@@ -165,3 +165,92 @@ def test_many_findings_are_capped(tmp_path: Path, lint):
 
     assert findings is not None
     assert len(findings) <= 21
+
+
+def test_corrupt_non_xml_member_is_reported(tmp_path: Path):
+    """Only the zip checksum pass sees a damaged image: nothing parses it.
+    Stored, not deflated, so a flipped byte breaks the CRC and nothing else."""
+    import zipfile
+
+    parts = minimal_pptx_parts()
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+        "<Default Extension=\"xml\"",
+        '<Default Extension="png" ContentType="image/png"/><Default Extension="xml"',
+    )
+    deck = tmp_path / "deck.pptx"
+    with zipfile.ZipFile(deck, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in parts.items():
+            zf.writestr(name, data)
+        zf.writestr("ppt/media/image1.png", b"\x89PNG\r\n\x1a\n" + b"pixels" * 20, zipfile.ZIP_STORED)
+    data = bytearray(deck.read_bytes())
+    data[data.find(b"pixels")] ^= 0xFF
+    deck.write_bytes(bytes(data))
+
+    assert "checksum" in _messages(lint_pptx(deck))
+
+
+def test_oversized_required_part_means_could_not_check(tmp_path: Path, monkeypatch):
+    """A part too big to parse is unchecked, not clean: skipping a broken
+    `[Content_Types].xml` must not return `[]`."""
+    import anton.core.artifacts.ooxml_lint as ooxml_lint
+
+    parts = minimal_pptx_parts()
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace("</Types>", "") + " " * 4096
+    deck = write_package(tmp_path / "deck.pptx", parts)
+    monkeypatch.setattr(ooxml_lint, "_MAX_XML_PART_BYTES", 1024)
+
+    assert lint_pptx(deck) is None
+
+
+def test_package_too_large_in_total_means_could_not_check(tmp_path: Path, monkeypatch):
+    """Many parts each under the per-part cap must not decompress without
+    bound on the agent's turn."""
+    import anton.core.artifacts.ooxml_lint as ooxml_lint
+
+    deck = write_minimal_pptx(tmp_path / "deck.pptx")
+    monkeypatch.setattr(ooxml_lint, "_MAX_TOTAL_UNCOMPRESSED_BYTES", 1024)
+
+    assert lint_pptx(deck) is None
+
+
+_STRICT_REL = "http://purl.oclc.org/ooxml/officeDocument/relationships"
+
+
+def _strict(parts: dict[str, str]) -> dict[str, str]:
+    """Strict OOXML swaps the relationship type and `r:` namespace URIs."""
+    return {
+        name: text.replace(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships", _STRICT_REL
+        )
+        for name, text in parts.items()
+    }
+
+
+def test_strict_ooxml_deck_is_clean(tmp_path: Path):
+    deck = write_package(tmp_path / "deck.pptx", _strict(minimal_pptx_parts()))
+
+    assert lint_pptx(deck) == []
+
+
+def test_strict_ooxml_dangling_relationship_id_is_reported(tmp_path: Path):
+    parts = _strict(minimal_pptx_parts())
+    parts["ppt/presentation.xml"] = parts["ppt/presentation.xml"].replace('r:id="rId2"', 'r:id="rId9"')
+    deck = write_package(tmp_path / "deck.pptx", parts)
+
+    assert "rId9" in _messages(lint_pptx(deck))
+
+
+def test_part_names_match_case_insensitively(tmp_path: Path):
+    """OPC part names compare ASCII case-insensitively, so a relationship to
+    `slides/Slide1.XML` and an override for `/PPT/Slides/slide1.xml` both
+    name the zip entry `ppt/slides/slide1.xml`."""
+    parts = minimal_pptx_parts()
+    parts["ppt/_rels/presentation.xml.rels"] = parts["ppt/_rels/presentation.xml.rels"].replace(
+        'Target="slides/slide1.xml"', 'Target="slides/Slide1.XML"'
+    )
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+        'PartName="/ppt/slides/slide1.xml"', 'PartName="/PPT/Slides/slide1.xml"'
+    )
+    deck = write_package(tmp_path / "deck.pptx", parts)
+
+    assert lint_pptx(deck) == []

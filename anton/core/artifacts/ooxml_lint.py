@@ -29,13 +29,20 @@ _CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
 _PR_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 # Attributes in this namespace (`r:id`, `r:embed`, `r:link`, ...) name a
 # relationship of the part they sit in.
-_R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+# Strict OOXML (ISO 29500 Strict) uses the purl.oclc.org URIs for both.
+_R_NS = (
+    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}",
+    "{http://purl.oclc.org/ooxml/officeDocument/relationships}",
+)
 _OFFICE_DOCUMENT_REL = (
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument",
 )
 
 # Main-part content type prefix per format. Prefix, not exact match, so the
-# template/slideshow/macro-enabled variants of the same format still count.
+# template/slideshow variants of the same format still count. Macro-enabled
+# types (`application/vnd.ms-...macroEnabled...`) do not match: Office
+# refuses a macro-enabled package saved under a `.pptx`/`.docx` name.
 _MAIN_CONTENT_TYPE = {
     "pptx": ("application/vnd.openxmlformats-officedocument.presentationml.", "a presentation"),
     "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.", "a document"),
@@ -44,8 +51,16 @@ _MAIN_CONTENT_TYPE = {
 # Enough to tell the agent what to fix without flooding its tool result.
 _MAX_FINDINGS = 20
 
-# A zip bomb must not stall the agent's turn: parts above this are not parsed.
+# A zip bomb must not stall the agent's turn. Uncompressed sizes come from
+# the zip headers, which zipfile enforces on read (a member that inflates
+# past its declared size fails its CRC check). A package over either cap is
+# "could not check" (`None`), never clean.
 _MAX_XML_PART_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+
+
+class _TooLargeToCheck(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -70,7 +85,8 @@ def lint_ooxml(path: Path, kind: str) -> list[PackageFinding] | None:
     """Check `path` is a well-formed OOXML package of `kind`.
 
     Returns `None` only when the file could not be read at all (missing,
-    permission denied), so nothing is claimed either way. A file that reads
+    permission denied) or is too large to check safely, so nothing is
+    claimed either way. A file that reads
     but is not a valid package is a finding, never `None`: for this format
     "does it open" is the whole question. Never raises.
     """
@@ -81,7 +97,7 @@ def lint_ooxml(path: Path, kind: str) -> list[PackageFinding] | None:
         return None
     try:
         findings = _lint(path, kind)
-    except OSError:
+    except (OSError, _TooLargeToCheck):
         return None
     except Exception as exc:  # anything else zipfile/expat can throw is a broken file
         findings = [PackageFinding(f"not a valid {kind} package ({type(exc).__name__}: {exc})")]
@@ -98,18 +114,26 @@ def _lint(path: Path, kind: str) -> list[PackageFinding]:
         return [PackageFinding(f"not a valid {kind} package, the zip container is damaged or truncated ({exc})")]
 
     with zf:
+        infos = zf.infolist()
+        if sum(i.file_size for i in infos) > _MAX_TOTAL_UNCOMPRESSED_BYTES or any(
+            i.file_size > _MAX_XML_PART_BYTES
+            for i in infos
+            if i.filename.lower().endswith((".xml", ".rels"))
+        ):
+            raise _TooLargeToCheck
+
         bad_member = zf.testzip()
         if bad_member is not None:
             return [PackageFinding(f"not a valid {kind} package, part '{bad_member}' is corrupt (checksum mismatch)")]
 
         names = {n for n in zf.namelist() if not n.endswith("/")}
+        # OPC part names compare ASCII case-insensitively.
+        lower_names = {n.lower() for n in names}
         findings: list[PackageFinding] = []
 
         parsed: dict[str, ET.Element] = {}
         for name in sorted(names):
-            if not name.endswith((".xml", ".rels")):
-                continue
-            if zf.getinfo(name).file_size > _MAX_XML_PART_BYTES:
+            if not name.lower().endswith((".xml", ".rels")):
                 continue
             try:
                 parsed[name] = ET.fromstring(zf.read(name))
@@ -124,17 +148,17 @@ def _lint(path: Path, kind: str) -> list[PackageFinding]:
         defaults, overrides = _content_types(content_types)
 
         for part in sorted(names - {"[Content_Types].xml"}):
-            if part not in overrides and _extension(part) not in defaults:
+            if part.lower() not in overrides and _extension(part) not in defaults:
                 findings.append(PackageFinding(f"part '{part}' has no content type in [Content_Types].xml"))
-        for part in sorted(set(overrides) - names):
+        for part in sorted(p for p in overrides if p not in lower_names):
             findings.append(PackageFinding(f"[Content_Types].xml lists part '{part}', which is missing"))
 
-        if "_rels/.rels" not in names:
+        if "_rels/.rels" not in lower_names:
             findings.append(PackageFinding("required part '_rels/.rels' is missing"))
             return findings
 
         rels_by_source = {
-            _rels_source(name): _relationships(root)
+            _rels_source(name).lower(): _relationships(root)
             for name, root in parsed.items()
             if name.endswith(".rels")
         }
@@ -145,7 +169,7 @@ def _lint(path: Path, kind: str) -> list[PackageFinding]:
                 if external:
                     continue
                 resolved = _resolve(base, target)
-                if resolved not in names:
+                if resolved.lower() not in lower_names:
                     where = source or "the package"
                     findings.append(
                         PackageFinding(f"relationship {rid} of '{where}' points at '{resolved}', which is missing")
@@ -153,14 +177,16 @@ def _lint(path: Path, kind: str) -> list[PackageFinding]:
 
         main = [
             _resolve("", target)
-            for target, external, rel_type in _relationships_with_type(parsed.get("_rels/.rels"))
-            if rel_type == _OFFICE_DOCUMENT_REL and not external
+            for target, external, rel_type in _relationships_with_type(
+                next((root for name, root in parsed.items() if name.lower() == "_rels/.rels"), None)
+            )
+            if rel_type in _OFFICE_DOCUMENT_REL and not external
         ]
         prefix, noun = _MAIN_CONTENT_TYPE[kind]
         if not main:
             findings.append(PackageFinding("'_rels/.rels' names no main document part"))
-        elif main[0] in names:
-            main_type = overrides.get(main[0]) or defaults.get(_extension(main[0]), "")
+        elif main[0].lower() in lower_names:
+            main_type = overrides.get(main[0].lower()) or defaults.get(_extension(main[0]), "")
             if not (main_type.startswith(prefix) and main_type.endswith("main+xml")):
                 findings.append(
                     PackageFinding(
@@ -172,7 +198,7 @@ def _lint(path: Path, kind: str) -> list[PackageFinding]:
         for name, root in sorted(parsed.items()):
             if name.endswith(".rels") or name == "[Content_Types].xml":
                 continue
-            known = rels_by_source.get(name, {})
+            known = rels_by_source.get(name.lower(), {})
             missing = sorted(
                 {
                     value
@@ -194,8 +220,9 @@ def _content_types(root: ET.Element) -> tuple[dict[str, str], dict[str, str]]:
         el.get("Extension", "").lower(): el.get("ContentType", "")
         for el in root.iter(f"{_CT_NS}Default")
     }
+    # Keyed lower-case: OPC part names compare case-insensitively.
     overrides = {
-        el.get("PartName", "").lstrip("/"): el.get("ContentType", "")
+        el.get("PartName", "").lstrip("/").lower(): el.get("ContentType", "")
         for el in root.iter(f"{_CT_NS}Override")
     }
     return defaults, overrides
