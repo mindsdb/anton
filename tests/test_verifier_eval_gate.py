@@ -602,7 +602,7 @@ def test_only_the_one_attempt_control_is_recorded_not_gated_on_a_model():
     assert case.skip_models == ("haiku",)
     # Still gated somewhere in the matrix, at the trade-off guard's count.
     assert ev._NARRATING_MODEL not in case.skip_models
-    assert ev._runs_for(case) == 6
+    assert ev._runs_for(case) == 12
 
 
 def test_run_overrides_are_only_the_premature_give_up_guard():
@@ -664,7 +664,7 @@ def test_every_scope_marker_resolves_to_a_span_in_the_code():
     assert set(scope.SPAN_MARKERS["anton/core/session.py"]) == {
         "_VerifierVerdict", "_VERIFIER_TOKEN_BUDGETS", "_VERIFIER_NO_PREAMBLE",
         "_VERIFIER_JUDGMENT_RUBRIC", "_build_verify_request", "_render_verify_transcript",
-        "_render_tool_result_content", "_clip_keep_cause",
+        "_render_tool_result_content", "_clip_keep_cause", "_IMAGE_PLACEHOLDER",
     }
     # The forced-tool-call body, not only the delegators that call it: a
     # tool_choice mutation inside _generate_object_with read "guard" before.
@@ -691,7 +691,7 @@ def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
         "    return y\n"
     )
     spans = scope.marker_spans(src, ("_render_verify_transcript", "_VERIFIER_TOKEN_BUDGETS"))
-    assert spans == {"_render_verify_transcript": (2, 5)}  # the constant is only *used* here
+    assert spans == {"_render_verify_transcript": [(2, 5)]}  # the constant is only *used* here
     inside = scope.parse_hunks("@@ -4 +4 @@\n-    b = 2\n+    b = 3\n")
     outside = scope.parse_hunks("@@ -8 +8 @@\n-    y = _VERIFIER_TOKEN_BUDGETS\n+    y = 0\n")
     assert scope.touched(inside, spans, spans) == {"_render_verify_transcript"}
@@ -710,7 +710,16 @@ def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
 def test_guard_mode_selects_exactly_the_truncation_guard():
     workflow = _WORKFLOW.read_text()
     assert ".github/scripts/verifier_eval_scope.py" in workflow
-    assert "${{ steps.scope.outputs.pytest_args }}" in workflow
+    # The scope output reaches pytest through env, never as `${{ }}` in the
+    # run line (review of #486): an expression interpolated into shell is an
+    # injection point if the script's output is ever widened.
+    assert "PYTEST_ARGS: ${{ steps.scope.outputs.pytest_args }}" in workflow
+    assert "--junitxml=eval-junit.xml $PYTEST_ARGS" in workflow
+    run_step = workflow.split("Run verdict-quality eval")[1].split("Assert the eval actually executed")[0]
+    assert "${{ steps.scope.outputs.pytest_args }}" not in run_step.split("run:")[1]
+    # And the guard-only summary is its own gated step, not a grep of $GITHUB_OUTPUT.
+    assert "if: steps.scope.outputs.scope == 'guard'" in workflow
+    assert 'grep -q "^scope=guard"' not in workflow
     assert "fetch-depth: 0" in workflow
     # The -k expression must select an existing test, and only one function.
     matches = [n for n in dir(ev) if n.startswith("test_") and scope.GUARD_K in n]
@@ -799,3 +808,35 @@ def test_the_workflow_fails_closed_and_lists_the_scope_script_as_a_trigger():
     paths = workflow.split("paths:")[1].split("concurrency:")[0]
     assert '- ".github/scripts/verifier_eval_scope.py"' in paths
     assert '- "tests/test_verifier_verdict_live.py"' in paths
+
+
+def test_a_decorated_marker_span_starts_at_its_first_decorator():
+    """`node.lineno` is the def line; a decorator added above a marker would
+    otherwise sit outside its span and read "guard" (review of #486)."""
+    src = "import functools\n\n@functools.lru_cache\n@something\ndef _render_verify_transcript(h):\n    return h\n"
+    spans = scope.marker_spans(src, ("_render_verify_transcript",))
+    assert spans == {"_render_verify_transcript": [(3, 6)]}
+    hit = scope.touched(scope.parse_hunks("@@ -3 +3 @@\n-@functools.lru_cache\n+@functools.cache\n"), spans, spans)
+    assert hit == {"_render_verify_transcript"}
+
+
+def test_every_assignment_of_a_marker_counts_including_augmented():
+    """A later re-assignment is the one that takes effect, and `+=` is an
+    AugAssign; keeping only the first Assign span read "guard" on both
+    (review of #486)."""
+    src = (
+        "_VERIFIER_JUDGMENT_RUBRIC = (\n"
+        '    "a"\n'
+        ")\n"
+        "X = 1\n"
+        '_VERIFIER_JUDGMENT_RUBRIC = "b"\n'
+        'Y = 2\n'
+        '_VERIFIER_JUDGMENT_RUBRIC += "c"\n'
+    )
+    spans = scope.marker_spans(src, ("_VERIFIER_JUDGMENT_RUBRIC",))
+    assert spans == {"_VERIFIER_JUDGMENT_RUBRIC": [(1, 3), (5, 5), (7, 7)]}
+    for line in (2, 5, 7):
+        assert scope.touched(scope.parse_hunks(f"@@ -{line} +{line} @@\n-x\n+y\n"), spans, spans) == {
+            "_VERIFIER_JUDGMENT_RUBRIC"
+        }, line
+    assert scope.touched(scope.parse_hunks("@@ -4 +4 @@\n-X = 1\n+X = 2\n"), spans, spans) == set()

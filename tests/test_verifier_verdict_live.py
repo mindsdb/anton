@@ -155,10 +155,10 @@ _THROTTLE_RETRY_CAP_S = 60.0
 # Total throttle retries allowed across the whole session, not per call.
 #
 # The per-call retry alone was not enough: `_verdicts` invokes `_verdict` ~45-51
-# times per model (seven cases at 3 runs, four at 6, one at 6 on air only), ~97
+# times per model (seven cases at 3 runs, four at 6, one at 12 on air only), ~103
 # calls per full session (ENG-2863 recount; it was 37 when this was written), each
-# entitled to its own pause. Under a SUSTAINED throttle that is ~32 minutes at
-# the default and ~97 at the cap — and it still ends green with zero cases
+# entitled to its own pause. Under a SUSTAINED throttle that is ~34 minutes at
+# the default and ~103 at the cap — and it still ends green with zero cases
 # executed. The retry fixed the common case (a short window that clears) while
 # turning the pathological one from a fast wrong answer into a slow one.
 #
@@ -1190,9 +1190,13 @@ _ONE_ATTEMPT_GIVE_UP = Case(
     # each. An 11-of-12 threshold flaked on its first CI run, and a gate people
     # learn to re-run is not a gate. If haiku stops slipping, delete
     # `skip_models` and its pin and let it gate.
-    # Six, not twelve: 0 slips in 48+ runs on air, so twelve bought nothing
-    # over six except gateway calls (ENG-2863).
-    runs=6,
+    # Twelve, deliberately. ENG-2863 first trimmed this to six ("0 slips in 48+
+    # runs on air"), and review pointed out that number bounds false positives
+    # only: this control exists to catch a LOW-RATE regression, and at the
+    # 1-in-16 slip rate haiku showed, 12 runs detect it ~54% of the time and
+    # 6 runs ~32%. The saving was 6 calls per full run, ~26 full runs a month
+    # once the guard tier exists — not worth halving the guard's power.
+    runs=12,
     skip_models=("haiku",),
 )
 

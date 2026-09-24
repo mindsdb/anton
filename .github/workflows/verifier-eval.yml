@@ -132,16 +132,21 @@ jobs:
           fi
           git fetch --quiet origin "$BASE_SHA" "$HEAD_SHA" || true
           python3 .github/scripts/verifier_eval_scope.py --base "$BASE_SHA" --head "$HEAD_SHA" --github-output "$GITHUB_OUTPUT"
-          if grep -q "^scope=guard" "$GITHUB_OUTPUT"; then
-            {
-              echo "### Verifier eval — guard only"
-              echo ""
-              echo "This PR touches a trigger path but none of the verifier's criteria,"
-              echo "request builder, transcript renderer, schema plumbing, or the eval module,"
-              echo "so only the one-call truncation guard ran. The verdict matrix was not"
-              echo "needed and did not run (ENG-2863)."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+
+      # Its own step, gated on the step output, rather than reading
+      # $GITHUB_OUTPUT back with grep — that file is for handing values to
+      # later steps, not a scratchpad (review of #486).
+      - name: Explain a guard-only run
+        if: steps.scope.outputs.scope == 'guard'
+        run: |
+          {
+            echo "### Verifier eval — guard only"
+            echo ""
+            echo "This PR touches a trigger path but none of the verifier's criteria,"
+            echo "request builder, transcript renderer, schema plumbing, or the eval module,"
+            echo "so only the truncation guard ran (one call per matrix alias). The verdict"
+            echo "matrix was not needed and did not run (ENG-2863)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run verdict-quality eval
         env:
@@ -149,9 +154,15 @@ jobs:
           # 1 on first-party PRs: a missing key becomes a collection error
           # instead of a silent all-skip. See tests/test_verifier_verdict_live.py.
           VERIFIER_EVAL_REQUIRE_LIVE: ${{ steps.mode.outputs.require_live }}
+          # Through env, not `${{ }}` in the run line: an expression
+          # interpolated into shell is an injection point if what the script
+          # writes here is ever widened. As an env var it is data. Expanded
+          # UNQUOTED below on purpose, so "-k <expr>" word-splits into two
+          # arguments and "" contributes nothing (review of #486).
+          PYTEST_ARGS: ${{ steps.scope.outputs.pytest_args }}
         run: >-
           uv run --group dev pytest tests/test_verifier_verdict_live.py -v
-          --junitxml=eval-junit.xml ${{ steps.scope.outputs.pytest_args }}
+          --junitxml=eval-junit.xml $PYTEST_ARGS
 
       # Belt and braces. The guard in the test module catches an absent key, but
       # not every other way a run can execute zero cases — a stray `-k`, a

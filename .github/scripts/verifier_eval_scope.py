@@ -40,6 +40,8 @@ SPAN_MARKERS: dict[str, tuple[str, ...]] = {
         "_render_verify_transcript",
         "_render_tool_result_content",
         "_clip_keep_cause",
+        # Inlined into the transcript the verifier judges (review of #486).
+        "_IMAGE_PLACEHOLDER",
     ),
     "anton/core/llm/client.py": (
         # The public entry points are 5-line delegators; the forced-tool-call
@@ -63,27 +65,36 @@ GUARD_K = "narrating_model_reaches_a_verdict"
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
-def marker_spans(source: str, names: tuple[str, ...]) -> dict[str, tuple[int, int]]:
-    """Map each marker name to its (first, last) line span in `source`.
+def marker_spans(source: str, names: tuple[str, ...]) -> dict[str, list[tuple[int, int]]]:
+    """Map each marker name to EVERY (first, last) line span it occupies.
 
     Classes and functions (including methods, so `generate_object_code` on
-    `LLMClient` resolves) by name; module-level constants by assignment target.
-    Names that do not resolve are simply absent — the caller decides whether
-    that is an error (the gate test) or a non-match (a deleted symbol).
+    `LLMClient` resolves) by name, with the span starting at the first
+    decorator when there is one — `node.lineno` is the `def` line, and an
+    `@lru_cache` added above a marker would otherwise sit outside its span.
+    Module-level constants by assignment target, including `+=`
+    (`ast.AugAssign`), and ALL assignments, not only the first: a later
+    re-assignment is the one that takes effect, so it must count too. Both
+    gaps were latent (no marker is decorated or assigned twice today) and
+    were found in review of #486. Names that do not resolve are absent — the
+    caller decides whether that is an error (the gate test) or a non-match.
     """
-    spans: dict[str, tuple[int, int]] = {}
+    spans: dict[str, list[tuple[int, int]]] = {}
     tree = ast.parse(source)
     for node in ast.walk(tree):
         name = None
+        start = getattr(node, "lineno", None)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             name = node.name
+            if node.decorator_list:
+                start = min([node.lineno] + [d.lineno for d in node.decorator_list])
         elif isinstance(node, ast.Assign):
             targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
             name = targets[0] if len(targets) == 1 else None
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
             name = node.target.id
-        if name in names and name not in spans:
-            spans[name] = (node.lineno, node.end_lineno or node.lineno)
+        if name in names:
+            spans.setdefault(name, []).append((start, node.end_lineno or start))
     return spans
 
 
@@ -113,17 +124,17 @@ def _intersects(start: int, length: int, span: tuple[int, int]) -> bool:
 
 def touched(
     hunks: list[tuple[int, int, int, int]],
-    old_spans: dict[str, tuple[int, int]],
-    new_spans: dict[str, tuple[int, int]],
+    old_spans: dict[str, list[tuple[int, int]]],
+    new_spans: dict[str, list[tuple[int, int]]],
 ) -> set[str]:
-    """Marker names whose span any hunk touches, on either side."""
+    """Marker names any of whose spans any hunk touches, on either side."""
     hit: set[str] = set()
     for old_start, old_len, new_start, new_len in hunks:
-        for name, span in old_spans.items():
-            if _intersects(old_start, old_len, span):
+        for name, spans in old_spans.items():
+            if any(_intersects(old_start, old_len, span) for span in spans):
                 hit.add(name)
-        for name, span in new_spans.items():
-            if _intersects(new_start, new_len, span):
+        for name, spans in new_spans.items():
+            if any(_intersects(new_start, new_len, span) for span in spans):
                 hit.add(name)
     return hit
 
