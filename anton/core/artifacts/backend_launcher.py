@@ -138,9 +138,6 @@ def build_backend_env(
     return env
 
 
-# Backwards-compatible name: pre-existing callers/tests import the underscored
-# form; the function went public when verify_backend became its second caller.
-
 def parse_requirements(text: str) -> list[str]:
     """The installable lines of a requirements.txt.
 

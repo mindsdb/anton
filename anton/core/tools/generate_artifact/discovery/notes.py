@@ -99,8 +99,9 @@ def render_web_notes(calls: list[dict]) -> str:
 
 # Residue of the model's own tool-call syntax leaking into a JSON value.
 # Twelfth live run 2026-09-16: `open_points` arrived as the string
-# '\n<parameter name="open_points">Что означает ...' — the model wrote the
-# field's opening tag inside the field. It is markup, never content.
+# '\n<parameter name="open_points">What does ...' (the question itself was in
+# the user's language) — the model wrote the field's opening tag inside the
+# field. It is markup, never content.
 _TOOL_CALL_MARKUP_RE = re.compile(r"</?parameter(?:\s[^>]*)?>")
 
 # Leading list markers a model puts in front of each line when it sends a
