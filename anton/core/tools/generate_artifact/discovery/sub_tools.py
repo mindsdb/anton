@@ -21,7 +21,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from anton.core.artifacts.models import ARTIFACT_TYPES
+from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 
 from ..sub_tools import tool_schema
 
@@ -67,7 +67,9 @@ FINISH_GATHERING_SCHEMA: dict = {
             },
             "artifact_type": {
                 "type": "string",
-                "enum": list(ARTIFACT_TYPES),
+                # Only what this pipeline builds: a registered type without
+                # a generator (document, dataset, ...) is not a choice here.
+                "enum": list(GENERATOR_ARTIFACT_TYPES_ORDERED),
                 "description": "The confirmed artifact type.",
             },
             "data_sources": {

@@ -6,7 +6,7 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
-from anton.core.artifacts.models import ARTIFACT_TYPES
+from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 
 from ..attachments import render_for_gathering
 from .state import PrdState
@@ -21,7 +21,7 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     rewriting this string at a phase switch would discard the prefix cache
     for the whole shared history.
     """
-    types_list = ", ".join(f"`{t}`" for t in ARTIFACT_TYPES)
+    types_list = ", ".join(f"`{t}`" for t in GENERATOR_ARTIFACT_TYPES_ORDERED)
     return (
         "You are producing a web artifact end to end, in one pipeline of "
         "steps. Each step has its own output — do not do the next step's "

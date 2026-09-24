@@ -177,6 +177,19 @@ async def test_finish_gathering_falls_back_to_the_registered_type_when_invented(
     assert state.final_artifact_type == "html-app"
 
 
+async def test_finish_gathering_falls_back_when_the_type_has_no_generator():
+    """Review 2026-09-24 №2: `document` is in ARTIFACT_TYPES, so it used to
+    be accepted here; `settle_artifact_type("document")` then read as
+    fullstack (`!= "html-app"`), the pipeline built a backend for a
+    document, and the handler refused every repeat call for the slug."""
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("finish_gathering", {"summary": "ready", "artifact_type": "document"})]),
+    )
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.final_artifact_type == "html-app"
+
+
 async def test_finish_gathering_keeps_a_valid_type_that_differs_from_the_registered_one():
     session = _session_with_plan_sequence(
         _response(tool_calls=[_tc("finish_gathering", {"summary": "ready", "artifact_type": "fullstack-stateless-app"})]),

@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from anton.core.artifacts.models import ARTIFACT_TYPES
+from anton.core.artifacts.models import ARTIFACT_TYPES, GENERATOR_ARTIFACT_TYPES
 from anton.core.tools.generate_artifact.discovery import sub_tools
 from anton.core.tools.generate_artifact.discovery.prompts import (
     DATASOURCES_HEADER,
@@ -44,10 +44,15 @@ def _state(**over) -> GenState:
     return GenState(**base)
 
 
-def test_pipeline_system_prompt_lists_every_valid_artifact_type():
+def test_pipeline_system_prompt_lists_every_buildable_artifact_type_and_no_other():
+    """Review 2026-09-24 №2: the list used to be every registered type, so
+    the model could settle on `document` and the pipeline would build a
+    fullstack app for it."""
     prompt = build_pipeline_system_prompt(_state())
-    for artifact_type in ARTIFACT_TYPES:
-        assert artifact_type in prompt
+    for artifact_type in GENERATOR_ARTIFACT_TYPES:
+        assert f"`{artifact_type}`" in prompt
+    for artifact_type in set(ARTIFACT_TYPES) - GENERATOR_ARTIFACT_TYPES:
+        assert f"`{artifact_type}`" not in prompt
 
 
 def test_pipeline_system_prompt_explains_that_a_listed_tool_may_be_unavailable():

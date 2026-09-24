@@ -193,7 +193,7 @@ async def redraw_brief(state: PrdState) -> None:
     bounded: the artifact is rebuilt from the sources already known, which is
     the same result the correction would have had without the new source.
     """
-    from anton.core.artifacts.models import ARTIFACT_TYPES
+    from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 
     brief, response = await sub_tools.plan_step(
         state, sub_tools.STEP_REDRAW_BRIEF, doing="redrawing the brief"
@@ -218,7 +218,8 @@ async def redraw_brief(state: PrdState) -> None:
 
     if declared is not None:
         previous = set(state.declared_sources)
-        if new_type in ARTIFACT_TYPES:
+        # Buildable types only, same rule as the gathering step.
+        if new_type in GENERATOR_ARTIFACT_TYPES:
             state.final_artifact_type = new_type
         state.declared_sources = declared
         # Anything the correction introduced has nothing executed against it.

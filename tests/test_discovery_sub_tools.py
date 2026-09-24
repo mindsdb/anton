@@ -29,17 +29,21 @@ def test_finish_gathering_schema_requires_summary_and_artifact_type():
     assert set(schema["input_schema"]["required"]) == {"summary", "artifact_type"}
 
 
-def test_finish_gathering_schema_constrains_artifact_type_to_the_closed_enum():
+def test_finish_gathering_schema_constrains_artifact_type_to_the_buildable_enum():
     """Without this, the model is free to invent a type string that later
     crashes write_prd's `ArtifactStore.update(type=...)` call — see
-    store.py's ValueError on anything outside ARTIFACT_TYPES."""
-    from anton.core.artifacts.models import ARTIFACT_TYPES
+    store.py's ValueError on anything outside ARTIFACT_TYPES. And the enum
+    is the BUILDABLE subset, not every registered type (review 2026-09-24
+    №2): `document` is valid metadata but has no generator."""
+    from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 
     schema = next(
         t for t in sub_tools.pipeline_tool_schemas()
         if t["name"] == "finish_gathering"
     )
-    assert schema["input_schema"]["properties"]["artifact_type"]["enum"] == list(ARTIFACT_TYPES)
+    enum = schema["input_schema"]["properties"]["artifact_type"]["enum"]
+    assert enum == list(GENERATOR_ARTIFACT_TYPES_ORDERED)
+    assert enum == ["html-app", "fullstack-stateless-app", "fullstack-stateful-app"]
 
 
 def test_finish_gathering_schema_replaced_free_form_notes_with_typed_fields():

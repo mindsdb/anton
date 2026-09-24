@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from anton.core.artifacts.models import ARTIFACT_TYPES
+from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 
 from .. import sub_tools as protocol
 from . import prompts, sub_tools
@@ -153,13 +153,19 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 claimed_type = str(inp.get("artifact_type") or "")
                 # The schema's `enum` (see sub_tools.FINISH_GATHERING_SCHEMA)
                 # is a hint, not an enforced constraint — a model can still
-                # emit a type outside ARTIFACT_TYPES. Left unchecked, that
-                # string reaches `write_prd`'s `ArtifactStore.update(type=...)`
+                # emit a type outside the enum. Left unchecked, that string
+                # reaches `write_prd`'s `ArtifactStore.update(type=...)`
                 # unvalidated until much later, where it raises ValueError
-                # and crashes the whole run instead of just
-                # falling back to the type that was already known-good.
+                # and crashes the whole run instead of just falling back to
+                # the type that was already known-good. The check is against
+                # what this pipeline BUILDS, not every registered type: a
+                # `document` or `dataset` is valid metadata but has no
+                # generator, and settling on one would build a fullstack
+                # app for it and lock the slug out of any repeat call
+                # (review 2026-09-24, finding 2).
                 state.final_artifact_type = (
-                    claimed_type if claimed_type in ARTIFACT_TYPES else state.artifact_type
+                    claimed_type if claimed_type in GENERATOR_ARTIFACT_TYPES
+                    else state.artifact_type
                 )
                 state.gathering_notes = render_gathering_notes(inp)
                 state.assumptions = string_list(inp.get("assumptions"))

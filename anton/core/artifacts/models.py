@@ -152,6 +152,11 @@ GENERATOR_ARTIFACT_TYPES: frozenset[str] = frozenset({
     "fullstack-stateless-app",
     "fullstack-stateful-app",
 })
+# The same set in ARTIFACT_TYPES order, for a schema `enum` or a prompt list
+# that must read the same on every call (a frozenset iterates in hash order).
+GENERATOR_ARTIFACT_TYPES_ORDERED: tuple[str, ...] = tuple(
+    t for t in ARTIFACT_TYPES if t in GENERATOR_ARTIFACT_TYPES
+)
 
 
 class FileEntry(BaseModel):
