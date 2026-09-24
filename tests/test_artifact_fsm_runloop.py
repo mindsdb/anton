@@ -184,6 +184,44 @@ async def test_a_truncated_body_writes_nothing(tmp_path: Path):
     assert not (tmp_path / "d.html").exists()
 
 
+async def test_a_body_without_write_file_still_answers_the_reply_s_other_tool_calls(tmp_path: Path):
+    """Review 2026-09-24 №1: the reply "final chunk + finish, write_file
+    forgotten" put an assistant turn with a `finish` tool_use into the
+    history and answered it with a bare user text. The next request was
+    rejected by the provider (tool_use without tool_result) and the whole
+    run ended as "generator crashed". Every tool_use of that reply gets a
+    tool_result — `finish` a refusal, not an acceptance — and the advice
+    rides as a text block in the same message."""
+    from anton.core.tools.generate_artifact.engine import (
+        _BODY_WITHOUT_CALL_MSG, _FINISH_REFUSED_BODY_UNWRITTEN_MSG,
+    )
+
+    session = AsyncMock()
+    session._llm.max_tokens = None
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="f1", name="finish", input={"summary": "done"})], body=_body("<h1>Hi</h1>"))
+    )
+    session._llm.code_stream = _stream_mock(
+        _resp([ToolCall(id="w1", name="write_file", input={"path": "index.html", "mode": "w"})]),
+        _resp([ToolCall(id="f2", name="finish", input={"summary": "done"})]),
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        node_label="generate_frontend",
+    )
+    assert isinstance(result, dict) and result["files_written"] == ["index.html"]
+    assert (tmp_path / "index.html").read_text() == "<h1>Hi</h1>"
+
+    # The message that answered round 0, as round 1 saw it.
+    history = session._llm.code_stream.call_args_list[0].kwargs["messages"]
+    reply = history[-1]
+    assert reply["role"] == "user" and isinstance(reply["content"], list)
+    [answer] = [b for b in reply["content"] if b.get("type") == "tool_result"]
+    assert answer["tool_use_id"] == "f1"
+    assert answer["content"] == _FINISH_REFUSED_BODY_UNWRITTEN_MSG
+    assert reply["content"][-1] == {"type": "text", "text": _BODY_WITHOUT_CALL_MSG}
+
+
 async def test_a_cut_off_body_and_a_forgotten_marker_get_different_advice(tmp_path: Path):
     """Same symptom, opposite fixes: re-send it smaller vs. add one line.
 

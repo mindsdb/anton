@@ -83,6 +83,22 @@ _BODY_WITHOUT_CALL_MSG = (
     "for it now."
 )
 
+# Answers the OTHER tool calls of a reply that carried a body but no
+# `write_file`: every `tool_use` in the history needs its `tool_result`, or the
+# next request is rejected by the provider (Anthropic: orphan tool_use; OpenAI:
+# assistant tool_calls without the tool messages). `finish` in particular is
+# refused rather than accepted — see the branch that uses these.
+_NOT_RUN_BODY_UNWRITTEN_MSG = (
+    "Not executed: this reply carried a file body without a `write_file` "
+    "call, so nothing was written and no other call ran. Make the "
+    "`write_file` call for that body first."
+)
+_FINISH_REFUSED_BODY_UNWRITTEN_MSG = (
+    "Not accepted: this reply carried a file body without a `write_file` "
+    "call, so the file is not on disk yet. Make the `write_file` call for "
+    "that body, then call `finish`."
+)
+
 _ONE_WRITE_PER_REPLY_MSG = (
     "Error: more than one `write_file` in this reply, and a reply carries only "
     "one file body, so nothing was written. Write one file (or one appended "
@@ -923,9 +939,26 @@ async def _run_loop(
             # earlier rounds, `require_files` at the bottom would pass, and the
             # artifact would ship missing its last section, reported as success.
             pending_body = body
+            advice = _BODY_WITHOUT_CALL_MSG if body is not None else body_error
+            # The assistant turn above already holds this reply's `tool_use`
+            # blocks (`finish`, `read_file`, ...). Each needs a `tool_result`
+            # in the very next message or the provider rejects the following
+            # request; without this the run died as "generator crashed" on
+            # the normal "final chunk plus finish" ending whenever the model
+            # forgot the call (review 2026-09-24, finding 1).
+            answers: list[dict] = []
+            for tc in response.tool_calls:
+                if tc.parse_error:
+                    answers.append(sub_tools.malformed_input_result(tc))
+                    continue
+                refusal = (
+                    _FINISH_REFUSED_BODY_UNWRITTEN_MSG if tc.name == "finish"
+                    else _NOT_RUN_BODY_UNWRITTEN_MSG
+                )
+                answers.append(sub_tools.tool_result(tc.id, refusal))
             messages.append({
                 "role": "user",
-                "content": _BODY_WITHOUT_CALL_MSG if body is not None else body_error,
+                "content": answers + [{"type": "text", "text": advice}] if answers else advice,
             })
             continue
 
