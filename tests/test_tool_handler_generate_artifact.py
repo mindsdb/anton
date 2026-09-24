@@ -510,6 +510,23 @@ async def test_a_budget_stop_asks_the_user_rather_than_reporting_failure(
     assert "generation failed" not in out
 
 
+async def test_a_budget_stop_tells_the_agent_to_show_the_unseen_brief(
+    tmp_path: Path, monkeypatch
+):
+    """Review 2026-09-24 №9: a budget stop in phase B leaves the checkpoint
+    at `awaiting_confirmation`, and the repeat call enters `ENTRY_CONFIRM`,
+    which treats the call itself as agreement. The instruction has to make
+    the agent show `brief_summary` first, or the app is built to a brief
+    nobody saw."""
+    out = await _status_result(
+        tmp_path, monkeypatch,
+        {"status": "stopped_over_budget", "reason": "ceiling", "brief_summary": "Goal: a clock"},
+    )
+    assert "`brief_summary`" in out
+    assert "taken as their agreement" in out
+    assert "`agent_understanding`" in out
+
+
 async def test_an_unknown_status_falls_back_to_the_generated_instruction(
     tmp_path: Path, monkeypatch
 ):

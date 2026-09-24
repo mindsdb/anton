@@ -677,9 +677,13 @@ _STATUS_INSTRUCTIONS = {
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
-        "got and ask whether to continue. If they agree, call this tool "
-        "again with the SAME `user_request` — it resumes rather than "
-        "restarting."
+        "got and ask whether to continue. When the result carries a "
+        "non-empty `brief_summary`, show it to the user as part of that "
+        "question: the pipeline stopped before they could confirm it, and "
+        "the repeat call is taken as their agreement to that brief. If they "
+        "agree, call this tool again with the SAME `user_request` — it "
+        "resumes rather than restarting. A requested change goes in "
+        "`agent_understanding`, with `user_request` left as it was."
     ),
 }
 
