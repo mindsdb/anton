@@ -15,10 +15,8 @@ from anton.utils.datasources import (
 )
 
 
-# Every Google API key format currently issued by AI Studio / Cloud Console.
-# Add a sample here when Google ships a new prefix.
-# The `_`/`-` variant is derived rather than written out: a realistic-looking
-# literal trips GitHub push protection even when synthetic.
+# One sample per Google key format currently issued. The `_`/`-` variant is
+# derived because a realistic literal trips GitHub push protection.
 _AUTH_KEY = "AQ.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMn"
 GOOGLE_KEY_SAMPLES = [
     "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",  # standard key
