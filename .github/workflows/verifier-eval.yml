@@ -40,9 +40,11 @@ on:
       - "anton/core/llm/structured.py"
       - "anton/core/llm/client.py"
       - "tests/test_verifier_verdict_live.py"
+      # The scope decision itself: a change here must prove the eval still runs.
+      - ".github/scripts/verifier_eval_scope.py"
 
 # One live run per PR at a time — a force-push cancels the superseded run
-# instead of stacking ~50 prod gateway calls per push.
+# instead of stacking ~100 prod gateway calls per push.
 concurrency:
   group: verifier-eval-${{ github.ref }}
   cancel-in-progress: true
@@ -56,6 +58,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The scope step below diffs the PR against its base; a shallow
+          # clone has no base to diff against.
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -93,15 +99,70 @@ jobs:
             echo "require_live=1" >> "$GITHUB_OUTPUT"
           fi
 
+
+      # Two tiers, decided per PR (ENG-2863). The trigger paths above fire on
+      # ~200 PRs a month, but only a small fraction touch anything the
+      # verifier's judgment depends on; the rest paid the full ~100-call live
+      # matrix to guard code that did not change. `.github/scripts/verifier_eval_scope.py`
+      # intersects the PR's hunks with the line spans of the verifier's
+      # criteria, request builder, transcript renderer and schema plumbing
+      # (parsed with `ast` on both sides of the diff), so a body-only edit
+      # inside the renderer counts and an edit elsewhere in the 6k-line
+      # session.py does not. Any change to the eval module or the structured-
+      # output builder is always full. Otherwise only the one-call truncation
+      # guard runs, which is why the two plumbing files are trigger paths at
+      # all (ENG-1081).
+      #
+      # A job-level decision, deliberately not a pytest.skip: the out-of-money
+      # branch below requires every junit skip to be a gateway denial.
+      # The marker names are pinned against the code by
+      # tests/test_verifier_eval_gate.py, so a rename cannot silently turn the
+      # matrix off.
+      - name: Decide eval scope
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            # Not a pull_request payload: fail closed to the full matrix.
+            echo "scope=full" >> "$GITHUB_OUTPUT"; echo "pytest_args=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --quiet origin "$BASE_SHA" "$HEAD_SHA" || true
+          python3 .github/scripts/verifier_eval_scope.py --base "$BASE_SHA" --head "$HEAD_SHA" --github-output "$GITHUB_OUTPUT"
+
+      # Its own step, gated on the step output, rather than reading
+      # $GITHUB_OUTPUT back with grep — that file is for handing values to
+      # later steps, not a scratchpad (review of #486).
+      - name: Explain a guard-only run
+        if: steps.scope.outputs.scope == 'guard'
+        run: |
+          {
+            echo "### Verifier eval — guard only"
+            echo ""
+            echo "This PR touches a trigger path but none of the verifier's criteria,"
+            echo "request builder, transcript renderer, schema plumbing, or the eval module,"
+            echo "so only the truncation guard ran (one call per matrix alias). The verdict"
+            echo "matrix was not needed and did not run (ENG-2863)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run verdict-quality eval
         env:
           MINDSHUB_API_KEY: ${{ secrets.MINDSHUB_API_KEY }}
           # 1 on first-party PRs: a missing key becomes a collection error
           # instead of a silent all-skip. See tests/test_verifier_verdict_live.py.
           VERIFIER_EVAL_REQUIRE_LIVE: ${{ steps.mode.outputs.require_live }}
+          # Through env, not `${{ }}` in the run line: an expression
+          # interpolated into shell is an injection point if what the script
+          # writes here is ever widened. As an env var it is data. Expanded
+          # UNQUOTED below on purpose, so "-k <expr>" word-splits into two
+          # arguments and "" contributes nothing (review of #486).
+          PYTEST_ARGS: ${{ steps.scope.outputs.pytest_args }}
         run: >-
           uv run --group dev pytest tests/test_verifier_verdict_live.py -v
-          --junitxml=eval-junit.xml
+          --junitxml=eval-junit.xml $PYTEST_ARGS
 
       # Belt and braces. The guard in the test module catches an absent key, but
       # not every other way a run can execute zero cases — a stray `-k`, a

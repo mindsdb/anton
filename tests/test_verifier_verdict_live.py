@@ -13,6 +13,11 @@ Ground truth is anchored to the fixtures, not to live behaviour or drifting
 real-world facts (ENG-381 lesson): the transcript is the input, the expected
 status is the label.
 
+Scope: ``.github/workflows/verifier-eval.yml`` runs the full matrix only when the
+PR touches the verifier's criteria, request builder, transcript renderer, schema
+plumbing, or this module; other PRs on its trigger paths run only
+``test_narrating_model_reaches_a_verdict_at_shipped_budgets`` (ENG-2863).
+
 Gating: requires ``MINDSHUB_API_KEY`` in the environment (or repo-root
 ``.env``). Without it the module auto-skips, so the default CI unit run is
 unaffected — **unless** ``VERIFIER_EVAL_REQUIRE_LIVE=1``, which turns a missing
@@ -149,10 +154,11 @@ _THROTTLE_RETRY_CAP_S = 60.0
 
 # Total throttle retries allowed across the whole session, not per call.
 #
-# The per-call retry alone was not enough: `_verdicts` invokes `_verdict` 18
-# times per model (4 cases x 3 runs + STUCK x 6), so 37 calls per session, each
-# entitled to its own pause. Under a SUSTAINED throttle that is 12 minutes at
-# the default and 37 at the cap — and it still ends green with zero cases
+# The per-call retry alone was not enough: `_verdicts` invokes `_verdict` ~45-51
+# times per model (seven cases at 3 runs, four at 6, one at 12 on air only), ~103
+# calls per full session (ENG-2863 recount; it was 37 when this was written), each
+# entitled to its own pause. Under a SUSTAINED throttle that is ~34 minutes at
+# the default and ~103 at the cap — and it still ends green with zero cases
 # executed. The retry fixed the common case (a short window that clears) while
 # turning the pathological one from a fast wrong answer into a slow one.
 #
@@ -1184,6 +1190,12 @@ _ONE_ATTEMPT_GIVE_UP = Case(
     # each. An 11-of-12 threshold flaked on its first CI run, and a gate people
     # learn to re-run is not a gate. If haiku stops slipping, delete
     # `skip_models` and its pin and let it gate.
+    # Twelve, deliberately. ENG-2863 first trimmed this to six ("0 slips in 48+
+    # runs on air"), and review pointed out that number bounds false positives
+    # only: this control exists to catch a LOW-RATE regression, and at the
+    # 1-in-16 slip rate haiku showed, 12 runs detect it ~54% of the time and
+    # 6 runs ~32%. The saving was 6 calls per full run, ~26 full runs a month
+    # once the guard tier exists — not worth halving the guard's power.
     runs=12,
     skip_models=("haiku",),
 )
@@ -1422,19 +1434,28 @@ async def test_verdict(case: Case, model: str):
     )
 
 
-async def test_narrating_model_reaches_a_verdict_at_shipped_budgets():
-    """ENG-1081 regression guard: a narrating alias must produce *a* verdict
-    through the shipped budget-escalation loop — the failure mode was 98.6% of
+@pytest.mark.parametrize("model", _MODELS)
+async def test_narrating_model_reaches_a_verdict_at_shipped_budgets(model: str):
+    """ENG-1081 regression guard: an alias must produce *a* verdict through the
+    shipped budget-escalation loop — the failure mode was 98.6% of
     mindshub_air verdicts silently returning no tool call at max_tokens=256,
     which the fail-safe upstream turned into silent task death. Verdict
-    *quality* on this alias is covered by the matrix above; this asserts only
-    that the call survives the model's narration.
+    *quality* is covered by the matrix above; this asserts only that the call
+    survives the model's narration.
+
+    Parametrized over BOTH matrix aliases, not only the narrating one, since
+    ENG-2863: this is the only test that runs in the workflow's guard tier, and
+    `_check_served_model` fires on every response it makes. With one alias the
+    guard tier never called haiku, so a haiku-only repoint would have gone
+    unnoticed until the next verifier-touching PR (~26/month) instead of the
+    next trigger-path PR (~200/month) — ENG-1687's whole premise is latency.
+    Two calls per guard run instead of one, against a ~97-call matrix.
 
     Behaviourally this overlaps the matrix (a truncation escape on the
     recovered fixture would fail `test_verdict` too) — kept as one cheap,
-    named call so the ENG-1081 regression class stays traceable in the test
-    report even if the matrix's cases or models are later reshaped.
+    named call per alias so the ENG-1081 regression class stays traceable in
+    the test report even if the matrix's cases or models are later reshaped.
     """
-    llm = _client(_NARRATING_MODEL)
+    llm = _client(model)
     verdict = await _verdict(llm, _RECOVERED)
     assert verdict.status in ("COMPLETE", "WAITING", "INCOMPLETE", "STUCK")
