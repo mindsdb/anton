@@ -212,12 +212,16 @@ async def test_a_body_without_write_file_still_answers_the_reply_s_other_tool_ca
     assert isinstance(result, dict) and result["files_written"] == ["index.html"]
     assert (tmp_path / "index.html").read_text() == "<h1>Hi</h1>"
 
-    # The message that answered round 0, as round 1 saw it.
+    # The message that answered round 0. The loop passes ONE list object to
+    # every call and keeps appending to it, so the recorded argument holds the
+    # whole history by now; find the answer by the tool_use id it closes.
     history = session._llm.code_stream.call_args_list[0].kwargs["messages"]
-    reply = history[-1]
-    assert reply["role"] == "user" and isinstance(reply["content"], list)
+    [reply] = [
+        m for m in history
+        if m["role"] == "user" and isinstance(m["content"], list)
+        and any(b.get("type") == "tool_result" and b.get("tool_use_id") == "f1" for b in m["content"])
+    ]
     [answer] = [b for b in reply["content"] if b.get("type") == "tool_result"]
-    assert answer["tool_use_id"] == "f1"
     assert answer["content"] == _FINISH_REFUSED_BODY_UNWRITTEN_MSG
     assert reply["content"][-1] == {"type": "text", "text": _BODY_WITHOUT_CALL_MSG}
 
