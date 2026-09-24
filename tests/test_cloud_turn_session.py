@@ -71,8 +71,10 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.web_fetch_enabled is False
 
 
-def test_datasource_turn_uses_only_trusted_pod_config_and_child_overlay(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTON_DATASOURCE_GATEWAY_URL", "https://datasource.internal/base")
+def test_datasource_turn_carries_only_its_references_to_the_child(tmp_path, monkeypatch):
+    """The key and the gateway host reach the child through its own inference
+    connection; a gateway setting left in the pod is ignored."""
+    monkeypatch.setenv("ANTON_DATASOURCE_GATEWAY_URL", "https://attacker.invalid")
     request = TurnRequestV1.from_json(
         '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
         '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
@@ -90,6 +92,7 @@ def test_datasource_turn_uses_only_trusted_pod_config_and_child_overlay(tmp_path
         "credential_version": 3,
     }
     assert "GATEWAY_URL" not in cfg.workspace_env_overlay
+    assert "ANTON_CLOUD_DATASOURCE_TURN_KEY" not in cfg.workspace_env_overlay
 
 
 def test_a_turn_without_a_datasource_block_carries_only_the_cloud_marker(tmp_path, monkeypatch):
@@ -112,17 +115,44 @@ def test_legacy_minds_configuration_never_reaches_a_cloud_prompt(tmp_path, monke
     assert "legacy-datasource" not in context
 
 
-def test_datasource_turn_fails_closed_without_trusted_gateway_config(tmp_path, monkeypatch):
-    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
-    monkeypatch.delenv("ANTON_DATASOURCE_GATEWAY_URL", raising=False)
-    request = TurnRequestV1.from_json(
+def _datasource_request(base_url="https://minds.internal/v1"):
+    return TurnRequestV1.from_json(
         '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
         '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
-        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        f'"base_url":"{base_url}"}},"datasource":{{"protocol_version":1,'
         '"connections":[{"connection_id":7,"credential_version":3}]}}'
     )
-    with pytest.raises(ValueError, match="trusted datasource gateway"):
-        build_cloud_chat_session(request)
+
+
+@pytest.mark.parametrize(
+    "pod_env",
+    [
+        {"ANTON_OPENAI_API_KEY": "shared-key"},
+        {"ANTON_OPENAI_API_KEY": "shared-key", "ANTON_OPENAI_BASE_URL": "https://minds.internal/v1"},
+        {"ANTON_OPENAI_BASE_URL": "https://shared.invalid/v1"},
+    ],
+    ids=["shared-key", "shared-key-same-base", "shared-base"],
+)
+def test_a_datasource_turn_fails_when_a_pod_setting_replaces_the_turn_connection(tmp_path, monkeypatch, pod_env):
+    """The helper would send the child's key to the child's base, so a shared
+    provider key or base in the pod must fail the turn, not every query."""
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    for name, value in pod_env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="cannot carry datasource reads"):
+        build_cloud_chat_session(_datasource_request())
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://minds.internal/v1", "https://minds.internal/api/v1", "https://minds.internal", "https://u:p@minds.internal/v1"],
+    ids=["plaintext", "api-v1-path", "no-path", "credentials"],
+)
+def test_a_datasource_turn_fails_when_its_inference_base_is_not_https_at_v1(tmp_path, monkeypatch, base_url):
+    """Only /v1/datasources/execute is published, and the bearer never goes over plaintext."""
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    with pytest.raises(ValueError, match="cannot carry datasource reads"):
+        build_cloud_chat_session(_datasource_request(base_url))
 
 
 def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):

@@ -385,7 +385,7 @@ def test_launch_backend_never_receives_the_turns_cloud_state(tmp_path, monkeypat
     sess._scratchpads = None
     sess._workspace_env_overlay = {
         "ANTON_CLOUD_TURN": "1",
-        "ANTON_CLOUD_DATASOURCE_TURN_KEY": "mdb_turn.secret",
+        "ANTON_CLOUD_DATASOURCE_CORRELATION_ID": "corr-1",
         "ANTON_CLOUD_DATASOURCE_CONNECTIONS": "[]",
         "PROJECT_ONLY": "yes",
     }
