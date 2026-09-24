@@ -200,7 +200,13 @@ step and costs a regeneration:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them.\
+  to them.
+- BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
+  / `document.cookie` may be unavailable — the in-app preview runs the page
+  in a sandboxed frame. Never touch them directly during top-level
+  initialisation: a throw there aborts the script before any listener is
+  bound, and the page renders with every control dead. Go through one
+  guarded helper with an in-memory fallback.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded

@@ -634,7 +634,20 @@ class TestPipelineContractMirrored:
         "never for comparison or change over time",
         "names the measure AND its unit",
         "never a raw float",
+        # The preview frame's storage APIs throw, and a page that
+        # reads them at top level dies before binding a single listener.
+        "BROWSER STORAGE",
     )
+
+    # FRONTEND_MARKERS minus the two the pipeline contract does not state
+    # today: `primary="index.html"` and "never for comparison or change over
+    # time" live only in the skill. That is pre-existing drift, recorded
+    # separately and deliberately not fixed here — this tuple keeps the new
+    # check deterministic instead of red on someone else's problem.
+    PIPELINE_MIRRORED_MARKERS = tuple(
+        m for m in FRONTEND_MARKERS
+        if m not in ('primary="index.html"', "never for comparison or change over time")
+    ) + ("BROWSER STORAGE",)
 
     def test_backend_skill_states_the_verifier_contract(self, store):
         body = store.load("build-fullstack-backend").declarative_md
@@ -644,6 +657,18 @@ class TestPipelineContractMirrored:
     def test_dashboard_skill_states_the_verifier_contract(self, store):
         body = store.load("build-html-dashboard").declarative_md
         missing = [m for m in self.FRONTEND_MARKERS if m not in body]
+        assert not missing, missing
+
+    def test_the_pipeline_contract_states_what_the_skills_mirror(self):
+        """The markers are the pipeline's own phrases; a skill that states them
+        while `prompts.py` does not is drift in the other direction, and the
+        test above cannot see it."""
+        from anton.core.tools.generate_artifact import prompts
+
+        contract = "\n".join(
+            value for value in vars(prompts).values() if isinstance(value, str)
+        )
+        missing = [m for m in self.PIPELINE_MIRRORED_MARKERS if m not in contract]
         assert not missing, missing
 
     def test_fullstack_frontend_step_points_at_the_host_contract(self, store):

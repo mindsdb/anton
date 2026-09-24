@@ -37,6 +37,7 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   8. Significant block containers (`div`, `section`, `table`, `main`, `article`) carry stable `id` attributes — the host app attaches comments to them.
   9. The only external resources are the two CDN scripts named under Visual design (Tailwind, ECharts). Any other library from a CDN is allowed only when the user asked for it.
   10. Opened in a browser, the page logs no console error and requests no local file that does not exist; it renders visible content without user interaction.
+  11. BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` may be unavailable — the in-app preview runs the page in a sandboxed frame. Never touch them directly during top-level initialisation: a throw there aborts the script before any listener is bound, and the page renders with every control dead. Go through one guarded helper with an in-memory fallback.
 
   SECURITY (critical): Dashboards may be published to the web. NEVER embed API keys, tokens, passwords, connection strings, or any credentials in the HTML, JS, or inline data. Fetch data in scratchpad cells using credentials from environment variables, then serialize only the resulting data into the dashboard. If the user explicitly asks to embed a credential (e.g. for a live-updating dashboard), warn them that publishing will expose it and get confirmation before proceeding.
 
