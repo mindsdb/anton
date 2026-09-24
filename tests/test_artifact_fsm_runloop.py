@@ -185,8 +185,9 @@ async def test_a_truncated_body_writes_nothing(tmp_path: Path):
 
 
 async def test_a_body_without_write_file_still_answers_the_reply_s_other_tool_calls(tmp_path: Path):
-    """The reply "final chunk + finish, write_file forgotten" put an assistant turn with a `finish` tool_use into the
-    history and answered it with a bare user text. The next request was
+    """The reply "final chunk + finish, write_file forgotten" put an
+    assistant turn with a `finish` tool_use into the history and answered it
+    with a bare user text. The next request was
     rejected by the provider (tool_use without tool_result) and the whole
     run ended as "generator crashed". Every tool_use of that reply gets a
     tool_result — `finish` a refusal, not an acceptance — and the advice

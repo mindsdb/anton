@@ -358,7 +358,8 @@ def _redraw_response(content: str, **fields) -> LLMResponse:
 async def test_redraw_brief_replaces_the_lists_when_they_arrive_as_strings(tmp_path):
     """`redraw_brief` used to replace the lists only for a JSON array, so a
     correction re-stated as one string kept the OLD assumptions and open
-    points — the same schema drift seen live on the gathering step, with the opposite failure: stale data instead of none."""
+    points — the same schema drift seen live on the gathering step, with the
+    opposite failure: stale data instead of none."""
     state = _state(tmp_path)
     state.assumptions = ["old assumption"]
     state.open_points = ["old question"]

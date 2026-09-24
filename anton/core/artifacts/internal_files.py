@@ -3,8 +3,8 @@ that are inputs to generation rather than artifact content.
 
 `generate_artifact` writes `prd.md`, `discovery.json`, `spec.md` and
 `openapi.json`, and reads the PRD back from the same folder. Every one of them
-physically sits next to `index.html` or `backend.py`, and every one of them would otherwise be reported to the user as
-part of what was built.
+physically sits next to `index.html` or `backend.py`, and every one of them
+would otherwise be reported to the user as part of what was built.
 
 One definition each, because both ends of every name matter and are far apart:
 the tool that writes the file and the store that must leave it out of `files[]`.

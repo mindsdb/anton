@@ -262,7 +262,8 @@ def test_api_spec_instruction_carries_the_rules_the_system_prompt_used_to():
 
 def test_both_kickoffs_carry_the_contract_as_one_line_of_json():
     """`openapi.json` is indented for people; indented it put 35.8 KB into
-    each generator's kickoff where the compact form is 11.7 KB. Text that is not JSON passes through unchanged."""
+    each generator's kickoff where the compact form is 11.7 KB. Text that is
+    not JSON passes through unchanged."""
     pretty = json.dumps({"openapi": "3.1.0", "paths": {"/api/t": {"get": {"responses": {"200": {}}}}}}, indent=2)
     compact = json.dumps(json.loads(pretty))
     assert "\n" in pretty and "\n" not in compact
@@ -907,8 +908,8 @@ def test_design_rules_do_not_restate_the_contract():
 # ── fullstack frontend prompt: same skeleton as html-app ────────────────────
 #
 # Live runs showed the html-app structure holding — one body, no self-check —
-# so the fullstack frontend uses the same blocks, with the fullstack-only material in the task paragraph and a
-# `## Fullstack rules` section.
+# so the fullstack frontend uses the same blocks, with the fullstack-only
+# material in the task paragraph and a `## Fullstack rules` section.
 
 def _fullstack_prompt() -> str:
     return prompts.build_frontend_system_prompt(Path("/tmp/artifact-prompt-probe"))

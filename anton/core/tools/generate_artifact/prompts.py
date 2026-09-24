@@ -1310,9 +1310,10 @@ _TECH_SPEC_CONTENT = (
 
 # The API contract (shapes, fields, formats, examples) lives in ONE place —
 # `openapi.json`, written on the next step. Seen live: spec.md gave
-# `GET /api/time` a response shape and the API step gave it another (an extra field, a different date format); both
-# generators followed openapi.json, so the app worked, but the two documents
-# disagreed inside the same kickoff. spec.md names the endpoints and the flow;
+# `GET /api/time` a response shape and the API step gave it another (an
+# extra field, a different date format); both generators followed
+# openapi.json, so the app worked, but the two documents disagreed inside
+# the same kickoff. spec.md names the endpoints and the flow;
 # it does not shape them.
 _TECH_SPEC_BACKEND = (
     "- `## Backend` (fullstack types): the endpoints under `/api/*` as a list, "

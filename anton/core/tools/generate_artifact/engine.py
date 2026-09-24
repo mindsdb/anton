@@ -348,7 +348,8 @@ async def _plan_whole_document(
     something was lost. That silent loss is the damage, not the missing length.
 
     Truncation is detected with the shared `looks_truncated`, which also honours
-    ``stop_reason`` — the gateway reports it correctly, and a token count alone cannot see a cut that stopped just under the cap.
+    ``stop_reason`` — the gateway reports it correctly, and a token count alone
+    cannot see a cut that stopped just under the cap.
     """
     trace = trace or NullTrace()
     budgets = (SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)

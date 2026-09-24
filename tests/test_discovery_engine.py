@@ -178,9 +178,10 @@ async def test_finish_gathering_falls_back_to_the_registered_type_when_invented(
 
 
 async def test_finish_gathering_falls_back_when_the_type_has_no_generator():
-    """`document` is in ARTIFACT_TYPES, so it used to be accepted here; `settle_artifact_type("document")` then read as
-    fullstack (`!= "html-app"`), the pipeline built a backend for a
-    document, and the handler refused every repeat call for the slug."""
+    """`document` is in ARTIFACT_TYPES, so it used to be accepted here;
+    `settle_artifact_type("document")` then read as fullstack
+    (`!= "html-app"`), the pipeline built a backend for a document, and the
+    handler refused every repeat call for the slug."""
     session = _session_with_plan_sequence(
         _response(tool_calls=[_tc("finish_gathering", {"summary": "ready", "artifact_type": "document"})]),
     )
@@ -429,9 +430,10 @@ async def test_a_fetched_web_page_verifies_the_source_it_came_from(monkeypatch):
 
 
 async def test_a_web_tool_outcome_is_unwrapped_to_its_text(monkeypatch):
-    """Both web fallbacks return a `ToolOutcome`. Passed through as-is, the model's tool_result and the
-    `web_notes` excerpt carried `ToolOutcome(content='...', ok=True)` — the
-    dataclass repr instead of the page."""
+    """Both web fallbacks return a `ToolOutcome`. Passed through as-is, the
+    model's tool_result and the `web_notes` excerpt carried
+    `ToolOutcome(content='...', ok=True)` — the dataclass repr instead of the
+    page."""
     import anton.core.tools.web_tools as web_tools
     from anton.core.tools.registry import ToolOutcome
 
