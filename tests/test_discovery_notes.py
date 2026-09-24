@@ -12,7 +12,7 @@ from anton.core.tools.generate_artifact.discovery.notes import (
 def _call(**over) -> dict:
     base = {
         "kind": "web_fetch",
-        "url": "https://habr.com/ru/articles/1074010/",
+        "url": "https://example.com/articles/1074010/",
         "title": "An article about dashboards",
         "excerpt": "Dashboards are useful.",
         "query": "",
@@ -27,14 +27,14 @@ def test_no_calls_render_to_an_empty_string():
 
 def test_a_fetch_renders_url_title_and_excerpt():
     out = render_web_notes([_call()])
-    assert "https://habr.com/ru/articles/1074010/" in out
+    assert "https://example.com/articles/1074010/" in out
     assert "An article about dashboards" in out
     assert "Dashboards are useful." in out
 
 
 def test_a_search_renders_its_query_not_a_url():
-    out = render_web_notes([_call(kind="web_search", query="habr dashboards", url="", title="")])
-    assert "habr dashboards" in out
+    out = render_web_notes([_call(kind="web_search", query="dashboard examples", url="", title="")])
+    assert "dashboard examples" in out
 
 
 def test_a_long_excerpt_is_capped_per_call():

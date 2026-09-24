@@ -61,8 +61,8 @@ def test_absolute_href_and_img_src_are_not_flagged_at_all():
     """
     html = GOOD.replace(
         '<div id="kpi-revenue"></div>',
-        '<a href="https://habr.com/ru/articles/1074010/">Source</a>'
-        '<img src="https://habrastorage.org/getpro/habr/upload_files/a.png">'
+        '<a href="https://example.com/articles/1074010/">Source</a>'
+        '<img src="https://images.example.com/upload_files/a.png">'
         '<link href="https://fonts.googleapis.com/css2?family=Inter" rel="stylesheet">',
     )
     for is_fullstack in (True, False):

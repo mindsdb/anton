@@ -15,11 +15,11 @@ def _cp(**over) -> cp.DiscoveryCheckpoint:
         pipeline_stage=cp.STAGE_PRD_WRITTEN,
         artifact_type="html-app",
         gathering_complete=True,
-        declared_sources=["habr article"],
+        declared_sources=["the article"],
         unverified_sources=[],
         brief_markdown="## Goal\nA dashboard.",
         data_notes="Scratchpad `dash`:\n```python\nx = 1\n```",
-        web_notes="- https://habr.com/x — Title",
+        web_notes="- https://example.com/x — Title",
         assumptions=["dark theme"],
         open_points=["count cancelled orders?"],
     )
