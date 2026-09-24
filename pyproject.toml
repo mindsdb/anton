@@ -37,6 +37,11 @@ dependencies = [
     # settings require, so the parser matches the one resolving the settings.
     "python-dotenv>=0.21",
     "typer>=0.12.4",
+    # Declared, not inherited: it arrives transitively via typer. Pinned
+    # directly to force the fix for CVE-2026-7246
+    # (SNYK-PYTHON-CLICK-16347201, shell=True command injection in
+    # click.edit()'s filename handling) since typer doesn't pin click itself.
+    "click>=8.3.3",
     "rich>=13.0,<15",
     "prompt-toolkit>=3.0",
     "packaging>=21.0",

@@ -177,11 +177,13 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     list is real findings — only that last case is ever appended to the
     agent-facing message list.
 
-    Add a format by adding one entry here. Only `.xlsx`/`.html` are
-    registered — every other extension is silently unchecked, which is
-    honest as-is: nothing ever claimed to validate a `.csv`.
+    Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
+    `.docx` are registered — every other extension is silently unchecked,
+    which is honest as-is: nothing ever claimed to validate a `.csv`.
     """
     from anton.core.artifacts.html_lint import lint_html
+    from anton.core.artifacts.office_open_check import check_opens_via_office
+    from anton.core.artifacts.ooxml_lint import lint_ooxml
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
@@ -217,7 +219,28 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             return [f.message() for f in findings]
         return None
 
-    return {".xlsx": _xlsx_linter, ".html": _html_linter}
+    def _ooxml_linter(kind: str) -> Callable[[Path], list[str] | None]:
+        def _lint(path: Path) -> list[str] | None:
+            # Structure first (ENG-2175): a truncated or hand-rolled package
+            # is named without any Office install. Only a package that is
+            # structurally sound goes on to LibreOffice, since a 30-second
+            # export of a file already known to be broken adds nothing.
+            structural_findings = lint_ooxml(path, kind)
+            if structural_findings:
+                return [f.message() for f in structural_findings]
+            office_findings = check_opens_via_office(path)
+            if structural_findings is None and office_findings is None:
+                return None
+            return [f.message() for f in (office_findings or [])]
+
+        return _lint
+
+    return {
+        ".xlsx": _xlsx_linter,
+        ".html": _html_linter,
+        ".pptx": _ooxml_linter("pptx"),
+        ".docx": _ooxml_linter("docx"),
+    }
 
 
 def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
@@ -493,9 +516,10 @@ async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> ToolO
     )
 
     # Only-if-unset, like the scratchpad, so a project .env cannot override
-    # PATH or a key this process already has.
+    # PATH or a key this process already has. The cloud turn's own state (its
+    # bearer, its connection references) is for the scratchpad alone.
     overlay = getattr(session, "_workspace_env_overlay", None) or {}
-    extra_env = {k: v for k, v in overlay.items() if k not in os.environ}
+    extra_env = {k: v for k, v in overlay.items() if k not in os.environ and not k.startswith("ANTON_CLOUD_")}
 
     result = await launch_artifact_backend(
         slug=slug,
