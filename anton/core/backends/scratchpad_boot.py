@@ -862,8 +862,10 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
         import ssl as _cloud_ssl
         import urllib.parse as _cloud_parse
 
-        _cloud_gateway_url = os.environ.get("ANTON_DATASOURCE_GATEWAY_URL", "").strip().rstrip("/")
-        _cloud_turn_key = os.environ.get("ANTON_CLOUD_DATASOURCE_TURN_KEY", "")
+        # The gateway is on the inference host this child already calls, with
+        # the same turn key. Never the ANTON_OPENAI_* fallbacks get_llm reads.
+        _cloud_gateway_url = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
+        _cloud_turn_key = os.environ.get("OPENAI_API_KEY", "")
         _cloud_correlation_id = os.environ.get("ANTON_CLOUD_DATASOURCE_CORRELATION_ID", "")
         _cloud_refs = json.loads(os.environ["ANTON_CLOUD_DATASOURCE_CONNECTIONS"])
         _cloud_versions = {
@@ -904,7 +906,7 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
             try:
                 connection.request(
                     "POST",
-                    f"{parsed.path.rstrip('/')}/v1/datasources/execute",
+                    "/v1/datasources/execute",
                     body=payload,
                     headers={
                         "Authorization": f"Bearer {_cloud_turn_key}",
@@ -954,9 +956,10 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
                 parsed_url = _cloud_parse.urlsplit(_cloud_gateway_url)
                 if (
                     parsed_url.scheme != "https"
-                    or not parsed_url.netloc
+                    or not parsed_url.hostname
                     or parsed_url.username is not None
                     or parsed_url.password is not None
+                    or parsed_url.path != "/v1"
                     or parsed_url.query
                     or parsed_url.fragment
                 ):

@@ -165,8 +165,8 @@ class TurnRequestV1:
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
     oauth: dict | None = None
-    #: Optional verified datasource references. Only IDs and immutable versions
-    #: cross the controller/pod boundary; gateway origin and capabilities do not.
+    #: Optional verified datasource references: only IDs and immutable versions.
+    #: No capability or password crosses; the gateway is on the `llm` base URL's host.
     datasource: DatasourceBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
