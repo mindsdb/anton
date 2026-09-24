@@ -466,15 +466,24 @@ def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
 
 
 async def _declare_datasources(state: GenState, refs: list) -> None:
-    """Persist the mapped `DatasourceRef`s into artifact metadata."""
-    if not refs:
-        return
+    """Persist the mapped `DatasourceRef`s into artifact metadata.
+
+    An empty list is written too, not skipped: it is the verified backend's
+    answer for THIS iteration, and a backend rewritten to read no database
+    must not keep the previous run's connection in `metadata.datasources`,
+    where `launch_backend` would go on handing it those credentials
+    (review 2026-09-24, finding 10). `store.update(datasources=[])` is the
+    documented way to clear the list.
+    """
     from anton.core.tools.tool_handlers import resolve_artifact_store
 
     store = resolve_artifact_store(state.session)
     if store is not None:
-        store.update(state.slug, datasources=refs)
-        state.record("declare_datasources", "done", ", ".join(r.slug for r in refs))
+        store.update(state.slug, datasources=list(refs))
+        state.record(
+            "declare_datasources", "done",
+            ", ".join(r.slug for r in refs) if refs else "none declared; list cleared",
+        )
 
 
 def _absorb_files_written(state: GenState, result: dict) -> None:

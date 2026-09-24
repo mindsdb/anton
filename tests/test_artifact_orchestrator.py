@@ -172,6 +172,22 @@ async def test_gen_verify_backend_retries_once_then_succeeds(tmp_path: Path, mon
     assert declared["refs"] == ["REF"]
 
 
+async def test_declare_datasources_writes_an_empty_list_to_clear_the_previous_one(
+    tmp_path: Path, monkeypatch
+):
+    """Review 2026-09-24 №10: the early return on an empty mapping left the
+    previous generation's connection in metadata."""
+    from anton.core.tools import tool_handlers
+
+    store = Mock()
+    monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: store)
+    st = _state(tmp_path)
+    await orchestrator._declare_datasources(st, [])
+    store.update.assert_called_once_with("a", datasources=[])
+    rec = [r for r in st.trace if r.node == "declare_datasources"][0]
+    assert rec.outcome == "done" and "cleared" in rec.detail
+
+
 async def test_gen_verify_backend_stateful_wiring(tmp_path: Path, monkeypatch):
     """Stateful: the manifest step is injected and the type reaches the verifier."""
     st = _state(tmp_path, artifact_type="fullstack-stateful-app", is_fullstack=True)
