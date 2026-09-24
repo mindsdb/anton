@@ -91,7 +91,7 @@ def _apply_workspace_overlay(env: dict[str, str], overlay: dict[str, str] | None
     project .env can neither replace PATH nor a key this process already holds.
     The per-turn cloud state is the exception: whatever a previous cloud
     runtime left in the parent environment is dropped first and the overlay's
-    values replace it, so a stale bearer or connection set never reaches a pad.
+    values replace it, so a stale correlation id or connection set never reaches a pad.
     """
     for key in list(env):
         if _is_cloud_turn_state(key):

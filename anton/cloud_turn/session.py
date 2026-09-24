@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -129,7 +130,7 @@ def _datasource_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
     if (
         llm.get("provider") != "minds-cloud"
         or not isinstance(llm.get("api_key"), str)
-        or settings.openai_api_key != llm["api_key"]
+        or not hmac.compare_digest(settings.openai_api_key or "", llm["api_key"])
         or base != str(llm.get("base_url") or "").rstrip("/")
         or parsed.scheme != "https"
         or not parsed.netloc

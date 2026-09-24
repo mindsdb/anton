@@ -7,7 +7,7 @@ import anton.core.backends.local as local
 
 
 def test_inherited_cloud_turn_state_is_dropped_and_the_overlay_wins():
-    """A previous runtime's bearer or connection set in the parent environment
+    """A previous runtime's correlation id or connection set in the parent environment
     must never reach the next pad; the overlay's own values replace them."""
     env = {
         "PATH": "/usr/bin",
