@@ -161,8 +161,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # what this pipeline BUILDS, not every registered type: a
                 # `document` or `dataset` is valid metadata but has no
                 # generator, and settling on one would build a fullstack
-                # app for it and lock the slug out of any repeat call
-                # (review 2026-09-24, finding 2).
+                # app for it and lock the slug out of any repeat call.
                 state.final_artifact_type = (
                     claimed_type if claimed_type in GENERATOR_ARTIFACT_TYPES
                     else state.artifact_type
@@ -208,7 +207,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # Raw material for `notes.render_exec_notes`: the working
                 # data-access code is what phase E needs, and it must not
                 # depend on the model mentioning it in a summary. Only a cell
-                # that RAN counts: the twenty-third live run recorded an exec
+                # that RAN counts: a live run once recorded an exec
                 # the single-scratchpad guard had refused, and both generators
                 # received its code with the refusal text as its "Output".
                 if inp.get("action") == "exec" and inp.get("code") and _exec_ran(outcome):
@@ -220,7 +219,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 result_blocks.append(protocol.tool_result(tc.id, content))
             elif name in ("web_search", "web_fetch"):
                 handler, field = _web_tools()[name]
-                # Both fallbacks answer with a `ToolOutcome` since ENG-2677;
+                # Both fallbacks answer with a `ToolOutcome`;
                 # the model, the trace and `web_notes` all want its text, not
                 # the dataclass repr — same unwrap as the scratchpad branch.
                 content = protocol.unwrap_outcome(await handler(state.session, inp))

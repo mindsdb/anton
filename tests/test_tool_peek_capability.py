@@ -1,5 +1,5 @@
 """`tool_peek` is a capability the host declares, not a phase every wire
-carries (review of PR #335). The relay itself is pinned in
+carries. The relay itself is pinned in
 test_tool_registry_streaming.py; this file pins the three ends around it.
 """
 from __future__ import annotations

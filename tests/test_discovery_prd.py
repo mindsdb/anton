@@ -150,7 +150,7 @@ def test_write_prd_instruction_also_forbids_process_meta_commentary():
 def test_write_prd_instruction_promotes_accepted_proposals_and_defaults():
     """The brief now separates proposals and questions from requirements;
     once accepted they have to become requirements, or the PRD loses them
-    the way the 2026-09-16 run lost both open points."""
+    the way a live run lost both open points."""
     text = prd._WRITE_PRD_INSTRUCTION
     assert "Proposals are accepted" in text
     assert "the stated default is the decision" in text
@@ -158,7 +158,7 @@ def test_write_prd_instruction_promotes_accepted_proposals_and_defaults():
 
 
 def test_write_prd_instruction_asks_data_model_to_skip_negatives():
-    """Fifth live run 2026-09-16: the brief already had this rule and was
+    """Seen live: the brief already had this rule and was
     clean, but the PRD's Data model still said "the connected databases
     are not used" — the kickoff's connections section is in its history."""
     text = prd._WRITE_PRD_INSTRUCTION
@@ -167,7 +167,7 @@ def test_write_prd_instruction_asks_data_model_to_skip_negatives():
 
 
 def test_write_prd_instruction_forbids_copying_long_form_source_content():
-    """The 2026-08-27 live run retold one article three times (pad -> prd.md
+    """A live run retold one article three times (pad -> prd.md
     -> spec.md -> index.html). The PRD gives the structure, not the content.
 
     The citation half of the old rule is gone with the merge: the generator
@@ -230,7 +230,7 @@ def test_write_prd_instruction_names_the_latest_brief_as_the_source():
 
 
 def test_write_prd_instruction_lets_a_data_free_artifact_skip_the_data_model():
-    """Sixth live run 2026-09-16: "fields and a few sample rows" was demanded
+    """Seen live: "fields and a few sample rows" was demanded
     unconditionally, so the PRD for a card game invented an in-memory card
     table and a fixed emoji list, which the spec then froze verbatim."""
     text = prd._WRITE_PRD_INSTRUCTION
@@ -248,7 +248,7 @@ def test_write_prd_instruction_keeps_sensitive_sample_values_out():
 
 
 def test_write_prd_instruction_leaves_visual_style_to_the_build_step():
-    """Sixth live run: the UI/UX section added flip animation, hover feedback
+    """Seen live: the UI/UX section added flip animation, hover feedback
     and a "calm, friendly" style nobody agreed to, under a header downstream
     reads as "accepted by the user". Layout follows the requirements; the
     look is the spec's decision."""

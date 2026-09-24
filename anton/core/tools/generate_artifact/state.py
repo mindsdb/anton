@@ -25,7 +25,7 @@ DATA_LOOP_MAX: int = 3
 # Generation-loop failures (round budget, no tool calls) and verification
 # failures get SEPARATE retry budgets. With a single shared counter a loop
 # failure consumed the retry reserved for fixing verifier findings, and a
-# trivially fixable verification error became terminal (live run 2026-08-27).
+# trivially fixable verification error became terminal.
 GEN_LOOP_MAX_RETRIES: int = 1
 GEN_VERIFY_MAX_RETRIES: int = 1
 RUNAPP_MAX_RETRIES: int = 1
@@ -37,8 +37,8 @@ JOURNAL_DETAIL_MAX: int = 300
 # Output budgets for the two whole-document calls (`make_tech_spec`,
 # `make_api_spec`), overriding the client default of 8192 — a specification is
 # among the longest single answers anton asks for, and reasoning models spend
-# their internal thinking from the same budget (stage-1a measured a 25 842-char
-# spec dying at 8192 output tokens, ENG-1116).
+# their internal thinking from the same budget (a 25 842-character spec was
+# measured dying at 8192 output tokens).
 #
 # The two values are what the MindsHub gateway actually accepts, not round
 # numbers: measured 2026-08-24 against `api.mindshub.ai/v1`, alias `opus` —
@@ -166,9 +166,8 @@ class GenState:
     # Entry-file name from the artifact metadata. May be None — `create_artifact`
     # allows omitting it; HTML_APP_DEFAULT_PRIMARY then applies.
     primary: str | None = None
-    # Body of `prd.md` when a previous run left one in the artifact folder
-    # (ENG-969 → ENG-968). This — not `brief` — is the requirements source on
-    # the normal path: it is the document the user actually reviewed and
+    # Body of `prd.md` when a previous run left one in the artifact folder.
+    # This — not `brief` — is the requirements source on the normal path: it is the document the user actually reviewed and
     # accepted, while `brief` is assembled by the calling agent. Empty when
     # there is no PRD, and every reader treats empty as "fall back to brief".
     prd: str = ""
@@ -198,7 +197,7 @@ class GenState:
     trace: list[StepResult] = field(default_factory=list)
     error: str | None = None
     trace_log: "GenTrace | NullTrace" = field(default_factory=NullTrace)
-    # Progress channel to the tool handler (ENG-970). None when nobody is
+    # Progress channel to the tool handler. None when nobody is
     # listening — the non-streaming path, `bench_generate.py`, most tests — so
     # every call site stays unconditional. Must be UNBOUNDED: `step_started`
     # is called from synchronous FSM code that cannot await a full queue, and

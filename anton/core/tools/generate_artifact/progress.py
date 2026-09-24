@@ -1,4 +1,4 @@
-"""User-facing labels for the generation FSM's steps (ENG-970).
+"""User-facing labels for the generation FSM's steps.
 
 `GenState.step_started` turns an FSM node name into one of these lines and
 pushes it onto the progress channel; `handle_generate_artifact` forwards them

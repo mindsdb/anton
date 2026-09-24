@@ -408,8 +408,8 @@ class TestSkillDescriptionsSteerAway:
     recall_skill(label)"; a recall puts the FULL body (~270 lines of "do it by
     hand") into the context. So the description must open with the
     applicability condition, not with "MANDATORY reading before ANY…".
-    (Until ENG-2666 a thalamus gate preloaded up to three skills per turn from
-    the same descriptions — the gate is gone, the steering still matters.)
+    (A thalamus gate once preloaded up to three skills per turn from the same
+    descriptions — the gate is gone, the steering still matters.)
     """
 
     LABELS = ("build-html-dashboard", "build-fullstack-backend")

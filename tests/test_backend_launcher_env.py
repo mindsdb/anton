@@ -83,7 +83,7 @@ def test_a_project_dotenv_cannot_add_an_undeclared_ds_var():
     assert "DS_SNEAKY__TOKEN" not in env
 
 
-# ── ENG-1382: the same DS_* rule on both launch paths ───────────────────────
+# ── the same DS_* rule on both launch paths ─────────────────────────────────
 #
 # `handle_launch_backend` is what the agent calls; `generate_artifact` launches
 # the backend itself at the end of its pipeline and never reaches that handler.
@@ -160,8 +160,8 @@ def test_an_undeclared_variable_is_stripped_from_the_backend_env(monkeypatch):
 async def test_the_generator_launches_with_only_the_declared_credentials(tmp_path, monkeypatch):
     """The pipeline's own launch must pass ds_env, not inherit the process's.
 
-    Without it the generator's launch is the single path ENG-1382 does not
-    cover — and it is the path that runs on every fullstack generation.
+    Without it the generator's launch is the single path the declared-only
+    rule does not cover — and it runs on every fullstack generation.
     """
     from anton.core.tools.generate_artifact import orchestrator
     from anton.core.tools.generate_artifact.state import GenState

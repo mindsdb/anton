@@ -98,7 +98,7 @@ def render_web_notes(calls: list[dict]) -> str:
 
 
 # Residue of the model's own tool-call syntax leaking into a JSON value.
-# Twelfth live run 2026-09-16: `open_points` arrived as the string
+# Seen live: `open_points` arrived as the string
 # '\n<parameter name="open_points">What does ...' (the question itself was in
 # the user's language) — the model wrote the field's opening tag inside the
 # field. It is markup, never content.
@@ -114,8 +114,8 @@ def string_list(value) -> list[str]:
     model's JSON is never trusted to match the schema:
 
     - a list: items stringified, `null` and blanks dropped;
-    - a string: one item per non-blank line, list markers removed. Twelfth
-      live run 2026-09-16: `constraints`, `assumptions` and `open_points`
+    - a string: one item per non-blank line, list markers removed. Seen live:
+      `constraints`, `assumptions` and `open_points`
       all came as plain strings, the old "not a list → empty" dropped every
       one of them, and `discovery.json` recorded no assumption and no open
       point — a cold start would have redrawn the brief without them;
@@ -136,7 +136,7 @@ def render_gathering_notes(inp: dict) -> str:
     """Markdown record of a `finish_gathering` call, built by code.
 
     The structured fields (`data_findings`, `constraints`, `assumptions`,
-    `open_points`) replaced the free-form `notes` on 2026-09-16 so the
+    `open_points`) replaced the free-form `notes` so the
     gathering step records facts and open decisions instead of drafting the
     brief. A call that still carries `notes` — an older prompt, a model that
     ignored the schema — falls back to it, then to `summary`, so nothing the

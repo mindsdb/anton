@@ -698,7 +698,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     folder. Pipeline failures come back wrapped by `_generation_failed` so
     the agent surfaces them instead of hand-building the artifact.
 
-    An async generator rather than a plain coroutine (ENG-970): a full run
+    An async generator rather than a plain coroutine: a full run
     takes minutes, and a tool that emits nothing for minutes reads as a hang.
     Step starts arrive on an `asyncio.Queue` and are yielded as `ToolProgress`
     markers; `ToolRegistry.dispatch_tool_stream` forwards those and takes the

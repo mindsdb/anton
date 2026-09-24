@@ -122,8 +122,8 @@ async def test_finish_gathering_tolerates_fields_of_the_wrong_shape():
 
 
 async def test_finish_gathering_keeps_list_fields_sent_as_strings():
-    """Twelfth live run 2026-09-16: `constraints`, `assumptions` and
-    `open_points` all arrived as strings. The old parser returned empty
+    """Seen live: `constraints`, `assumptions` and `open_points` all
+    arrived as strings. The old parser returned empty
     lists for all three, `gathering_notes` shrank to the summary, and
     `discovery.json` held no assumption and no open point — the hot path
     survived only because `draft_brief` reads the tool call off the history.
@@ -178,8 +178,7 @@ async def test_finish_gathering_falls_back_to_the_registered_type_when_invented(
 
 
 async def test_finish_gathering_falls_back_when_the_type_has_no_generator():
-    """Review 2026-09-24 №2: `document` is in ARTIFACT_TYPES, so it used to
-    be accepted here; `settle_artifact_type("document")` then read as
+    """`document` is in ARTIFACT_TYPES, so it used to be accepted here; `settle_artifact_type("document")` then read as
     fullstack (`!= "html-app"`), the pipeline built a backend for a
     document, and the handler refused every repeat call for the slug."""
     session = _session_with_plan_sequence(
@@ -299,7 +298,7 @@ async def test_re_entry_appends_a_continue_message_instead_of_resetting_history(
 
 
 async def test_each_round_restarts_the_spinner_before_the_llm_call():
-    """Live-testing feedback (ENG-969): `elicit()` stops the host spinner
+    """`elicit()` stops the host spinner
     for `ask_user` and never restarts it, so a round that follows one must
     signal `reasoning_start` itself — otherwise the gap between the user's
     answer and the model's next reply renders as a silent pause."""
@@ -430,8 +429,7 @@ async def test_a_fetched_web_page_verifies_the_source_it_came_from(monkeypatch):
 
 
 async def test_a_web_tool_outcome_is_unwrapped_to_its_text(monkeypatch):
-    """Review 2026-09-24 №3: since ENG-2677 both web fallbacks return a
-    `ToolOutcome`. Passed through as-is, the model's tool_result and the
+    """Both web fallbacks return a `ToolOutcome`. Passed through as-is, the model's tool_result and the
     `web_notes` excerpt carried `ToolOutcome(content='...', ok=True)` — the
     dataclass repr instead of the page."""
     import anton.core.tools.web_tools as web_tools
@@ -473,8 +471,8 @@ async def test_a_source_nothing_was_run_against_stays_unverified():
 
 
 async def test_only_cells_that_ran_are_recorded_for_the_data_notes(monkeypatch):
-    """The twenty-third live run recorded an exec the single-scratchpad
-    guard had refused: both generators then received its code with the
+    """A live run recorded an exec the single-scratchpad guard had
+    refused: both generators then received its code with the
     refusal text as its "Output". A refused or failed cell is not working
     data-access code and stays out of `scratchpad_execs`."""
     from anton.core.tools.registry import ToolOutcome

@@ -492,7 +492,7 @@ def test_housekeeping_set_still_mirrors_cowork_server():
     (`cowork/services/artifacts.py:132`), and `publish_access` plus the publish
     bundle carry their own copies. Drift means the agent and the UI disagree on
     what an artifact contains — which is exactly how backend.log ended up
-    counted here and nowhere else. The STATE runtime entries (PR #259) are in
+    counted here and nowhere else. The STATE runtime entries are in
     anton's three copies; cowork-server's copy does not know them yet."""
     from anton.core.artifacts.store import _HOUSEKEEPING_FILES
 

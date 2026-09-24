@@ -1,9 +1,8 @@
 """The file-body protocol: content as text, `write_file` for the path only.
 
-Why the protocol exists at all is in
-docs/artifact-generation-tools/2026-09-15-tool-call-argument-not-streamed.md —
-a body sent as a tool argument leaves the connection silent for the whole
-generation, because the API buffers a parameter before streaming it.
+Why the protocol exists at all: a body sent as a tool argument leaves the
+connection silent for the whole generation, because the API buffers a
+parameter before streaming it.
 
 What this file guards is the other half: a protocol built out of markers in
 free text can fail in ways a JSON schema could not, and every one of those
@@ -114,7 +113,7 @@ def test_markers_in_the_wrong_order_are_an_error():
 def test_prose_around_the_body_is_accepted_and_noted():
     """Not a failure — an observation.
 
-    A live run (2026-09-15) opened a continuation round with "Let me append the
+    A live run opened a continuation round with "Let me append the
     JavaScript section." before the body. Under the plan's first draft that was
     an error and would have cost a round; it costs nothing, because the body was
     complete and the file was written. The note exists so a CHANGE in the

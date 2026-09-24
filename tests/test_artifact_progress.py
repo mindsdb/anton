@@ -1,4 +1,4 @@
-"""ENG-970: the generation FSM announces each step's START on a progress
+"""The generation FSM announces each step's START on a progress
 channel, so a run that takes minutes is not silent.
 
 Covers the label table, `GenState.step_started`, and the orchestrator's

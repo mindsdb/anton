@@ -2,7 +2,7 @@
 instruction to report to the user (never DIY the artifact); input-validation
 errors stay unwrapped so the agent fixes its call instead.
 
-The handler is an async generator (ENG-970), so every case here drains it via
+The handler is an async generator, so every case here drains it via
 `_collect` and asserts on the single non-ToolProgress item — the tool result.
 """
 from __future__ import annotations
@@ -134,7 +134,7 @@ async def test_handler_forwards_primary_to_generate(monkeypatch, tmp_path):
     assert captured["primary"] == "report.html"
 
 
-# ── ENG-970: progress markers ────────────────────────────────────────────────
+# ── progress markers ─────────────────────────────────────────────────────────
 
 async def test_step_lines_are_yielded_as_progress_before_the_result(
     tmp_path: Path, monkeypatch
@@ -240,7 +240,7 @@ async def test_validation_errors_yield_no_progress(tmp_path: Path):
 
 async def test_success_tells_the_agent_not_to_reverify(tmp_path: Path, monkeypatch):
     """Without this instruction the calling agent re-verifies the pipeline's
-    work by hand — a measured 2026-08-27 run spent 11 planning-model calls
+    work by hand — a live run spent 11 planning-model calls
     re-reading an artifact the generator had already verified."""
     slug = _make_artifact(tmp_path)
 
@@ -273,7 +273,7 @@ def test_the_tool_schema_has_no_context_parameter():
 
 
 def test_the_soft_input_fields_forbid_the_outer_agent_from_inventing_scope():
-    """Five live runs on an eight-word request: the outer agent put ten
+    """Repeated live runs on an eight-word request: the outer agent put ten
     features into `agent_understanding` and, by the fifth run, wrote into
     `user_preferences` that the user "likes combo scoring and localStorage
     records" — features it had itself built the time before. The pipeline
@@ -513,7 +513,7 @@ async def test_a_budget_stop_asks_the_user_rather_than_reporting_failure(
 async def test_a_budget_stop_tells_the_agent_to_show_the_unseen_brief(
     tmp_path: Path, monkeypatch
 ):
-    """Review 2026-09-24 №9: a budget stop in phase B leaves the checkpoint
+    """A budget stop in phase B leaves the checkpoint
     at `awaiting_confirmation`, and the repeat call enters `ENTRY_CONFIRM`,
     which treats the call itself as agreement. The instruction has to make
     the agent show `brief_summary` first, or the app is built to a brief

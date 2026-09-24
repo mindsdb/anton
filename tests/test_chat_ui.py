@@ -144,7 +144,7 @@ class TestStreamDisplay:
 
     @patch("anton.chat_ui.Live")
     def test_reasoning_start_restarts_the_spinner_after_interactive_stopped_it(self, MockLive):
-        """Live-testing feedback (ENG-969, generate_prd): `phase="interactive"`
+        """`phase="interactive"`
         tears the Live context down (`_live = None`). A `reasoning_start`
         that follows it directly — with no tool-result line printed in
         between to implicitly restart the spinner, as generate_prd's phase 1

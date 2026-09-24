@@ -54,7 +54,7 @@ def lint_html(path: Path) -> list[HtmlFinding] | None:
         # Absolute on purpose: Electron's `loadFile` resolves a relative path
         # against its own app directory, not the cwd, and reports the page
         # itself as ERR_FILE_NOT_FOUND — which the runner then returns as an
-        # empty page plus a failed request for the target (seen 2026-09-17).
+        # empty page plus a failed request for the target.
         return _lint_target(str(Path(path).resolve()))
     except Exception:
         return None

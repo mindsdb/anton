@@ -33,8 +33,8 @@ def test_finish_gathering_schema_constrains_artifact_type_to_the_buildable_enum(
     """Without this, the model is free to invent a type string that later
     crashes write_prd's `ArtifactStore.update(type=...)` call — see
     store.py's ValueError on anything outside ARTIFACT_TYPES. And the enum
-    is the BUILDABLE subset, not every registered type (review 2026-09-24
-    №2): `document` is valid metadata but has no generator."""
+    is the BUILDABLE subset, not every registered type: `document` is valid
+    metadata but has no generator."""
     from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 
     schema = next(

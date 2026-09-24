@@ -59,7 +59,7 @@ async def test_draft_brief_sets_the_brief_and_appends_to_messages(tmp_path):
 
 
 async def test_draft_brief_restarts_the_spinner_before_the_llm_call(tmp_path):
-    """Live-testing feedback (ENG-969): a direct `_llm.plan` call outside
+    """A direct `_llm.plan` call outside
     the outer agent loop never gets that loop's own `reasoning_start`
     signal, and `elicit()` (from the preceding `show_and_confirm`) stops
     the spinner without restarting it — see `sub_tools.signal_thinking`."""
@@ -226,7 +226,7 @@ async def test_classify_feedback_falls_back_to_revise_brief_on_an_unknown_route(
 
 
 def test_draft_brief_instruction_asks_for_a_lead_in_sentence():
-    """Live-testing feedback (ENG-969): the brief used to land on the user
+    """The brief used to land on the user
     with zero framing — just headers. The model must open with one
     sentence explaining what follows, in the reply's own language."""
     assert "lead-in" in brief._DRAFT_BRIEF_INSTRUCTION.lower()
@@ -257,7 +257,7 @@ def test_draft_brief_instruction_asks_data_model_to_skip_negatives():
 
 
 def test_draft_brief_instruction_asks_for_a_closing_continue_line():
-    """Live-testing feedback (ENG-969): the brief used to end abruptly on
+    """The brief used to end abruptly on
     "1. Accept / 2. Cancel" with no framing sentence. The model must add a
     closing line, in-language, asking whether to continue."""
     lowered = brief._DRAFT_BRIEF_INSTRUCTION.lower()
@@ -277,7 +277,7 @@ def test_draft_brief_instruction_forbids_describing_the_input_affordance():
 
 
 def test_draft_brief_instruction_routes_assumptions_and_open_points_to_their_own_sections():
-    """Live run 2026-09-16: the brief showed gathering's assumptions as
+    """Seen live: the brief showed gathering's assumptions as
     requirements and dropped both open points, so the user accepted a
     brief that hid what was decided for them."""
     text = brief._DRAFT_BRIEF_INSTRUCTION
@@ -299,7 +299,7 @@ def test_draft_brief_instruction_says_continuing_accepts_the_defaults():
 
 
 def test_draft_brief_instruction_carries_no_example_that_can_leak():
-    """Live run 2026-09-16: "the device's system clock" from the old Data
+    """Seen live: "the device's system clock" from the old Data
     model example surfaced verbatim in a brief for a card game."""
     lowered = brief._DRAFT_BRIEF_INSTRUCTION.lower()
     assert "system clock" not in lowered
@@ -358,8 +358,7 @@ def _redraw_response(content: str, **fields) -> LLMResponse:
 async def test_redraw_brief_replaces_the_lists_when_they_arrive_as_strings(tmp_path):
     """`redraw_brief` used to replace the lists only for a JSON array, so a
     correction re-stated as one string kept the OLD assumptions and open
-    points — the same schema drift the twelfth live run showed on the
-    gathering step, with the opposite failure: stale data instead of none."""
+    points — the same schema drift seen live on the gathering step, with the opposite failure: stale data instead of none."""
     state = _state(tmp_path)
     state.assumptions = ["old assumption"]
     state.open_points = ["old question"]

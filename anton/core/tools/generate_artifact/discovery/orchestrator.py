@@ -41,7 +41,7 @@ def _elicit_available(session) -> bool:
     never enters a confirm/return cycle.
 
     A heuristic, and knowingly so: a host can hold an elicitor that never
-    renders the question (I-12). Being wrong here is safe in the direction
+    renders the question. Being wrong here is safe in the direction
     that matters — the question comes back `unavailable`, the run returns
     `needs_confirmation`, and the repeat call resumes at
     `awaiting_confirmation`. The path still converges; it just spends one

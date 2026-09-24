@@ -38,12 +38,12 @@ _log = logging.getLogger(__name__)
 def build_datasource_env(vault, datasources, *, slug: str = "") -> dict[str, str]:
     """The complete `DS_*` set a backend is entitled to: its declared sources only.
 
-    Shared by both launch paths on purpose (ENG-1382). `handle_launch_backend`
+    Shared by both launch paths on purpose. `handle_launch_backend`
     is what the agent calls; `generate_artifact` launches the backend itself at
     the end of its pipeline and never goes through that handler. Building this
     in only one of them means an artifact's credential exposure depends on WHO
     started it — the generator's own launch would hand the subprocess every
-    `DS_*` in the process, which is the inheritance ENG-1382 removed.
+    `DS_*` in the process, which is exactly the inheritance this rule removes.
 
     Returns `{}` when nothing is declared or resolvable. That is still a
     meaningful answer: passed as `ds_env` it strips the inherited `DS_*`, which
@@ -122,7 +122,7 @@ def build_backend_env(
     `anton_state` injection, or a correct stateful backend fails its import.
 
     A non-None `ds_env` replaces the inherited DS_* entirely, so the backend
-    sees only the datasources it declared (ENG-1382).
+    sees only the datasources it declared.
     """
     env = {**os.environ}
     # Before the strip, so a caller's DS_* survive only when ds_env is None;

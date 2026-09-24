@@ -506,7 +506,7 @@ def test_the_set_of_verdict_declaring_handlers_is_pinned():
             seen.add(node.name)
             for ret in ast.walk(node):
                 # `return ToolOutcome(...)`, or `yield ToolOutcome(...)` for a
-                # streaming handler (ENG-970). Without the yield arm a
+                # streaming handler. Without the yield arm a
                 # streaming handler is counted by the census below and then
                 # looks permanently unverdicted to the subset check — the lock
                 # would report full coverage for a handler it cannot see, which

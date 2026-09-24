@@ -80,7 +80,7 @@ digraph artifact_generation {
 # three generators build their prompts from the `_gen_html_*` blocks below
 # and carry the write protocol in `_gen_html_output_protocol`; the write half
 # that used to be stacked on top of this block (`_ROLE_WRITE`, `_ROLE`)
-# reached no live prompt after 2026-09-17 and was removed (I-09).
+# reached no live prompt and was removed.
 _ROLE_COMMON = """\
 You are a focused, single-purpose worker inside an artifact-generation pipeline.
 You do exactly the job your task section describes, then call `finish`.
@@ -477,9 +477,8 @@ names a path `openapi.json` does not define, fails the step.
 # ---------------------------------------------------------------------------
 
 # The entry-point filename for an html-app whose `create_artifact` call set no
-# `primary`. Was "dashboard.html" until 2026-09-16 — a leftover from the
-# dashboard-only origin of the tool; the tenth live run wrote a card game to
-# that name. `index.html` is what a browser, a static host and a reader expect.
+# `primary`. `index.html`, not the tool's dashboard-era "dashboard.html": it is
+# what a browser, a static host and a reader expect.
 HTML_APP_DEFAULT_PRIMARY = "index.html"
 
 
@@ -739,14 +738,13 @@ def build_user_kickoff(context: str) -> str:
 # ---------------------------------------------------------------------------
 # API spec generation (planning call, no tools)
 #
-# Like `make_tech_spec` (0c4767d6), the step's rules travel in the step
-# message: on the hot path the node continues the shared history under the
-# pipeline system prompt, so a system prompt of its own is never seen there.
-# Until 2026-09-17 the rules lived only in `_API_SPEC_SYSTEM`, and every live
-# run got a fenced OpenAPI 3.0 document with tags, header schemas and two
-# examples per operation — 4 000 characters for one endpoint — plus the PRD
-# and spec.md restated in the message although both were already in the
-# history as the model's own replies.
+# Like `make_tech_spec`, the step's rules travel in the step message: on the
+# hot path the node continues the shared history under the pipeline system
+# prompt, so a system prompt of its own is never seen there. Rules kept only
+# in `_API_SPEC_SYSTEM` produced a fenced OpenAPI 3.0 document with tags,
+# header schemas and two examples per operation — 4 000 characters for one
+# endpoint — plus the PRD and spec.md restated although both were already in
+# the history as the model's own replies.
 # ---------------------------------------------------------------------------
 
 _API_SPEC_STATELESS = (
@@ -949,9 +947,9 @@ def _datasource_section(
     """The `## Connected Data Sources` section for the backend prompt.
 
     The full catalog lists every connection the user has, whether or not the
-    artifact reads it — the eighteenth live run (2026-09-17) carried two
-    databases with ten `DS_*` names into a backend whose spec said "no
-    external data". The gathering step records which sources the artifact
+    artifact reads it — seen live: two databases with ten `DS_*` names went
+    into a backend whose spec said "no external data". The gathering step
+    records which sources the artifact
     uses (`data_sources` → `state.declared_sources`), so:
     - no declared source and no `DS_*` in the gathered data → a one-line note
       instead of the catalog;
@@ -1010,12 +1008,9 @@ def build_backend_system_prompt(
     """System prompt for `generate_backend`.
 
     Same skeleton as the two frontend prompts (task → inputs → workflow →
-    output protocol → size → verifier contract → rules → tools). Until
-    2026-09-17 it stacked the shared `_ROLE` on top of the backend rules —
-    scratchpad discipline, an html-app data recipe, a second copy of the
-    write protocol, the absolute output folder — and carried every connected
-    data source whether the artifact used it or not. `artifact_path` is not
-    quoted: every path the model writes is relative to the artifact root.
+    output protocol → size → verifier contract → rules → tools), and only
+    the declared data sources. `artifact_path` is not quoted: every path the
+    model writes is relative to the artifact root.
     """
     target = "backend.py"
     parts = [
@@ -1040,7 +1035,7 @@ def _compact_api_spec(api_spec: str) -> str:
 
     `openapi.json` is written indented for people; the generators read the
     same document as prose, and the indentation is dead weight on every
-    round of both of them — measured on the twentieth live run: 35.8 KB
+    round of both of them — measured live: 35.8 KB
     indented against 11.7 KB compact, i.e. ~6k tokens per generator per
     round. Text that is not JSON is passed through unchanged.
     """
@@ -1072,11 +1067,9 @@ def build_backend_kickoff(
 #
 # Built from the same blocks as the html-app prompt, in the same order, with
 # the fullstack-only material in two places: the task paragraph and a
-# `## Fullstack rules` section. Until 2026-09-17 this builder stacked the
-# shared `_ROLE` (scratchpad discipline, an html-app data recipe, a second
-# copy of the write protocol) on top of its own blocks — 32 % more text than
-# the html-app prompt, no workflow, no input map, no UI-language rule, stale
-# "brief" wording, and every protocol fix had to be made twice.
+# `## Fullstack rules` section. One set of blocks, so every protocol fix is
+# made once and both pages get the same workflow, input map and UI-language
+# rule.
 # ---------------------------------------------------------------------------
 
 FULLSTACK_FRONTEND_TARGET = "static/index.html"
@@ -1273,13 +1266,11 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
 # Everything the spec writer is told lives in the step INSTRUCTION, not in a
 # system prompt: on the hot path the node continues the phases A-D history
 # under the shared pipeline system prompt (part of the cached prefix, so it
-# cannot carry step-specific text), and the seventh live run of 2026-09-16
-# showed what a bare "write the specification now" produces next to a
-# confirmed PRD — a 5.5 KB retelling of a 2.1 KB PRD, eight sections of which
-# five restated the PRD and one (acceptance criteria) restated it a third
-# time, riding into every generation round as 60 % of the frontend context.
-# The rules below used to sit in the cold-start system prompt only, where no
-# live run ever read them.
+# cannot carry step-specific text). A bare "write the specification now"
+# next to a confirmed PRD produced a 5.5 KB retelling of a 2.1 KB PRD — five
+# of eight sections restating it, acceptance criteria a third time — riding
+# into every generation round as 60 % of the frontend context. Rules kept in
+# the cold-start system prompt only were never read on the hot path.
 
 # What the code-writing steps actually receive next to spec.md — see
 # `orchestrator._spec_context`. Stated exactly, because the previous wording
@@ -1318,9 +1309,8 @@ _TECH_SPEC_CONTENT = (
 )
 
 # The API contract (shapes, fields, formats, examples) lives in ONE place —
-# `openapi.json`, written on the next step. The eighteenth live run
-# (2026-09-17) had spec.md give `GET /api/time` a response shape and the API
-# step give it another (an extra field, a different date format); both
+# `openapi.json`, written on the next step. Seen live: spec.md gave
+# `GET /api/time` a response shape and the API step gave it another (an extra field, a different date format); both
 # generators followed openapi.json, so the app worked, but the two documents
 # disagreed inside the same kickoff. spec.md names the endpoints and the flow;
 # it does not shape them.

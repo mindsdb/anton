@@ -1,6 +1,6 @@
 """Files the user attached to the conversation, carried into the pipeline.
 
-Until 2026-09-18 the pipeline could not see them at all (S-01): the paths
+Without this module the pipeline could not see them at all: the paths
 an upload gets (`.cowork/files/<uuid>/<name>` in the app, `.anton/uploads/`
 for a CLI paste) live only in the outer conversation, the generator's
 `read_file` is fenced to the artifact folder, and the html-app task forbids

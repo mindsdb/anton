@@ -28,8 +28,8 @@ _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
 # checked: there is nothing static to compare. Group 3 catches a `+` right
 # after the literal — `fetch(api('/api/rooms/' + code))` — where the literal
 # is a prefix of the path, not the path: compared as written it normalises
-# to `/api/rooms` and fails a contract that only has `/api/rooms/{code}`
-# (review 2026-09-24, finding 8). Such a call is skipped like a variable.
+# to `/api/rooms` and fails a contract that only has `/api/rooms/{code}`.
+# Such a call is skipped like a variable.
 _FETCH_TARGET = re.compile(
     r"""fetch\s*\(\s*(?:api\s*\(\s*)?(['"`])(.*?)\1(\s*\+)?""", re.S
 )
@@ -258,7 +258,7 @@ def verify_frontend_live(entry: Path) -> VerifyResult | None:
     surface as `TypeError: Failed to fetch` console errors that are the
     harness's doing, not the page's (measured 2026-09-17). The fullstack
     page gets the same check from `verify_app_live`, through its running
-    backend, after `run_app` (S-02). The path is resolved here as well as in
+    backend, after `run_app`. The path is resolved here as well as in
     `lint_html`: Electron's `loadFile` reads a relative path against its own
     app directory, not the cwd.
     """
@@ -324,8 +324,8 @@ def _browser_verdict(findings, *, served: bool) -> VerifyResult:
 def browser_check_skip_reason() -> str:
     """Why `verify_frontend_live` returned None, for the trace.
 
-    `lint_html` folds every "could not check" into one None. The thirteenth
-    live run 2026-09-17 traced "ANTON_HTML_LINT_BROWSER unset" for what may
+    `lint_html` folds every "could not check" into one None. A live trace
+    said "ANTON_HTML_LINT_BROWSER unset" for what may
     have been a wrong path or a timeout — the three need different fixes, so
     the trace has to tell them apart. Evaluated after the fact, so a variable
     that changes between the check and this call could mislabel one run; the

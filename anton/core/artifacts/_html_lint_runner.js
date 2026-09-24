@@ -2,7 +2,7 @@
 // Target comes via ANTON_HTML_LINT_TARGET (env, not argv, to avoid mixing
 // Chromium switches with a positional argument): a file path, loaded through
 // file://, or an http(s) URL — the fullstack page served by its own running
-// backend, where the relative /api/* fetches resolve (S-02).
+// backend, where the relative /api/* fetches resolve.
 //
 // Loads the page in a hidden, sandboxed BrowserWindow and reports one JSON
 // blob between RESULT_JSON_START/RESULT_JSON_END on stdout: console errors

@@ -2,9 +2,8 @@
 that are inputs to generation rather than artifact content.
 
 `generate_artifact` writes `prd.md`, `discovery.json`, `spec.md` and
-`openapi.json`, and reads the PRD back from the same folder (ENG-969 → ENG-968
-handoff). Every one of them physically sits next to `dashboard.html` or
-`backend.py`, and every one of them would otherwise be reported to the user as
+`openapi.json`, and reads the PRD back from the same folder. Every one of them
+physically sits next to `index.html` or `backend.py`, and every one of them would otherwise be reported to the user as
 part of what was built.
 
 One definition each, because both ends of every name matter and are far apart:

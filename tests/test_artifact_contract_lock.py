@@ -427,7 +427,7 @@ RULES: tuple[Rule, ...] = (
          _both(_BACKEND_BOTH, "point of use")),
     Rule("errors", "requirements.txt must list `",
          _both(_BACKEND_BOTH, "requirements.txt")),
-    # ── evaluate_backend: STATE contract (PR #259) ──
+    # ── evaluate_backend: STATE contract ──
     Rule("errors", "requirements.txt must not list `anton_state` — the STATE SDK is ",
          (("backend_stateful", "NEVER list `anton_state`"),)),
     Rule("errors", "backend.py must define a module-level `STATE = None` slot (the cloud runner overlays",

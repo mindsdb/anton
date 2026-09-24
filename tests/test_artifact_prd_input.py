@@ -42,7 +42,7 @@ def test_prd_is_read_from_the_artifact_folder(tmp_path: Path):
 
 
 def test_a_missing_prd_is_not_a_failure(tmp_path: Path):
-    """An agent may skip the PRD step and artifacts predating ENG-969 have no
+    """An agent may skip the PRD step and artifacts predating it have no
     prd.md — generation then runs on `context` alone."""
     st = _state(tmp_path)
     engine._load_prd(st)
@@ -213,8 +213,8 @@ def test_generation_nodes_see_the_prd(tmp_path: Path):
 def test_generation_nodes_do_not_see_the_brief_next_to_a_prd(tmp_path: Path):
     """Since phase B the brief is the confirmation proposal shown to the user
     ("here is what I suggest — continue or say what to change"), with
-    questions the accepted PRD has already settled. Ninth live run
-    2026-09-16: 1 KB of every generation round and a second voice next to
+    questions the accepted PRD has already settled. Measured 2026-09-16:
+    1 KB of every generation round and a second voice next to
     the authoritative document. The PRD supersedes it."""
     st = _state(tmp_path, prd="## Goal\nShow orders")
     st.brief = "Here is what I propose.\n\n**Questions**\n- Is a timer needed?"

@@ -59,8 +59,8 @@ def test_resolve_drops_missing_paths_and_directories_with_a_reason(tmp_path: Pat
 
 
 def test_resolve_refuses_a_dot_directory_file_inside_the_workspace(tmp_path: Path):
-    """Review of PR #335: `.anton/.env` has no data suffix, so without a
-    fence it was an asset and got copied into the published artifact."""
+    """`.anton/.env` has no data suffix, so without a fence it was an asset
+    and got copied into the published artifact."""
     secret = tmp_path / ".anton" / ".env"
     secret.parent.mkdir()
     secret.write_text("DS_PG_PASSWORD=hunter2\n")

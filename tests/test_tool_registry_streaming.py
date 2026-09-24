@@ -148,7 +148,7 @@ class TestPeekRelay:
         assert ToolProgress("x").kind == "step"
 
     async def test_a_peek_is_dropped_before_the_wire_unless_the_host_opted_in(self):
-        """Review of PR #335: `tool_peek` reached cowork-server and the cloud
+        """`tool_peek` reached cowork-server and the cloud
         JSONL as an undocumented phase nobody rendered, spending their
         progress throttle window. The step line still travels; the tail does
         not. Opt-in is `ChatSessionConfig.live_tool_peek`; a session double

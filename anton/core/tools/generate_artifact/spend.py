@@ -1,4 +1,4 @@
-"""Turn-budget guard for the generation pipeline (I-20).
+"""Turn-budget guard for the generation pipeline.
 
 The pipeline is ONE tool-use round from the outer agent's point of view, and
 the spend ceiling is only checked BETWEEN those rounds (`session.py`'s

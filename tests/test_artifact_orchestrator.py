@@ -175,8 +175,8 @@ async def test_gen_verify_backend_retries_once_then_succeeds(tmp_path: Path, mon
 async def test_declare_datasources_writes_an_empty_list_to_clear_the_previous_one(
     tmp_path: Path, monkeypatch
 ):
-    """Review 2026-09-24 №10: the early return on an empty mapping left the
-    previous generation's connection in metadata."""
+    """The early return on an empty mapping left the previous generation's
+    connection in metadata."""
     from anton.core.tools import tool_handlers
 
     store = Mock()
@@ -345,7 +345,7 @@ async def test_run_fullstack_launches_and_verifies(tmp_path: Path, monkeypatch):
     assert launched["health_path"] == "/api/health"
     assert any(s["node"] == "verify_fullstack" and s["outcome"] == "ok" for s in out["trace"])
     # The launch URL is the app's entry point and rides the result at the top
-    # level — the sixteenth live run had it only as "port 42303" inside the
+    # level — a live run had it only as "port 42303" inside the
     # trace, and the agent pointed the user at static/index.html on disk.
     assert out["url"] == "http://127.0.0.1:5555"
     assert out["port"] == 5555
@@ -869,7 +869,7 @@ _VALID_HTML = (
 async def test_frontend_loop_failure_does_not_consume_the_verify_retry(
     tmp_path: Path, monkeypatch
 ):
-    """Live run 2026-08-27: attempt 0 died on the round budget, attempt 1
+    """Seen live: attempt 0 died on the round budget, attempt 1
     failed verification — and the trivially fixable CSS was terminal, because
     the loop failure had already burned the only retry."""
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)

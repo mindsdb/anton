@@ -72,7 +72,7 @@ def malformed_input_result(tc) -> dict:
 def unwrap_outcome(result):
     """Flatten a handler result down to `tool_result`-ready content.
 
-    Since ENG-696 some handlers return a `ToolOutcome` (content + the
+    Some handlers return a `ToolOutcome` (content + the
     handler's own ok/reason verdict) instead of a bare string —
     `handle_scratchpad`'s exec path is the one both loops hit. The verdict
     drives the outer agent's error streak, which the sub-loops do not
@@ -94,9 +94,9 @@ def unwrap_outcome(result):
 # full before streaming it, so a body sent as a tool argument means a silent
 # connection for the whole generation (measured 2026-08-28: 112s of dead air
 # for a 59 000-character argument, reproduced against api.anthropic.com). Plain
-# text streams evenly through the same channel. The full analysis, including
-# the supported `eager_input_streaming` flag the gateway does not forward yet,
-# is in docs/artifact-generation-tools/2026-09-15-tool-call-argument-not-streamed.md.
+# text streams evenly through the same channel. The API's
+# `eager_input_streaming` flag would lift this, but the gateway does not
+# forward it yet.
 #
 # Both values are quoted to the model in several places; every one of them
 # reads these constants, because a literal on any surface drifts silently.

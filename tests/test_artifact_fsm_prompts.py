@@ -237,9 +237,9 @@ def test_api_spec_prompt_state_constraints_by_type():
 def test_api_spec_instruction_carries_the_rules_the_system_prompt_used_to():
     """On the hot path the node continues the shared history under the
     pipeline system prompt, so a system prompt of its own is never seen. The
-    rules have to travel in the step message — the seventeenth live run got
-    a fenced OpenAPI 3.0 document with tags and header schemas because they
-    did not."""
+    rules have to travel in the step message — kept elsewhere, they were not
+    read, and the step produced a fenced OpenAPI 3.0 document with tags and
+    header schemas."""
     instruction = prompts.build_api_spec_instruction(stateless=True)
     for marker in (
         "no markdown fence",
@@ -261,9 +261,8 @@ def test_api_spec_instruction_carries_the_rules_the_system_prompt_used_to():
 
 
 def test_both_kickoffs_carry_the_contract_as_one_line_of_json():
-    """`openapi.json` is indented for people; the twentieth live run put
-    35.8 KB of it into each generator's kickoff where the compact form is
-    11.7 KB. Text that is not JSON passes through unchanged."""
+    """`openapi.json` is indented for people; indented it put 35.8 KB into
+    each generator's kickoff where the compact form is 11.7 KB. Text that is not JSON passes through unchanged."""
     pretty = json.dumps({"openapi": "3.1.0", "paths": {"/api/t": {"get": {"responses": {"200": {}}}}}}, indent=2)
     compact = json.dumps(json.loads(pretty))
     assert "\n" in pretty and "\n" not in compact
@@ -398,7 +397,7 @@ def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
     assert "inline CSS" not in prompts._TECH_SPEC_STACK
 
 
-# ── backend prompt: same skeleton as the two frontend prompts (2026-09-17) ──
+# ── backend prompt: same skeleton as the two frontend prompts ───────────────
 
 def _backend_prompt(*, stateless: bool = True) -> str:
     return prompts.build_backend_system_prompt(
@@ -488,9 +487,9 @@ def test_html_prompt_pins_the_registered_primary():
 
 
 def test_html_prompt_falls_back_to_index_html():
-    """primary is optional (Artifact.primary: str | None). The default was
-    `dashboard.html` until 2026-09-16 — the tenth live run wrote a card game
-    under that name."""
+    """primary is optional (Artifact.primary: str | None). The default is
+    `index.html`, not the tool's dashboard-era `dashboard.html`, which a card
+    game once got written under."""
     for primary in (None, ""):
         system = prompts.build_subagent_system_prompt(
             Path("/tmp/a"), primary=primary
@@ -501,7 +500,7 @@ def test_html_prompt_falls_back_to_index_html():
 
 def test_size_rules_block_is_present_in_both_frontend_prompts():
     """Split writing is needed by html-app and the fullstack frontend alike;
-    since 2026-09-17 both quote the one `_GEN_SIZE_RULES` block."""
+    both quote the one `_GEN_SIZE_RULES` block."""
     assert "mode=\"a\"" in prompts._GEN_SIZE_RULES
     for system in (
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
@@ -620,8 +619,8 @@ def test_generator_prompts_still_get_the_write_part():
 
 def test_tech_spec_instruction_refuses_to_restate_a_prd_it_has():
     """A full spec next to a confirmed PRD is near-pure duplication (measured
-    2026-08-27: 190 s / 13k output tokens restating a 20 KB PRD; seventh live
-    run 2026-09-16: a 5.5 KB spec for a 2.1 KB PRD, five of eight sections a
+    2026-08-27: 190 s / 13k output tokens restating a 20 KB PRD; measured
+    2026-09-16: a 5.5 KB spec for a 2.1 KB PRD, five of eight sections a
     retelling), and `_spec_context` carries both into every generation
     prompt. The rule is in the INSTRUCTION, because the hot path never saw
     the cold-start system prompt where it used to live."""
@@ -662,7 +661,7 @@ def test_tech_spec_instruction_adds_a_backend_section_for_fullstack():
 
 
 def test_tech_spec_instruction_leaves_the_frontends_design_rules_alone():
-    """Seventh live run: the spec spent lines on palette, flip timing and a
+    """Seen live: the spec spent lines on palette, flip timing and a
     breakpoint the generator's own `_DESIGN_RULES` already decide."""
     instruction = prompts.build_tech_spec_instruction(_state(prd="# PRD"))
     assert "frontend's own design rules" in instruction
@@ -678,7 +677,7 @@ def test_cold_and_hot_tech_spec_paths_ask_for_the_same_document():
 
 
 def test_generator_prompts_say_verification_is_not_the_models_job():
-    """Nine of twenty rounds of the 2026-08-27 live run went to self-checks the
+    """Nine of twenty rounds of a live run went to self-checks the
     deterministic verifier repeats anyway — and the round budget died of it.
     The rule lives in the workflow block of every generator prompt."""
     for name, system in _generator_prompts().items():
@@ -769,7 +768,7 @@ def test_the_markers_are_quoted_identically_on_every_surface():
 
 # ── `read_file`'s surfaces must agree about `full` ──────────────────────────
 #
-# The 2026-09-14 run found them disagreeing in the way that costs the most:
+# A live run found them disagreeing in the way that costs the most:
 # the only place stating that `full=true` is expensive and must not be used to
 # check finished work was the tool schema's `description`, while the system
 # prompt showed `read_file(path)` as a one-argument call and separately
@@ -822,7 +821,7 @@ def test_the_write_result_is_advertised_as_the_cheaper_answer():
         assert "without reading" in text, name
 
 
-# ── html-app generator prompt: structure (2026-09-15 rewrite) ───────────────
+# ── html-app generator prompt: structure ────────────────────────────────────
 #
 # The prompt was reordered so the model reads the task and its done-criterion
 # first, then what its input carries, then the workflow, and only then the
@@ -905,12 +904,10 @@ def test_design_rules_do_not_restate_the_contract():
         assert "## Design rules\n" in system
 
 
-# ── fullstack frontend prompt: same skeleton as html-app (2026-09-17) ───────
+# ── fullstack frontend prompt: same skeleton as html-app ────────────────────
 #
-# Until then `build_frontend_system_prompt` stacked the shared `_ROLE` on top
-# of its own blocks. Two live runs (13 and 14) showed the html-app structure
-# holding — one body, no self-check — so the fullstack frontend now uses the
-# same blocks, with the fullstack-only material in the task paragraph and a
+# Live runs showed the html-app structure holding — one body, no self-check —
+# so the fullstack frontend uses the same blocks, with the fullstack-only material in the task paragraph and a
 # `## Fullstack rules` section.
 
 def _fullstack_prompt() -> str:

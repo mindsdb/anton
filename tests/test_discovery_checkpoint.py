@@ -81,8 +81,8 @@ def test_load_ignores_unknown_keys_from_a_future_version(tmp_path: Path):
 
 
 def test_load_defaults_the_lists_a_pre_feature_file_lacks(tmp_path: Path):
-    """`assumptions` / `open_points` were added on 2026-09-16; a checkpoint
-    written before that must still load, with the lists empty."""
+    """`assumptions` / `open_points` were added later than the checkpoint
+    format; a file written before them must still load, with the lists empty."""
     payload = {"pipeline_stage": cp.STAGE_PRD_WRITTEN, "brief_markdown": "## Goal"}
     (tmp_path / DISCOVERY_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
     loaded = cp.load(tmp_path)

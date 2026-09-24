@@ -260,7 +260,7 @@ async def _write_tech_spec(state: GenState) -> str | None:
     if trunc_err is not None:
         # Deliberately terminal. Writing the cut spec would put it into
         # `_spec_context` for both generators, which would then build half a
-        # system with nothing reporting the loss (ENG-1116).
+        # system with nothing reporting the loss.
         state.record("make_tech_spec", "fail", trunc_err)
         state.error = trunc_err
         return state.error
@@ -471,8 +471,8 @@ async def _declare_datasources(state: GenState, refs: list) -> None:
     An empty list is written too, not skipped: it is the verified backend's
     answer for THIS iteration, and a backend rewritten to read no database
     must not keep the previous run's connection in `metadata.datasources`,
-    where `launch_backend` would go on handing it those credentials
-    (review 2026-09-24, finding 10). `store.update(datasources=[])` is the
+    where `launch_backend` would go on handing it those credentials.
+    `store.update(datasources=[])` is the
     documented way to clear the list.
     """
     from anton.core.tools.tool_handlers import resolve_artifact_store
@@ -884,7 +884,7 @@ async def _tail_log(state: GenState, limit: int = 2000) -> str:
 
 
 def _launch_datasource_env(state: GenState) -> dict[str, str]:
-    """The `DS_*` set this artifact's backend is entitled to (ENG-1382).
+    """The `DS_*` set this artifact's backend is entitled to.
 
     The pipeline launches the backend itself and never passes through
     `handle_launch_backend`, so without this the generator's own launch would
@@ -1103,8 +1103,8 @@ def _result_shell(state: GenState) -> dict:
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }
-    # The sixteenth live run (2026-09-17) had the agent present
-    # `<path>/static/index.html` as the entry point of a fullstack app: the
+    # Seen live: the agent presented `<path>/static/index.html` as the
+    # entry point of a fullstack app: the
     # port was in the trace, the URL nowhere, and the system prompt's "prefer
     # the url the launch step returned" had nothing to prefer.
     if state.app_url:

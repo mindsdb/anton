@@ -45,7 +45,7 @@ def _state(**over) -> GenState:
 
 
 def test_pipeline_system_prompt_lists_every_buildable_artifact_type_and_no_other():
-    """Review 2026-09-24 №2: the list used to be every registered type, so
+    """The list used to be every registered type, so
     the model could settle on `document` and the pipeline would build a
     fullstack app for it."""
     prompt = build_pipeline_system_prompt(_state())
@@ -112,7 +112,7 @@ def test_the_redraw_step_requires_finish_gathering():
     ) is None
 
 
-# ── 2026-09-16: the gathering step records facts, not the brief ──────────────
+# ── the gathering step records facts, not the brief ─────────────────────────
 
 
 def test_pipeline_system_prompt_maps_each_step_to_its_output():
@@ -153,7 +153,7 @@ def test_gathering_step_states_the_task_and_keeps_design_out():
 
 
 def test_gathering_step_defines_open_points_as_ambiguities_not_feature_ideas():
-    """Live run 2026-09-16: both open points were features nobody asked for
+    """Seen live: both open points were features nobody asked for
     (high-score table, sound effects) — the no-new-features rule was being
     bypassed through the question list."""
     message = step_message(sub_tools.STEP_GATHERING, _state())
@@ -162,7 +162,7 @@ def test_gathering_step_defines_open_points_as_ambiguities_not_feature_ideas():
 
 
 def test_gathering_step_does_not_turn_unused_connections_into_a_question():
-    """Live run 2026-09-16 (third): with `## Connected Data Sources` in the
+    """Seen live: with `## Connected Data Sources` in the
     kickoff, the model asked the user to confirm that two databases the
     game does not need would not be used — noise in the brief and a
     negative nobody asked about in the PRD."""
@@ -210,7 +210,7 @@ def test_restored_context_omits_empty_assumption_sections():
 # ── scratchpads the calling agent already ran ───────────────────────────────
 
 def test_the_kickoff_lists_the_pads_to_reuse_only_when_there_are_any():
-    """The twenty-third live run: `known_data` never named the pad, the
+    """Seen live: `known_data` never named the pad, the
     step guessed a new name, the single-scratchpad guard refused it and a
     round was lost. The kickoff now names the pads; with none there is
     nothing to say, and no guard to run into."""

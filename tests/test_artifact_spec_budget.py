@@ -1,4 +1,4 @@
-"""ENG-1116 / I-07: the two whole-document calls run with an explicit output
+"""The two whole-document calls run with an explicit output
 budget, retry once with more room when cut off, and fail loudly rather than
 handing a truncated specification to the generators.
 
@@ -109,7 +109,7 @@ async def test_a_cut_answer_is_retried_with_more_room_and_a_compact_nudge():
 
 async def test_truncation_is_detected_by_stop_reason_too():
     """A cut that stops just under the cap is invisible to a token count; the
-    gateway has reported `stop_reason` correctly since 2026-08-03."""
+    gateway reports `stop_reason` correctly."""
     session = AsyncMock()
     session._llm.plan_stream = _stream_mock(
         _response("# half", output_tokens=12, stop_reason="length"),
@@ -310,7 +310,7 @@ def _doc(*paths: str) -> dict:
 
 
 def test_api_spec_problem_rejects_paths_that_differ_from_spec_md():
-    """The twentieth live run turned `/api/rooms/{code}/state` into
+    """Seen live: the API step turned `/api/rooms/{code}/state` into
     `/api/rooms/{code}`: the count matched, so the shape check let it
     through and `spec.md` stopped describing the app."""
     p = engine._api_spec_problem
@@ -511,8 +511,8 @@ async def test_the_spec_node_continues_the_history_when_there_is_one(tmp_path, m
     # No restating of a context the conversation already holds.
     assert "A dashboard." not in seen["user"]
     # ...but the step's own rules travel in the instruction: this is the only
-    # step-specific text the hot path ever sees (seventh live run 2026-09-16
-    # ran on a bare "write the specification now" and retold the PRD).
+    # step-specific text the hot path ever sees (a bare "write the
+    # specification now" retold the PRD).
     assert seen["user"] == prompts.build_tech_spec_instruction(state)
     assert prompts._TECH_SPEC_STACK in seen["user"]
     assert "Implementation notes" in seen["user"]

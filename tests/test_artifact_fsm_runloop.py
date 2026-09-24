@@ -185,8 +185,7 @@ async def test_a_truncated_body_writes_nothing(tmp_path: Path):
 
 
 async def test_a_body_without_write_file_still_answers_the_reply_s_other_tool_calls(tmp_path: Path):
-    """Review 2026-09-24 №1: the reply "final chunk + finish, write_file
-    forgotten" put an assistant turn with a `finish` tool_use into the
+    """The reply "final chunk + finish, write_file forgotten" put an assistant turn with a `finish` tool_use into the
     history and answered it with a bare user text. The next request was
     rejected by the provider (tool_use without tool_result) and the whole
     run ended as "generator crashed". Every tool_use of that reply gets a
@@ -235,7 +234,7 @@ async def test_a_cut_off_body_and_a_forgotten_marker_get_different_advice(tmp_pa
 
     # Cut off: the fix is less content, so the advice is to split — and it must
     # say the shorter part goes in the NEXT REPLY, body included. A live run
-    # (2026-09-15) answered the earlier wording, "emit the first part now, then
+    # answered the earlier wording, "emit the first part now, then
     # append the rest on the next turn", by announcing the part and calling
     # write_file with no body at all: it read the sentence as a two-turn plan.
     assert "was cut off" in cut_off
@@ -392,7 +391,7 @@ async def test_truncation_is_caught_by_stop_reason_when_no_cap_is_readable(tmp_p
 
 
 async def test_round_budget_with_files_hands_them_to_the_caller(tmp_path: Path):
-    """Budget exhaustion is not evidence the files are bad (live run 2026-08-27).
+    """Budget exhaustion is not evidence the files are bad.
 
     A complete page was deleted and regenerated because the loop died counting
     its own slides. With files on disk the loop must return a dict so the
@@ -506,7 +505,7 @@ async def test_read_file_full_flag_is_passed_through(tmp_path: Path, monkeypatch
     assert seen["full"] is True
 
 
-# ── Output budget per round, and surviving a dropped stream (2026-08-28) ──────
+# ── Output budget per round, and surviving a dropped stream ──────────────────
 
 
 async def test_every_round_gets_the_raised_budget_including_round_zero(

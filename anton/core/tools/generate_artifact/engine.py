@@ -267,8 +267,8 @@ def _scratchpads_context(session) -> str:
 def _output_token_cap(session) -> int | None:
     """The client's effective output cap, or None when it cannot be read.
 
-    Reads the public `max_tokens` property (`anton/core/llm/client.py:151`,
-    added by ENG-1042 for exactly this comparison). In tests the session is an
+    Reads the public `max_tokens` property of `anton/core/llm/client.py`,
+    exposed for exactly this comparison. In tests the session is an
     `AsyncMock` where the attribute exists and is truthy but is not a number,
     so the type check is mandatory: without it the detection would fire on
     every test.
@@ -345,12 +345,10 @@ async def _plan_whole_document(
     A truncated document is never returned. Both generators consume the spec as
     their requirements, and `_spec_context` hands it to them verbatim, so half a
     spec means half a system built with nothing anywhere reporting that
-    something was lost — which is the actual damage ENG-1116 describes, not the
-    missing length.
+    something was lost. That silent loss is the damage, not the missing length.
 
     Truncation is detected with the shared `looks_truncated`, which also honours
-    ``stop_reason`` — the gateway reports it correctly since 2026-08-03, and a
-    token count alone cannot see a cut that stopped just under the cap.
+    ``stop_reason`` — the gateway reports it correctly, and a token count alone cannot see a cut that stopped just under the cap.
     """
     trace = trace or NullTrace()
     budgets = (SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY)
@@ -413,7 +411,7 @@ def _load_prd(state) -> None:
 
     Every failure mode degrades to "no PRD" instead of stopping the run:
     an agent may legitimately skip the PRD step, artifacts created before
-    ENG-969 have no `prd.md`, and a file that cannot be read must not cost a
+    the PRD step existed have no `prd.md`, and a file that cannot be read must not cost a
     generation that `context` alone can still complete. Which of the two
     modes ran is recorded, so a wrong-looking artifact can be traced back to
     the requirements it was actually built from.
@@ -735,10 +733,10 @@ def _api_spec_problem(spec, declared: dict[str, str] | None = None) -> str | Non
     operation with no `responses` (the frontend has no shape to render).
 
     With ``declared`` (from `_declared_api_paths`) the document's paths must
-    be exactly those, `/api/health` aside. The twentieth live run renamed
-    `GET /api/rooms/{code}/state` to `GET /api/rooms/{code}`: both generators
-    followed the document, so the app was consistent — and `spec.md` no
-    longer described it. Parameter names may differ; segments may not.
+    be exactly those, `/api/health` aside. Seen live: the document renamed
+    `GET /api/rooms/{code}/state` to `GET /api/rooms/{code}`; both generators
+    followed it, so the app was consistent and `spec.md` no longer described
+    it. Parameter names may differ; segments may not.
     """
     if not isinstance(spec, dict):
         return "the document is not a JSON object"
@@ -945,7 +943,7 @@ async def _run_loop(
             # in the very next message or the provider rejects the following
             # request; without this the run died as "generator crashed" on
             # the normal "final chunk plus finish" ending whenever the model
-            # forgot the call (review 2026-09-24, finding 1).
+            # forgot the call.
             answers: list[dict] = []
             for tc in response.tool_calls:
                 if tc.parse_error:
@@ -1046,7 +1044,7 @@ async def _run_loop(
         # Round accounting rides on the same user message as the tool results.
         # The model has no other way to see the budget, and without it the
         # measured failure mode is spending the last rounds on self-checks and
-        # dying at the cap with a finished file (live run 2026-08-27). Appended
+        # dying at the cap with a finished file. Appended
         # as a trailing text block: both providers accept text after
         # tool_result blocks, and appending never invalidates the prefix cache.
         rounds_left = MAX_ROUNDS - round_idx - 1
@@ -1066,9 +1064,9 @@ async def _run_loop(
     else:
         # Budget exhausted without `finish`. A missing `finish` call is not
         # evidence the files are bad — when the loop DID write files, hand
-        # them to the caller and let the verifier judge them (live run
-        # 2026-08-27: a complete 48 KB page was deleted and regenerated
-        # because the model burned its last rounds self-checking). The
+        # them to the caller and let the verifier judge them (seen live: a
+        # complete 48 KB page was deleted and regenerated because the model
+        # burned its last rounds self-checking). The
         # `finished` flag tells the caller how the loop ended.
         if not files_written:
             return (

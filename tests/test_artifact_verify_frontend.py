@@ -124,7 +124,7 @@ def test_universal_important_at_top_level_is_error():
 
 
 def test_universal_important_in_reduced_motion_media_is_allowed():
-    """The standard accessibility reset must not fail the artifact (2026-08-27)."""
+    """The standard accessibility reset must not fail the artifact."""
     html = GOOD.replace(
         "</head>",
         "<style>@media (prefers-reduced-motion: reduce) {\n"
@@ -224,7 +224,7 @@ def test_live_check_maps_findings_to_errors_and_a_warning(monkeypatch):
 
 def test_live_check_hands_the_browser_an_absolute_path(monkeypatch):
     """Electron's loadFile resolves a relative path against its own app dir
-    and reports the page as not found (seen 2026-09-17)."""
+    and reports the page as not found."""
     seen: list[Path] = []
 
     def fake_lint(path):
@@ -247,7 +247,7 @@ def test_skip_reason_names_the_unset_variable(monkeypatch):
 
 
 def test_skip_reason_names_a_path_that_is_not_executable(monkeypatch, tmp_path):
-    """Thirteenth live run 2026-09-17: the trace said "unset" for what could
+    """Seen live: the trace said "unset" for what could
     as well have been a wrong path — this is the case the old message hid."""
     monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", str(tmp_path / "no-such-electron"))
     reason = browser_check_skip_reason()
@@ -316,7 +316,7 @@ def test_calls_inside_the_contract_pass_in_every_literal_shape():
 
 
 def test_a_literal_prefix_joined_with_plus_is_not_compared():
-    """Review 2026-09-24 №8: `fetch(api('/api/rooms/' + code))` builds the
+    """`fetch(api('/api/rooms/' + code))` builds the
     contract's `/api/rooms/{code}` by concatenation. The literal alone
     normalised to `/api/rooms`, which the contract does not have, and a
     correct page failed verification. A prefix before `+` is skipped like
