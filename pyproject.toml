@@ -25,6 +25,8 @@ dependencies = [
     "openai>=3.0",
     # Declared, not inherited: it arrived transitively via anthropic/openai.
     # Same range those SDKs require, so the client we hand them matches theirs.
+    # Also what `generate_artifact` catches transport errors by type against
+    # when a tool-call stream dies mid-generation.
     "httpx2>=2.7,<3",
     # Floor for GHSA-8bx3-mgpq-m8m9 (IDNA 2003 vs IDNA 2009 host-name encoding
     # mismatch in TLSStream/connect_tcp() lets a hijacked connection to an

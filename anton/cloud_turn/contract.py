@@ -18,6 +18,16 @@ Events written back on stdout (JSONL):
       rather than replacing it. Also exempt, and for a sharper reason —
       dropping it lets the explanation pass as the replacement, and the answer
       the user already read is lost from the transcript.
+      `phase: "tool_progress"` is a streaming tool's step line, `id` the
+      tool_use id it belongs to; the first one per id is never rate limited
+      (it creates the step a consumer renders), `phase: "tool_done"` closes
+      that step and carries `ok` and `eta_seconds`.
+      `phase: "tool_peek"` — the live tail of what a streaming tool is
+      writing, each one replacing the last, an empty `message` clearing it —
+      does NOT appear on this wire: `ToolRegistry.dispatch_tool` relays it
+      only to a host that declared `ChatSessionConfig.live_tool_peek`, and
+      the pod does not. A consumer that meets it anyway (an older pod, a
+      host that opted in later) should drop it unless it renders a live tail.
   {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork

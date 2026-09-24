@@ -76,6 +76,7 @@ from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
+    GENERATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -1293,6 +1294,14 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # Whether this host renders a streaming tool's live tail — the last lines
+    # of the file a tool is writing, relayed as the `tool_peek` progress phase
+    # (`ToolRegistry.dispatch_tool`). Only the CLI has a footer for it today;
+    # cowork-server's formatter and the cloud pod's wire would carry it as
+    # unrenderable noise that also spends their progress throttle window. A
+    # capability the host declares, like `elicitor`, never inferred from
+    # `surface` or `console`: those answer different questions.
+    live_tool_peek: bool = False
     # WHO the user is, for analytics attribution only (ENG-2121): the Keycloak
     # ``sub`` and the active organisation id, both UUIDs. ``turn_completed``
     # is keyed on ``user_id`` when it is set, which is the same distinct_id the
@@ -1489,6 +1498,7 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self.live_tool_peek = config.live_tool_peek
         self._user_id = _validated_account_id(config.user_id)
         self._organization_id = _validated_account_id(config.organization_id)
         # Per-turn token cost books (ENG-1288). Created and armed at each
@@ -2439,6 +2449,7 @@ class ChatSession:
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -3595,6 +3606,17 @@ class ChatSession:
         except Exception:
             # Analytics must never affect the tool call that just ran.
             pass
+
+    def spend_ceiling_reached(self) -> bool:
+        """Public read of the turn's spend ceiling, for long-running tools.
+
+        `generate_artifact` runs a whole pipeline inside a single tool-use
+        round, so the loop-level check in `_spend_ceiling_stops_the_tool_loop`
+        cannot see it overspend (I-20). It reads this instead of the private
+        method — a tool reaching into `_`-prefixed session internals is how
+        `_output_token_cap` ended up broken by a refactor (I-08).
+        """
+        return self._spend_ceiling_reached()
 
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.
