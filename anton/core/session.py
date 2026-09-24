@@ -261,6 +261,7 @@ if TYPE_CHECKING:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
     from anton.core.llm.client import LLMClient
+    from anton.core.mcp.client import McpSession
     from anton.core.memory.cortex import Cortex
     from anton.core.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
@@ -1350,6 +1351,14 @@ class ChatSessionConfig:
     # process (the cloud pod) turn this off: several spend an LLM call on writes
     # that land after the turn's storage is gone. `memorize` is unaffected.
     background_memory: bool = True
+    # Open MCP sessions (ENG-1816) discovered before this session was built —
+    # their tools are already folded into `tools` above via
+    # `anton.core.mcp.wiring.discover_mcp_tools[_async]`, called by the host
+    # BEFORE constructing this config (not after: see that module's
+    # docstring for why the ordering is load-bearing). Carried here only so
+    # `ChatSession.close()` can tear them down at turn end, the same way it
+    # already closes the LLM client's transports.
+    mcp_sessions: list["McpSession"] = field(default_factory=list)
 
 
 class ChatSession:
@@ -1440,6 +1449,7 @@ class ChatSession:
         self._background_memory = config.background_memory
         self._memory_writes: set[asyncio.Task] = set()
         self._started_at = config.started_at
+        self._mcp_sessions = list(config.mcp_sessions)
         self._extra_tools = config.tools
         self._tool_allowlist = config.tool_allowlist
         # Deferred tool bundles: tools tagged with `unlock_skill`
@@ -2457,10 +2467,22 @@ class ChatSession:
             await self._reap_tracked_backends()
             await self._scratchpads.close_all()
         finally:
-            # Provider clients own an HTTP pool. This runs even if the steps
-            # above raise, or the pool outlives the process.
-            if self._llm is not None:
-                await self._llm.aclose()
+            # Guaranteed even if either step above raises — ScratchpadManager
+            # has no internal try/except around each pad's own close(), so
+            # without this, one bad scratchpad close would leak every open
+            # MCP session's transport (httpx2.AsyncClient + SDK task group)
+            # for the rest of this turn, same reasoning as the LLM client
+            # cleanup below it already gets.
+            try:
+                if self._mcp_sessions:
+                    from anton.core.mcp.wiring import close_mcp_sessions
+
+                    await close_mcp_sessions(self._mcp_sessions)
+            finally:
+                # Provider clients own an HTTP pool. This runs even if the
+                # steps above raise, or the pool outlives the process.
+                if self._llm is not None:
+                    await self._llm.aclose()
 
     async def emit(self, event) -> None:
         """Push an out-of-band event to the host, if one is listening.

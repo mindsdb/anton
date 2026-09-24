@@ -1208,3 +1208,65 @@ def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, m
     assert "Planning model: grok" in ctx
     assert "Provider: openai-compatible" in ctx  # minds-cloud → openai-compatible derivation
     assert str(tmp_path) not in ctx  # the workspace path never rides along (security note)
+
+
+# ── ENG-1816: MCP sessions opened by discover_mcp_tools() must not leak ──────
+
+def test_mcp_sessions_are_closed_if_chat_session_construction_fails(tmp_path, monkeypatch):
+    """discover_mcp_tools() opens live MCP sessions before ChatSession exists
+    (see anton/core/mcp/wiring.py's module docstring for why). If
+    ChatSession(config) itself then raises, there's no ChatSession yet for
+    its close() to run on — this is the only other place those sessions can
+    get torn down."""
+    import anton.core.mcp.wiring as wiring_mod
+
+    closed: list = []
+    fake_sessions = [object(), object()]
+
+    def fake_discover_mcp_tools(vault, connections):
+        return [], fake_sessions
+
+    async def fake_close_mcp_sessions(sessions):
+        closed.extend(sessions)
+
+    def fake_chat_session_raises(config):
+        raise RuntimeError("simulated ChatSession construction failure")
+
+    monkeypatch.setattr(wiring_mod, "discover_mcp_tools", fake_discover_mcp_tools)
+    monkeypatch.setattr(wiring_mod, "close_mcp_sessions", fake_close_mcp_sessions)
+    monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session_raises)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "hubspot", "name": "acme"}]}
+    request = TurnRequestV1(
+        protocol_version=1, conversation_id="conv_1", input="hello", oauth=oauth,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
+        build_cloud_chat_session(request)
+
+    assert closed == fake_sessions
+
+
+def test_no_mcp_sessions_means_no_cleanup_call_on_construction_failure(tmp_path, monkeypatch):
+    """The cleanup branch must not blow up (e.g. on an unbound import) when
+    there was nothing to clean up — the overwhelmingly common case today,
+    since no auth Connection carries method=="mcp" yet."""
+    def fake_chat_session_raises(config):
+        raise RuntimeError("simulated ChatSession construction failure")
+
+    monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session_raises)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+
+    request = TurnRequestV1(protocol_version=1, conversation_id="conv_1", input="hello")
+
+    with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
+        build_cloud_chat_session(request)
