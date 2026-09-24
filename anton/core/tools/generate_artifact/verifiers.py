@@ -25,8 +25,14 @@ _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
 # helper is the documented shape, and a path with a parameter is written as
 # `fetch(api(`/api/rooms/${code}`))` — backticks, which `_FETCH_CALL` never
 # saw. A non-literal first argument (a variable) is not a match and is not
-# checked: there is nothing static to compare.
-_FETCH_TARGET = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?(['"`])(.*?)\1""", re.S)
+# checked: there is nothing static to compare. Group 3 catches a `+` right
+# after the literal — `fetch(api('/api/rooms/' + code))` — where the literal
+# is a prefix of the path, not the path: compared as written it normalises
+# to `/api/rooms` and fails a contract that only has `/api/rooms/{code}`
+# (review 2026-09-24, finding 8). Such a call is skipped like a variable.
+_FETCH_TARGET = re.compile(
+    r"""fetch\s*\(\s*(?:api\s*\(\s*)?(['"`])(.*?)\1(\s*\+)?""", re.S
+)
 _API_METHODS = ("get", "post", "put", "patch", "delete")
 _HEALTH_PATH = "/api/health"
 
@@ -185,7 +191,9 @@ def verify_frontend(
     #     calls routes that exist (I-34). Reported once, with the whole
     #     contract, so the retry has what it needs to fix the call.
     if is_fullstack and api_paths is not None:
-        for _quote, raw in _FETCH_TARGET.findall(html):
+        for _quote, raw, concatenated in _FETCH_TARGET.findall(html):
+            if concatenated:
+                continue
             key = _fetch_path_key(raw)
             if key is None or key in api_paths:
                 continue

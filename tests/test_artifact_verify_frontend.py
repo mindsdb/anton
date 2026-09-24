@@ -315,6 +315,20 @@ def test_calls_inside_the_contract_pass_in_every_literal_shape():
     assert r.ok, r.errors
 
 
+def test_a_literal_prefix_joined_with_plus_is_not_compared():
+    """Review 2026-09-24 №8: `fetch(api('/api/rooms/' + code))` builds the
+    contract's `/api/rooms/{code}` by concatenation. The literal alone
+    normalised to `/api/rooms`, which the contract does not have, and a
+    correct page failed verification. A prefix before `+` is skipped like
+    a variable; the same literal on its own is still compared."""
+    ok = _page("fetch(api('/api/rooms/' + code));\nfetch(api(\"/api/rooms/\" + code + '/moves'), {method: 'POST'});")
+    assert verify_frontend(ok, is_fullstack=True, api_paths=_PATHS).ok
+
+    alone = _page("fetch(api('/api/rooms/'));")
+    r = verify_frontend(alone, is_fullstack=True, api_paths=_PATHS)
+    assert not r.ok and any(e.startswith("fetch() calls `") for e in r.errors)
+
+
 def test_a_call_outside_the_contract_is_error_and_names_the_contract():
     html = _page("fetch(api(`/api/rooms/${code}/state`));")
     r = verify_frontend(html, is_fullstack=True, api_paths=_PATHS)
