@@ -478,6 +478,30 @@ def test_an_alias_outside_the_pin_map_is_recorded_but_not_asserted():
     assert ev._SERVED == {"gpt-terra": "gpt-5.6-terra"}
 
 
+def test_an_alias_echo_is_recorded_as_not_disclosed_and_never_a_repoint(monkeypatch):
+    """ENG-2892: the gateway now returns the alias as `model`. That is no
+    information about the served model, not a repoint — the check must not
+    raise, must record the blindness where the report will show it, and must
+    keep failing a GENUINE repoint (a different real id)."""
+    monkeypatch.setattr(ev, "_SERVED", {})
+    ev._check_served_model("haiku", "haiku")  # must not raise
+    assert "not disclosed" in ev._SERVED["haiku"]
+    assert ev._SERVED["haiku"].startswith("haiku")
+    # The guard is still armed for a real repoint of the same slot.
+    with pytest.raises(ev.AliasRepointed):
+        ev._check_served_model("haiku", "claude-sonnet-5")
+    # And the pinned id itself is still accepted and recorded verbatim.
+    ev._check_served_model("haiku", "claude-haiku-4-5-20251001")
+    assert ev._SERVED["haiku"] == "claude-haiku-4-5-20251001"
+    # A confirmed match wins over the echo test: when the alias IS the pinned
+    # real id (a one-off `VERIFIER_EVAL_*_MODEL=<real id>` run), the gateway
+    # did disclose and the report must not claim blindness (#490 self-review,
+    # finding 2 — the echo branch used to run first and mislabel it).
+    monkeypatch.setitem(ev._EXPECTED_SERVED, "gpt-5.6-luna", "gpt-5.6-luna")
+    ev._check_served_model("gpt-5.6-luna", "gpt-5.6-luna")
+    assert ev._SERVED["gpt-5.6-luna"] == "gpt-5.6-luna"
+
+
 @pytest.mark.parametrize("served", [None, "", 0, object()])
 def test_a_missing_served_id_is_not_treated_as_a_repoint(served):
     """A provider that omits `model` says nothing about which model ran.
