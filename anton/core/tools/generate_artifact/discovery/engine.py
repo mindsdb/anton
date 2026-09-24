@@ -214,7 +214,10 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 result_blocks.append(protocol.tool_result(tc.id, content))
             elif name in ("web_search", "web_fetch"):
                 handler, field = _web_tools()[name]
-                content = await handler(state.session, inp)
+                # Both fallbacks answer with a `ToolOutcome` since ENG-2677;
+                # the model, the trace and `web_notes` all want its text, not
+                # the dataclass repr — same unwrap as the scratchpad branch.
+                content = protocol.unwrap_outcome(await handler(state.session, inp))
                 state.trace_log.scratchpad(node=name, input=inp, output=content)
                 # Raw material for `notes.render_web_notes`; the field the
                 # call was made with (`query` or `url`) is what the notes cite.

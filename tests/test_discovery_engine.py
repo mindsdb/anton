@@ -416,6 +416,32 @@ async def test_a_fetched_web_page_verifies_the_source_it_came_from(monkeypatch):
     assert state.unverified_sources == []
 
 
+async def test_a_web_tool_outcome_is_unwrapped_to_its_text(monkeypatch):
+    """Review 2026-09-24 №3: since ENG-2677 both web fallbacks return a
+    `ToolOutcome`. Passed through as-is, the model's tool_result and the
+    `web_notes` excerpt carried `ToolOutcome(content='...', ok=True)` — the
+    dataclass repr instead of the page."""
+    import anton.core.tools.web_tools as web_tools
+    from anton.core.tools.registry import ToolOutcome
+
+    monkeypatch.setattr(
+        web_tools, "handle_web_fetch_fallback",
+        AsyncMock(return_value=ToolOutcome(content="page body", ok=True)),
+    )
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("web_fetch", {"url": "https://example.com/a"})]),
+        _response(tool_calls=[_tc("finish_gathering", {"artifact_type": "html-app", "summary": "read"})]),
+    )
+    state = _state(session)
+
+    await engine.run_gathering_loop(state)
+
+    assert state.web_calls[0]["excerpt"] == "page body"
+    results = [b for m in state.messages if isinstance(m["content"], list)
+               for b in m["content"] if b.get("type") == "tool_result"]
+    assert results[0]["content"] == "page body"
+
+
 async def test_a_source_nothing_was_run_against_stays_unverified():
     """The condition the emergency data loop exists for: the model declared
     a source it never touched."""
