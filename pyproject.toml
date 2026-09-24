@@ -34,7 +34,13 @@ dependencies = [
     # themselves, so it floats to whatever the resolver picks without this.
     "anyio>=4.14.2",
     "pydantic>=2.0",
-    "pydantic-settings>=2.0",
+    # Floor for GHSA-c8vh-cgw2-cfmc (NestedSecretsSettingsSource followed
+    # symlinked directories inside secrets_dir out to their target and
+    # skipped them in the secrets_dir_max_size accounting, an out-of-tree
+    # read + size-cap bypass on secrets_nested_subdir=True). We don't use
+    # that source (no secrets_dir/secrets_nested_subdir anywhere in this
+    # repo), but the fix costs nothing.
+    "pydantic-settings>=2.14.2",
     # Declared, not inherited: it arrives transitively via pydantic-settings.
     # `workspace.vault_key` calls dotenv_values directly so a vault file is
     # parsed exactly the way pydantic-settings parsed it — the two disagreeing
