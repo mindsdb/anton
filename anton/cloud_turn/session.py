@@ -130,10 +130,11 @@ def _datasource_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
     if (
         llm.get("provider") != "minds-cloud"
         or not isinstance(llm.get("api_key"), str)
+        or not llm["api_key"]
         or not hmac.compare_digest(settings.openai_api_key or "", llm["api_key"])
         or base != str(llm.get("base_url") or "").rstrip("/")
         or parsed.scheme != "https"
-        or not parsed.netloc
+        or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path != "/v1"

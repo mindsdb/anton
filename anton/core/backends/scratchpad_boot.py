@@ -956,7 +956,7 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
                 parsed_url = _cloud_parse.urlsplit(_cloud_gateway_url)
                 if (
                     parsed_url.scheme != "https"
-                    or not parsed_url.netloc
+                    or not parsed_url.hostname
                     or parsed_url.username is not None
                     or parsed_url.password is not None
                     or parsed_url.path != "/v1"

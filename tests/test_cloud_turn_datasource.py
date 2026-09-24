@@ -269,8 +269,8 @@ print("ok")
 
 @pytest.mark.parametrize(
     "base_url",
-    ["http://inference.internal/v1", "https://inference.internal/api/v1"],
-    ids=["plaintext", "api-v1-path"],
+    ["http://inference.internal/v1", "https://inference.internal/api/v1", "https://:443/v1"],
+    ids=["plaintext", "api-v1-path", "no-host"],
 )
 def test_the_helper_refuses_a_base_it_cannot_send_the_bearer_to(tmp_path, base_url):
     """The helper's own check, for a child whose environment the session did

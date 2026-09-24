@@ -115,10 +115,10 @@ def test_legacy_minds_configuration_never_reaches_a_cloud_prompt(tmp_path, monke
     assert "legacy-datasource" not in context
 
 
-def _datasource_request(base_url="https://minds.internal/v1"):
+def _datasource_request(base_url="https://minds.internal/v1", api_key="mdb_turn.secret"):
     return TurnRequestV1.from_json(
         '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
-        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        f'"input":"hello","llm":{{"api_key":"{api_key}","provider":"minds-cloud",'
         f'"base_url":"{base_url}"}},"datasource":{{"protocol_version":1,'
         '"connections":[{"connection_id":7,"credential_version":3}]}}'
     )
@@ -145,14 +145,31 @@ def test_a_datasource_turn_fails_when_a_pod_setting_replaces_the_turn_connection
 
 @pytest.mark.parametrize(
     "base_url",
-    ["http://minds.internal/v1", "https://minds.internal/api/v1", "https://minds.internal", "https://u:p@minds.internal/v1"],
-    ids=["plaintext", "api-v1-path", "no-path", "credentials"],
+    [
+        "http://minds.internal/v1",
+        "https://minds.internal/api/v1",
+        "https://minds.internal",
+        "https://u:p@minds.internal/v1",
+        "https://:443/v1",
+    ],
+    ids=["plaintext", "api-v1-path", "no-path", "credentials", "no-host"],
 )
 def test_a_datasource_turn_fails_when_its_inference_base_is_not_https_at_v1(tmp_path, monkeypatch, base_url):
     """Only /v1/datasources/execute is published, and the bearer never goes over plaintext."""
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
     with pytest.raises(ValueError, match="cannot carry datasource reads"):
         build_cloud_chat_session(_datasource_request(base_url))
+
+
+def test_a_datasource_turn_without_a_turn_key_fails(tmp_path, monkeypatch):
+    """An empty turn key leaves the child's inherited OPENAI_API_KEY in place,
+    so with a pod base equal to the turn's the helper would send the pod's key."""
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "pod-key")
+    monkeypatch.setenv("ANTON_OPENAI_BASE_URL", "https://minds.internal/v1")
+    monkeypatch.delenv("ANTON_OPENAI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="cannot carry datasource reads"):
+        build_cloud_chat_session(_datasource_request(api_key=""))
 
 
 def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):
