@@ -92,6 +92,7 @@ from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     build_workspace_discovery_context,
+    cell_failure_reason,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
@@ -5301,14 +5302,10 @@ class ChatSession:
                                 if cell is not None:
                                     tool_ok = not (cell.error or "").strip()
                                     # Same source `tool_handlers` uses for its
-                                    # ToolOutcome: the traceback's LAST line is
-                                    # the cause, and it is the runtime's own
+                                    # ToolOutcome, and the runtime's own
                                     # output rather than anything the model
-                                    # wrote (ENG-1492).
-                                    _cell_err = (cell.error or "").strip()
-                                    tool_reason = (
-                                        _cell_err.splitlines()[-1][:160] if _cell_err else ""
-                                    )
+                                    # wrote.
+                                    tool_reason = cell_failure_reason(cell.error)
                                 if cell is not None:
                                     self._record_cell_explainability(
                                         pad_name=tc.input.get("name", ""),

@@ -33,6 +33,7 @@ from anton.core.llm.structured import (
     no_preamble_instruction,
 )
 from anton.core.memory.base import Engram
+from anton.core.utils.scratchpad import cell_error_headline
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +158,7 @@ class Consolidator:
                 first_line = cell.stdout.strip().split("\n")[0][:200]
                 output_preview = f" → {first_line}"
             elif cell.error:
-                first_line = cell.error.strip().split("\n")[-1][:200]
+                first_line = cell_error_headline(cell.error)[:200]
                 output_preview = f" → ERROR: {first_line}"
 
             summary_lines.append(f"Cell {i} [{status}]: {desc}{output_preview}")
