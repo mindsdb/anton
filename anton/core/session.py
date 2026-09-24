@@ -1264,6 +1264,14 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # Whether this host renders a streaming tool's live tail — the last lines
+    # of the file a tool is writing, relayed as the `tool_peek` progress phase
+    # (`ToolRegistry.dispatch_tool`). Only the CLI has a footer for it today;
+    # cowork-server's formatter and the cloud pod's wire would carry it as
+    # unrenderable noise that also spends their progress throttle window. A
+    # capability the host declares, like `elicitor`, never inferred from
+    # `surface` or `console`: those answer different questions.
+    live_tool_peek: bool = False
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
     # assumptions inline instead of stopping to ask ("do first, ask later").
@@ -1439,6 +1447,7 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self.live_tool_peek = config.live_tool_peek
         # Per-turn token cost books (ENG-1288). Created and armed at each
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
