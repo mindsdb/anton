@@ -1466,11 +1466,19 @@ class ChatSession:
             repair_replayed_tool_ids(list(config.initial_history))[0]
             if config.initial_history else []
         )
-        # Seed length + how many leading history messages the last compaction
-        # folded into its summary — lets a host map the compaction back onto
-        # its own message list (see `last_compaction`).
+        # Seed length + the last compaction's own record (its summary text and
+        # how many leading history messages it folded) — lets a host map the
+        # compaction back onto its own message list (see `last_compaction`).
         self._seed_len = len(self._history)
-        self._last_compacted_count: int | None = None
+        self._last_compaction: dict | None = None
+        # Bookkeeping that keeps `covered_through` in the SEED's coordinates
+        # while `_history` drifts away from them: each compaction replaces the
+        # turns it folded with entries of its own, so the next one counts from
+        # a shifted list. `_compaction_sealed` is the one-way door for when
+        # history stops mirroring the seed at all (see `hard_truncate_history`).
+        self._seed_covered = 0
+        self._synthetic_prefix_len = 0
+        self._compaction_sealed = False
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
@@ -1663,13 +1671,13 @@ class ChatSession:
         resummarized). `covered_through`: how many of `initial_history`'s
         messages are now folded into it — map this count onto your own
         message list to find the cutoff.
+
+        A snapshot written when the compaction succeeded, not read back from
+        `_history[0]` on demand: the last-resort marker overwrites that slot
+        without recording a compaction, so a late read would pair an earlier
+        compaction's count with the marker's "no summary is available" text.
         """
-        if self._last_compacted_count is None:
-            return None
-        return {
-            "summary": self._history[0]["content"],
-            "covered_through": min(self._last_compacted_count, self._seed_len),
-        }
+        return self._last_compaction
 
 
     def _note_latch_class(self, failure: str) -> None:
@@ -2628,6 +2636,11 @@ class ChatSession:
         else:
             user_content = old_text
 
+        # Set only where a durable compaction is recorded, and read at the end
+        # of this function: the record's text must be the body built there, and
+        # taking it in the same statement as the count is what keeps the marker
+        # below out of it.
+        recorded = False
         try:
             # Never above the client's own ceiling: a host that configures a
             # smaller `max_tokens` (or a distinct router model with a lower
@@ -2686,12 +2699,17 @@ class ChatSession:
                     f"{len(old_turns)} earlier turns were dropped to fit the "
                     "context window. No summary of them is available."
                 )
-                # Deliberately no `_last_compacted_count`: the host must not
-                # persist and replay this as the conversation's summary.
+                # Deliberately not `recorded`: the host must not persist
+                # and replay this as the conversation's summary. Sealed on top
+                # of that: the folded turns are now gone rather than summarized,
+                # so a LATER compaction would report them as covered by a
+                # summary that never saw them — that one loses turns, where an
+                # unrecorded compaction only costs a replay.
+                self._compaction_sealed = True
             else:
                 summary = summary_response.content
                 # Record the compaction ONLY on success.
-                self._last_compacted_count = compacted_count
+                recorded = True
         except Exception as exc:
             # Don't discard history on failure — losing the earlier turns is
             # worse than carrying them. Leave `self._history` untouched and let
@@ -2721,6 +2739,16 @@ class ChatSession:
         )
         summary_msg = {"role": "user", "content": summary_body}
 
+        # `compacted_count` indexes the CURRENT history, which an earlier
+        # compaction may already have rewritten as [summary, separator?, rest]:
+        # its leading `_synthetic_prefix_len` entries are ours, not seed
+        # messages, and everything after them starts where the last compaction
+        # stopped. Counted before the prefix below replaces it.
+        covered = min(
+            self._seed_covered + max(0, compacted_count - self._synthetic_prefix_len),
+            self._seed_len,
+        )
+
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
@@ -2729,8 +2757,13 @@ class ChatSession:
                 {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
             ]
+            self._synthetic_prefix_len = 2
         else:
             self._history = [summary_msg] + recent_turns
+            self._synthetic_prefix_len = 1
+        self._seed_covered = covered
+        if recorded and not self._compaction_sealed:
+            self._last_compaction = {"summary": summary_body, "covered_through": covered}
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -3008,11 +3041,14 @@ class ChatSession:
         else:
             self._history = [placeholder, separator, *tail]
 
-        # A hard truncate discards the compacted summary — history[0] is now
-        # the truncation placeholder, not the summary. Clear the compaction
-        # record so `last_compaction` reports None (keep-full-history) rather
-        # than letting a host persist the placeholder as the durable summary.
-        self._last_compacted_count = None
+        # A hard truncate discards the compacted summary — the turns it covered
+        # are gone from history, so replaying it next turn would describe
+        # material the host would also replay in full. Clear the record so
+        # `last_compaction` reports None (keep-full-history), and seal it: what
+        # survives here is a 4-message tail at an unknown offset, so nothing
+        # later in this session can map a count back onto the seed.
+        self._last_compaction = None
+        self._compaction_sealed = True
 
     async def plan_with_recovery(
         self,

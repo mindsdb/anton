@@ -199,6 +199,96 @@ class TestTruncatedRecord:
         # The host must not replay a marker as the conversation's summary.
         assert session.last_compaction is None
 
+    async def test_marker_does_not_overwrite_an_earlier_compactions_summary(self):
+        """Compact successfully, then hit the last-resort marker later in the
+        same session. The marker replaces history[0], so reporting the summary
+        by reading that slot would hand the host the marker text under the
+        earlier compaction's count — and the messages it covers would be
+        replaced by "no summary is available" in every later turn."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nreal"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+        assert await session._summarize_history() is True
+        first = session.last_compaction
+
+        session._history.extend(_alternating_history(10, "y" * 50))
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("   "))
+        assert await session._summarize_history(last_resort=True) is True
+
+        assert "No summary of them is available" in session.history[0]["content"]
+        assert session.last_compaction == first
+
+    async def test_nothing_is_recorded_after_a_marker_folded_turns_away(self):
+        """The marker drops turns instead of summarizing them. A later
+        compaction summarizes what's left — including the marker line, not the
+        turns behind it — so recording it would tell the host those turns are
+        covered and stop them ever being replayed."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("  "))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(20, "x" * 50),
+        ))
+        assert await session._summarize_history(last_resort=True) is True
+        assert session.last_compaction is None
+
+        session._history.extend(_alternating_history(10, "y" * 50))
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nreal"))
+        assert await session._summarize_history() is True
+
+        assert session.last_compaction is None
+
+
+class TestSecondCompactionInOneTurn:
+    """The reactive overflow path compacts without the once-per-turn guard, so
+    a turn that compacts proactively and then overflows compacts twice."""
+
+    async def test_covered_through_stays_in_seed_coordinates(self):
+        """The second compaction indexes a history the first one already
+        rewrote as [summary, separator, rest]. Reporting that raw index would
+        undercount what's folded, and the host would keep replaying turns the
+        summary already covers — the heavy conversations this is for would
+        never stop being re-summarized."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nfirst"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(20, "x" * 50),
+        ))
+        assert await session._summarize_history() is True
+        assert session.last_compaction["covered_through"] == 12
+        # [summary, separator, seed12..seed19]
+        assert len(session.history) == 10
+
+        session._history.extend(_alternating_history(4, "y" * 50))
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nsecond"))
+        assert await session._summarize_history() is True
+
+        # Folds history[:8] = summary + separator + seed12..seed17, i.e. the
+        # seed through index 17. The raw count would have said 8.
+        assert session.last_compaction["covered_through"] == 18
+        assert "second" in session.last_compaction["summary"]
+
+    async def test_covered_through_never_runs_past_the_seed(self):
+        """A second compaction can fold this turn's own messages too; those are
+        the host's current input, not history it can put behind a cutoff."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nfirst"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(20, "x" * 50),
+        ))
+        assert await session._summarize_history() is True
+
+        session._history.extend(_alternating_history(10, "y" * 50))
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nsecond"))
+        assert await session._summarize_history() is True
+
+        assert session.last_compaction["covered_through"] == 20  # the whole seed
+
     async def test_empty_record_leaves_history_intact(self, caplog):
         """A generation cut off before any text is a "success" carrying no
         record — `raise_on_empty_response` returns early on any stop_reason.
