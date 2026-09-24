@@ -2106,6 +2106,22 @@ class ChatSession:
     def _record_cell_explainability(
         self, *, pad_name: str, description: str, cell
     ) -> None:
+        # Runs after the cell has finished, so a raise here would be reported
+        # to the model as a failure of a tool call that succeeded.
+        try:
+            self._collect_cell_explainability(
+                pad_name=pad_name, description=description, cell=cell
+            )
+        except Exception as exc:
+            logger.warning(
+                "explainability bookkeeping failed for scratchpad %s: %s",
+                pad_name,
+                exc,
+            )
+
+    def _collect_cell_explainability(
+        self, *, pad_name: str, description: str, cell
+    ) -> None:
         if self._active_explainability is None:
             return
         if description:
