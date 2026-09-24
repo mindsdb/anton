@@ -16,6 +16,7 @@ error string: the old tests fed the classifier a bare "Cell timed out after
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,7 +26,11 @@ from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
 from anton.core.memory.consolidator import Consolidator, _ConsolidatedLessons
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict, _tool_failure_cause
-from anton.core.utils.scratchpad import cell_error_headline, cell_failure_reason
+from anton.core.utils.scratchpad import (
+    KILL_ERROR_PREFIXES,
+    cell_error_headline,
+    cell_failure_reason,
+)
 
 _DEFAULTS = dict(
     coding_provider="anthropic",
@@ -89,6 +94,38 @@ async def test_salvaged_kill_headline_is_the_cause_not_the_salvage_note(monkeypa
     assert "\n" in cell.error.strip(), "salvage must append a second paragraph"
     assert cell_error_headline(cell.error).startswith("Cell timed out")
     assert "Partial output" not in cell_error_headline(cell.error)
+
+
+async def test_cancelled_cell_leads_with_the_cancellation(monkeypatch):
+    """A cancelled exec (the desktop Stop) raises a CancelledError with no
+    message, so the kill message used to begin with a bare ". " — and, not
+    starting with a kill prefix, its headline fell to the partial-output note."""
+    monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+    pad = LocalScratchpadRuntime(name="kill-cancel", **_DEFAULTS)
+    await pad.start()
+
+    async def run():
+        async for _ in pad.execute_streaming(
+            "import time\nprint('sent 1/3')\ntime.sleep(30)\n", estimated_seconds=60
+        ):
+            pass
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.sleep(2)  # past the first heartbeat, so output is salvaged
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        cell = pad.cells[-1]
+    finally:
+        await pad.close()
+
+    assert "sent 1/3" in cell.stdout
+    assert cell.error.startswith("Cancelled. ")
+    assert cell.error.startswith(KILL_ERROR_PREFIXES)
+    assert cell_error_headline(cell.error).startswith("Cancelled")
 
 
 def test_traceback_headline_is_still_its_last_line():

@@ -91,9 +91,8 @@ def cell_error_headline(error: str | None) -> str:
 
 
 def cell_failure_reason(error: str | None) -> str:
-    """The machine-comparable failure key (ENG-1286/ENG-1492): the cell
-    error's headline, capped. Tests call this rather than restating the
-    extraction (ENG-1635 review)."""
+    """The machine-comparable failure key: the cell error's headline, capped.
+    Tests call this rather than restating the extraction."""
     return cell_error_headline(error)[:160]
 
 

@@ -5304,7 +5304,7 @@ class ChatSession:
                                     # Same source `tool_handlers` uses for its
                                     # ToolOutcome, and the runtime's own
                                     # output rather than anything the model
-                                    # wrote (ENG-1492).
+                                    # wrote.
                                     tool_reason = cell_failure_reason(cell.error)
                                 if cell is not None:
                                     self._record_cell_explainability(
