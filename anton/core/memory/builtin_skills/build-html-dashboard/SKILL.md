@@ -28,6 +28,8 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
 
   SECURITY (critical): Dashboards may be published to the web. NEVER embed API keys, tokens, passwords, connection strings, or any credentials in the HTML, JS, or inline data. Fetch data in scratchpad cells using credentials from environment variables, then serialize only the resulting data into the dashboard. If the user explicitly asks to embed a credential (e.g. for a live-updating dashboard), warn them that publishing will expose it and get confirmation before proceeding.
 
+  BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` may be unavailable — the in-app preview runs the page in a sandboxed frame. Never touch them directly during top-level initialisation: a throw there aborts the script before any listener is bound, and the page renders with every control dead. Go through one guarded helper with an in-memory fallback.
+
   Build the parts in separate cells, then assemble at the end:
 
   CELL 1 — Serialize data to a JS string variable (programmatic, no HTML):
