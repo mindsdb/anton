@@ -205,7 +205,7 @@ _SECRET_KEY_PATTERN = re.compile(
     r"mdb_[A-Za-z0-9._-]{10,}"   # MindsHub
     r"|sk-[A-Za-z0-9_-]{20,}"    # OpenAI / Anthropic (sk-, sk-proj-, sk-ant-)
     r"|AIza[A-Za-z0-9_-]{30,}"   # Google standard key
-    r"|AQ\.[A-Za-z0-9.]{50}"     # Google authorization key (AI Studio, 2026+)
+    r"|AQ\.[A-Za-z0-9._-]{50}"   # Google authorization key (AI Studio, 2026+)
 )
 
 
