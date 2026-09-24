@@ -210,12 +210,12 @@ def test_slug_falls_back_when_name_is_garbage(store: ArtifactStore):
 
 
 def test_non_latin_names_still_get_distinct_folders(store: ArtifactStore):
-    """The character whitelist is ASCII, so a Cyrillic name sanitises to
+    """The character whitelist is ASCII, so a non-Latin name sanitises to
     nothing and every such artifact shares the `untitled-artifact` base. Before
     the id suffix that made same-base collisions the NORM for a non-English
     user, not an edge case."""
-    a = store.create(name="Текущее время", description="x", type="html-app")
-    b = store.create(name="Другой отчёт", description="x", type="html-app")
+    a = store.create(name="Τρέχουσα ώρα", description="x", type="html-app")
+    b = store.create(name="Άλλη αναφορά", description="x", type="html-app")
 
     assert a.slug != b.slug
     assert a.slug.startswith("untitled-artifact-")

@@ -11,7 +11,7 @@ _NOW = datetime(2026, 7, 28, 13, 33)
 
 
 def test_stamps_string_content():
-    assert _stamp_user_content("да", _NOW) == "[2026-07-28 13:33] да"
+    assert _stamp_user_content("ναι", _NOW) == "[2026-07-28 13:33] ναι"
 
 
 def test_format_matches_cowork_server_history_stamp():

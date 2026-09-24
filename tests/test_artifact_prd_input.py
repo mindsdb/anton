@@ -217,10 +217,10 @@ def test_generation_nodes_do_not_see_the_brief_next_to_a_prd(tmp_path: Path):
     2026-09-16: 1 KB of every generation round and a second voice next to
     the authoritative document. The PRD supersedes it."""
     st = _state(tmp_path, prd="## Goal\nShow orders")
-    st.brief = "Вот что предлагаю сделать.\n\n**Вопросы**\n- Нужен ли таймер?"
+    st.brief = "Here is what I propose.\n\n**Questions**\n- Is a timer needed?"
     context = orchestrator._spec_context(st)
     assert "## Brief" not in context
-    assert "Нужен ли таймер" not in context
+    assert "Is a timer needed" not in context
     assert "Show orders" in context
 
 

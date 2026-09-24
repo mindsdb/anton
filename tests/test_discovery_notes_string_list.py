@@ -22,9 +22,10 @@ def test_a_single_line_string_is_one_item():
 
 
 def test_tool_call_markup_is_removed_from_items():
-    """Verbatim shape from the twelfth live run 2026-09-16."""
-    leaked = '\n<parameter name="open_points">Что означает «твой символ» в одиночной игре'
-    assert string_list(leaked) == ["Что означает «твой символ» в одиночной игре"]
+    """Shape from the twelfth live run 2026-09-16 (the original question was
+    in the user's language; the wording here is a translation)."""
+    leaked = '\n<parameter name="open_points">What does «your symbol» mean in a solo game'
+    assert string_list(leaked) == ["What does «your symbol» mean in a solo game"]
     assert string_list(["<parameter name=\"x\">a</parameter>", "b"]) == ["a", "b"]
 
 
