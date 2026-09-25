@@ -223,7 +223,6 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         # pod memory with args that would be clipped anyway.
         tool_args: dict[str, list[str]] = {}
         tool_args_len: dict[str, int] = {}
-        seen_tool_progress: set[str] = set()
         last_progress_wire = 0.0
         # Build attribution rides the turn, not the session: cowork resolved it
         # per turn and only it knows the server version / install channel (this
@@ -263,19 +262,21 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             elif isinstance(event, StreamTaskProgress):
                 logger.info("progress [%s]: %s", event.phase, event.message)
                 phase = event.phase or ""
-                first_progress = (phase == "tool_progress" and event.id
-                                  and event.id not in seen_tool_progress)
-                if first_progress:
-                    seen_tool_progress.add(event.id)
-                # Step-creating/closing phases and the first tool_progress per
-                # id must never be dropped (they open/close renderer steps);
-                # the rest is rate-limited. `continuation` and `handback` are
-                # exempt for a different reason: together they tell a consumer
-                # whether the text that follows replaces the answer or adds to
-                # it, and dropping either corrupts the answer in one direction
-                # or the other. Both fire at most once per continuation, so
-                # exempting them cannot flood.
-                always = bool(first_progress) or phase in (
+                # A tool_progress line with an id is a step announcement: the
+                # first one opens the renderer's step, every one is a step the
+                # user must see (ENG-2981 — reasoning_start from the tool's own
+                # LLM calls used to take the window and drop the line). A tool
+                # emits a handful per run; one that streams many lines must use
+                # the tool_peek phase instead, which this pod never relays.
+                step_line = phase == "tool_progress" and bool(event.id)
+                # Step-creating/closing phases and step lines must never be
+                # dropped; the rest is rate-limited. `continuation` and
+                # `handback` are exempt for a different reason: together they
+                # tell a consumer whether the text that follows replaces the
+                # answer or adds to it, and dropping either corrupts the answer
+                # in one direction or the other. Both fire at most once per
+                # continuation, so exempting them cannot flood.
+                always = step_line or phase in (
                     "scratchpad_start", "scratchpad_done", "tool_done",
                     "continuation", "handback")
                 now = time.monotonic()
