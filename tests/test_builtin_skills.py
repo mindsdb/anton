@@ -640,14 +640,12 @@ class TestPipelineContractMirrored:
     )
 
     # FRONTEND_MARKERS minus the two the pipeline contract does not state
-    # today: `primary="index.html"` and "never for comparison or change over
-    # time" live only in the skill. That is pre-existing drift, recorded
-    # separately and deliberately not fixed here — this tuple keeps the new
-    # check deterministic instead of red on someone else's problem.
+    # today (they live only in the skill): pre-existing drift, recorded
+    # separately and not fixed here.
     PIPELINE_MIRRORED_MARKERS = tuple(
         m for m in FRONTEND_MARKERS
         if m not in ('primary="index.html"', "never for comparison or change over time")
-    ) + ("BROWSER STORAGE",)
+    )
 
     def test_backend_skill_states_the_verifier_contract(self, store):
         body = store.load("build-fullstack-backend").declarative_md
