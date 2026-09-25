@@ -196,20 +196,25 @@ class ScratchpadRuntime(ABC):
     def _truncate_output(text: str, max_lines: int = 20, max_chars: int = 2000) -> str:
         """Truncate output to max_lines / max_chars, whichever is shorter."""
         lines = text.split("\n")
+        suffix = ""
         if len(lines) > max_lines:
-            kept = "\n".join(lines[:max_lines])
-            remaining = len(lines) - max_lines
-            return kept + f"\n... ({remaining} more lines)"
-        if len(text) > max_chars:
+            suffix = f"\n... ({len(lines) - max_lines} more lines)"
+            lines = lines[:max_lines]
+        kept = "\n".join(lines)
+        if len(kept) > max_chars:
             total = 0
             kept_lines: list[str] = []
             for line in lines:
-                if total + len(line) + 1 > max_chars and kept_lines:
+                if total + len(line) + 1 > max_chars:
+                    if not kept_lines:
+                        # One line longer than the whole budget: cut it
+                        # rather than keeping all of it.
+                        kept_lines.append(line[:max_chars])
                     break
                 kept_lines.append(line)
                 total += len(line) + 1
             return "\n".join(kept_lines) + "\n... (truncated)"
-        return text
+        return kept + suffix
 
     def _compact_cells(self) -> bool:
         """Collapse old cells into a summary cell to reduce context size.
