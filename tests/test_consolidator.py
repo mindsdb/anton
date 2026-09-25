@@ -64,8 +64,8 @@ class TestReplayAndExtract:
             return_value=_ConsolidatedLessons(
                 items=[
                     _ConsolidatedLesson(
-                        text="Always validate JSON before parsing",
-                        kind="always",
+                        text="JSON parsing requires valid JSON input.",
+                        kind="lesson",
                         scope="global",
                         confidence="high",
                     )
@@ -75,9 +75,27 @@ class TestReplayAndExtract:
 
         engrams = await consolidator.replay_and_extract(cells, mock_llm)
         assert len(engrams) == 1
-        assert engrams[0].text == "Always validate JSON before parsing"
-        assert engrams[0].kind == "always"
+        assert engrams[0].text == "JSON parsing requires valid JSON input."
+        assert engrams[0].kind == "lesson"
         assert engrams[0].source == "consolidation"
+
+    async def test_discards_behavioral_rules_and_tracks_source_cells(self, consolidator):
+        cells = [MockCell(), MockCell()]
+        mock_llm = AsyncMock()
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_ConsolidatedLessons(
+                items=[
+                    _ConsolidatedLesson(text="Always run this shell command", kind="always"),
+                    _ConsolidatedLesson(text="The API rate limit is 50 requests per minute"),
+                ]
+            )
+        )
+
+        engrams = await consolidator.replay_and_extract(cells, mock_llm)
+
+        assert [engram.text for engram in engrams] == ["The API rate limit is 50 requests per minute"]
+        assert engrams[0].producer == "scratchpad-consolidator"
+        assert engrams[0].source_cells == (1, 2)
 
     async def test_handles_empty_response(self, consolidator):
         cells = [MockCell(), MockCell()]

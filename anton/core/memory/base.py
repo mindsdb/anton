@@ -28,6 +28,11 @@ class Engram:
     confidence: Literal["high", "medium", "low"] | None = None
     topic: str = None
     source: Literal["user", "consolidation", "llm"] | None = None
+    # ``trusted`` is set only by an explicit, direct user-memory action. LLM
+    # output must never promote itself by claiming a user source.
+    trusted: bool = False
+    producer: str | None = None
+    source_cells: tuple[int, ...] = ()
     updated_at: dt.datetime = None
 
     def __post_init__(self):
