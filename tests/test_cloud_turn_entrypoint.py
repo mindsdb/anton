@@ -223,6 +223,48 @@ def test_the_continuation_boundary_outlives_a_progress_flood():
     )
 
 
+def test_every_tool_progress_line_reaches_the_wire():
+    """ENG-2981: generate_artifact announces each pipeline step as a
+    tool_progress line, and its own LLM calls emit reasoning_start right next
+    to it. The rate limiter used to let reasoning_start take the window and
+    drop the step line, so cowork never showed that step. A tool emits a
+    handful of these lines per run, so exempting them cannot flood the wire.
+    """
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamTaskProgress(phase="tool_progress", message="Gathering", id="t1")
+            for step in ("step 1", "step 2", "step 3"):
+                yield StreamTaskProgress(phase="reasoning_start", message="Thinking...")
+                yield StreamTaskProgress(phase="tool_progress", message=step, id="t1")
+            yield StreamTaskProgress(
+                phase="tool_done", message="generate_artifact", id="t1", ok=True,
+            )
+
+    events = _drive(_S())
+    lines = [
+        e["message"] for e in events
+        if e.get("kind") == "progress" and e["phase"] == "tool_progress"
+    ]
+    assert lines == ["Gathering", "step 1", "step 2", "step 3"]
+    # tool_progress does not take the window from other phases either: the
+    # first reasoning_start still gets through right after "Gathering".
+    phases = [e["phase"] for e in events if e.get("kind") == "progress"]
+    assert phases.count("reasoning_start") >= 1
+
+
+def test_tool_progress_without_an_id_is_still_rate_limited():
+    """Only step lines WITH an id are exempt (ENG-2981): an id-less line cannot
+    open or advance a renderer step, so a flood of them must still collapse."""
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            for i in range(50):
+                yield StreamTaskProgress(phase="tool_progress", message=f"m{i}")
+
+    events = _drive(_S())
+    progress = [e for e in events if e.get("kind") == "progress"]
+    assert 0 < len(progress) < 10
+
+
 def test_tool_args_accumulation_is_bounded():
     class _S(_FakeSession):
         async def turn_stream(self, user_input, **kwargs):

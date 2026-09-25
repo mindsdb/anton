@@ -19,8 +19,9 @@ Events written back on stdout (JSONL):
       dropping it lets the explanation pass as the replacement, and the answer
       the user already read is lost from the transcript.
       `phase: "tool_progress"` is a streaming tool's step line, `id` the
-      tool_use id it belongs to; the first one per id is never rate limited
-      (it creates the step a consumer renders), `phase: "tool_done"` closes
+      tool_use id it belongs to; lines with an id are never rate limited (the
+      first creates the step a consumer renders, each one is a step the user
+      must see; a tool emits a handful per run), `phase: "tool_done"` closes
       that step and carries `ok` and `eta_seconds`.
       `phase: "tool_peek"` — the live tail of what a streaming tool is
       writing, each one replacing the last, an empty `message` clearing it —
