@@ -22,18 +22,22 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
+import json
 import logging
 import os
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
+    from anton.config.settings import AntonSettings
     from anton.core.session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -102,6 +106,60 @@ _SKILLS_DIR_PREFIX = "anton-cloud-skills-"
 #: directly and the wire payload's `skills` block is ignored: cowork-server owns
 #: that tree and the pod sees the live copy, not a per-turn snapshot.
 _SKILLS_ROOT_ENV = "ANTON_CLOUD_SKILLS_ROOT"
+_CLOUD_TURN_ENV = "ANTON_CLOUD_TURN"
+_DATASOURCE_CORRELATION_ENV = "ANTON_CLOUD_DATASOURCE_CORRELATION_ID"
+_DATASOURCE_CONNECTIONS_ENV = "ANTON_CLOUD_DATASOURCE_CONNECTIONS"
+
+
+def _datasource_workspace_env(request: TurnRequestV1, settings: AntonSettings) -> dict[str, str]:
+    """Build pod-child configuration for a turn, refusing a datasource turn that could not reach the gateway.
+
+    The scratchpad's datasource helper sends the child's own ``OPENAI_API_KEY``
+    to the gateway at the child's ``OPENAI_BASE_URL``, which is the inference
+    host the gateway is published on. That holds only while both are this turn's
+    own, so the turn fails here when a pod setting such as
+    ``ANTON_OPENAI_API_KEY`` has replaced either, or the base is not https at
+    ``/v1``. Raises ``ValueError`` in those cases.
+    """
+    overlay = {_CLOUD_TURN_ENV: "1"}
+    if request.datasource is None:
+        return overlay
+    llm = request.llm or {}
+    base = (settings.openai_base_url or "").rstrip("/")
+    parsed = urlsplit(base)
+    if (
+        llm.get("provider") != "minds-cloud"
+        or not isinstance(llm.get("api_key"), str)
+        or not llm["api_key"]
+        or not hmac.compare_digest(settings.openai_api_key or "", llm["api_key"])
+        or base != str(llm.get("base_url") or "").rstrip("/")
+        or parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/v1"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("the turn's inference connection cannot carry datasource reads")
+    if not request.correlation_id:
+        raise ValueError("datasource turn credentials are unavailable")
+    overlay.update(
+        {
+            _DATASOURCE_CORRELATION_ENV: request.correlation_id,
+            _DATASOURCE_CONNECTIONS_ENV: json.dumps(
+                [
+                    {
+                        "connection_id": ref.connection_id,
+                        "credential_version": ref.credential_version,
+                    }
+                    for ref in request.datasource.connections
+                ],
+                separators=(",", ":"),
+            ),
+        }
+    )
+    return overlay
 
 
 def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
@@ -565,8 +623,10 @@ def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
 # product: artifact cards carry a Download control on web (ENG-2044), HTML and
 # Markdown artifacts are auto-shared at turn end (ENG-1680) with the link
 # surfaced on the card, and the chat renderer neutralises local-path links into
-# inert text. The base ARTIFACTS prompt (anton/core/llm/prompts.py, workflow
-# step 4) instructs the OPPOSITE for the CLI case — "include the primary
+# inert text. The base ARTIFACTS prompt (anton/core/llm/prompts.py, the
+# "AFTER FINISHING" workflow step — numbered 4 when this shipped, 6 since the
+# artifact pipeline became a single tool) instructs the OPPOSITE for the CLI
+# case — "include the primary
 # file's path … so it is clickable/openable in a plain CLI", and for
 # fullstack apps to prefer launch_backend's (loopback) url — so this block
 # overrides both BY NAME rather than merely contradicting them; suffix order
@@ -639,6 +699,12 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         if llm.get("coding_model"):
             settings_kwargs["coding_model"] = llm["coding_model"]
     settings = AntonSettings(**settings_kwargs)
+    # Cloud turns do not inherit the desktop Minds datasource configuration. A
+    # short-lived LLM key alone must never advertise or enable the static-key
+    # helper in a pod.
+    settings.minds_mind_name = None
+    settings.minds_datasource = None
+    settings.minds_datasource_engine = None
     # ENG-2056: the workspace mount is per-conversation, so deriving
     # `<workspace>/.anton/artifacts` hides sibling tasks' artifacts. When the
     # controller mounts the PROJECT's shared artifacts dir (outside the
@@ -682,12 +748,26 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     # Connectors ON only when this turn carries an oauth block (Google
     # Drive/Gmail today) — clears+reinjects DS_* env before the sandbox subprocess inherits it.
     data_vault = None
+    mcp_tool_defs: list = []
+    mcp_sessions: list = []
     if request.oauth:
         from anton.core.datasources.data_vault import TurnKeyDataVault
         from anton.utils.datasources import restore_namespaced_env
 
         data_vault = TurnKeyDataVault(request.oauth)
         restore_namespaced_env(data_vault)
+
+        # ENG-1816: discover any MCP-method connections' tools now, before
+        # ChatSessionConfig/ChatSession exist — see anton/core/mcp/wiring.py's
+        # module docstring for why this can't happen after construction.
+        # A no-op today: no `auth` Connection carries `_method == "mcp"` yet
+        # (Stage 3, not built), so this always returns ([], []) in production
+        # until then.
+        from anton.core.mcp.wiring import discover_mcp_tools
+
+        mcp_tool_defs, mcp_sessions = discover_mcp_tools(
+            data_vault, data_vault.list_connections()
+        )
     else:
         # No vault this turn — still clear, so a prior call's DS_* vars
         # can never survive into a turn with nothing of its own to reset them.
@@ -730,7 +810,7 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # configured block is the same one desktop injects; the serving-model
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
-            runtime_context=build_runtime_context(settings),
+            runtime_context=build_runtime_context(settings, cloud_datasource=request.datasource),
             # The delivery half of the prompt context (ENG-2421) — the desktop
             # harness injects its own via `_turn_style_context`; this is the
             # web-worded equivalent, which the pod owns because only it runs
@@ -742,6 +822,12 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # driven directly rather than by cowork; an unset surface reads as
         # "nobody declared one", which is the honest answer for a standalone run.
         surface=(request.trace or {}).get("surface"),
+        # WHO the user is, for the analytics event only (ENG-2121). Same reason
+        # as `surface`: the pod cannot know, cowork-server can (the gateway's
+        # verified principal). Validated as UUIDs by the session; absent when
+        # the pod is driven directly or by an older cowork-server.
+        user_id=(request.trace or {}).get("user_id"),
+        organization_id=(request.trace or {}).get("organization_id"),
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
@@ -750,15 +836,37 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         self_awareness=None,
         data_vault=data_vault,              # connectors ON iff request.oauth is set
         history_store=None,                 # disk history OFF (DB authoritative)
-        tools=[],                           # no host connector/publish tools
-        tool_allowlist=CLOUD_TOOL_ALLOWLIST,  # only reviewed tools survive the build
+        tools=mcp_tool_defs,                 # ENG-1816: this turn's MCP connections, if any
+        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own discovered MCP
+        # tool names — _build_tools() re-enforces the allowlist on every
+        # call (not just the first), so an MCP tool left out of it would
+        # survive exactly one round then vanish on the turn's next rebuild.
+        tool_allowlist=CLOUD_TOOL_ALLOWLIST | {td.name for td in mcp_tool_defs},
+        mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
         background_memory=False,            # one turn per pod: no end-of-turn LLM passes
         runtime_factory=local_scratchpad_runtime_factory,
+        workspace_env_overlay=_datasource_workspace_env(request, settings),
         web_search_enabled=False,
         web_fetch_enabled=False,
     )
 
-    session = ChatSession(config)
+    try:
+        session = ChatSession(config)
+    except Exception:
+        # discover_mcp_tools() above already opened these — if construction
+        # itself raises, there's no ChatSession yet to hang them on, so
+        # nothing else would ever close them (ChatSession.close() is the
+        # only other place that does). Synchronous cleanup: this whole
+        # function is a plain `def`, not async (see discover_mcp_tools's own
+        # sync wrapper for why asyncio.run() is safe here — no event loop of
+        # this function's own, it always runs inside run_in_executor).
+        if mcp_sessions:
+            import asyncio
+
+            from anton.core.mcp.wiring import close_mcp_sessions
+
+            asyncio.run(close_mcp_sessions(mcp_sessions))
+        raise
     # Baseline for `drain_pending_skills`, taken before the turn runs. Drafts
     # from earlier turns are already on the workspace, so without this every
     # turn would re-report all of them.

@@ -28,6 +28,7 @@ import pytest
 from anton.core.llm.anthropic import _raise_for_status_error as _raise_anthropic
 from anton.core.llm.openai import _raise_for_status_error
 from anton.core.llm.provider import (
+    ContentTooLargeError,
     ContentValidationError,
     EndpointConfigurationError,
     ModelUnavailableError,
@@ -485,6 +486,78 @@ def test_content_validation_error_is_a_connection_error():
     # Preserve generic ConnectionError compatibility for legacy callers while
     # typed readers distinguish content-shape failures from provider auth.
     assert issubclass(ContentValidationError, ConnectionError)
+
+
+# ── content-SIZE rejections (ENG-2689) ────────────────────────────────
+# Same permanence as the shape family above, different remedy: the image is
+# too big for the model and only the user can fix that. The live incident body
+# — a user's 8.3M-pixel PNG, well under every byte limit anton enforces.
+
+_PATCHES_400 = {
+    "message": (
+        "The image you provided requires 32400 patches after processing, "
+        "exceeding the limit of 30000. Please resize the image and try again."
+    ),
+    "type": "invalid_request_error",
+    "param": "input",
+    "code": "invalid_value",
+}
+
+
+def test_oversized_image_maps_to_content_too_large():
+    exc = _sdk_error(400, json_body={"error": dict(_PATCHES_400)})
+    with pytest.raises(ContentTooLargeError):
+        _raise_for_status_error(exc, "gpt-5.6-luna")
+
+
+def test_oversized_image_keeps_the_providers_own_remedy():
+    """The defect users actually saw. This 400 used to fall off the end of the
+    ladder into the generic ConnectionError, which asserts the failure is
+    TEMPORARY and invites exactly the retry that cannot work — while discarding
+    the one sentence that told the user how to fix it."""
+    exc = _sdk_error(400, json_body={"error": dict(_PATCHES_400)})
+    with pytest.raises(ContentTooLargeError) as err:
+        _raise_for_status_error(exc, "gpt-5.6-luna")
+    text = str(err.value)
+    assert "Please resize the image and try again." in text
+    assert "temporarily unavailable" not in text
+    assert "try again in a moment" not in text.lower()
+
+
+def test_content_too_large_is_a_content_validation_error():
+    """Subclassing is what keeps the ENG-1992 machinery working unchanged: the
+    session's no-retry rule and cowork-server's history repair both key on the
+    parent, so neither had to learn the subtype exists."""
+    assert issubclass(ContentTooLargeError, ContentValidationError)
+    assert issubclass(ContentTooLargeError, ConnectionError)
+
+
+def test_an_oversized_non_image_payload_is_not_a_content_rejection():
+    """Guard on the DESTRUCTIVE direction. Classifying a 400 as a content
+    rejection makes cowork-server strip EVERY image block from the
+    conversation's stored history — so a 400 that never mentions an image must
+    not qualify, however much it talks about exceeding a limit."""
+    exc = _sdk_error(400, json_body={"error": {
+        "message": "Your input exceeds the maximum context length of 128000 tokens.",
+        "type": "invalid_request_error",
+        "param": "input",
+    }})
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, ContentValidationError)
+
+
+def test_a_non_400_error_type_is_never_a_content_rejection():
+    """The classifier keys on `invalid_request_error`. A rate-limit body that
+    happens to mention an image must not be read as a permanent refusal — that
+    would turn a wait-and-retry into a destroyed conversation."""
+    exc = _sdk_error(429, json_body={"error": {
+        "message": "Too many image requests — please resize your workload.",
+        "type": "rate_limit_error",
+    }})
+    with pytest.raises(Exception) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, ContentValidationError)
 
 
 # ── the M3 wallet taxonomy (ENG-1169) ─────────────────────────────────
@@ -1041,3 +1114,47 @@ def test_the_agent_instance_zone_is_deliberately_untrusted():
     assert is_mindshub_host("sp_abc123.4nton.ai") is False
     assert is_mindshub_host("cw-9a9e789c.4nton.ai") is False
     assert is_mindshub_host("4nton.ai") is False
+
+
+# ── the Anthropic mapper gets the same content classification (ENG-2689) ──
+# Before ENG-2689 `anthropic.py` had NO content branch at all: the ENG-1992 fix
+# landed only in the OpenAI mapper, so a BYOK-Anthropic user hit the identical
+# bug with none of the handling — four retries of a permanent refusal and a
+# "try again in a moment" message. `classify_content_rejection` is shared for
+# the same reason `classify_404` is: so the two cannot drift again.
+
+def test_anthropic_mapper_classifies_an_oversized_image():
+    exc = _anthropic_sdk_error(400, json_body={"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": (
+            "messages.0.content.0.image.source.base64.data: At least one of "
+            "the image dimensions exceed max allowed size for many-image "
+            "requests: 2000 pixels"
+        ),
+    }})
+    with pytest.raises(ContentTooLargeError):
+        _raise_anthropic(exc, model="claude-sonnet")
+
+
+def test_anthropic_mapper_classifies_a_content_shape_rejection():
+    """The ENG-1992 family, which this mapper also never handled."""
+    exc = _anthropic_sdk_error(400, json_body={"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": (
+            "Input tag 'image_url' found using 'type' does not match any of "
+            "the expected tags: 'image'"
+        ),
+    }})
+    with pytest.raises(ContentValidationError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert not isinstance(err.value, ContentTooLargeError)
+
+
+def test_anthropic_mapper_leaves_an_unrelated_400_generic():
+    exc = _anthropic_sdk_error(400, json_body={"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "max_tokens: must be greater than 0",
+    }})
+    with pytest.raises(ConnectionError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert not isinstance(err.value, ContentValidationError)

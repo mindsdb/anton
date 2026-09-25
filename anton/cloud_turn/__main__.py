@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 #: Bound step-event payloads (tool args / results) on the wire. Matches the
 #: cap cowork's SSE formatter applies to the same content.
+# Trace-block keys the pod applies to the session config rather than forwarding
+# as per-turn Langfuse metadata (see `stream_turn`).
+_SESSION_CONFIG_TRACE_KEYS = frozenset({"surface", "user_id", "organization_id"})
+
 MAX_STEP_CHARS = 65536
 MAX_PROGRESS_CHARS = 2000
 #: Per-string-field cap when shrinking a cell-result JSON to fit the wire.
@@ -219,17 +223,20 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         # pod memory with args that would be clipped anyway.
         tool_args: dict[str, list[str]] = {}
         tool_args_len: dict[str, int] = {}
-        seen_tool_progress: set[str] = set()
         last_progress_wire = 0.0
         # Build attribution rides the turn, not the session: cowork resolved it
         # per turn and only it knows the server version / install channel (this
         # image has no cowork-server). `surface` is handled on the session
         # config instead, so it is dropped here to avoid stamping it twice.
+        # So are the account ids (ENG-2121): they ride the session config for
+        # the analytics event, and the gateway already records the verified
+        # user and org on the trace itself, so a client-supplied copy in
+        # Langfuse-Metadata would only be a second, weaker source.
         # Observability only — a malformed block must never affect the turn.
         _trace_md = {
             str(k): str(v)
             for k, v in (req.trace or {}).items()
-            if k != "surface" and v is not None
+            if k not in _SESSION_CONFIG_TRACE_KEYS and v is not None
         } or None
         async for event in session.turn_stream(turn_content, trace_metadata=_trace_md):
             if isinstance(event, StreamTextDelta):
@@ -255,19 +262,21 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             elif isinstance(event, StreamTaskProgress):
                 logger.info("progress [%s]: %s", event.phase, event.message)
                 phase = event.phase or ""
-                first_progress = (phase == "tool_progress" and event.id
-                                  and event.id not in seen_tool_progress)
-                if first_progress:
-                    seen_tool_progress.add(event.id)
-                # Step-creating/closing phases and the first tool_progress per
-                # id must never be dropped (they open/close renderer steps);
-                # the rest is rate-limited. `continuation` and `handback` are
-                # exempt for a different reason: together they tell a consumer
-                # whether the text that follows replaces the answer or adds to
-                # it, and dropping either corrupts the answer in one direction
-                # or the other. Both fire at most once per continuation, so
-                # exempting them cannot flood.
-                always = bool(first_progress) or phase in (
+                # A tool_progress line with an id is a step announcement: the
+                # first one opens the renderer's step, every one is a step the
+                # user must see (ENG-2981 — reasoning_start from the tool's own
+                # LLM calls used to take the window and drop the line). A tool
+                # emits a handful per run; one that streams many lines must use
+                # the tool_peek phase instead, which this pod never relays.
+                step_line = phase == "tool_progress" and bool(event.id)
+                # Step-creating/closing phases and step lines must never be
+                # dropped; the rest is rate-limited. `continuation` and
+                # `handback` are exempt for a different reason: together they
+                # tell a consumer whether the text that follows replaces the
+                # answer or adds to it, and dropping either corrupts the answer
+                # in one direction or the other. Both fire at most once per
+                # continuation, so exempting them cannot flood.
+                always = step_line or phase in (
                     "scratchpad_start", "scratchpad_done", "tool_done",
                     "continuation", "handback")
                 now = time.monotonic()
@@ -309,6 +318,19 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
             emit({"kind": "skill", "entries": drafts})
+        # Pre-terminal like memory and skills. Without this the pod compacts
+        # every turn and throws the result away: the host owns history, so it
+        # must be told which seeded messages the summary now covers.
+        #
+        # `getattr`: cowork and anton deploy independently, and a session double
+        # (or a build predating `last_compaction`) must no-op here, not raise.
+        compaction = getattr(session, "last_compaction", None)
+        if compaction:
+            logger.info("emitting compaction covering %d seeded message(s)",
+                        compaction["covered_through"])
+            emit({"kind": "compaction",
+                  "summary": compaction["summary"],
+                  "covered_through": compaction["covered_through"]})
         # Pre-terminal for the same reason as memory and skills: cowork stops
         # reading the stream at the terminal event.
         #

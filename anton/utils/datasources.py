@@ -204,7 +204,8 @@ _PROVIDER_SECRET_VARS: tuple[str, ...] = (
 _SECRET_KEY_PATTERN = re.compile(
     r"mdb_[A-Za-z0-9._-]{10,}"   # MindsHub
     r"|sk-[A-Za-z0-9_-]{20,}"    # OpenAI / Anthropic (sk-, sk-proj-, sk-ant-)
-    r"|AIza[A-Za-z0-9_-]{30,}"   # Google / Gemini
+    r"|AIza[A-Za-z0-9_-]{30,}"   # Google standard key
+    r"|AQ\.[A-Za-z0-9._-]{50}"   # Google authorization key (AI Studio, 2026+)
 )
 
 
@@ -304,7 +305,7 @@ def scrub_credentials(text: str) -> str:
         value, conservatively.
       * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS,
         then anything matching a well-known key shape (_SECRET_KEY_PATTERN), so
-        a raw `mdb_`/`sk-`/`AIza` key can't reach model context via a tool
+        a raw `mdb_`/`sk-`/`AIza`/`AQ.` key can't reach model context via a tool
         result, traceback, or settings echo.
     """
     for key in _DS_SECRET_VARS:

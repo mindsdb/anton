@@ -478,6 +478,30 @@ def test_an_alias_outside_the_pin_map_is_recorded_but_not_asserted():
     assert ev._SERVED == {"gpt-terra": "gpt-5.6-terra"}
 
 
+def test_an_alias_echo_is_recorded_as_not_disclosed_and_never_a_repoint(monkeypatch):
+    """ENG-2892: the gateway now returns the alias as `model`. That is no
+    information about the served model, not a repoint — the check must not
+    raise, must record the blindness where the report will show it, and must
+    keep failing a GENUINE repoint (a different real id)."""
+    monkeypatch.setattr(ev, "_SERVED", {})
+    ev._check_served_model("haiku", "haiku")  # must not raise
+    assert "not disclosed" in ev._SERVED["haiku"]
+    assert ev._SERVED["haiku"].startswith("haiku")
+    # The guard is still armed for a real repoint of the same slot.
+    with pytest.raises(ev.AliasRepointed):
+        ev._check_served_model("haiku", "claude-sonnet-5")
+    # And the pinned id itself is still accepted and recorded verbatim.
+    ev._check_served_model("haiku", "claude-haiku-4-5-20251001")
+    assert ev._SERVED["haiku"] == "claude-haiku-4-5-20251001"
+    # A confirmed match wins over the echo test: when the alias IS the pinned
+    # real id (a one-off `VERIFIER_EVAL_*_MODEL=<real id>` run), the gateway
+    # did disclose and the report must not claim blindness (#490 self-review,
+    # finding 2 — the echo branch used to run first and mislabel it).
+    monkeypatch.setitem(ev._EXPECTED_SERVED, "gpt-5.6-luna", "gpt-5.6-luna")
+    ev._check_served_model("gpt-5.6-luna", "gpt-5.6-luna")
+    assert ev._SERVED["gpt-5.6-luna"] == "gpt-5.6-luna"
+
+
 @pytest.mark.parametrize("served", [None, "", 0, object()])
 def test_a_missing_served_id_is_not_treated_as_a_repoint(served):
     """A provider that omits `model` says nothing about which model ran.
@@ -608,3 +632,211 @@ def test_recorded_not_gated_pairs_are_excluded_at_parametrization_not_skipped():
     import inspect
 
     assert "pytest.skip(" not in inspect.getsource(ev.test_verdict)
+
+
+# --- ENG-2863: the two-tier scope decision in verifier-eval.yml ------------
+
+import importlib.util as _ilu
+
+_SCOPE_PATH = Path(__file__).resolve().parent.parent / ".github/scripts/verifier_eval_scope.py"
+_spec = _ilu.spec_from_file_location("verifier_eval_scope", _SCOPE_PATH)
+scope = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(scope)
+
+
+def test_every_scope_marker_resolves_to_a_span_in_the_code():
+    """A renamed function must fail here, not silently turn the matrix off.
+
+    The workflow decides full-matrix vs guard-only by intersecting the PR's
+    hunks with these symbols' line spans. A marker that resolves to nothing
+    would make every PR touching that code run the one-call guard, and the
+    rubric would be unguarded again (the ENG-1334 failure in a new coat).
+    """
+    root = Path(__file__).resolve().parent.parent
+    for path, names in scope.SPAN_MARKERS.items():
+        spans = scope.marker_spans((root / path).read_text(), names)
+        missing = [n for n in names if n not in spans]
+        assert not missing, f"{path}: scope markers resolve to nothing: {missing}"
+    # Pinned by EQUALITY, not subset: review of #486 deleted six entries one
+    # at a time and the subset asserts passed every time. Removing a marker is
+    # a deliberate edit to this test, with a reason.
+    assert set(scope.SPAN_MARKERS) == {"anton/core/session.py", "anton/core/llm/client.py"}
+    assert set(scope.SPAN_MARKERS["anton/core/session.py"]) == {
+        "_VerifierVerdict", "_VERIFIER_TOKEN_BUDGETS", "_VERIFIER_NO_PREAMBLE",
+        "_VERIFIER_JUDGMENT_RUBRIC", "_build_verify_request", "_render_verify_transcript",
+        "_render_tool_result_content", "_clip_keep_cause", "_IMAGE_PLACEHOLDER",
+    }
+    # The forced-tool-call body, not only the delegators that call it: a
+    # tool_choice mutation inside _generate_object_with read "guard" before.
+    assert set(scope.SPAN_MARKERS["anton/core/llm/client.py"]) == {
+        "_generate_object_with", "_call_with_auth_confirmation",
+        "generate_object", "generate_object_code",
+    }
+    assert set(scope.ALWAYS_FULL) == {
+        "tests/test_verifier_verdict_live.py", "anton/core/llm/structured.py",
+        ".github/scripts/verifier_eval_scope.py",
+    }
+
+
+def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
+    src = (
+        "X = 1\n"
+        "def _render_verify_transcript(h):\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    return a + b\n"
+        "\n"
+        "async def turn_stream(self):\n"
+        "    y = _VERIFIER_TOKEN_BUDGETS\n"
+        "    return y\n"
+    )
+    spans = scope.marker_spans(src, ("_render_verify_transcript", "_VERIFIER_TOKEN_BUDGETS"))
+    assert spans == {"_render_verify_transcript": [(2, 5)]}  # the constant is only *used* here
+    inside = scope.parse_hunks("@@ -4 +4 @@\n-    b = 2\n+    b = 3\n")
+    outside = scope.parse_hunks("@@ -8 +8 @@\n-    y = _VERIFIER_TOKEN_BUDGETS\n+    y = 0\n")
+    assert scope.touched(inside, spans, spans) == {"_render_verify_transcript"}
+    assert scope.touched(outside, spans, spans) == set()
+    # A pure insertion (zero-length old side) inside the span counts too.
+    insertion = scope.parse_hunks("@@ -3,0 +4 @@\n+    c = 9\n")
+    assert scope.touched(insertion, spans, spans) == {"_render_verify_transcript"}
+    # And a pure DELETION whose zero-length new side lands on the span's first
+    # line: old side is outside the span, so only the max(length, 1) treatment
+    # of the new side can catch it (review of #486: the insertion case above
+    # passed via the non-empty new side and never exercised that guard).
+    deletion = scope.parse_hunks("@@ -7 +2,0 @@\n-    gone = 1\n")
+    assert scope.touched(deletion, spans, spans) == {"_render_verify_transcript"}
+
+
+def test_guard_mode_selects_exactly_the_truncation_guard():
+    workflow = _WORKFLOW.read_text()
+    assert ".github/scripts/verifier_eval_scope.py" in workflow
+    # The scope output reaches pytest through env, never as `${{ }}` in the
+    # run line (review of #486): an expression interpolated into shell is an
+    # injection point if the script's output is ever widened.
+    assert "PYTEST_ARGS: ${{ steps.scope.outputs.pytest_args }}" in workflow
+    assert "--junitxml=eval-junit.xml $PYTEST_ARGS" in workflow
+    run_step = workflow.split("Run verdict-quality eval")[1].split("Assert the eval actually executed")[0]
+    assert "${{ steps.scope.outputs.pytest_args }}" not in run_step.split("run:")[1]
+    # And the guard-only summary is its own gated step, not a grep of $GITHUB_OUTPUT.
+    assert "if: steps.scope.outputs.scope == 'guard'" in workflow
+    assert 'grep -q "^scope=guard"' not in workflow
+    assert "fetch-depth: 0" in workflow
+    # The -k expression must select an existing test, and only one function.
+    matches = [n for n in dir(ev) if n.startswith("test_") and scope.GUARD_K in n]
+    assert matches == ["test_narrating_model_reaches_a_verdict_at_shipped_budgets"]
+    # ...which must reach EVERY pinned alias, or a repoint of the unreached one
+    # goes unnoticed on guard runs (ENG-1687's latency guarantee; round-2
+    # review of #486, finding 6). It is parametrized over `_MODELS`.
+    import inspect
+
+    src = inspect.getsource(ev.test_narrating_model_reaches_a_verdict_at_shipped_budgets)
+    assert 'parametrize("model", _MODELS)' in src and "_client(model)" in src
+    assert set(ev._EXPECTED_SERVED) <= set(ev._MODELS)
+    # And the scope step never reaches for pytest.skip.
+    step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
+    assert "pytest.skip" not in step
+
+
+def test_a_failing_scope_decision_falls_back_to_the_full_matrix(tmp_path, monkeypatch):
+    """Fail CLOSED. If the decision cannot be made (bad revision, git error,
+    unparsable file), the answer is the full matrix — never a red job for an
+    unrelated reason, and never the one-call guard."""
+    out = tmp_path / "gh_output"
+    monkeypatch.setattr(scope, "decide", lambda b, h: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc = scope.main(["--base", "x", "--head", "y", "--github-output", str(out)])
+    assert rc == 0
+    text = out.read_text()
+    assert "scope=full" in text and "pytest_args=\n" in text
+
+
+def test_decide_diffs_from_the_merge_base_not_the_base_tip(tmp_path, monkeypatch):
+    """pull_request.base.sha is the base branch TIP. After the PR branched, the
+    base gained a commit touching an ALWAYS_FULL file; the PR itself touched only
+    turn_stream. Against the tip that reads "full" (the base's own change shows
+    up as a reverse hunk); against the merge base it is "guard"."""
+    import subprocess
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q", "-b", "staging")
+    git("config", "user.email", "t@example.com"); git("config", "user.name", "t")
+    (tmp_path / "anton/core/llm").mkdir(parents=True); (tmp_path / "tests").mkdir(); (tmp_path / "scripts").mkdir()
+    session = tmp_path / "anton/core/session.py"
+    session.write_text(
+        "def _render_verify_transcript(h):\n    return h\n\n"
+        "async def turn_stream(self):\n    return 1\n"
+    )
+    (tmp_path / "anton/core/llm/client.py").write_text("def generate_object():\n    pass\n")
+    (tmp_path / "tests/test_verifier_verdict_live.py").write_text("# eval\n")
+    git("add", "."); git("commit", "-q", "-m", "base")
+    branch_point = git("rev-parse", "HEAD")
+    # The PR: touches turn_stream only.
+    git("checkout", "-q", "-b", "pr")
+    session.write_text(session.read_text().replace("return 1", "return 2"))
+    git("commit", "-q", "-am", "pr edit")
+    pr_head = git("rev-parse", "HEAD")
+    # The base moves on and touches an ALWAYS_FULL file.
+    git("checkout", "-q", "staging")
+    (tmp_path / "tests/test_verifier_verdict_live.py").write_text("# eval changed on staging\n")
+    git("commit", "-q", "-am", "verifier work landed on staging")
+    base_tip = git("rev-parse", "HEAD")
+    assert base_tip != branch_point
+
+    monkeypatch.chdir(tmp_path)
+    verdict, reasons = scope.decide(base_tip, pr_head)
+    assert verdict == "guard", reasons
+    # And a PR that really touches a marker still reads full from the same base tip.
+    git("checkout", "-q", "pr")
+    session.write_text(session.read_text().replace("return h", "return list(h)"))
+    git("commit", "-q", "-am", "renderer edit")
+    verdict, reasons = scope.decide(base_tip, git("rev-parse", "HEAD"))
+    assert verdict == "full" and any("_render_verify_transcript" in r for r in reasons), reasons
+
+
+def test_the_workflow_fails_closed_and_lists_the_scope_script_as_a_trigger():
+    """The YAML half of the scope decision, pinned like the Python half
+    (round-2 review of #486, finding 8): the empty-payload fallback must be
+    the FULL matrix, never the guard; and the script must be a trigger path so
+    a change to the decision itself proves the eval still runs."""
+    workflow = _WORKFLOW.read_text()
+    step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
+    fallback = step.split("if [ -z")[1].split("fi")[0]
+    assert 'echo "scope=full"' in fallback
+    assert 'echo "pytest_args="' in fallback
+    assert "scope=guard" not in fallback
+    paths = workflow.split("paths:")[1].split("concurrency:")[0]
+    assert '- ".github/scripts/verifier_eval_scope.py"' in paths
+    assert '- "tests/test_verifier_verdict_live.py"' in paths
+
+
+def test_a_decorated_marker_span_starts_at_its_first_decorator():
+    """`node.lineno` is the def line; a decorator added above a marker would
+    otherwise sit outside its span and read "guard" (review of #486)."""
+    src = "import functools\n\n@functools.lru_cache\n@something\ndef _render_verify_transcript(h):\n    return h\n"
+    spans = scope.marker_spans(src, ("_render_verify_transcript",))
+    assert spans == {"_render_verify_transcript": [(3, 6)]}
+    hit = scope.touched(scope.parse_hunks("@@ -3 +3 @@\n-@functools.lru_cache\n+@functools.cache\n"), spans, spans)
+    assert hit == {"_render_verify_transcript"}
+
+
+def test_every_assignment_of_a_marker_counts_including_augmented():
+    """A later re-assignment is the one that takes effect, and `+=` is an
+    AugAssign; keeping only the first Assign span read "guard" on both
+    (review of #486)."""
+    src = (
+        "_VERIFIER_JUDGMENT_RUBRIC = (\n"
+        '    "a"\n'
+        ")\n"
+        "X = 1\n"
+        '_VERIFIER_JUDGMENT_RUBRIC = "b"\n'
+        'Y = 2\n'
+        '_VERIFIER_JUDGMENT_RUBRIC += "c"\n'
+    )
+    spans = scope.marker_spans(src, ("_VERIFIER_JUDGMENT_RUBRIC",))
+    assert spans == {"_VERIFIER_JUDGMENT_RUBRIC": [(1, 3), (5, 5), (7, 7)]}
+    for line in (2, 5, 7):
+        assert scope.touched(scope.parse_hunks(f"@@ -{line} +{line} @@\n-x\n+y\n"), spans, spans) == {
+            "_VERIFIER_JUDGMENT_RUBRIC"
+        }, line
+    assert scope.touched(scope.parse_hunks("@@ -4 +4 @@\n-X = 1\n+X = 2\n"), spans, spans) == set()

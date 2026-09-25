@@ -80,6 +80,29 @@ def _encode_cell_payload(payload: str) -> bytes:
     return payload.encode("utf-8", errors="surrogateescape")
 
 
+def _is_cloud_turn_state(key: str) -> bool:
+    return key == "ANTON_CLOUD_TURN" or key.startswith("ANTON_CLOUD_DATASOURCE_")
+
+
+def _apply_workspace_overlay(env: dict[str, str], overlay: dict[str, str] | None) -> None:
+    """Lay the workspace overlay over ``env`` in place.
+
+    Ordinary keys are only-if-unset, as ``apply_env_to_process`` was, so a
+    project .env can neither replace PATH nor a key this process already holds.
+    The per-turn cloud state is the exception: whatever a previous cloud
+    runtime left in the parent environment is dropped first and the overlay's
+    values replace it, so a stale correlation id or connection set never reaches a pad.
+    """
+    for key in list(env):
+        if _is_cloud_turn_state(key):
+            del env[key]
+    for key, value in (overlay or {}).items():
+        if _is_cloud_turn_state(key):
+            env[key] = value
+        else:
+            env.setdefault(key, value)
+
+
 def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     """A copy of ``base`` with Python UTF-8 mode forced for the scratchpad
     subprocess.
@@ -594,10 +617,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
-        # Only-if-unset, as apply_env_to_process was, and before the DS_* strip
-        # so a project .env can neither replace PATH nor smuggle a credential.
-        for key, value in (self._workspace_env_overlay or {}).items():
-            env.setdefault(key, value)
+        # Before the DS_* strip, so a project .env cannot smuggle a credential.
+        _apply_workspace_overlay(env, self._workspace_env_overlay)
         if self._scratchpad_ds_env is not None:
             # Never trust inherited DS_* values — strip them, then overlay
             # exactly what this pad should see.
@@ -954,15 +975,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "either way the next exec call starts from an empty "
                     "namespace."
                 )
-            error_msg = (
-                f"{exc}. {state_note}\n\n"
-                "If a database query was running, it may still be executing server-side.\n"
-                "To check and cancel: run SHOW PROCESSLIST (MySQL) or\n"
-                "SELECT * FROM information_schema.processlist WHERE status='running' "
-                "and cancel with KILL <id>.\n"
-                "For Snowflake: use SHOW RUNNING QUERIES and "
-                "SELECT SYSTEM$CANCEL_ALL_QUERIES(<session_id>)."
-            )
+            # A cancellation carries no message; name it so the error still
+            # leads with its cause like every other kill.
+            error_msg = f"{str(exc) or 'Cancelled'}. {state_note}"
             salvaged = "".join(self._salvage)
             if salvaged:
                 if self._salvage_truncated:

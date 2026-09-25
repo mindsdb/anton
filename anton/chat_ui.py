@@ -282,12 +282,17 @@ class StreamDisplay:
             "dots", text=Text(f" {self._line2_status}", style="anton.muted")
         )
 
-        # Line 2: peek (only if there's something to peek at)
+        # Line 2: peek (only if there's something to peek at). A multi-line
+        # peek — a streaming tool's live tail (`tool_peek`) — keeps the arrow
+        # on its first line and indents the rest under it.
         parts: list = [spinner]
         if self._line3_peek:
+            first, *rest = self._line3_peek.splitlines() or [self._line3_peek]
             line3 = Text()
             line3.append("  \u21b3 ", style="anton.muted")
-            line3.append(self._line3_peek, style="dim")
+            line3.append(first, style="dim")
+            for extra in rest:
+                line3.append("\n    " + extra, style="dim")
             parts.append(line3)
 
         # Line 3: control + personality (at the bottom)
@@ -352,8 +357,15 @@ class StreamDisplay:
         plausible label like "[recommended] postgres" would otherwise be
         rendered as a Rich tag and swallowed, while one containing "[/]" would
         raise MarkupError out of here and kill the turn mid-dispatch.
+
+        `request.compact` skips the option list and the "Pick one or more"
+        hint entirely — for a prompt that already spells out the choice in
+        prose (e.g. a PRD brief ending in its own "continue, or changes?"
+        sentence), repeating it as a numbered list under the text is noise.
         """
         self._console.print(f"\n[bold]{escape(request.prompt)}[/]")
+        if request.compact:
+            return
         for index, option in enumerate(request.options, start=1):
             icon = "📁" if option.kind == "folder" else "📄" if option.kind == "file" else ""
             prefix = f"{icon} " if icon else ""
@@ -482,10 +494,21 @@ class StreamDisplay:
             # yielded a ToolProgress marker. Print it as a permanent line —
             # falling through to the generic phase handler below would only
             # update the transient spinner footer (Live(transient=True)),
-            # which disappears the moment the spinner stops.
+            # which disappears the moment the spinner stops. A new step also
+            # ends whatever the previous one was streaming, so its tail goes.
+            self._line3_peek = ""
             self._stop_spinner()
             self._console.print(Text(f"  {message}", style="anton.muted"))
             self._start_spinner()
+            return
+
+        if phase == "tool_peek":
+            # A streaming tool's live tail (generate_artifact: the last lines
+            # of the file being written). Transient by nature — it lives in
+            # the spinner footer, each one replaces the last, and an empty
+            # message clears it.
+            self._line3_peek = message
+            self._update_spinner()
             return
 
         if phase == "tool_done":
@@ -506,7 +529,16 @@ class StreamDisplay:
             self._line1_fun = random.choice(THINKING_MESSAGES)  # noqa: S311
             self._line2_status = random.choice(WORKING_FOOTER_MESSAGES)  # noqa: S311
             self._line3_peek = ""
-            self._update_spinner()
+            # `_update_spinner()` alone is a no-op once `phase="interactive"`
+            # has torn the Live context down (`_live = None`) — e.g. right
+            # after an `ask_user`/`elicit()` answer, with no tool-result line
+            # printed in between to implicitly restart it. Recreate it here
+            # so this phase always leaves a running spinner behind, not just
+            # when one happened to already be running.
+            if self._live is None:
+                self._start_spinner()
+            else:
+                self._update_spinner()
             return
 
         if phase == "reasoning_done":

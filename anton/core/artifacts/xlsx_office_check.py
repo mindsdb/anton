@@ -112,8 +112,16 @@ def _discover_office() -> str | None:
     return shutil.which("soffice") or shutil.which("libreoffice")
 
 
-def _convert(office: str, path: Path, outdir: Path, profile_dir: Path) -> tuple[Path | None, str | None]:
-    """Run the headless conversion. Returns `(output_path, None)` on success,
+def _convert(
+    office: str,
+    path: Path,
+    outdir: Path,
+    profile_dir: Path,
+    target: str = "xlsx",
+    timeout: float | None = None,
+) -> tuple[Path | None, str | None]:
+    """Run the headless conversion to `target` (`office_open_check.py`
+    reuses this with `pdf` for decks and documents). Returns `(output_path, None)` on success,
     or `(None, detail)` where `detail` is a human-readable rejection reason
     when LibreOffice explicitly said why (nonzero exit, or exit 0 with no
     output file) — `(None, None)` for a timeout, which isn't evidence about
@@ -127,7 +135,7 @@ def _convert(office: str, path: Path, outdir: Path, profile_dir: Path) -> tuple[
         "--nofirststartwizard",
         f"-env:UserInstallation=file://{profile_dir}",
         "--convert-to",
-        "xlsx",
+        target,
         "--outdir",
         str(outdir),
         str(path),
@@ -139,12 +147,12 @@ def _convert(office: str, path: Path, outdir: Path, profile_dir: Path) -> tuple[
         start_new_session=True,  # own process group, so a timeout can kill the whole tree
     )
     try:
-        _, stderr = proc.communicate(timeout=_TIMEOUT_SECONDS)
+        _, stderr = proc.communicate(timeout=_TIMEOUT_SECONDS if timeout is None else timeout)
     except subprocess.TimeoutExpired:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         proc.communicate()
         return None, None
-    out_path = outdir / f"{path.stem}.xlsx"
+    out_path = outdir / f"{path.stem}.{target}"
     if out_path.is_file() and proc.returncode == 0:
         return out_path, None
 

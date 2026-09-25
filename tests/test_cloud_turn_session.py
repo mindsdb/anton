@@ -10,6 +10,7 @@ Two layers:
 
 from __future__ import annotations
 
+import json
 import os
 # Bound at import so the constants below are built from the real class, which
 # `_pin_today` later replaces on the module.
@@ -70,6 +71,107 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.web_fetch_enabled is False
 
 
+def test_datasource_turn_carries_only_its_references_to_the_child(tmp_path, monkeypatch):
+    """The key and the gateway host reach the child through its own inference
+    connection; a gateway setting left in the pod is ignored."""
+    monkeypatch.setenv("ANTON_DATASOURCE_GATEWAY_URL", "https://attacker.invalid")
+    request = TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        '"input":"hello","llm":{"api_key":"mdb_turn.secret","provider":"minds-cloud",'
+        '"base_url":"https://minds.internal/v1"},"datasource":{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+    _, cfg = _build(tmp_path, monkeypatch, **{
+        "correlation_id": request.correlation_id,
+        "llm": request.llm,
+        "datasource": request.datasource,
+    })
+    assert cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CORRELATION_ID"] == "corr_1"
+    assert json.loads(cfg.workspace_env_overlay["ANTON_CLOUD_DATASOURCE_CONNECTIONS"])[0] == {
+        "connection_id": 7,
+        "credential_version": 3,
+    }
+    assert "GATEWAY_URL" not in cfg.workspace_env_overlay
+    assert "ANTON_CLOUD_DATASOURCE_TURN_KEY" not in cfg.workspace_env_overlay
+
+
+def test_a_turn_without_a_datasource_block_carries_only_the_cloud_marker(tmp_path, monkeypatch):
+    """The old-job path: no bearer, no references, nothing for the pod child to act on."""
+    _, cfg = _build(tmp_path, monkeypatch, correlation_id="corr_1",
+                    llm={"api_key": "mdb_turn.secret", "provider": "minds-cloud", "base_url": "https://m/v1"})
+    assert cfg.workspace_env_overlay == {"ANTON_CLOUD_TURN": "1"}
+
+
+def test_legacy_minds_configuration_never_reaches_a_cloud_prompt(tmp_path, monkeypatch):
+    """A pod carrying the desktop Minds variables must not advertise the static-key
+    helper or its one-argument signature; the cloud helper is the only one offered."""
+    monkeypatch.setenv("ANTON_MINDS_DATASOURCE", "legacy-datasource")
+    monkeypatch.setenv("ANTON_MINDS_URL", "https://legacy.invalid")
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", "legacy-static-key")
+    _, cfg = _build(tmp_path, monkeypatch)
+    context = cfg.system_prompt_context.runtime_context
+    assert "CONNECTED MIND" not in context
+    assert 'query_minds_data("SELECT' not in context
+    assert "legacy-datasource" not in context
+
+
+def _datasource_request(base_url="https://minds.internal/v1", api_key="mdb_turn.secret"):
+    return TurnRequestV1.from_json(
+        '{"protocol_version":1,"conversation_id":"conv_1","correlation_id":"corr_1",'
+        f'"input":"hello","llm":{{"api_key":"{api_key}","provider":"minds-cloud",'
+        f'"base_url":"{base_url}"}},"datasource":{{"protocol_version":1,'
+        '"connections":[{"connection_id":7,"credential_version":3}]}}'
+    )
+
+
+@pytest.mark.parametrize(
+    "pod_env",
+    [
+        {"ANTON_OPENAI_API_KEY": "shared-key"},
+        {"ANTON_OPENAI_API_KEY": "shared-key", "ANTON_OPENAI_BASE_URL": "https://minds.internal/v1"},
+        {"ANTON_OPENAI_BASE_URL": "https://shared.invalid/v1"},
+    ],
+    ids=["shared-key", "shared-key-same-base", "shared-base"],
+)
+def test_a_datasource_turn_fails_when_a_pod_setting_replaces_the_turn_connection(tmp_path, monkeypatch, pod_env):
+    """The helper would send the child's key to the child's base, so a shared
+    provider key or base in the pod must fail the turn, not every query."""
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    for name, value in pod_env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="cannot carry datasource reads"):
+        build_cloud_chat_session(_datasource_request())
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://minds.internal/v1",
+        "https://minds.internal/api/v1",
+        "https://minds.internal",
+        "https://u:p@minds.internal/v1",
+        "https://:443/v1",
+    ],
+    ids=["plaintext", "api-v1-path", "no-path", "credentials", "no-host"],
+)
+def test_a_datasource_turn_fails_when_its_inference_base_is_not_https_at_v1(tmp_path, monkeypatch, base_url):
+    """Only /v1/datasources/execute is published, and the bearer never goes over plaintext."""
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    with pytest.raises(ValueError, match="cannot carry datasource reads"):
+        build_cloud_chat_session(_datasource_request(base_url))
+
+
+def test_a_datasource_turn_without_a_turn_key_fails(tmp_path, monkeypatch):
+    """An empty turn key leaves the child's inherited OPENAI_API_KEY in place,
+    so with a pod base equal to the turn's the helper would send the pod's key."""
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "pod-key")
+    monkeypatch.setenv("ANTON_OPENAI_BASE_URL", "https://minds.internal/v1")
+    monkeypatch.delenv("ANTON_OPENAI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="cannot carry datasource reads"):
+        build_cloud_chat_session(_datasource_request(api_key=""))
+
+
 def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
     assert cfg.runtime_factory is local_scratchpad_runtime_factory
@@ -107,7 +209,10 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
         output_dir=str(tmp_path),
     )
     assert CLOUD_ARTIFACT_DELIVERY_GUIDANCE.strip() in prompt
-    # Tripwire: the override sentence targets the base ARTIFACTS step-4 text.
+    # Tripwire: the override sentence targets the base ARTIFACTS "AFTER
+    # FINISHING" text. Locked by phrase, not by step number — the number moved
+    # from 4 to 6 when the artifact pipeline became one tool, and a lock on the
+    # numbering would have failed for a reason that does not matter.
     # If the durable fix lands (web-specific assembly REMOVES that base
     # instruction), this assertion fails on purpose — the override sentence in
     # CLOUD_ARTIFACT_DELIVERY_GUIDANCE is then stale and must be cleaned up
@@ -1041,6 +1146,31 @@ def test_a_trace_block_without_a_surface_leaves_it_unset(tmp_path, monkeypatch):
 # TurnKeyDataVault instead of None, and DS_* env is (re)populated for it the
 # same way desktop's harness.py does for LocalDataVault.
 
+# ── account key (ENG-2121) ───────────────────────────────────────────────────
+# The pod cannot know who the user is; cowork-server does (the gateway's
+# verified principal) and sends it in the same trace block as `surface`.
+
+_SUB = "0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30"
+_ORG = "7c6a1d2e-5f30-4d18-bb44-0f2b5c719e3a"
+
+
+def test_the_account_from_the_trace_block_reaches_the_config(tmp_path, monkeypatch):
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        trace={"surface": "web", "user_id": _SUB, "organization_id": _ORG},
+    )
+    assert cfg.user_id == _SUB
+    assert cfg.organization_id == _ORG
+
+
+def test_no_account_in_the_trace_block_leaves_it_unset(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, trace={"surface": "web"})
+    assert cfg.user_id is None
+    assert cfg.organization_id is None
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.user_id is None
+
+
 def test_no_oauth_block_leaves_data_vault_none(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
     assert cfg.data_vault is None
@@ -1125,3 +1255,65 @@ def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, m
     assert "Planning model: grok" in ctx
     assert "Provider: openai-compatible" in ctx  # minds-cloud → openai-compatible derivation
     assert str(tmp_path) not in ctx  # the workspace path never rides along (security note)
+
+
+# ── ENG-1816: MCP sessions opened by discover_mcp_tools() must not leak ──────
+
+def test_mcp_sessions_are_closed_if_chat_session_construction_fails(tmp_path, monkeypatch):
+    """discover_mcp_tools() opens live MCP sessions before ChatSession exists
+    (see anton/core/mcp/wiring.py's module docstring for why). If
+    ChatSession(config) itself then raises, there's no ChatSession yet for
+    its close() to run on — this is the only other place those sessions can
+    get torn down."""
+    import anton.core.mcp.wiring as wiring_mod
+
+    closed: list = []
+    fake_sessions = [object(), object()]
+
+    def fake_discover_mcp_tools(vault, connections):
+        return [], fake_sessions
+
+    async def fake_close_mcp_sessions(sessions):
+        closed.extend(sessions)
+
+    def fake_chat_session_raises(config):
+        raise RuntimeError("simulated ChatSession construction failure")
+
+    monkeypatch.setattr(wiring_mod, "discover_mcp_tools", fake_discover_mcp_tools)
+    monkeypatch.setattr(wiring_mod, "close_mcp_sessions", fake_close_mcp_sessions)
+    monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session_raises)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "hubspot", "name": "acme"}]}
+    request = TurnRequestV1(
+        protocol_version=1, conversation_id="conv_1", input="hello", oauth=oauth,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
+        build_cloud_chat_session(request)
+
+    assert closed == fake_sessions
+
+
+def test_no_mcp_sessions_means_no_cleanup_call_on_construction_failure(tmp_path, monkeypatch):
+    """The cleanup branch must not blow up (e.g. on an unbound import) when
+    there was nothing to clean up — the overwhelmingly common case today,
+    since no auth Connection carries method=="mcp" yet."""
+    def fake_chat_session_raises(config):
+        raise RuntimeError("simulated ChatSession construction failure")
+
+    monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session_raises)
+    monkeypatch.setattr(
+        llm_client_mod.LLMClient, "from_settings",
+        classmethod(lambda cls, settings: object()),
+    )
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+
+    request = TurnRequestV1(protocol_version=1, conversation_id="conv_1", input="hello")
+
+    with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
+        build_cloud_chat_session(request)

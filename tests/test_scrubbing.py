@@ -15,6 +15,16 @@ from anton.utils.datasources import (
 )
 
 
+# One sample per Google key format currently issued. The `_`/`-` variant is
+# derived because a realistic literal trips GitHub push protection.
+_AUTH_KEY = "AQ.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMn"
+GOOGLE_KEY_SAMPLES = [
+    "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",  # standard key
+    _AUTH_KEY,  # authorization key
+    _AUTH_KEY[:30] + "_" + _AUTH_KEY[31:45] + "-" + _AUTH_KEY[46:],  # with _ and -
+]
+
+
 @pytest.fixture(autouse=True)
 def clean_ds_state():
     """Clear _DS_SECRET_VARS, _DS_KNOWN_VARS, and all DS_* env vars around each test."""
@@ -95,11 +105,22 @@ class TestScrubProviderKeys:
         assert "mdb_AAAAAAAAAA" not in result
         assert "[REDACTED_API_KEY]" in result
 
-    def test_sk_and_gemini_keys_scrubbed_by_pattern(self):
-        text = "k1=sk-ant-api03-abcdefghij1234567890XYZ k2=AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"
-        result = scrub_credentials(text)
+    def test_sk_key_scrubbed_by_pattern(self):
+        result = scrub_credentials("k1=sk-ant-api03-abcdefghij1234567890XYZ")
         assert "sk-ant-api03" not in result
-        assert "AIzaSy" not in result
+
+    @pytest.mark.parametrize("key", GOOGLE_KEY_SAMPLES)
+    def test_every_issued_google_key_format_scrubbed_bare(self, key):
+        result = scrub_credentials(f"k2={key}")
+        assert key not in result
+        assert "[REDACTED_API_KEY]" in result
+
+    @pytest.mark.parametrize("key", GOOGLE_KEY_SAMPLES)
+    def test_every_issued_google_key_format_scrubbed_in_url_query(self, key):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}&pageSize=100"
+        result = scrub_credentials(url)
+        assert key not in result
+        assert "&pageSize=100" in result
 
     def test_short_sk_and_base_url_left_readable(self, monkeypatch):
         """Short `sk-` strings and non-secret base URLs are not over-redacted."""

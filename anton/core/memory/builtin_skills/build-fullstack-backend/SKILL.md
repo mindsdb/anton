@@ -1,12 +1,13 @@
 ---
 name: build-fullstack-backend
-description: 'MANDATORY reading before writing ANY backend, API, server, or fullstack
-  application code (create_artifact types fullstack-stateless-app / fullstack-stateful-app,
-  or anything that will be launched with launch_backend). Contains the complete hard
-  contract: the canonical FastAPI+Mangum backend.py template, SECRETS handling, /api/*
-  route prefix rules, static/ frontend layout, requirements.txt, and the launch/preview
-  workflow. Building a backend without recalling this skill first WILL break launch
-  and deployment. When in doubt, recall it.'
+description: 'ONLY for writing backend or fullstack code BY HAND. NOT needed on the
+  normal path — create_artifact(fullstack-stateless-app or fullstack-stateful-app)
+  followed by generate_artifact writes the backend, verifies it by importing it and
+  launches it. Recall this when editing an existing fullstack artifact, or when
+  generate_artifact failed and the user asked you to continue manually: it is the hard
+  contract — canonical FastAPI+Mangum backend.py template, SECRETS handling, /api/*
+  route prefix rules, static/ frontend layout, requirements.txt, launch and preview.
+  Covers backend, API and server code.'
 metadata:
   display_name: Backend & fullstack app generation
   provenance: builtin
@@ -21,8 +22,14 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
 - ALL API routes live under `/api/*` and are registered BEFORE `app.mount("/", StaticFiles(...))`.
 - The script accepts `--port` via argparse and binds to it — never hardcode a port.
 - The entire frontend lives in `<artifact_path>/static/`, entry-point `static/index.html`.
-- `<artifact_path>/requirements.txt` exists and lists at least `fastapi`, `mangum`, `uvicorn`.
+- `GET /api/health` exists and returns `200 {"status": "ok"}` — the readiness probe of the launcher and the cloud runner.
+- `<artifact_path>/requirements.txt` exists and lists at least `fastapi`, `mangum`, `uvicorn` — and never `anton_state`.
 - Secrets are read from `SECRETS[...]` at their point of use inside routes — never copied into module-level variables at import time.
+- Every `DS_*` name the code reads is copied verbatim from the `Connected Data Sources` section of the prompt; an invented name cannot be resolved at deploy time.
+- Target Python >= 3.12 — the runtime the artifact is launched with.
+- `fullstack-stateless-app` never imports `anton_state`; `fullstack-stateful-app` declares `STATE = None` and ships a valid `state_manifest.json`.
+
+These are the same checks `generate_artifact` runs on its own output (see the `## Verifier contract` of its backend generator); a hand-built backend gets no automatic check, so verify each item yourself before `launch_backend`.
 
 1. REGISTER THE ARTIFACT: Follow the universal artifact contract from the ARTIFACTS section. For backend apps specifically:
   - `type`: pick between the two fullstack types:
@@ -107,6 +114,10 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
       )
 
   # === API routes ===
+  @app.get("/api/health")
+  async def health():
+      return {"status": "ok"}
+
   @app.get("/api/hello")
   async def hello():
       # Example secret use (read at point of use, not at import):
@@ -142,11 +153,13 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
   - Keep `Mangum(app, lifespan="off")`. Without `lifespan="off"` Mangum warns and may fail cold start.
   - SECRETS: expose `SECRETS` as a module-level dict, keyed by the canonical `DS_<ENGINE>_<NAME>__<FIELD>` name, with each entry initialized from `os.environ.get(...)` (the local default). The cloud runner overlays the decrypted values onto this same dict before each request. Read a secret AT ITS POINT OF USE — `SECRETS["DS_..."]` inside the route — and NEVER hoist it into a module-level variable at import time: the import runs before the overlay, so the cloud value would be missed. If a credential-backed resource (DB pool, API client) is needed, build it LAZILY on first request, never at module level.
   - ALL API endpoints MUST live under the `/api/*` path prefix (e.g. `/api/items`, `/api/users/{user_id}`, `/api/search`). This is a hard contract between backend and frontend: it separates API traffic from the static mount at `/`, and lets edge routing (CloudFront behaviors, API Gateway path-based routing) split frontend vs backend traffic by prefix in production. NEVER expose routes at the root (e.g. `/items`, `/login`) — they will collide with the static mount and break in deployment.
+  - MUST expose `GET /api/health` returning `200 {"status": "ok"}`. The `generate_artifact` launcher and the cloud runner use it as the readiness probe; pass `health_path="/api/health"` to `launch_backend` (step 6) so the hand-built launch waits for the same signal.
   - API routes MUST be registered BEFORE `app.mount("/", StaticFiles(...))`. FastAPI matches in registration order — a mount at `/` swallows everything after it.
+  - Target Python >= 3.12 — that is the runtime the artifact is launched with locally and in the cloud.
   - The backend MUST accept `--port` via argparse and bind to that port. NEVER hardcode the port — `launch_backend` picks a free one and passes it in.
   - Prefer `async def` for I/O-bound routes (DB queries, external HTTP calls via `httpx.AsyncClient`). Sync `def` is fine for trivial CPU work, but sync blocking I/O inside an async app stalls the event loop.
   - LOCAL STATE (the ONE rule that differs between the two fullstack types):
-    * `fullstack-stateless-app`: no local state of any kind survives a request. No module-level mutable caches that matter across requests (`USERS = {}`, `SESSIONS = []`) — in Lambda these globals may or may not survive between invocations, never rely on them. Treat the filesystem as read-only and non-persistent: anything written is lost between requests and may fail outright depending on the host (Linux, Windows, or a read-only cloud sandbox). NEVER write to `<artifact_path>` at runtime, and never rely on a file surviving to a later request. If a request genuinely needs scratch space, use the OS temp dir via `tempfile` and treat it as ephemeral (gone the moment the request ends). ALL persistence goes through external data sources.
+    * `fullstack-stateless-app`: no local state of any kind survives a request. No module-level mutable caches that matter across requests (`USERS = {}`, `SESSIONS = []`) — in Lambda these globals may or may not survive between invocations, never rely on them. Treat the filesystem as read-only and non-persistent: anything written is lost between requests and may fail outright depending on the host (Linux, Windows, or a read-only cloud sandbox). NEVER write to `<artifact_path>` at runtime, and never rely on a file surviving to a later request. If a request genuinely needs scratch space, use the OS temp dir via `tempfile` and treat it as ephemeral (gone the moment the request ends). ALL persistence goes through external data sources: connecting to an EXTERNAL database or API to read/write data IS allowed — open a fresh connection per request and do not cache results in memory across requests. Do NOT import `anton_state` — the platform STATE store belongs to `fullstack-stateful-app` backends only.
     * `fullstack-stateful-app`: durable state goes through the platform `STATE` store (module-level `STATE`, built via `get_store()`), which is a document/key-value model — suitable for LIGHT state (counters, settings, sessions, simple documents keyed by id). Declare the state KEY schema in `state_manifest.json` next to `backend.py` (see STATE MANIFEST below for the exact format — do NOT hand-invent it). For HEAVY/relational needs (joins, transactions, analytics, large data) use an EXTERNAL database via a connected data source instead — do not force it into `STATE`. The `anton_state` SDK is injected at runtime (do NOT add it to `requirements.txt` — see REQUIREMENTS below) and needs pydantic v2, which the mandatory `fastapi` dependency provides — always keep `fastapi` in `requirements.txt`. Every other rule in this list still applies.
   - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
   - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at minimum:
@@ -155,9 +168,10 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
     mangum
     uvicorn
     ```
-    Add any other libraries the backend imports (one per line: `pkg` or `pkg==1.2`). `launch_backend` reads this file and installs everything into the slug-named scratchpad's venv before spawning the process. Only simple lines are supported — `-r`, `-e`, `--index-url`, blank lines and `#` comments are ignored.
+    Add any other libraries the backend imports, one per line. Extras and version specifiers are fine (`uvicorn[standard]`, `fastapi>=0.100`). `launch_backend` reads this file and installs everything into the slug-named scratchpad's venv before spawning the process. Only simple lines are supported — `-r`, `-e`, `--index-url`, blank lines and `#` comments are ignored.
     NEVER list `anton_state` in `requirements.txt` — it is NOT a published package and the install will FAIL to resolve it (`anton-state was not found in the package registry`), aborting the launch. The STATE SDK is provided to the backend automatically at runtime, so `from anton_state import open_store` just works without any dependency line. This is the ONLY import you leave out of `requirements.txt`.
   - Do NOT start the server inside the scratchpad — use `launch_backend` in step 6.
+  - DATA SOURCE CREDENTIALS: the `Connected Data Sources` section of this prompt lists every `DS_<ENGINE>_<NAME>__<FIELD>` variable verbatim. Copy the names exactly — never derive or invent a `DS_*` key: a name that matches no connected source cannot be resolved at deploy time and the artifact fails there. If no data source is connected, leave `SECRETS` empty and read no `DS_*` variable.
   - DECLARE DATASOURCES: if `backend.py` reads any `DS_<ENGINE>_<NAME>__<FIELD>` env var, call `update_artifact(slug=<slug>, datasources=[...])` immediately after writing the file. Pass a flat list of connection slugs (e.g. `["postgres-prod_db", "hubspot-main"]`); each slug MUST match a connection from the `Connected Data Sources` section of this prompt. This records the deployable's credential dependencies in `metadata.json` so the artifact can be redeployed with the right env vars later. Skip this call only when the backend uses no `DS_*` vars at all.
   - STATE MANIFEST (`fullstack-stateful-app` ONLY): `state_manifest.json` is a SINGLE universal contract read by the local SQLite driver AND (client-side) by the cloud HTTP driver — the trusted broker is schema-agnostic. GENERATE it from the `anton_state` model instead of hand-writing JSON (this makes a malformed manifest impossible):
     ```python
@@ -168,7 +182,7 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
         collections=["comments", "users"],  # every Collection(store, "<name>") you use
     ).to_manifest(f"{artifact_path}/state_manifest.json")
     ```
-    The manifest describes ONLY the KEY schema, never data fields. The resulting JSON is a FLAT object `{version, pk, sk?, gsis?, ttl_attribute?, collections?}` where `pk`/`sk` are `{"name": ..., "type": "S"}` — string keys only in v1. Do NOT wrap it in `entities`/`attributes`/`partition_key`/`sort_key` (a DynamoDB-CreateTable-style shape) and do NOT declare non-key attributes: those fail validation (`StateSchema ... pk Field required`) at the first request. Store the actual values freely via `store.put({...})` at runtime — they need no schema entry. List every `Collection(store, "<name>")` name in `collections` (this is NOT declaring data fields — it is the collection registry). Removing a name here when UPDATING an already-published artifact BLOCKS the publish (its stored data would be orphaned) — to change the set you must /unpublish first and publish again.
+    The manifest is validated with the same `StateSchema` model at launch and on publish, so a shape it rejects fails the artifact. The manifest describes ONLY the KEY schema, never data fields. The resulting JSON is a FLAT object `{version, pk, sk?, gsis?, ttl_attribute?, collections?}` where `pk`/`sk` are `{"name": ..., "type": "S"}` — string keys only in v1. Do NOT wrap it in `entities`/`attributes`/`partition_key`/`sort_key` (a DynamoDB-CreateTable-style shape) and do NOT declare non-key attributes: those fail validation (`StateSchema ... pk Field required`) at the first request. Store the actual values freely via `store.put({...})` at runtime — they need no schema entry. List every `Collection(store, "<name>")` name in `collections` (this is NOT declaring data fields — it is the collection registry). Removing a name here when UPDATING an already-published artifact BLOCKS the publish (its stored data would be orphaned) — to change the set you must /unpublish first and publish again.
   - STATE STORE API (`fullstack-stateful-app` ONLY): the `store` from `get_store()` is a key-value store keyed by `(pk, sk)`. PREFER the `Collection` helper for light state — it manages the sort key and defaults the partition:
     ```python
     from anton_state import Collection
@@ -189,7 +203,9 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
-  - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML. Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Apache ECharts via CDN for charts; dark theme #0d1117; responsive layout with a viewport meta tag.
+  - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML, including the HOST CONTRACT list of static checks (explicit `<body>`, viewport meta, closed `<script>` blocks, no `window.__antonCommentsLayer`, no universal `* { !important }`, `z-index` <= 1000, stable `id` attributes on significant blocks, only the Tailwind and ECharts CDNs). Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Tailwind CSS and Apache ECharts via CDN; dark theme #0d1117; responsive layout with a viewport meta tag.
+  - The frontend calls ONLY the endpoints of the technical specification from step 2, spelled exactly as the backend registers them (same method, same path segments). Keep the two in sync: a `fetch()` to a path the backend does not serve is a 404 at runtime that no static check catches on this path.
+  - UI text and the `<html lang>` attribute follow the language the user writes in.
   - Save the entry-point to `<artifact_path>/static/index.html` (create the `static/` subfolder if needed). ANY additional frontend assets that don't end up inlined into `index.html` (separate CSS, JS, images, fonts, large data .js payloads, and any file the user uploaded or pasted that you bring into the artifact) MUST live under `<artifact_path>/static/` — never at the artifact root, since the backend only serves files from `static/` and publishing bundles nothing else.
   - All backend endpoints MUST be called under the `/api/*` prefix (matches the backend route convention from step 4). The frontend never calls bare paths like `/items` — always `/api/items`.
   - API base URL is supplied via a `<meta>` tag so the same HTML works locally AND when deployed with frontend and backend on different origins (e.g. CloudFront/S3 + API Gateway/Lambda). Include this line in `<head>`:
@@ -206,7 +222,7 @@ HARD CONTRACT (violating ANY of these breaks launch or deployment — full expla
   - NEVER hardcode an absolute URL in the source — no `fetch('http://localhost:PORT/...')`, no `fetch('https://api.example.com/...')`, no `const API_BASE = 'http://...'`. The meta tag is the ONLY place the base URL is configured.
 
 6. LAUNCH THE BACKEND: Call the `launch_backend` tool with the artifact's slug:
-  - `launch_backend(slug=<slug>)` — the tool picks a free port, spawns `python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, waits for readiness, writes the port into `metadata.json`, and returns a JSON envelope: the URL in `external_url` and `{slug, port, pid, log_path}` under `details`.
+  - `launch_backend(slug=<slug>, health_path="/api/health")` — the tool picks a free port, spawns `python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, waits for readiness, writes the port into `metadata.json`, and returns a JSON envelope: the URL in `external_url` and `{slug, port, pid, log_path}` under `details`.
   - Uses the scratchpad named `<slug>` — created automatically on first call. If `<artifact_path>/requirements.txt` exists, its packages are installed into that scratchpad's venv before spawn (install output is appended to `backend.log` with a banner). An install failure aborts the launch and is returned as an error string — fix `requirements.txt` and retry.
   - Backend stdout/stderr stream to `<artifact_path>/backend.log` — read it if the launch fails or the API misbehaves.
   - Do NOT call `update_artifact(port=...)` manually — `launch_backend` does it.

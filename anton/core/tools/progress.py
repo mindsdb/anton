@@ -15,4 +15,10 @@ from dataclasses import dataclass
 
 @dataclass
 class ToolProgress:
+    """`kind` says how the text is shown: a `"step"` line is printed once and
+    stays; a `"peek"` is the live tail of what the tool is producing right
+    now and replaces the previous peek in the transient footer (relayed as
+    the `tool_peek` phase — see `ToolRegistry.dispatch_tool`)."""
+
     text: str
+    kind: str = "step"

@@ -12,6 +12,7 @@ import re
 import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
+import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -40,6 +41,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     CURATED_PROVIDER_ERRORS,
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
@@ -74,6 +76,7 @@ from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
+    GENERATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -90,6 +93,7 @@ from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     build_workspace_discovery_context,
+    cell_failure_reason,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
@@ -257,6 +261,7 @@ if TYPE_CHECKING:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
     from anton.core.llm.client import LLMClient
+    from anton.core.mcp.client import McpSession
     from anton.core.memory.cortex import Cortex
     from anton.core.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
@@ -1202,6 +1207,33 @@ def _validated_surface(value: str | None) -> str | None:
     return cleaned
 
 
+def _validated_account_id(value: str | None) -> str | None:
+    """Keep only a UUID-shaped account id, in canonical lowercase form (ENG-2121).
+
+    Hosts supply this, so it is untrusted like ``surface``. The ids it carries
+    (the Keycloak ``sub`` and the active organisation) are UUIDs everywhere
+    they are minted, and nothing else may pass: an email address or other free
+    text in this field would reach PostHog as a ``distinct_id``, which is new
+    personal data on the event and a key that joins nothing.
+
+    The rejected value is deliberately NOT logged, unlike ``_validated_surface``:
+    the likeliest wrong value here is an email address, and logging it would
+    put personal data in the user's log file for the sake of a warning.
+
+    Never raises. Telemetry must not be able to fail a turn.
+    """
+    if value is None:
+        return None
+    try:
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        return str(uuid.UUID(cleaned))
+    except Exception:
+        logger.warning("ignoring an account id that is not a UUID")
+        return None
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -1263,6 +1295,27 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # Whether this host renders a streaming tool's live tail — the last lines
+    # of the file a tool is writing, relayed as the `tool_peek` progress phase
+    # (`ToolRegistry.dispatch_tool`). Only the CLI has a footer for it today;
+    # cowork-server's formatter and the cloud pod's wire would carry it as
+    # unrenderable noise that also spends their progress throttle window. A
+    # capability the host declares, like `elicitor`, never inferred from
+    # `surface` or `console`: those answer different questions.
+    live_tool_peek: bool = False
+    # WHO the user is, for analytics attribution only (ENG-2121): the Keycloak
+    # ``sub`` and the active organisation id, both UUIDs. ``turn_completed``
+    # is keyed on ``user_id`` when it is set, which is the same distinct_id the
+    # console, the desktop renderer and the auth service's billing mirror use,
+    # so a completed turn joins the person who signed up and paid. None when
+    # the host did not say (the CLI, an older host); the event then stays keyed
+    # on the install fingerprint, as before.
+    #
+    # Never an email address or a name: anything that is not a UUID is dropped
+    # at construction (``_validated_account_id``). Nothing in the turn reads
+    # these; they only ride the analytics event.
+    user_id: str | None = None
+    organization_id: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
     # assumptions inline instead of stopping to ask ("do first, ask later").
@@ -1298,6 +1351,14 @@ class ChatSessionConfig:
     # process (the cloud pod) turn this off: several spend an LLM call on writes
     # that land after the turn's storage is gone. `memorize` is unaffected.
     background_memory: bool = True
+    # Open MCP sessions (ENG-1816) discovered before this session was built —
+    # their tools are already folded into `tools` above via
+    # `anton.core.mcp.wiring.discover_mcp_tools[_async]`, called by the host
+    # BEFORE constructing this config (not after: see that module's
+    # docstring for why the ordering is load-bearing). Carried here only so
+    # `ChatSession.close()` can tear them down at turn end, the same way it
+    # already closes the LLM client's transports.
+    mcp_sessions: list["McpSession"] = field(default_factory=list)
 
 
 class ChatSession:
@@ -1388,6 +1449,7 @@ class ChatSession:
         self._background_memory = config.background_memory
         self._memory_writes: set[asyncio.Task] = set()
         self._started_at = config.started_at
+        self._mcp_sessions = list(config.mcp_sessions)
         self._extra_tools = config.tools
         self._tool_allowlist = config.tool_allowlist
         # Deferred tool bundles: tools tagged with `unlock_skill`
@@ -1423,11 +1485,19 @@ class ChatSession:
             repair_replayed_tool_ids(list(config.initial_history))[0]
             if config.initial_history else []
         )
-        # Seed length + how many leading history messages the last compaction
-        # folded into its summary — lets a host map the compaction back onto
-        # its own message list (see `last_compaction`).
+        # Seed length + the last compaction's own record (its summary text and
+        # how many leading history messages it folded) — lets a host map the
+        # compaction back onto its own message list (see `last_compaction`).
         self._seed_len = len(self._history)
-        self._last_compacted_count: int | None = None
+        self._last_compaction: dict | None = None
+        # Bookkeeping that keeps `covered_through` in the SEED's coordinates
+        # while `_history` drifts away from them: each compaction replaces the
+        # turns it folded with entries of its own, so the next one counts from
+        # a shifted list. `_compaction_sealed` is the one-way door for when
+        # history stops mirroring the seed at all (see `hard_truncate_history`).
+        self._seed_covered = 0
+        self._synthetic_prefix_len = 0
+        self._compaction_sealed = False
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
@@ -1438,6 +1508,9 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self.live_tool_peek = config.live_tool_peek
+        self._user_id = _validated_account_id(config.user_id)
+        self._organization_id = _validated_account_id(config.organization_id)
         # Per-turn token cost books (ENG-1288). Created and armed at each
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
@@ -1618,13 +1691,13 @@ class ChatSession:
         resummarized). `covered_through`: how many of `initial_history`'s
         messages are now folded into it — map this count onto your own
         message list to find the cutoff.
+
+        A snapshot written when the compaction succeeded, not read back from
+        `_history[0]` on demand: the last-resort marker overwrites that slot
+        without recording a compaction, so a late read would pair an earlier
+        compaction's count with the marker's "no summary is available" text.
         """
-        if self._last_compacted_count is None:
-            return None
-        return {
-            "summary": self._history[0]["content"],
-            "covered_through": min(self._last_compacted_count, self._seed_len),
-        }
+        return self._last_compaction
 
 
     def _note_latch_class(self, failure: str) -> None:
@@ -2033,6 +2106,22 @@ class ChatSession:
     def _record_cell_explainability(
         self, *, pad_name: str, description: str, cell
     ) -> None:
+        # Runs after the cell has finished, so a raise here would be reported
+        # to the model as a failure of a tool call that succeeded.
+        try:
+            self._collect_cell_explainability(
+                pad_name=pad_name, description=description, cell=cell
+            )
+        except Exception as exc:
+            logger.warning(
+                "explainability bookkeeping failed for scratchpad %s: %s",
+                pad_name,
+                exc,
+            )
+
+    def _collect_cell_explainability(
+        self, *, pad_name: str, description: str, cell
+    ) -> None:
         if self._active_explainability is None:
             return
         if description:
@@ -2386,6 +2475,7 @@ class ChatSession:
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -2393,10 +2483,22 @@ class ChatSession:
             await self._reap_tracked_backends()
             await self._scratchpads.close_all()
         finally:
-            # Provider clients own an HTTP pool. This runs even if the steps
-            # above raise, or the pool outlives the process.
-            if self._llm is not None:
-                await self._llm.aclose()
+            # Guaranteed even if either step above raises — ScratchpadManager
+            # has no internal try/except around each pad's own close(), so
+            # without this, one bad scratchpad close would leak every open
+            # MCP session's transport (httpx2.AsyncClient + SDK task group)
+            # for the rest of this turn, same reasoning as the LLM client
+            # cleanup below it already gets.
+            try:
+                if self._mcp_sessions:
+                    from anton.core.mcp.wiring import close_mcp_sessions
+
+                    await close_mcp_sessions(self._mcp_sessions)
+            finally:
+                # Provider clients own an HTTP pool. This runs even if the
+                # steps above raise, or the pool outlives the process.
+                if self._llm is not None:
+                    await self._llm.aclose()
 
     async def emit(self, event) -> None:
         """Push an out-of-band event to the host, if one is listening.
@@ -2583,6 +2685,11 @@ class ChatSession:
         else:
             user_content = old_text
 
+        # Set only where a durable compaction is recorded, and read at the end
+        # of this function: the record's text must be the body built there, and
+        # taking it in the same statement as the count is what keeps the marker
+        # below out of it.
+        recorded = False
         try:
             # Never above the client's own ceiling: a host that configures a
             # smaller `max_tokens` (or a distinct router model with a lower
@@ -2641,12 +2748,17 @@ class ChatSession:
                     f"{len(old_turns)} earlier turns were dropped to fit the "
                     "context window. No summary of them is available."
                 )
-                # Deliberately no `_last_compacted_count`: the host must not
-                # persist and replay this as the conversation's summary.
+                # Deliberately not `recorded`: the host must not persist
+                # and replay this as the conversation's summary. Sealed on top
+                # of that: the folded turns are now gone rather than summarized,
+                # so a LATER compaction would report them as covered by a
+                # summary that never saw them — that one loses turns, where an
+                # unrecorded compaction only costs a replay.
+                self._compaction_sealed = True
             else:
                 summary = summary_response.content
                 # Record the compaction ONLY on success.
-                self._last_compacted_count = compacted_count
+                recorded = True
         except Exception as exc:
             # Don't discard history on failure — losing the earlier turns is
             # worse than carrying them. Leave `self._history` untouched and let
@@ -2676,6 +2788,16 @@ class ChatSession:
         )
         summary_msg = {"role": "user", "content": summary_body}
 
+        # `compacted_count` indexes the CURRENT history, which an earlier
+        # compaction may already have rewritten as [summary, separator?, rest]:
+        # its leading `_synthetic_prefix_len` entries are ours, not seed
+        # messages, and everything after them starts where the last compaction
+        # stopped. Counted before the prefix below replaces it.
+        covered = min(
+            self._seed_covered + max(0, compacted_count - self._synthetic_prefix_len),
+            self._seed_len,
+        )
+
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
@@ -2684,8 +2806,13 @@ class ChatSession:
                 {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
             ]
+            self._synthetic_prefix_len = 2
         else:
             self._history = [summary_msg] + recent_turns
+            self._synthetic_prefix_len = 1
+        self._seed_covered = covered
+        if recorded and not self._compaction_sealed:
+            self._last_compaction = {"summary": summary_body, "covered_through": covered}
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -2742,6 +2869,73 @@ class ChatSession:
             return True  # _cancel_event fired
         except asyncio.TimeoutError:
             return False  # slept the full delay
+
+    _IMAGE_REMOVED_PLACEHOLDER = (
+        "[An image here could not be sent to the model and was removed "
+        "automatically so this conversation could continue. Re-share it if you "
+        "still need it referenced.]"
+    )
+
+    def _strip_image_blocks_from_history(self) -> int:
+        """Replace every image block in history with a placeholder; return the
+        count removed.
+
+        Runs when the provider PERMANENTLY rejects content already in history.
+        Retrying is pointless because the request is rebuilt from this same
+        history every time — so unless the poison is removed, every later turn
+        re-sends it and fails identically. That is the difference between a
+        dead turn and a dead conversation.
+
+        cowork-server does this in its own store (ENG-1992) and rebuilds the
+        session each turn, so for that host this is a harmless no-op on a
+        history about to be discarded. The standalone CLI keeps ONE long-lived
+        session and has no such store: without this, its next turn re-sends the
+        same image forever (review of #484). Doing it here makes the error
+        message's promise true for every host rather than only the one that
+        happens to implement it.
+
+        Every image goes, not just the offending one: the provider's index is
+        request-relative and cannot be mapped back to a history entry reliably
+        across dialects. Blunt, and the same trade-off ENG-1992 already took.
+        """
+        removed = 0
+
+        def _strip(content):
+            nonlocal removed
+            if not isinstance(content, list):
+                return content, False
+            out, changed = [], False
+            for block in content:
+                if not isinstance(block, dict):
+                    out.append(block)
+                    continue
+                # Both shapes, matching the pair this file already uses at
+                # its other two image sites. `turn_stream` accepts the
+                # OpenAI-style `image_url` as public input and the provider
+                # translates it onward, so stripping only `image` left that
+                # shape in history to be re-sent on the next turn — the exact
+                # failure this repair exists to stop (review of #484).
+                if block.get("type") in ("image", "image_url"):
+                    out.append({"type": "text", "text": self._IMAGE_REMOVED_PLACEHOLDER})
+                    changed = True
+                    removed += 1
+                    continue
+                if block.get("type") == "tool_result":
+                    nested, nested_changed = _strip(block.get("content"))
+                    if nested_changed:
+                        out.append({**block, "content": nested})
+                        changed = True
+                        continue
+                out.append(block)
+            return (out if changed else content), changed
+
+        for msg in self._history:
+            if not isinstance(msg, dict):
+                continue
+            new_content, changed = _strip(msg.get("content"))
+            if changed:
+                msg["content"] = new_content
+        return removed
 
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
@@ -2896,11 +3090,14 @@ class ChatSession:
         else:
             self._history = [placeholder, separator, *tail]
 
-        # A hard truncate discards the compacted summary — history[0] is now
-        # the truncation placeholder, not the summary. Clear the compaction
-        # record so `last_compaction` reports None (keep-full-history) rather
-        # than letting a host persist the placeholder as the durable summary.
-        self._last_compacted_count = None
+        # A hard truncate discards the compacted summary — the turns it covered
+        # are gone from history, so replaying it next turn would describe
+        # material the host would also replay in full. Clear the record so
+        # `last_compaction` reports None (keep-full-history), and seal it: what
+        # survives here is a 4-message tail at an unknown offset, so nothing
+        # later in this session can map a count back onto the seed.
+        self._last_compaction = None
+        self._compaction_sealed = True
 
     async def plan_with_recovery(
         self,
@@ -3286,6 +3483,14 @@ class ChatSession:
                 # (ENG-1945). "" when the host did not say; never a guess —
                 # `_validated_surface` already rejected anything unrecognised.
                 surface=str(getattr(self, "_surface", None) or ""),
+                # WHO ran the turn (ENG-2121). `user_id` becomes the event's
+                # distinct_id in `anton.analytics._posthog_body`, so the turn
+                # lands on the same PostHog person as sign-up, install and
+                # payment and the staff/test exclusion reaches it. Opaque UUIDs
+                # only, already validated at construction; "" when the host did
+                # not say, and then the event stays keyed on the install.
+                user_id=str(getattr(self, "_user_id", None) or ""),
+                organization_id=str(getattr(self, "_organization_id", None) or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
                 # trace headers carry, so an analytics row links back to
@@ -3439,6 +3644,17 @@ class ChatSession:
         except Exception:
             # Analytics must never affect the tool call that just ran.
             pass
+
+    def spend_ceiling_reached(self) -> bool:
+        """Public read of the turn's spend ceiling, for long-running tools.
+
+        `generate_artifact` runs a whole pipeline inside a single tool-use
+        round, so the loop-level check in `_spend_ceiling_stops_the_tool_loop`
+        cannot see it overspend (I-20). It reads this instead of the private
+        method — a tool reaching into `_`-prefixed session internals is how
+        `_output_token_cap` ended up broken by a refactor (I-08).
+        """
+        return self._spend_ceiling_reached()
 
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.
@@ -4327,6 +4543,54 @@ class ChatSession:
                     # the auto-retry below sends a malformed history
                     # and we get the same 400 forever.
                     self._seal_dangling_tool_uses("interrupted by error")
+
+                    # A permanent rejection of content already in history
+                    # (ENG-1992 shape, ENG-2689 size). The request is rebuilt
+                    # from the SAME stored history on every attempt, so it is
+                    # byte-identical each time and fails identically each time
+                    # — the provider's own docstring says so. Retrying it spent
+                    # four full requests on a refusal that was permanent by
+                    # construction, injected a "diagnose and fix the issue"
+                    # note the model cannot act on, and delayed by ~34s the
+                    # repair that actually unsticks the conversation.
+                    #
+                    # Raised HERE, after the seal above, rather than with the
+                    # other early-raise types at the top of this handler: the
+                    # failure can land mid-tool-round, and a dangling tool_use
+                    # left in history would 400 the NEXT turn too — turning a
+                    # repairable conversation into a differently-broken one.
+                    if isinstance(_agent_exc, ContentValidationError):
+                        # Remove the poison before giving up, so the NEXT turn
+                        # isn't refused for the same content. Without this the
+                        # turn dies and the conversation dies with it.
+                        _removed = self._strip_image_blocks_from_history()
+                        if _removed:
+                            logger.info(
+                                "content rejected permanently — stripped %d image "
+                                "block(s) from history so the conversation can continue",
+                                _removed,
+                            )
+                            # Save it NOW. The turn-end `_persist_history()` is
+                            # below this raise and never runs, and `close()`
+                            # does not save either — so without this the repair
+                            # lives only in memory and `/resume` reloads the
+                            # original image and repeats the refusal forever
+                            # (review of #484). Failure-safe: this runs on the
+                            # error path, where an escape would turn a handled
+                            # failure into a dead turn.
+                            try:
+                                self._persist_history()
+                            except Exception:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "could not persist the repaired history; a "
+                                    "resumed session may resend the rejected image",
+                                    exc_info=True,
+                                )
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "content_rejected"
+                        )
+                        raise
+
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to
                         # recover. A TransientProviderError reaching here is a
@@ -5134,14 +5398,10 @@ class ChatSession:
                                 if cell is not None:
                                     tool_ok = not (cell.error or "").strip()
                                     # Same source `tool_handlers` uses for its
-                                    # ToolOutcome: the traceback's LAST line is
-                                    # the cause, and it is the runtime's own
+                                    # ToolOutcome, and the runtime's own
                                     # output rather than anything the model
-                                    # wrote (ENG-1492).
-                                    _cell_err = (cell.error or "").strip()
-                                    tool_reason = (
-                                        _cell_err.splitlines()[-1][:160] if _cell_err else ""
-                                    )
+                                    # wrote.
+                                    tool_reason = cell_failure_reason(cell.error)
                                 if cell is not None:
                                     self._record_cell_explainability(
                                         pad_name=tc.input.get("name", ""),

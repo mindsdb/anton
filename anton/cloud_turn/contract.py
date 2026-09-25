@@ -18,6 +18,17 @@ Events written back on stdout (JSONL):
       rather than replacing it. Also exempt, and for a sharper reason —
       dropping it lets the explanation pass as the replacement, and the answer
       the user already read is lost from the transcript.
+      `phase: "tool_progress"` is a streaming tool's step line, `id` the
+      tool_use id it belongs to; lines with an id are never rate limited (the
+      first creates the step a consumer renders, each one is a step the user
+      must see; a tool emits a handful per run), `phase: "tool_done"` closes
+      that step and carries `ok` and `eta_seconds`.
+      `phase: "tool_peek"` — the live tail of what a streaming tool is
+      writing, each one replacing the last, an empty `message` clearing it —
+      does NOT appear on this wire: `ToolRegistry.dispatch_tool` relays it
+      only to a host that declared `ChatSessionConfig.live_tool_peek`, and
+      the pod does not. A consumer that meets it anyway (an older pod, a
+      host that opted in later) should drop it unless it renders a live tail.
   {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork
@@ -28,6 +39,13 @@ Events written back on stdout (JSONL):
       own hidden `messages` rows so the NEXT turn's history replays a valid
       tool_use -> tool_result sequence. Omitted after a mid-turn compaction or
       on failure, in which case that turn replays text-only.
+  {"kind": "compaction", "summary": "...", "covered_through": N}  - pre-terminal;
+      this turn folded the first N messages of the REQUEST's `history` into
+      `summary`. cowork saves both and seeds `summary` + the uncovered tail next
+      turn, instead of resending (and re-summarizing) the whole conversation.
+      Mutually exclusive with `history` above, which the same compaction
+      suppresses. Omitted on failure too: the next turn re-seeds the same
+      history and compacts it again.
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
 
@@ -41,6 +59,66 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+TURN_PROTOCOL_VERSION = 1
+DATASOURCE_PROTOCOL_VERSION = 1
+MAX_DATASOURCE_CONNECTIONS = 100
+
+
+def _is_version(value: object, expected: int) -> bool:
+    """Whether ``value`` is the JSON integer ``expected``, and not merely equal to it.
+
+    `True == 1` and `1.0 == 1`, and `int(1.9)` is 1, so an equality check or a
+    coercion reads an envelope that is not this version as if it were, then
+    parses it with this version's schema and drops whatever else it carried.
+    """
+    return not isinstance(value, bool) and isinstance(value, int) and value == expected
+
+
+@dataclass(frozen=True)
+class DatasourceConnectionRefV1:
+    connection_id: int
+    credential_version: int
+
+
+@dataclass(frozen=True)
+class DatasourceBlockV1:
+    protocol_version: int
+    connections: tuple[DatasourceConnectionRefV1, ...]
+
+
+def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("datasource must be an object")
+    if set(value) != {"protocol_version", "connections"}:
+        raise ValueError("datasource contains unsupported fields")
+    if not _is_version(value.get("protocol_version"), DATASOURCE_PROTOCOL_VERSION):
+        raise ValueError("unsupported datasource protocol version")
+    connections = value.get("connections")
+    if not isinstance(connections, list) or not connections or len(connections) > MAX_DATASOURCE_CONNECTIONS:
+        raise ValueError("datasource connections are invalid")
+    refs: list[DatasourceConnectionRefV1] = []
+    seen: set[int] = set()
+    for connection in connections:
+        if not isinstance(connection, dict) or set(connection) != {"connection_id", "credential_version"}:
+            raise ValueError("datasource connection reference is invalid")
+        connection_id = connection.get("connection_id")
+        credential_version = connection.get("credential_version")
+        if (
+            isinstance(connection_id, bool)
+            or not isinstance(connection_id, int)
+            or connection_id < 1
+            or isinstance(credential_version, bool)
+            or not isinstance(credential_version, int)
+            or credential_version < 1
+            or connection_id in seen
+        ):
+            raise ValueError("datasource connection reference is invalid")
+        seen.add(connection_id)
+        refs.append(DatasourceConnectionRefV1(connection_id, credential_version))
+    return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
 
 @dataclass
 class TurnRequestV1:
@@ -49,6 +127,7 @@ class TurnRequestV1:
     protocol_version: int
     conversation_id: str
     input: str
+    correlation_id: str | None = None
     #: Mount path the controller passes; the pod uses its own trusted mount and
     #: does not act on this value (kept for wire-compatibility). See session.py.
     workspace_path: str | None = None
@@ -68,7 +147,9 @@ class TurnRequestV1:
     #: never writes skills back (agent-built skills are a desktop draft flow).
     skills: dict | None = None
     #: Optional trace-attribution block cowork resolved for this turn:
-    #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``.
+    #: ``{"surface": "web", "cowork_server_version": ..., "install_channel": ...}``,
+    #: plus ``user_id`` / ``organization_id`` (Keycloak UUIDs, ENG-2121) for the
+    #: ``turn_completed`` analytics event.
     #: Observability only — nothing here may affect what the turn DOES.
     #:
     #: It has to travel because the pod cannot derive any of it: cowork-server is
@@ -85,6 +166,9 @@ class TurnRequestV1:
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
     oauth: dict | None = None
+    #: Optional verified datasource references: only IDs and immutable versions.
+    #: No capability or password crosses; the gateway is on the `llm` base URL's host.
+    datasource: DatasourceBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
     #: rows carry no timestamps. Without it the session dates the conversation
@@ -95,10 +179,14 @@ class TurnRequestV1:
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
         d = json.loads(raw)
+        protocol_version = d["protocol_version"]
+        if not _is_version(protocol_version, TURN_PROTOCOL_VERSION):
+            raise ValueError("unsupported cloud turn protocol version")
         return TurnRequestV1(
-            protocol_version=int(d["protocol_version"]),
+            protocol_version=protocol_version,
             conversation_id=str(d["conversation_id"]),
             input=str(d["input"]),
+            correlation_id=(d.get("correlation_id") if isinstance(d.get("correlation_id"), str) else None),
             workspace_path=d.get("workspace_path"),
             model=d.get("model"),
             history=d.get("history") or [],
@@ -110,6 +198,7 @@ class TurnRequestV1:
             trace=d.get("trace") if isinstance(d.get("trace"), dict) else None,
             # Same defensive isinstance check as trace, for the same reason.
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
+            datasource=_parse_datasource_block(d.get("datasource")),
             # The controller always sends the key and sends None when
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(

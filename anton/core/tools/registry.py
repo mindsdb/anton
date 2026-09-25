@@ -126,15 +126,25 @@ class ToolRegistry:
         Silently skipped when ``session`` has no emitter (the non-streaming
         ``turn()`` path, or a bare test double) — there's no drain loop there
         to receive it anyway.
+
+        A ``"peek"`` marker (the live tail of what the tool is writing) is
+        relayed as ``tool_peek`` only when the host declared it can render
+        one (``ChatSessionConfig.live_tool_peek``; the CLI does). Elsewhere it
+        is dropped here, before the wire: a consumer without a footer for it
+        would carry a few hundred characters every 0.3s as noise, and spend
+        its progress throttle window on them — see cloud_turn/contract.py.
         """
         emitter = getattr(session, "emitter", None)
+        peek_wanted = bool(getattr(session, "live_tool_peek", False))
         result = None
         async for item in self.dispatch_tool_stream(session, tool_name, tc_input):
             if isinstance(item, ToolProgress):
-                if emitter is not None:
+                is_peek = item.kind == "peek"
+                if emitter is not None and (peek_wanted or not is_peek):
                     await emitter.emit(
                         StreamTaskProgress(
-                            phase="tool_progress", message=item.text, id=tool_call_id,
+                            phase="tool_peek" if is_peek else "tool_progress",
+                            message=item.text, id=tool_call_id,
                         )
                     )
             else:
