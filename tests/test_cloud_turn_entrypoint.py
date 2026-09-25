@@ -252,6 +252,19 @@ def test_every_tool_progress_line_reaches_the_wire():
     assert phases.count("reasoning_start") >= 1
 
 
+def test_tool_progress_without_an_id_is_still_rate_limited():
+    """Only step lines WITH an id are exempt (ENG-2981): an id-less line cannot
+    open or advance a renderer step, so a flood of them must still collapse."""
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            for i in range(50):
+                yield StreamTaskProgress(phase="tool_progress", message=f"m{i}")
+
+    events = _drive(_S())
+    progress = [e for e in events if e.get("kind") == "progress"]
+    assert 0 < len(progress) < 10
+
+
 def test_tool_args_accumulation_is_bounded():
     class _S(_FakeSession):
         async def turn_stream(self, user_input, **kwargs):
