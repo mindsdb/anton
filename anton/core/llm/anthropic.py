@@ -101,7 +101,7 @@ def _raise_for_status_error(
     body = exc.body if isinstance(exc.body, dict) else {}
 
     # The `detail` branch below can mint a MindsHub billing verdict, so it must
-    # refuse a provably foreign origin ; `mindshub_billing_stop`
+    # refuse a provably foreign origin; `mindshub_billing_stop`
     # applies the same gate to the gate's billing codes itself.
     _foreign = origin_is_known_third_party(exc)
 
