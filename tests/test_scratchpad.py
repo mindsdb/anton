@@ -457,6 +457,18 @@ class TestScratchpadRenderNotebook:
         finally:
             await pad.close()
 
+    async def test_render_notebook_truncates_one_long_output_line(self):
+        """A cell that prints one very long line is still cut in the dump."""
+        pad = make_scratchpad(name="wide")
+        await pad.start()
+        try:
+            await pad.execute("print('z' * 8000)")
+            md = pad.render_notebook()
+            assert "(truncated)" in md
+            assert "z" * 2001 not in md
+        finally:
+            await pad.close()
+
     async def test_render_notebook_empty(self):
         """Empty pad returns a message."""
         pad = make_scratchpad(name="empty")
@@ -536,6 +548,19 @@ class TestScratchpadRenderNotebook:
         result = LocalScratchpadRuntime._truncate_output(text, max_lines=100, max_chars=200)
         assert "(truncated)" in result
         assert len(result) < len(text)
+
+    async def test_truncate_output_chars_single_long_line(self):
+        """One line longer than max_chars is cut, not kept whole."""
+        text = "x" * 10_000
+        result = LocalScratchpadRuntime._truncate_output(text, max_lines=20, max_chars=2000)
+        assert "(truncated)" in result
+        assert len(result) <= 2000 + len("\n... (truncated)")
+
+    async def test_truncate_output_chars_applies_after_line_limit(self):
+        """Long lines still respect max_chars when the line limit also trips."""
+        text = "\n".join("y" * 500 for _ in range(30))
+        result = LocalScratchpadRuntime._truncate_output(text, max_lines=20, max_chars=2000)
+        assert len(result) <= 2000 + len("\n... (truncated)")
 
 
 class TestCellMetadata:
