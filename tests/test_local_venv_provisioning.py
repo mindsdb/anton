@@ -181,7 +181,7 @@ def test_ensure_venv_failure_message_includes_the_verify_detail(tmp_path, monkey
         pad._last_verify_error = "exit 1: dyld: Library not loaded"
         return False
 
-    monkeypatch.setattr(pad, "_create_venv", lambda: None)
+    monkeypatch.setattr(pad, "_create_venv", lambda **_: None)
     monkeypatch.setattr(pad, "_verify_venv_python", fake_verify)
 
     with pytest.raises(RuntimeError, match="dyld: Library not loaded"):
@@ -211,3 +211,135 @@ def test_find_uv_checks_winget_links_on_windows(monkeypatch):
     monkeypatch.setattr(local.os, "access", lambda p, mode: True)
 
     assert local.LocalScratchpadRuntime._find_uv() == winget_path
+
+
+# --- ENG-1646: uv sometimes writes bin/python as a copied, merely ad-hoc
+# signed launcher (missing its own libpythonX.Y.dylib) instead of a symlink
+# to the base interpreter. macOS's AMFI then refuses to execute it. A plain
+# symlink to the same interpreter has proven reliable everywhere we've seen
+# this fail, so `_create_venv()` now repairs the copy into a symlink, and
+# `_ensure_venv()`'s last retry escalates to the stdlib fallback instead of
+# repeating the same doomed `uv venv` call a third time.
+
+
+def _make_uv_venv_layout(tmp_path, venv_dir, *, python_is_symlink, real_interpreter=None):
+    """Lay out a bin/ dir the way `uv venv` would, with bin/python either a
+    symlink (the healthy/expected form) or a plain copied file (the observed
+    broken form)."""
+    bin_dir = os.path.join(venv_dir, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    py = os.path.join(bin_dir, "python")
+    if python_is_symlink:
+        os.symlink(real_interpreter or sys.executable, py)
+    else:
+        with open(py, "wb") as f:
+            f.write(b"\xfa\xde\x0c\xfe fake copied launcher, not a real Mach-O")
+        os.chmod(py, 0o755)
+    return bin_dir
+
+
+def test_repair_copied_launcher_replaces_a_copy_with_a_symlink(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("posix-only: symlink semantics differ on Windows")
+    pad = make_pad(tmp_path)
+    bin_dir = _make_uv_venv_layout(tmp_path, str(tmp_path / "v"), python_is_symlink=False)
+
+    pad._repair_copied_launcher(bin_dir)
+
+    py = os.path.join(bin_dir, "python")
+    assert os.path.islink(py)
+    assert os.path.realpath(py) == os.path.realpath(sys.executable)
+
+
+def test_repair_copied_launcher_leaves_an_existing_symlink_alone(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("posix-only: symlink semantics differ on Windows")
+    pad = make_pad(tmp_path)
+    bin_dir = _make_uv_venv_layout(
+        tmp_path, str(tmp_path / "v"), python_is_symlink=True, real_interpreter="/some/other/python"
+    )
+
+    pad._repair_copied_launcher(bin_dir)
+
+    # Untouched — still points at whatever it originally symlinked to, not
+    # silently repointed at this process's own interpreter.
+    assert os.readlink(os.path.join(bin_dir, "python")) == "/some/other/python"
+
+
+def test_create_venv_repairs_a_copied_launcher_when_uv_is_used(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("posix-only: symlink semantics differ on Windows")
+    import subprocess
+
+    pad = make_pad(tmp_path)
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/fake/uv"))
+
+    # _create_venv sets self._venv_dir = self._venvs_base / self.name before
+    # invoking uv, so build the venv dir path the same way it does.
+    venv_dir = str(tmp_path / pad.name)
+
+    def fake_run(args, **kwargs):
+        # Simulate `uv venv` "succeeding" but leaving bin/python as a copy,
+        # matching what was actually observed via macOS's AMFI/XProtect logs.
+        _make_uv_venv_layout(tmp_path, venv_dir, python_is_symlink=False)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    pad._create_venv()
+
+    assert os.path.islink(pad._venv_python)
+    assert os.path.realpath(pad._venv_python) == os.path.realpath(sys.executable)
+
+
+def test_ensure_venv_escalates_to_stdlib_on_the_last_attempt_even_with_uv(tmp_path, monkeypatch):
+    # The failure this fix targets is deterministic per environment, not
+    # transient — repeating the identical `uv venv` call 3 times bought
+    # nothing. The last attempt must actually try something different.
+    pad = make_pad(tmp_path)
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/fake/uv"))
+    calls = []
+
+    def fake_create(*, force_stdlib=False):
+        calls.append(force_stdlib)
+        pad._venv_python = str(tmp_path / "never-verifies")
+
+    monkeypatch.setattr(pad, "_create_venv", fake_create)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: False)
+
+    with pytest.raises(RuntimeError):
+        pad._ensure_venv()
+
+    assert calls == [False, False, True]
+
+
+def test_ensure_venv_preserves_the_venv_dir_after_the_final_failure(tmp_path, monkeypatch):
+    # Nuking the directory after every attempt, including the last, erased
+    # the only evidence of what actually went wrong before anyone could look.
+    pad = make_pad(tmp_path)
+
+    def fake_create(*, force_stdlib=False):
+        pad._venv_dir = str(tmp_path / pad.name)
+        os.makedirs(pad._venv_dir, exist_ok=True)
+        pad._venv_python = str(tmp_path / "never-verifies")
+
+    monkeypatch.setattr(pad, "_create_venv", fake_create)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: False)
+
+    with pytest.raises(RuntimeError):
+        pad._ensure_venv()
+
+    assert os.path.isdir(pad._venv_dir)
+
+
+def test_diagnose_broken_interpreter_reports_symlink_shape(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("posix-only: symlink semantics differ on Windows")
+    pad = make_pad(tmp_path)
+    copied = tmp_path / "copied_binary"
+    copied.write_bytes(b"not a real interpreter, just needs to exist")
+    pad._venv_python = str(copied)
+
+    detail = pad._diagnose_broken_interpreter()
+
+    assert "is_symlink=False" in detail
