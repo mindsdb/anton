@@ -33,7 +33,8 @@ from .provider import (
     compute_context_pressure,
     origin_is_known_third_party,
     ensure_replayable_tool_call,
-    wallet_denial_code,
+    mindshub_billing_stop,
+    mindshub_model_restriction,
     raise_on_empty_response,
 )
 
@@ -76,9 +77,15 @@ def _raise_for_status_error(
 
     - 401 → ProviderAuthError (canonical provider-credential refusal).
     - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
-    - 402/429 with an M3 gate wallet code (``wallet_empty`` /
-      ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
-      → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
+    - 402/429 with an M3 gate billing code (``wallet_empty`` /
+      ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
+      body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
+      subclass from ``mindshub_billing_stop`` (ENG-1169). Code-exact: BYOK
+      402s stay generic.
+    - 403 with the gateway's ``model_restricted`` deny detail
+      (``X-MindsHub-Deny-Detail`` header or ``error.deny_detail``)
+      → ModelRestrictedError from ``mindshub_model_restriction``. A 403
+      ``permission_denied`` without the detail stays generic.
     - 404 → ModelUnavailableError or EndpointConfigurationError via the
       shared ``classify_404`` (ENG-1139) — permanent, non-duplicated copy
       instead of the generic "temporarily unavailable, try again".
@@ -93,8 +100,9 @@ def _raise_for_status_error(
 
     body = exc.body if isinstance(exc.body, dict) else {}
 
-    # Computed once, up front: several branches below can mint a MindsHub
-    # billing verdict and each must refuse a provably foreign origin (ENG-1693).
+    # The `detail` branch below can mint a MindsHub billing verdict, so it must
+    # refuse a provably foreign origin ; `mindshub_billing_stop`
+    # applies the same gate to the gate's billing codes itself.
     _foreign = origin_is_known_third_party(exc)
 
     # Origin-gated, and `str`-guarded to match the openai twin. Two bugs the
@@ -109,38 +117,35 @@ def _raise_for_status_error(
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
-    # MindsHub M3 wallet taxonomy (ENG-1169) — same branch as the openai twin
-    # so the mapping can't drift. Today the gateway's anthropic-dialect lane
-    # strips both the code and the X-MindsHub-* headers (tracked separately),
-    # so this fires only against a fixed gateway or a proxy that preserves
-    # them — but a wallet denial that DOES arrive here must hit the credits
-    # card, not the generic copy. Code/reason-exact: a BYOK Anthropic billing
-    # error carries neither and stays generic.
-    # ENG-1693 — see the openai twin for the full reasoning. Both carriers are
-    # third-party controlled on a BYOK endpoint, and cowork-server's own gates
-    # run too late because anton converts a wallet denial into a typed error
-    # that is matched above all origin logic.
-    # Read once, UNGATED, then used two different ways below.
+    # MindsHub M3 billing taxonomy, through the helper the openai twin uses so
+    # the mapping can't drift. The gateway's Anthropic lane re-envelopes a gate
+    # denial with only `error.type` and `error.message`, so the body code never
+    # reaches this mapper from the gateway. The lane passes the X-MindsHub-*
+    # headers through: the reason arrives on X-MindsHub-Reason and the reset
+    # instant on X-MindsHub-Reset-At, and `mindshub_billing_stop` reads both.
+    # A body code from a sender that keeps it maps the same way. A BYOK
+    # Anthropic billing error carries neither carrier and stays generic.
+    # `mindshub_billing_stop` also owns the origin gate: both carriers are
+    # third-party controlled on a BYOK endpoint.
+    billing_stop = mindshub_billing_stop(exc=exc, body=body, status_code=exc.status_code)
+    if billing_stop is not None:
+        raise billing_stop from exc
+
+    # An org admin's model rule, through the helper the openai twin uses so the
+    # mapping can't drift. The Anthropic SDK keeps the wire envelope, so the
+    # body copy of the deny detail sits at `error.deny_detail` here. A 403
+    # `permission_denied` without the detail stays generic.
+    restriction = mindshub_model_restriction(
+        exc=exc, body=body, status_code=exc.status_code, model=model,
+    )
+    if restriction is not None:
+        raise restriction from exc
+
+    # Read UNGATED, for the velocity check below only: a velocity limit is not
+    # a billing verdict, so the origin gate does not apply to it.
     raw_gate_reason = ""
     if getattr(exc, "response", None) is not None:
         raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
-    # Gated form — only this one may pick a BILLING verdict.
-    gate_reason = "" if _foreign else raw_gate_reason
-    wallet_code = None if _foreign else (
-        wallet_denial_code(body) or (
-            gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
-        )
-    )
-    if exc.status_code in (402, 429) and wallet_code:
-        what = (
-            "your MindsHub credits are used up."
-            if wallet_code == "wallet_empty"
-            else "your included token allowance is exhausted."
-        )
-        raise TokenLimitExceeded(
-            f"Server returned {exc.status_code} — {what} Add credits at "
-            "https://console.mindshub.ai/settings/organization/billing to continue."
-        ) from exc
 
     # A 404 from the Anthropic Messages API means the model isn't recognized
     # (there's no alternate route to misconfigure on this fixed endpoint) —

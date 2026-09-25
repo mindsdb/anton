@@ -4,7 +4,8 @@ import weakref
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
@@ -654,6 +655,87 @@ class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
 
 
+def parse_reset_at(value: object) -> str | None:
+    """``value`` as a normalized ISO-8601 instant, or ``None`` when it is not one.
+
+    An instant needs a UTC offset: a naive timestamp names a different moment
+    in every timezone, so a card that counted down to it would be wrong for
+    most readers. Anything else (a non-string, junk, an HTTP-date) is dropped
+    rather than passed on, because every consumer would have to re-validate it.
+    The result is ``datetime.isoformat()``'s extended form, which a browser's
+    ``Date`` parses; Python accepts compact forms that it does not.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.isoformat()
+
+
+class MindsHubBillingStop(TokenLimitExceeded):
+    """The MindsHub authorization gate refused a request the org cannot pay for.
+
+    Base of the three denials the gate names; only the subclasses are raised,
+    by :func:`mindshub_billing_stop`. Subclassing ``TokenLimitExceeded`` keeps
+    every existing catch working: the no-retry re-raise in
+    ``ChatSession.turn_stream``, the verifier's ``_DENIED_VERDICT_ERRORS`` latch
+    (both ``anton/core/session.py``), and cowork-server's
+    ``is_token_limit_error``. The subclass NAME is what survives a hosted turn:
+    ``cloud_turn.__main__._scrub`` sends only ``"TypeName: message"``.
+
+    ``reason`` is the gate's code, ``status_code`` the HTTP status (``None`` for
+    a denial inside an open stream, which has no error status), and
+    ``reset_at`` the instant the limit lifts when the gateway sent one that
+    parses (see :func:`parse_reset_at`).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        status_code: int | None = None,
+        reset_at: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+        self.reset_at = parse_reset_at(reset_at)
+
+
+class WalletEmptyError(MindsHubBillingStop):
+    """402 ``wallet_empty``: the wallet cannot pay for the requested model.
+
+    Per auth's ``resolve_model_access`` (``auth/entitlements/services/access.py``)
+    a free-bucket model with allowance left is served regardless of the wallet,
+    so this fires for a priced model, or for the free one once its allowance is
+    spent by an org that has a payment method.
+    """
+
+
+class AllowanceExhaustedError(MindsHubBillingStop):
+    """429 ``included_allowance_exhausted``: the org's free allowance is spent.
+
+    Per the same ``resolve_model_access``, only an org with no confirmed
+    payment method gets this. The gateway sends ``reset_at`` for when the
+    allowance refills, when auth supplies one.
+    """
+
+
+class FreeServingPausedError(MindsHubBillingStop):
+    """429 ``free_air_daily_spend_fuse_exceeded``: free serving is paused fleet-wide.
+
+    The gateway's daily free-serving budget tripped. The caller did nothing
+    unusual, and adding credit lifts it at once. ``reset_at`` is the end of the
+    UTC day. Waiting inside a turn cannot help, so it is a billing stop, never
+    a transient retry.
+    """
+
+
 class ProviderAuthError(ConnectionError):
     """Raised when a provider rejects its credential with HTTP 401.
 
@@ -795,13 +877,39 @@ _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
 )
 
-# The MindsHub M3 authorization gate's out-of-credits deny codes (ENG-1169):
-# ``wallet_empty`` rides a 402, ``included_allowance_exhausted`` a 429 (with NO
-# FastAPI ``detail``, so the legacy 429-quota branch never sees it). Both are
-# permanent for the identical request — they belong on the out-of-credits card,
-# never in the retry loop. The gate's velocity 429 (``rate_limited``) is NOT
-# here on purpose: that one means "slow down", and stays transient.
-_WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
+class _BillingStopKind(NamedTuple):
+    """Which typed error a gate billing code raises, and what its message says."""
+
+    error_type: type[MindsHubBillingStop]
+    what: str
+
+
+# The MindsHub authorization gate's billing deny codes:
+# ``wallet_empty`` rides a 402; ``included_allowance_exhausted`` and
+# ``free_air_daily_spend_fuse_exceeded`` ride a 429 (with NO FastAPI ``detail``,
+# so the legacy 429-quota branch never sees them). All three stop only an org
+# whose wallet cannot pay, and all three are permanent for the identical request
+# inside a turn: they belong on a billing card, never in the retry loop. The
+# fuse resets at the end of the UTC day, which no retry budget waits out. The
+# gate's velocity 429 (``rate_limited``) is NOT here on purpose: that one means
+# "slow down", and stays transient.
+#
+# ``what`` never names how long the allowance window is: the window is auth's
+# configuration, and copy that stated it would go stale the day it changed.
+_MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
+    "wallet_empty": _BillingStopKind(
+        WalletEmptyError, "your MindsHub credits are used up."),
+    "included_allowance_exhausted": _BillingStopKind(
+        AllowanceExhaustedError, "your free MindsHub Air allowance is used up."),
+    "free_air_daily_spend_fuse_exceeded": _BillingStopKind(
+        FreeServingPausedError,
+        "free MindsHub Air is paused for everyone until the daily budget resets."),
+}
+_WALLET_DENIAL_CODES = frozenset(_MINDSHUB_BILLING_STOPS)
+
+_MINDSHUB_BILLING_CTA = (
+    "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+)
 
 
 # Hosts that ARE the MindsHub gateway. Only a response from one of these may
@@ -933,14 +1041,16 @@ def origin_is_known_third_party_host(host: str | None) -> bool:
 
 
 def wallet_denial_code(body: Any) -> str | None:
-    """The M3 gate's out-of-credits code carried in an error body, if any.
+    """The M3 gate's billing code carried in an error body, if any.
 
-    Reads ``code`` from both dialects — the SDK-unwrapped top level (OpenAI
-    SDK peels the ``error`` envelope, ENG-747) and the wire envelope
-    (Anthropic SDK / proxies that deliver it unmodified). Detection is
-    code-exact on purpose: BYOK 402s (e.g. OpenRouter's insufficient-credits
-    402) carry no such code and must stay generic — the remedy there is the
-    user's own provider billing, not MindsHub credits.
+    One of ``wallet_empty``, ``included_allowance_exhausted`` or
+    ``free_air_daily_spend_fuse_exceeded`` (the keys of
+    ``_MINDSHUB_BILLING_STOPS``). Reads ``code`` from both dialects — the
+    SDK-unwrapped top level (OpenAI SDK peels the ``error`` envelope, ENG-747)
+    and the wire envelope (Anthropic SDK / proxies that deliver it unmodified).
+    Detection is code-exact on purpose: BYOK 402s (e.g. OpenRouter's
+    insufficient-credits 402) carry no such code and must stay generic — the
+    remedy there is the user's own provider billing, not MindsHub credits.
     """
     b = body if isinstance(body, dict) else {}
     err = b.get("error") if isinstance(b.get("error"), dict) else {}
@@ -949,6 +1059,112 @@ def wallet_denial_code(body: Any) -> str | None:
     # endpoint sending a list `code` would otherwise TypeError the classifier
     # (every other wire-value membership check in these mappers uses tuples).
     return code if isinstance(code, str) and code in _WALLET_DENIAL_CODES else None
+
+
+def _response_header(exc: BaseException, name: str) -> str:
+    """Header ``name`` off the response ``exc`` carries, or ``""`` without one.
+
+    A bare mid-stream ``openai.APIError`` has no ``.response`` at all, and a
+    header value is always a string on a real response, so anything else reads
+    as absent.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return ""
+    value = resp.headers.get(name, "")
+    return value if isinstance(value, str) else ""
+
+
+def mindshub_billing_stop(
+    *, exc: BaseException, body: Any, status_code: int | None,
+) -> MindsHubBillingStop | None:
+    """The typed billing stop for a MindsHub gate denial, or ``None`` if ``exc`` is not one.
+
+    Shared by both provider mappers and the OpenAI mid-stream lanes, so the
+    subclass, its copy and the origin gate are decided in one place. The caller
+    raises the result ``from exc``.
+
+    The reason comes from the body code (both dialects, see
+    :func:`wallet_denial_code`) or, for a body that lost its code, the
+    ``X-MindsHub-Reason`` header. ``reset_at`` comes only from the
+    ``X-MindsHub-Reset-At`` header: the OpenAI SDK keeps just the ``error``
+    envelope of the body, so the gateway's top-level ``reset_at`` field is gone
+    by the time the error gets here.
+
+    A provably foreign origin gets ``None`` whatever it carries (see
+    :func:`origin_is_known_third_party`). On a BYOK endpoint the whole response
+    is third-party controlled, and a spoofed billing card asks the user for
+    money. cowork-server's own origin checks run too late to stop it:
+    ``friendly_turn_error`` (``cowork/handlers/turn_errors.py``) matches
+    ``TokenLimitExceeded`` before any of them.
+
+    ``status_code`` is the HTTP error status, which must be the gate's 402 or
+    429; ``None`` means a denial inside an already-open stream, which has no
+    error status to check.
+    """
+    if origin_is_known_third_party(exc):
+        return None
+    if status_code is not None and status_code not in (402, 429):
+        return None
+    reason = wallet_denial_code(body)
+    if reason is None:
+        header_reason = _response_header(exc, "x-mindshub-reason")
+        if header_reason in _MINDSHUB_BILLING_STOPS:
+            reason = header_reason
+    if reason is None:
+        return None
+    kind = _MINDSHUB_BILLING_STOPS[reason]
+    if status_code is None:
+        lead = kind.what[:1].upper() + kind.what[1:]
+    else:
+        lead = f"Server returned {status_code}: {kind.what}"
+    return kind.error_type(
+        f"{lead} {_MINDSHUB_BILLING_CTA}",
+        reason=reason,
+        status_code=status_code,
+        reset_at=_response_header(exc, "x-mindshub-reset-at"),
+    )
+
+
+def mindshub_model_restriction(
+    *, exc: BaseException, body: Any, status_code: int, model: str,
+) -> ModelRestrictedError | None:
+    """The typed error for a gateway 403 caused by an org admin's model rule, or ``None``.
+
+    Shared by both provider mappers, so the carriers, the copy and the origin
+    gate are decided in one place. The caller raises the result ``from exc``.
+
+    The gateway puts ``permission_denied`` on ``error.code`` and
+    ``X-MindsHub-Reason`` for every 403 it refuses, so neither one tells a
+    model rule apart from a member whose role cannot run the product. The
+    ``model_restricted`` deny detail does. The gateway sends it twice: as the
+    ``X-MindsHub-Deny-Detail`` header, and as ``deny_detail`` inside the
+    ``error`` object. Either copy is enough. ``body`` is read in both dialects,
+    like :func:`wallet_denial_code`: the OpenAI SDK peels the ``error``
+    envelope, so the field sits at the top level there, and the Anthropic SDK
+    keeps the envelope.
+
+    A provably foreign origin gets ``None`` whatever it carries (see
+    :func:`origin_is_known_third_party`). On a BYOK endpoint the whole response
+    is third-party controlled, and this copy tells the user that their own
+    org's admin blocked the model.
+    """
+    if origin_is_known_third_party(exc) or status_code != 403:
+        return None
+    b = body if isinstance(body, dict) else {}
+    err = b.get("error") if isinstance(b.get("error"), dict) else {}
+    carriers = (
+        _response_header(exc, "x-mindshub-deny-detail"),
+        b.get("deny_detail"),
+        err.get("deny_detail"),
+    )
+    if _MODEL_RESTRICTED not in carriers:
+        return None
+    return ModelRestrictedError(
+        f"An admin in your organization restricted the model '{model}'. "
+        "Choose another model in Settings.",
+        model=model,
+    )
 
 
 def retry_after_seconds(exc: BaseException) -> float | None:
@@ -1046,8 +1262,9 @@ def classify_transient(
     if status_code == 429 and not b.get("detail"):
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
         # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
-        # ``insufficient_quota``, the M3 gate's allowance 429 carries a wallet
-        # code); the guards here are defense for direct callers — a billing
+        # ``insufficient_quota``, the M3 gate's allowance and free-serving fuse
+        # 429s carry a billing code); the guards here are defense for direct
+        # callers, and for a mapper whose origin gate refused the code — a billing
         # failure is permanent and must never enter the retry loop (ENG-1169).
         if etype == "insufficient_quota":
             return None
@@ -1119,6 +1336,9 @@ class ModelUnavailableError(ConnectionError):
       model (an upgrade fixes it).
     - ``model_disabled`` — an admin kill switch (an upgrade does NOT fix it).
 
+    An org admin's model rule is the subclass :class:`ModelRestrictedError`,
+    with code ``model_restricted``.
+
     Subclasses ConnectionError so call sites that only know the legacy
     ConnectionError mapping keep working unchanged; typed consumers
     (cowork-server's turn-error mapping) read ``code``/``model`` to pick the
@@ -1129,6 +1349,31 @@ class ModelUnavailableError(ConnectionError):
         super().__init__(message)
         self.code = code
         self.model = model
+
+
+# The gateway's deny detail for a 403 that an org admin's model rule caused,
+# and the ``code`` that :class:`ModelRestrictedError` carries for it.
+_MODEL_RESTRICTED = "model_restricted"
+
+
+class ModelRestrictedError(ModelUnavailableError):
+    """403 with the ``model_restricted`` deny detail: an org admin restricted the model.
+
+    Only :func:`mindshub_model_restriction` raises it. Credits do not lift it,
+    so its copy carries no billing link, and the remedy is choosing another
+    model. A 403 ``permission_denied`` without the deny detail is not this
+    error: it stays the generic ConnectionError.
+
+    Subclassing ``ModelUnavailableError`` keeps every existing catch working:
+    the no-retry re-raise in ``ChatSession.turn_stream`` and the verifier's
+    ``_DENIED_VERDICT_ERRORS`` latch (both ``anton/core/session.py``), and
+    ``_default_turn_error_action`` in ``anton/chat.py``. The class NAME is what
+    survives a hosted turn: ``cloud_turn.__main__._scrub`` sends only
+    ``"TypeName: message"``.
+    """
+
+    def __init__(self, message: str, *, model: str) -> None:
+        super().__init__(message, code=_MODEL_RESTRICTED, model=model)
 
 
 class ContentValidationError(ConnectionError):
@@ -1436,11 +1681,20 @@ class EndpointConfigurationError(ConnectionError):
 CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     ContextOverflowError,
     TokenLimitExceeded,
+    # Subclasses of TokenLimitExceeded, listed for the same reason as
+    # ContentTooLargeError below. The base is never raised on its own.
+    MindsHubBillingStop,
+    WalletEmptyError,
+    AllowanceExhaustedError,
+    FreeServingPausedError,
     ProviderAuthError,
     StructuredOutputError,
     TransientProviderError,
     ProviderOverloadedError,
     ModelUnavailableError,
+    # Subclass of ModelUnavailableError, listed by name for the same reason as
+    # ContentTooLargeError below.
+    ModelRestrictedError,
     ContentValidationError,
     # Subclass of ContentValidationError, so isinstance() already covered
     # it — listed anyway because the triage test compares NAMES, which is

@@ -270,6 +270,72 @@ def test_turn_failure_is_terminal_and_scrubbed():
     assert session.closed is True  # closed even on failure
 
 
+class _GateDenial(Exception):
+    """Stands in for the SDK error the mapper reads: status and body only, no
+    response, so the origin is unknown and trusted."""
+
+    def __init__(self, status_code, body):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+        self.body = body
+
+
+def _mapped_denial(*, status, body):
+    from anton.core.llm.openai import _raise_for_status_error
+
+    try:
+        _raise_for_status_error(_GateDenial(status, body), "latest:sonnet")
+    except Exception as exc:
+        return exc
+    raise AssertionError("the mapper did not raise")
+
+
+def _mapped_gate_denial(status, code):
+    return _mapped_denial(status=status, body={"code": code})
+
+
+@pytest.mark.parametrize("status,code,type_name", [
+    (402, "wallet_empty", "WalletEmptyError"),
+    (429, "included_allowance_exhausted", "AllowanceExhaustedError"),
+    (429, "free_air_daily_spend_fuse_exceeded", "FreeServingPausedError"),
+])
+def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
+    """A hosted turn's host sees only the `turn_failed` string, and reads the
+    failure's kind from the `TypeName:` prefix. The wire format is unchanged;
+    the subclass name is what tells the host which limit fired."""
+    events = _drive(_FakeSession(raise_on_stream=_mapped_gate_denial(status, code)))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    error = events[0]["error"]
+    assert error.startswith(f"{type_name}: ")
+    # The whole curated message fits under the wire cap, billing link included.
+    assert not error.endswith("…")
+    assert error.endswith(
+        "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+    )
+
+
+def test_an_admin_model_restriction_names_itself_on_the_wire():
+    """A hosted turn's host reads the failure's kind from the `TypeName:`
+    prefix of the `turn_failed` string, so the restriction must arrive as
+    `ModelRestrictedError:`. Without its own type the 403 reached the wire as a
+    generic ConnectionError, which reads as an outage."""
+    body = {  # SDK-unwrapped: the OpenAI SDK peels the `error` envelope
+        "message": "An administrator in your organization has restricted the model "
+                   "'latest:sonnet'. Choose another model.",
+        "type": "permission_error",
+        "code": "permission_denied",
+        "deny_detail": "model_restricted",
+    }
+    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(status=403, body=body)))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    assert events[0]["error"] == (
+        "ModelRestrictedError: An admin in your organization restricted the model "
+        "'latest:sonnet'. Choose another model in Settings."
+    )
+
+
 class _BaseBoom(BaseException):
     """A non-Exception failure, like the httpcore GeneratorExit->RuntimeError
     teardown or a CancelledError, that escapes `except Exception`."""

@@ -21,6 +21,7 @@ import types
 import pytest
 
 from anton.core.llm.provider import (
+    ModelRestrictedError,
     ModelUnavailableError,
     ProviderOverloadedError,
     TokenLimitExceeded,
@@ -122,6 +123,10 @@ def test_velocity_429_without_a_hint_still_backs_off():
         (429, {"code": "included_allowance_exhausted"}),
         (402, {"error": {"code": "wallet_empty"}}),
         (402, {"code": "wallet_empty"}),
+        # The fleet-wide free-serving fuse: it lifts at the end of the UTC day
+        # or when the org adds credit, and no retry budget waits out either.
+        (429, {"error": {"code": "free_air_daily_spend_fuse_exceeded"}}),
+        (429, {"code": "free_air_daily_spend_fuse_exceeded"}),
         # OpenAI's own quota dialect.
         (429, {"error": {"code": "insufficient_quota"}}),
         (429, {"code": "insufficient_quota"}),
@@ -431,6 +436,84 @@ async def test_turn_transient_retry_does_not_inject_recovery_note():
     joined = json.dumps(s._history)
     assert "An error interrupted execution" not in joined
     assert "transient provider error" not in joined  # seal reason not injected either
+
+
+def _mapped_denial(*, status, body):
+    """The exception the real openai mapper raises for a gateway error body."""
+    from anton.core.llm.openai import _raise_for_status_error
+
+    try:
+        _raise_for_status_error(_FakeStatusError(status, body), "latest:sonnet")
+    except Exception as exc:
+        return exc
+    raise AssertionError("the mapper did not raise")
+
+
+def _mapped_gate_denial(status, code):
+    """The exception the real openai mapper raises for a gate denial."""
+    return _mapped_denial(status=status, body={"code": code})
+
+
+@pytest.mark.parametrize("status,code", [
+    (402, "wallet_empty"),
+    (429, "included_allowance_exhausted"),
+    (429, "free_air_daily_spend_fuse_exceeded"),
+])
+async def test_a_gate_billing_stop_fails_the_turn_on_the_first_attempt(status, code):
+    """End to end from the mapper's output to the session's retry loop. The fuse
+    used to map to a retryable rate limit, so the turn re-sent the request
+    before ending on the "provider overloaded" card, which blamed the provider
+    for a budget stop."""
+    s = _session()
+    calls = {"n": 0}
+
+    async def _gen(user_msg):
+        calls["n"] += 1
+        raise _mapped_gate_denial(status, code)
+        yield  # pragma: no cover  (makes this an async generator)
+
+    s._stream_and_handle_tools = _gen
+    s._backoff_sleep = AsyncMock(return_value=False)
+
+    with pytest.raises(TokenLimitExceeded) as ei:
+        _ = [e async for e in s.turn_stream("do it")]
+
+    assert ei.value.reason == code
+    assert calls["n"] == 1, f"{code} was retried {calls['n'] - 1} time(s)"
+    assert s._backoff_sleep.await_count == 0
+
+
+async def test_an_admin_model_restriction_fails_the_turn_on_the_first_attempt():
+    """End to end from the mapper's output to the session's retry loop. The
+    gateway's 403 for an admin model rule used to map to the generic
+    "temporarily unavailable" ConnectionError, so the turn re-sent the doomed
+    request twice and then ended as assistant prose telling the user to try
+    again."""
+    s = _session()
+    calls = {"n": 0}
+    # The SDK-unwrapped body: the OpenAI SDK peels the `error` envelope.
+    body = {
+        "message": "An administrator in your organization has restricted the model "
+                   "'latest:sonnet'. Choose another model.",
+        "type": "permission_error",
+        "code": "permission_denied",
+        "deny_detail": "model_restricted",
+    }
+
+    async def _gen(user_msg):
+        calls["n"] += 1
+        raise _mapped_denial(status=403, body=body)
+        yield  # pragma: no cover  (makes this an async generator)
+
+    s._stream_and_handle_tools = _gen
+    s._backoff_sleep = AsyncMock(return_value=False)
+
+    with pytest.raises(ModelRestrictedError) as ei:
+        _ = [e async for e in s.turn_stream("do it")]
+
+    assert ei.value.model == "latest:sonnet"
+    assert calls["n"] == 1, f"the restriction was retried {calls['n'] - 1} time(s)"
+    assert s._backoff_sleep.await_count == 0
 
 
 async def test_turn_exhausts_budget_to_provider_overloaded():
