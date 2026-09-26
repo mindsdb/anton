@@ -20,6 +20,8 @@ shipped dead. If the SDK's behavior ever changes, these tests notice;
 hand-built fixtures cannot.
 """
 
+from typing import NamedTuple
+
 import anthropic
 import httpx2 as httpx
 import openai
@@ -28,14 +30,23 @@ import pytest
 from anton.core.llm.anthropic import _raise_for_status_error as _raise_anthropic
 from anton.core.llm.openai import _raise_for_status_error
 from anton.core.llm.provider import (
+    AllowanceExhaustedError,
     ContentTooLargeError,
     ContentValidationError,
     EndpointConfigurationError,
+    ErrorBodyFields,
+    FreeServingPausedError,
+    ModelRestrictedError,
     ModelUnavailableError,
     ProviderAuthError,
+    ProviderErrorBody,
     TokenLimitExceeded,
     TransientProviderError,
+    WalletEmptyError,
     classify_transient,
+    mindshub_billing_stop,
+    mindshub_model_restriction,
+    parse_reset_at,
     wallet_denial_code,
 )
 from anton.core.session import _is_provider_auth_error
@@ -662,10 +673,53 @@ def test_wallet_denial_code_reads_both_dialects():
         wallet_denial_code({"error": {"code": "included_allowance_exhausted"}})
         == "included_allowance_exhausted"
     )
+    assert (
+        wallet_denial_code({"code": "free_air_daily_spend_fuse_exceeded"})
+        == "free_air_daily_spend_fuse_exceeded"
+    )
     assert wallet_denial_code({"error": {"code": "rate_limited"}}) is None
     assert wallet_denial_code({"code": 402}) is None
     assert wallet_denial_code(None) is None
     assert wallet_denial_code("<html>402</html>") is None
+
+
+def test_the_error_body_is_split_into_its_two_levels():
+    # The Anthropic wire shape keeps the envelope; its top-level `type` is the
+    # constant "error", which is why readers pick their own order per field.
+    wire = ProviderErrorBody.parse({"type": "error", "error": {
+        "type": "invalid_request_error", "message": "denied", "code": "wallet_empty",
+    }})
+    assert wire.has_envelope is True
+    assert wire.top.type == "error"
+    assert wire.envelope.type == "invalid_request_error"
+    assert wire.code == "wallet_empty"  # read from the envelope when the top has none
+    # The OpenAI SDK peels the envelope, so everything sits at the top level.
+    peeled = ProviderErrorBody.parse({"code": "rate_limited", "deny_detail": "model_restricted"})
+    assert peeled.has_envelope is False
+    assert peeled.envelope == ErrorBodyFields()
+    assert peeled.code == "rate_limited"
+    assert peeled.top.deny_detail == "model_restricted"
+    # The top-level code wins when both levels carry one.
+    both = ProviderErrorBody.parse({"code": "wallet_empty", "error": {"code": "rate_limited"}})
+    assert both.code == "wallet_empty"
+    # Values are kept as sent, not coerced.
+    assert ProviderErrorBody.parse({"code": ["wallet_empty"]}).code == ["wallet_empty"]
+    # Anything but a dict parses as empty, and so does a non-object `error`.
+    for junk in (None, "<html>402</html>", [{"code": "wallet_empty"}], {"error": "denied"}):
+        parsed = ProviderErrorBody.parse(junk)
+        assert parsed.has_envelope is False
+        assert parsed.top.code is None and parsed.envelope == ErrorBodyFields()
+
+
+def test_classify_transient_reads_only_the_envelope_when_there_is_one():
+    # The transient classifier treats a present envelope as the whole error
+    # object and never falls back to the top level for `type` or `code`, unlike
+    # the other readers. A transient-looking top-level type beside an envelope
+    # that names no type or code therefore stays unclassified.
+    body = {"type": "overloaded_error", "error": {"message": "bad request"}}
+    assert classify_transient(400, body, provider="p") is None
+    # Without an envelope, the top level is the error object.
+    assert classify_transient(400, {"type": "overloaded_error"}, provider="p") is not None
 
 
 # ── the anthropic twin (ENG-1169) ─────────────────────────────────────
@@ -722,8 +776,8 @@ def test_anthropic_402_wallet_code_maps_to_token_limit():
 
 
 def test_anthropic_402_header_alone_maps_to_token_limit():
-    # Today's live gateway anthropic lane strips the body code — if the
-    # header survives (proxy/fixed gateway), it must still map.
+    # The gateway's Anthropic lane drops the body code and keeps the
+    # X-MindsHub-Reason header, so the header alone must map.
     exc = _anthropic_sdk_error(402, json_body={"type": "error", "error": {
         "type": "invalid_request_error",
         "message": "Your wallet has no balance to cover the model 'claude'.",
@@ -1039,6 +1093,276 @@ def test_a_relayed_gateway_rate_limit_still_earns_the_session_wait():
     assert not isinstance(err2.value, TokenLimitExceeded)
 
 
+# ── Which limit fired: one type per gate billing code ─────────────────────
+# The gate names three billing stops. One plain TokenLimitExceeded turned all
+# three into the same card and the same sentence, which is wrong for two of
+# them. Each code now raises its own subclass: an in-process host reads the
+# attributes, and a hosted turn's host reads the class name off the
+# `turn_failed` string and the reset instant off its `reset_at` key (see
+# tests/test_cloud_turn_entrypoint.py).
+
+_RESET_AT = "2026-09-25T00:00:00Z"
+_RESET_AT_NORMALIZED = "2026-09-25T00:00:00+00:00"
+_BILLING_CTA = (
+    "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+)
+_BILLING_STOPS = [
+    pytest.param("wallet_empty", 402, WalletEmptyError,
+                 "your MindsHub credits are used up.", id="wallet_empty"),
+    pytest.param("included_allowance_exhausted", 429, AllowanceExhaustedError,
+                 "you have no free MindsHub Air allowance left.", id="allowance"),
+    pytest.param("free_air_daily_spend_fuse_exceeded", 429, FreeServingPausedError,
+                 "free MindsHub Air is paused for everyone until the daily budget resets.",
+                 id="fuse"),
+]
+
+
+def _assert_billing_stop(exc, *, code, status, cls, what):
+    assert type(exc) is cls
+    assert isinstance(exc, TokenLimitExceeded)  # every existing catch still holds
+    assert exc.reason == code
+    assert exc.status_code == status
+    assert str(exc) == f"Server returned {status}: {what} {_BILLING_CTA}"
+
+
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+@pytest.mark.parametrize("carrier", ["body", "header"])
+def test_each_gate_billing_code_raises_its_own_type(code, status, cls, what, carrier):
+    """OpenAI dialect, built by the real SDK. The header carrier is what is left
+    when a proxy strips the body code."""
+    error = {"message": "denied", "type": "rate_limit_error"}
+    if carrier == "body":
+        error["code"] = code
+    headers = {"X-MindsHub-Reason": code} if carrier == "header" else None
+    exc = _sdk_error(status, json_body={"error": error}, headers=headers)
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_for_status_error(exc, "sonnet")
+    _assert_billing_stop(err.value, code=code, status=status, cls=cls, what=what)
+    assert err.value.reset_at is None  # no header, no hint
+
+
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+@pytest.mark.parametrize("carrier", ["body", "header"])
+def test_the_anthropic_twin_raises_the_same_type(code, status, cls, what, carrier):
+    error = {"type": "rate_limit_error", "message": "denied"}
+    if carrier == "body":
+        error["code"] = code
+    headers = {"X-MindsHub-Reason": code} if carrier == "header" else None
+    exc = _anthropic_sdk_error(status, json_body={"type": "error", "error": error},
+                               headers=headers)
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    _assert_billing_stop(err.value, code=code, status=status, cls=cls, what=what)
+
+
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+def test_the_reset_hint_is_read_off_the_header(code, status, cls, what):
+    """The gateway sends `reset_at` twice: a top-level body field and the
+    `X-MindsHub-Reset-At` header. The OpenAI SDK keeps only the `error`
+    envelope of the body, so the header is the copy that survives."""
+    exc = _sdk_error(
+        status,
+        json_body={"error": {"message": "denied", "code": code}, "reset_at": _RESET_AT},
+        headers={"X-MindsHub-Reset-At": _RESET_AT},
+    )
+    assert "reset_at" not in exc.body  # the premise: the SDK dropped the body copy
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert type(err.value) is cls
+    assert err.value.reset_at == _RESET_AT_NORMALIZED
+
+
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+def test_the_anthropic_twin_reads_the_reset_hint_too(code, status, cls, what):
+    exc = _anthropic_sdk_error(
+        status, json_body={"type": "error", "error": {"code": code}},
+        headers={"X-MindsHub-Reset-At": _RESET_AT},
+    )
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert type(err.value) is cls
+    assert err.value.reset_at == _RESET_AT_NORMALIZED
+
+
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+def test_the_gateway_anthropic_lane_shape_maps_off_the_headers(code, status, cls, what):
+    """The gateway's Anthropic lane sends no `error.code`, keeps the top-level
+    `reset_at`, and passes the X-MindsHub-* headers through. The headers alone
+    carry the reason and the reset hint to the typed stop."""
+    exc = _anthropic_sdk_error(
+        status,
+        json_body={"type": "error",
+                   "error": {"type": "rate_limit_error", "message": "denied"},
+                   "reset_at": _RESET_AT},
+        headers={"X-MindsHub-Reason": code, "X-MindsHub-Reset-At": _RESET_AT},
+    )
+    with pytest.raises(TokenLimitExceeded) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    _assert_billing_stop(err.value, code=code, status=status, cls=cls, what=what)
+    assert err.value.reset_at == _RESET_AT_NORMALIZED
+
+
+@pytest.mark.parametrize("raw", [
+    "tomorrow",
+    "2026-09-25T00:00:00",            # naive
+    "Thu, 25 Sep 2026 00:00:00 GMT",  # HTTP-date
+])
+def test_a_reset_hint_that_is_not_an_instant_is_dropped(raw):
+    exc = _sdk_error(429, json_body={"error": {"code": "included_allowance_exhausted"}},
+                     headers={"X-MindsHub-Reset-At": raw})
+    with pytest.raises(AllowanceExhaustedError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.reset_at is None
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026-09-25T00:00:00Z", "2026-09-25T00:00:00+00:00"),
+    ("2026-09-25T00:00:00+00:00", "2026-09-25T00:00:00+00:00"),
+    ("2026-09-24T19:00:00-05:00", "2026-09-24T19:00:00-05:00"),
+    ("2026-09-25T00:00:00.250Z", "2026-09-25T00:00:00.250000+00:00"),
+    (" 2026-09-25T00:00:00Z ", "2026-09-25T00:00:00+00:00"),
+    ("20260925T000000Z", "2026-09-25T00:00:00+00:00"),  # compact form, normalized
+    ("2026-09-25T00:00:00", None),       # naive: a different moment per timezone
+    ("2026-09-25", None),                 # a date, not an instant
+    ("Thu, 25 Sep 2026 00:00:00 GMT", None),
+    ("tomorrow", None),
+    ("", None),
+    (None, None),
+    (1790294400, None),
+    (["2026-09-25T00:00:00Z"], None),
+])
+def test_parse_reset_at_keeps_only_an_instant(raw, expected):
+    assert parse_reset_at(raw) == expected
+
+
+def test_the_constructor_validates_reset_at_itself():
+    """Whoever builds the error, the attribute is either an instant or None."""
+    assert WalletEmptyError("m", reason="wallet_empty", reset_at="soon").reset_at is None
+    assert FreeServingPausedError(
+        "m", reason="free_air_daily_spend_fuse_exceeded", reset_at=_RESET_AT,
+    ).reset_at == _RESET_AT_NORMALIZED
+
+
+def test_the_allowance_copy_never_states_the_window():
+    """The allowance window is auth's configuration; copy that named it would
+    go stale the day it changed."""
+    exc = _sdk_error(429, json_body={"error": {"code": "included_allowance_exhausted"}})
+    with pytest.raises(AllowanceExhaustedError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    text = str(err.value).lower()
+    for word in ("month", "week", "day", "hour"):
+        assert word not in text, f"allowance copy names a window: {text}"
+
+
+def test_the_legacy_quota_branches_still_raise_plain_token_limit():
+    """The FastAPI `detail` 429 and OpenAI's own `insufficient_quota` are not gate
+    billing codes, so neither may claim to name a MindsHub limit."""
+    with pytest.raises(TokenLimitExceeded) as detail:
+        _raise_for_status_error(
+            _sdk_error(429, json_body={"detail": "Monthly limit exceeded"}), "sonnet")
+    assert type(detail.value) is TokenLimitExceeded
+    with pytest.raises(TokenLimitExceeded) as quota:
+        _raise_for_status_error(_openai_quota_429(), "sonnet")
+    assert type(quota.value) is TokenLimitExceeded
+
+
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+@pytest.mark.parametrize("carrier", ["body", "header"])
+def test_a_third_party_gets_no_billing_stop_and_no_reset_hint(code, status, cls, what, carrier):
+    """The origin gate covers every code, the new one included, and a foreign
+    reset header never reaches an attribute a card could count down to."""
+    kwargs = {"reason": code} if carrier == "header" else {"json_body": {"code": code}}
+    exc = _byok_error("openrouter.ai", status=status,
+                      headers_extra={"X-MindsHub-Reset-At": _RESET_AT}, **kwargs)
+    with pytest.raises(Exception) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded), f"{code} via {carrier} minted a card"
+    assert getattr(err.value, "reset_at", None) is None
+    assert "console.mindshub.ai" not in str(err.value)
+
+
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+def test_the_anthropic_twin_gives_a_third_party_no_billing_stop(code, status, cls, what):
+    exc = _anthropic_sdk_error(status, json_body={"code": code},
+                               headers={"X-MindsHub-Reason": code,
+                                        "X-MindsHub-Reset-At": _RESET_AT})
+    exc.response.request = httpx.Request("POST", "https://openrouter.ai/v1/messages")
+    with pytest.raises(Exception) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert getattr(err.value, "reset_at", None) is None
+
+
+@pytest.mark.parametrize("helper,kwargs", [
+    pytest.param(mindshub_billing_stop, {"body": {}, "status_code": 402}, id="billing_stop"),
+    pytest.param(mindshub_model_restriction, {"body": {}, "status_code": 403, "model": "opus"},
+                 id="model_restriction"),
+])
+def test_the_gate_helpers_take_every_argument_by_keyword(helper, kwargs):
+    """Both gate helpers refuse a positional `exc` and accept the keyword form."""
+    exc = RuntimeError("denied")
+    with pytest.raises(TypeError, match="positional argument"):
+        helper(exc, **kwargs)
+    assert helper(exc=exc, **kwargs) is None  # no carrier, no typed error
+
+
+# The OpenAI provider has two stream lanes (chat.completions and, for direct
+# OpenAI, the Responses API), and each catches a bare mid-stream
+# `openai.APIError` in its own `except`. Both are driven here.
+
+async def _drain_midstream(*, lane, host, code):
+    from unittest.mock import AsyncMock
+
+    from anton.core.llm.openai import OpenAIProvider
+
+    async def _denied_stream():
+        raise openai.APIError(
+            "denied",
+            request=httpx.Request("POST", f"https://{host}/v1/chat/completions"),
+            body={"message": "denied", "type": "rate_limit_error", "code": code},
+        )
+        yield  # pragma: no cover  (makes this an async generator)
+
+    flavor = (OpenAIProvider.FLAVOR_OPENAI if lane == "responses"
+              else OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC)
+    prov = OpenAIProvider(api_key="k", base_url=f"https://{host}/v1", flavor=flavor)
+    prov._client = AsyncMock()
+    create = AsyncMock(return_value=_denied_stream())
+    if lane == "responses":
+        prov._client.responses.create = create
+    else:
+        prov._client.chat.completions.create = create
+    return [
+        ev async for ev in prov.stream(
+            model="latest:sonnet", system="s",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    ]
+
+
+@pytest.mark.parametrize("lane", ["chat", "responses"])
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+async def test_the_midstream_lanes_raise_the_same_type(lane, code, status, cls, what):
+    """A denial inside an open stream has no error status, so its copy drops
+    the "Server returned" lead and `status_code` stays None."""
+    with pytest.raises(TokenLimitExceeded) as err:
+        await _drain_midstream(lane=lane, host="api.mindshub.ai", code=code)
+    assert type(err.value) is cls
+    assert err.value.reason == code
+    assert err.value.status_code is None
+    assert err.value.reset_at is None
+    assert str(err.value) == f"{what[:1].upper()}{what[1:]} {_BILLING_CTA}"
+
+
+@pytest.mark.parametrize("lane", ["chat", "responses"])
+@pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
+async def test_the_midstream_lanes_give_a_third_party_no_billing_stop(lane, code, status, cls, what):
+    with pytest.raises(Exception) as err:
+        await _drain_midstream(lane=lane, host="evil.example.com", code=code)
+    assert not isinstance(err.value, TokenLimitExceeded)
+    assert "console.mindshub.ai" not in str(err.value)
+
+
 # ---------------------------------------------------------------------------
 # Review nits on #363 (ENG-1693).
 # ---------------------------------------------------------------------------
@@ -1158,3 +1482,177 @@ def test_anthropic_mapper_leaves_an_unrelated_400_generic():
     with pytest.raises(ConnectionError) as err:
         _raise_anthropic(exc, model="claude-sonnet")
     assert not isinstance(err.value, ContentValidationError)
+
+
+# ── an org admin's model rule: a 403 with the model_restricted deny detail ──
+# The gateway keeps `permission_denied` on `error.code` and X-MindsHub-Reason
+# for every 403 it refuses, so only the deny detail tells a model rule apart
+# from a member whose role cannot run the product. The gateway sends the detail
+# twice: the X-MindsHub-Deny-Detail header and `deny_detail` inside the
+# `error` object. Before this, the 403 fell to the generic "temporarily
+# unavailable, try again" copy.
+
+_RESTRICTED_COPY = (
+    "An admin in your organization restricted the model 'opus'. "
+    "Choose another model in Settings."
+)
+
+
+class _Gateway403(NamedTuple):
+    """The `error` object and headers of one gateway 403."""
+
+    error: dict
+    headers: dict
+
+
+def _restricted_403(*, carrier) -> _Gateway403:
+    """The gateway's 403 `error` object and headers for an admin model rule.
+
+    ``carrier`` picks which copies of the deny detail survive: a proxy can
+    strip the header, and a client or lane can drop the body field.
+    """
+    error = {
+        "message": "An administrator in your organization has restricted the model "
+                   "'opus'. Choose another model.",
+        "type": "permission_error",
+        "param": "model",
+        "code": "permission_denied",
+    }
+    headers = {"X-MindsHub-Reason": "permission_denied"}
+    if carrier in ("body", "both"):
+        error["deny_detail"] = "model_restricted"
+    if carrier in ("header", "both"):
+        headers["X-MindsHub-Deny-Detail"] = "model_restricted"
+    return _Gateway403(error=error, headers=headers)
+
+
+def _assert_restricted(*, exc):
+    assert type(exc) is ModelRestrictedError
+    assert isinstance(exc, ModelUnavailableError)  # every existing catch still holds
+    assert exc.code == "model_restricted"
+    assert exc.model == "opus"
+    assert str(exc) == _RESTRICTED_COPY  # names the model, no billing link
+
+
+@pytest.mark.parametrize("carrier", ["header", "body", "both"])
+def test_a_gateway_model_restriction_raises_its_own_type(carrier):
+    """OpenAI dialect, built by the real SDK, which peels the `error`
+    envelope: the body copy of the detail arrives at the top level."""
+    denial = _restricted_403(carrier=carrier)
+    exc = _sdk_error(403, json_body={"error": denial.error}, headers=denial.headers)
+    with pytest.raises(ModelRestrictedError) as err:
+        _raise_for_status_error(exc, "opus")
+    _assert_restricted(exc=err.value)
+
+
+def test_an_envelope_shaped_model_restriction_maps_via_fallback():
+    """A client or proxy that keeps the wire envelope leaves the detail at
+    `error.deny_detail`, which the SDK route cannot produce."""
+    denial = _restricted_403(carrier="body")
+    exc = _wire_shaped_error(403, {"error": denial.error})
+    with pytest.raises(ModelRestrictedError) as err:
+        _raise_for_status_error(exc, "opus")
+    _assert_restricted(exc=err.value)
+
+
+@pytest.mark.parametrize("carrier", ["header", "body", "both"])
+def test_the_anthropic_twin_raises_the_same_restriction(carrier):
+    """The Anthropic SDK keeps the wire envelope, so the body copy sits at
+    `error.deny_detail` on this door."""
+    denial = _restricted_403(carrier=carrier)
+    exc = _anthropic_sdk_error(403, json_body={"type": "error", "error": denial.error},
+                               headers=denial.headers)
+    with pytest.raises(ModelRestrictedError) as err:
+        _raise_anthropic(exc, model="opus")
+    _assert_restricted(exc=err.value)
+
+
+@pytest.mark.parametrize("host", ["api.mindshub.ai", "mindshub.ai", "api.mdb.ai"])
+def test_every_real_gateway_host_gets_the_restriction(host):
+    denial = _restricted_403(carrier="header")
+    exc = _byok_error(host, status=403, json_body={"error": denial.error}, headers_extra=denial.headers)
+    with pytest.raises(ModelRestrictedError) as err:
+        _raise_for_status_error(exc, "opus")
+    _assert_restricted(exc=err.value)
+
+
+# A plain `permission_denied` (the membership deny) and a detail the gateway
+# does not send keep today's generic copy. The last row is a header value the
+# gateway does not send, the others are body values.
+_NOT_A_RESTRICTION = [
+    pytest.param("body", None, id="no-detail"),
+    pytest.param("body", "membership", id="unknown-body-detail"),
+    pytest.param("body", ["model_restricted"], id="non-string-body-detail"),
+    pytest.param("header", "model-restricted", id="unknown-header-detail"),
+]
+
+
+def _permission_denied_403(*, carrier, detail) -> _Gateway403:
+    error = {
+        "message": "These credentials are not permitted to use this resource.",
+        "type": "permission_error",
+        "code": "permission_denied",
+    }
+    headers = {"X-MindsHub-Reason": "permission_denied"}
+    if detail is not None and carrier == "body":
+        error["deny_detail"] = detail
+    if detail is not None and carrier == "header":
+        headers["X-MindsHub-Deny-Detail"] = detail
+    return _Gateway403(error=error, headers=headers)
+
+
+@pytest.mark.parametrize("carrier,detail", _NOT_A_RESTRICTION)
+def test_a_403_permission_denied_without_the_detail_stays_generic(carrier, detail):
+    denial = _permission_denied_403(carrier=carrier, detail=detail)
+    exc = _sdk_error(403, json_body={"error": denial.error}, headers=denial.headers)
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "opus")
+    assert type(err.value) is ConnectionError
+    assert "temporarily unavailable" in str(err.value)
+
+
+@pytest.mark.parametrize("carrier,detail", _NOT_A_RESTRICTION)
+def test_the_anthropic_twin_leaves_a_plain_permission_denied_generic(carrier, detail):
+    denial = _permission_denied_403(carrier=carrier, detail=detail)
+    exc = _anthropic_sdk_error(403, json_body={"type": "error", "error": denial.error},
+                               headers=denial.headers)
+    with pytest.raises(ConnectionError) as err:
+        _raise_anthropic(exc, model="opus")
+    assert type(err.value) is ConnectionError
+    assert "temporarily unavailable" in str(err.value)
+
+
+@pytest.mark.parametrize("status", [402, 404, 500])
+def test_the_deny_detail_on_another_status_is_not_a_restriction(status):
+    """Only the gate's 403 carries the detail; any other status keeps its own
+    mapping whatever the body or headers say."""
+    denial = _restricted_403(carrier="both")
+    exc = _sdk_error(status, json_body={"error": denial.error}, headers=denial.headers)
+    with pytest.raises(Exception) as err:
+        _raise_for_status_error(exc, "opus")
+    assert not isinstance(err.value, ModelUnavailableError)
+
+
+@pytest.mark.parametrize("host", ["openrouter.ai", "mindshub.ai.evil.com"])
+@pytest.mark.parametrize("carrier", ["header", "body", "both"])
+def test_a_third_party_cannot_claim_an_admin_restriction(host, carrier):
+    """On a BYOK endpoint the whole response is the remote's choice, and this
+    copy tells the user that their own org's admin blocked the model."""
+    denial = _restricted_403(carrier=carrier)
+    exc = _byok_error(host, status=403, json_body={"error": denial.error}, headers_extra=denial.headers)
+    with pytest.raises(ConnectionError) as err:
+        _raise_for_status_error(exc, "opus")
+    assert type(err.value) is ConnectionError, f"{host} via {carrier} minted a restriction"
+    assert "admin" not in str(err.value).lower()
+
+
+@pytest.mark.parametrize("carrier", ["header", "body", "both"])
+def test_the_anthropic_twin_gives_a_third_party_no_restriction(carrier):
+    denial = _restricted_403(carrier=carrier)
+    exc = _anthropic_sdk_error(403, json_body={"type": "error", "error": denial.error},
+                               headers=denial.headers)
+    exc.response.request = httpx.Request("POST", "https://openrouter.ai/v1/messages")
+    with pytest.raises(ConnectionError) as err:
+        _raise_anthropic(exc, model="opus")
+    assert type(err.value) is ConnectionError
+    assert "admin" not in str(err.value).lower()

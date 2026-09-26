@@ -515,16 +515,18 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 
 # Verdict-call failures that are DETERMINISTIC DENIALS: the provider will give
 # the identical answer on every retry this session — a wallet that can't pay
-# for the verifier's model (TokenLimitExceeded: 402 ``wallet_empty`` / 429
-# ``included_allowance_exhausted``, both code-exact per ENG-1169; velocity 429s
-# map to TransientProviderError and never land here) or a model id that doesn't
-# resolve for this key (ModelUnavailableError: 404 model-not-found / 403
-# model-access-denied). These latch on the FIRST occurrence and stay silent:
-# the turn's work already succeeded, and telling the user an internal check
-# failed is a lie when the check was merely priced out (ENG-1632 —
-# of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
-# were aux-surface calls like this one, across 33 of those users; every aux
-# one surfaced to the user as an internal error and an apology).
+# for the verifier's model (TokenLimitExceeded, raised as one of its subclasses
+# for the gate's 402 ``wallet_empty`` / 429 ``included_allowance_exhausted`` /
+# 429 ``free_air_daily_spend_fuse_exceeded``, all matched on the exact code;
+# velocity 429s map to TransientProviderError and never land here) or a model
+# id that doesn't resolve for this key (ModelUnavailableError: 404
+# model-not-found / 403 model-access-denied / 403 model-restricted, the last
+# raised as its ModelRestrictedError subclass). These latch on the FIRST
+# occurrence and stay silent: the turn's work already succeeded, and telling
+# the user an internal check failed is a lie when the check was merely priced
+# out (of a 14-day baseline of 296 wallet-402s across 39 users, 208 were
+# aux-surface calls like this one, across 33 of those users; every aux one
+# surfaced to the user as an internal error and an apology).
 #
 # ORDER MATTERS in the verdict loop: this clause must precede
 # _TRANSIENT_VERDICT_ERRORS. ModelUnavailableError subclasses ConnectionError →

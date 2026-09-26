@@ -26,10 +26,14 @@ import pytest
 from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.provider import (
+    AllowanceExhaustedError,
+    FreeServingPausedError,
+    ModelRestrictedError,
     StreamComplete,
     StreamTextDelta,
     TokenLimitExceeded,
     TransientProviderError,
+    WalletEmptyError,
 )
 
 
@@ -261,3 +265,79 @@ async def test_e2e_openai_midstream_allowance_denial_is_token_limit():
     with pytest.raises(TokenLimitExceeded) as ei:
         await _drain(prov)
     assert "allowance" in str(ei.value).lower()
+
+
+@pytest.mark.parametrize("code,cls", [
+    ("wallet_empty", WalletEmptyError),
+    ("included_allowance_exhausted", AllowanceExhaustedError),
+    ("free_air_daily_spend_fuse_exceeded", FreeServingPausedError),
+])
+async def test_e2e_openai_midstream_billing_code_raises_its_own_type(code, cls):
+    """The real SDK's SSE parser, one frame per gate code. The fuse frame used
+    to fall through to the 30s stream_error backoff, because its `type` is not
+    a transient one and its code was not a billing one."""
+    body = _sse(
+        'data: {"error":{"message":"denied","type":"rate_limit_error",'
+        f'"code":"{code}"}}}}\n\n',
+    )
+    prov = _openai_provider(_static(body))
+    with pytest.raises(cls) as ei:
+        await _drain(prov)
+    assert ei.value.reason == code
+    assert ei.value.status_code is None
+
+
+# --------------------------------------------------------------------------- #
+# An org admin's model rule: a request-time 403 with the deny detail
+# --------------------------------------------------------------------------- #
+
+def _counted_restriction(*, calls: dict, anthropic_envelope: bool):
+    """A gateway 403 for an admin model rule, counting the requests that reach it.
+
+    Only the header carries the deny detail on the OpenAI door and only the
+    body on the Anthropic one, so each provider proves one carrier end to end.
+    """
+    def handler(_req):
+        calls["n"] += 1
+        error = {
+            "message": "An administrator in your organization has restricted the "
+                       "model 'latest:sonnet'. Choose another model.",
+            "type": "permission_error",
+            "code": "permission_denied",
+        }
+        headers = {"X-MindsHub-Reason": "permission_denied"}
+        if anthropic_envelope:
+            error["deny_detail"] = "model_restricted"
+            return httpx.Response(403, json={"type": "error", "error": error}, headers=headers)
+        headers["X-MindsHub-Deny-Detail"] = "model_restricted"
+        return httpx.Response(403, json={"error": error}, headers=headers)
+    return handler
+
+
+async def test_e2e_openai_model_restriction_is_its_own_type():
+    calls = {"n": 0}
+    prov = _openai_provider(_counted_restriction(calls=calls, anthropic_envelope=False))
+    with pytest.raises(ModelRestrictedError) as ei:
+        await _drain(prov)
+    assert ei.value.model == "latest:sonnet"
+    # A sanity check that the mock gateway served this request, not a retry
+    # guarantee: the SDKs do not retry a 403, so this count cannot catch one.
+    assert calls["n"] == 1
+
+
+async def test_e2e_anthropic_model_restriction_is_its_own_type():
+    calls = {"n": 0}
+    prov = AnthropicProvider(api_key="test")
+    prov._client = anthropic.AsyncAnthropic(
+        api_key="test",
+        # A real MindsHub host: the origin decides whether the detail is trusted.
+        base_url="https://api.mindshub.ai",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(
+            _counted_restriction(calls=calls, anthropic_envelope=True))),
+    )
+    with pytest.raises(ModelRestrictedError) as ei:
+        await _drain(prov)
+    assert ei.value.model == "latest:sonnet"
+    # A sanity check that the mock gateway served this request, not a retry
+    # guarantee: the SDKs do not retry a 403, so this count cannot catch one.
+    assert calls["n"] == 1
