@@ -34,10 +34,12 @@ from anton.core.llm.provider import (
     ContentTooLargeError,
     ContentValidationError,
     EndpointConfigurationError,
+    ErrorBodyFields,
     FreeServingPausedError,
     ModelRestrictedError,
     ModelUnavailableError,
     ProviderAuthError,
+    ProviderErrorBody,
     TokenLimitExceeded,
     TransientProviderError,
     WalletEmptyError,
@@ -681,6 +683,45 @@ def test_wallet_denial_code_reads_both_dialects():
     assert wallet_denial_code("<html>402</html>") is None
 
 
+def test_the_error_body_is_split_into_its_two_levels():
+    # The Anthropic wire shape keeps the envelope; its top-level `type` is the
+    # constant "error", which is why readers pick their own order per field.
+    wire = ProviderErrorBody.parse({"type": "error", "error": {
+        "type": "invalid_request_error", "message": "denied", "code": "wallet_empty",
+    }})
+    assert wire.has_envelope is True
+    assert wire.top.type == "error"
+    assert wire.envelope.type == "invalid_request_error"
+    assert wire.code == "wallet_empty"  # read from the envelope when the top has none
+    # The OpenAI SDK peels the envelope, so everything sits at the top level.
+    peeled = ProviderErrorBody.parse({"code": "rate_limited", "deny_detail": "model_restricted"})
+    assert peeled.has_envelope is False
+    assert peeled.envelope == ErrorBodyFields()
+    assert peeled.code == "rate_limited"
+    assert peeled.top.deny_detail == "model_restricted"
+    # The top-level code wins when both levels carry one.
+    both = ProviderErrorBody.parse({"code": "wallet_empty", "error": {"code": "rate_limited"}})
+    assert both.code == "wallet_empty"
+    # Values are kept as sent, not coerced.
+    assert ProviderErrorBody.parse({"code": ["wallet_empty"]}).code == ["wallet_empty"]
+    # Anything but a dict parses as empty, and so does a non-object `error`.
+    for junk in (None, "<html>402</html>", [{"code": "wallet_empty"}], {"error": "denied"}):
+        parsed = ProviderErrorBody.parse(junk)
+        assert parsed.has_envelope is False
+        assert parsed.top.code is None and parsed.envelope == ErrorBodyFields()
+
+
+def test_classify_transient_reads_only_the_envelope_when_there_is_one():
+    # The transient classifier treats a present envelope as the whole error
+    # object and never falls back to the top level for `type` or `code`, unlike
+    # the other readers. A transient-looking top-level type beside an envelope
+    # that names no type or code therefore stays unclassified.
+    body = {"type": "overloaded_error", "error": {"message": "bad request"}}
+    assert classify_transient(400, body, provider="p") is None
+    # Without an envelope, the top level is the error object.
+    assert classify_transient(400, {"type": "overloaded_error"}, provider="p") is not None
+
+
 # ── the anthropic twin (ENG-1169) ─────────────────────────────────────
 
 def test_anthropic_401_maps_to_provider_auth_error():
@@ -1057,7 +1098,8 @@ def test_a_relayed_gateway_rate_limit_still_earns_the_session_wait():
 # three into the same card and the same sentence, which is wrong for two of
 # them. Each code now raises its own subclass: an in-process host reads the
 # attributes, and a hosted turn's host reads the class name off the
-# `turn_failed` string (see tests/test_cloud_turn_entrypoint.py).
+# `turn_failed` string and the reset instant off its `reset_at` key (see
+# tests/test_cloud_turn_entrypoint.py).
 
 _RESET_AT = "2026-09-25T00:00:00Z"
 _RESET_AT_NORMALIZED = "2026-09-25T00:00:00+00:00"
@@ -1068,7 +1110,7 @@ _BILLING_STOPS = [
     pytest.param("wallet_empty", 402, WalletEmptyError,
                  "your MindsHub credits are used up.", id="wallet_empty"),
     pytest.param("included_allowance_exhausted", 429, AllowanceExhaustedError,
-                 "your free MindsHub Air allowance is used up.", id="allowance"),
+                 "you have no free MindsHub Air allowance left.", id="allowance"),
     pytest.param("free_air_daily_spend_fuse_exceeded", 429, FreeServingPausedError,
                  "free MindsHub Air is paused for everyone until the daily budget resets.",
                  id="fuse"),

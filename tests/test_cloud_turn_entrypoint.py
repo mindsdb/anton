@@ -16,6 +16,8 @@ import pytest
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
 from anton.core.llm.provider import (
+    AllowanceExhaustedError,
+    FreeServingPausedError,
     LLMResponse,
     StreamComplete,
     StreamContextCompacted,
@@ -25,6 +27,7 @@ from anton.core.llm.provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    WalletEmptyError,
 )
 
 
@@ -300,9 +303,9 @@ def _mapped_gate_denial(status, code):
     (429, "free_air_daily_spend_fuse_exceeded", "FreeServingPausedError"),
 ])
 def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
-    """A hosted turn's host sees only the `turn_failed` string, and reads the
-    failure's kind from the `TypeName:` prefix. The wire format is unchanged;
-    the subclass name is what tells the host which limit fired."""
+    """A hosted turn's host reads the failure's kind from the `TypeName:`
+    prefix of the `turn_failed` string. The string's format is unchanged; the
+    subclass name is what tells the host which limit fired."""
     events = _drive(_FakeSession(raise_on_stream=_mapped_gate_denial(status, code)))
     assert len(events) == 1
     assert events[0]["kind"] == "turn_failed"
@@ -334,6 +337,58 @@ def test_an_admin_model_restriction_names_itself_on_the_wire():
         "ModelRestrictedError: An admin in your organization restricted the model "
         "'latest:sonnet'. Choose another model in Settings."
     )
+
+
+_RESET_AT = "2026-09-26T00:00:00Z"
+_RESET_AT_NORMALIZED = "2026-09-26T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("error_type,reason", [
+    (FreeServingPausedError, "free_air_daily_spend_fuse_exceeded"),
+    (AllowanceExhaustedError, "included_allowance_exhausted"),
+])
+def test_a_billing_stop_carries_its_reset_instant_on_the_wire(error_type, reason):
+    """The `error` string has no room for when the limit lifts, so the reset
+    instant rides the frame as its own `reset_at` key, in the normalized form
+    the stop already holds."""
+    stop = error_type("denied", reason=reason, status_code=429, reset_at=_RESET_AT)
+    events = _drive(_FakeSession(raise_on_stream=stop))
+    assert events == [{
+        "kind": "turn_failed",
+        "error": f"{error_type.__name__}: denied",
+        "reset_at": _RESET_AT_NORMALIZED,
+    }]
+
+
+class _ResetLookalike(RuntimeError):
+    """Not a billing stop, but carries a `reset_at` attribute anyway."""
+
+    reset_at = _RESET_AT_NORMALIZED
+
+
+@pytest.mark.parametrize("exc", [
+    pytest.param(
+        AllowanceExhaustedError("denied", reason="included_allowance_exhausted",
+                                status_code=429),
+        id="allowance-without-reset"),
+    pytest.param(
+        FreeServingPausedError("denied", reason="free_air_daily_spend_fuse_exceeded",
+                               status_code=429, reset_at="tomorrow"),
+        id="unparseable-reset"),
+    pytest.param(
+        WalletEmptyError("denied", reason="wallet_empty", status_code=402),
+        id="wallet-empty"),
+    pytest.param(RuntimeError("boom"), id="plain"),
+    pytest.param(_ResetLookalike("boom"), id="not-a-billing-stop"),
+])
+def test_a_failure_without_a_reset_instant_sends_no_reset_key(exc):
+    """The key is present only when there is an instant to show: a consumer
+    must never meet `reset_at: null`, or a reset from an error anton did not
+    classify."""
+    events = _drive(_FakeSession(raise_on_stream=exc))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    assert set(events[0]) == {"kind", "error"}
 
 
 class _BaseBoom(BaseException):

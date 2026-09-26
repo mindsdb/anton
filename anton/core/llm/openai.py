@@ -23,6 +23,7 @@ from .provider import (
     ModelUnavailableError,
     ProviderAuthError,
     ProviderConnectionInfo,
+    ProviderErrorBody,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -51,12 +52,13 @@ logger = logging.getLogger(__name__)
 AsyncAPIKeyProvider = Callable[[], Awaitable[str]]
 
 
-def _error_body(exc: "openai.APIStatusError") -> tuple[object, dict, dict]:
-    """``(raw_body, body, envelope)`` off an SDK error, Gemini's list wrapper undone.
+def _error_body(exc: "openai.APIStatusError") -> object:
+    """The body off an SDK error, Gemini's list wrapper undone.
 
-    ``raw_body`` is the unwrapped value even when it is not a dict, because
-    ``mindshub_billing_stop`` inspects it directly; ``body`` is the dict-or-empty
-    form every structured check below uses.
+    The result is the unwrapped value even when it is not a dict: the shared
+    helpers it is handed to (``mindshub_billing_stop``,
+    ``mindshub_model_restriction``, ``classify_transient``) take the raw body,
+    and :class:`ProviderErrorBody` parses it for every structured check below.
 
     Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-element
     ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare object, and
@@ -67,9 +69,7 @@ def _error_body(exc: "openai.APIStatusError") -> tuple[object, dict, dict]:
     raw = exc.body
     if isinstance(raw, list) and raw and isinstance(raw[0], dict):
         raw = raw[0]
-    body = raw if isinstance(raw, dict) else {}
-    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
-    return raw, body, envelope
+    return raw
 
 
 def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
@@ -95,11 +95,11 @@ def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     if "context_length_exceeded" in msg or "maximum context length" in msg:
         raise ContextOverflowError(str(exc)) from exc
 
-    _, body, envelope = _error_body(exc)
+    parsed = ProviderErrorBody.parse(_error_body(exc))
     content = classify_content_rejection(
-        error_type=envelope.get("type") or body.get("type"),
-        message=envelope.get("message") or body.get("message"),
-        param=envelope.get("param") or body.get("param"),
+        error_type=parsed.envelope.type or parsed.top.type,
+        message=parsed.envelope.message or parsed.top.message,
+        param=parsed.envelope.param or parsed.top.param,
     )
     if content is not None:
         raise content from exc
@@ -170,8 +170,9 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # structured check below (auth / quota / model) silently misses on Gemini
     # and the error falls through to the generic "temporarily unavailable"
     # message — the exact reason ENG-1145 surfaced as an opaque 404.
-    raw_body, body, envelope = _error_body(exc)
-    detail = body.get("detail") or envelope.get("detail")
+    raw_body = _error_body(exc)
+    parsed = ProviderErrorBody.parse(raw_body)
+    detail = parsed.top.detail or parsed.envelope.detail
     # str-only: FastAPI validation errors put a LIST in detail — rendering
     # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
     # ENG-1693: origin-gated like every other branch that can mint a MindsHub
@@ -185,8 +186,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
-    code = body.get("code") or envelope.get("code")
-    etype = body.get("type") or envelope.get("type")
+    code = parsed.code
+    etype = parsed.top.type or parsed.envelope.type
     # OpenAI's own quota dialect (BYOK): permanent for the identical request, so
     # retrying it as a rate limit just burns the session's backoff budget and
     # surfaces a misleading "provider overloaded". No MindsHub CTA — the remedy
@@ -205,11 +206,12 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # three are permanent for the identical request: without this branch the
     # 402 fell to the generic "temporarily unavailable" ConnectionError, got
     # auto-retried, and was finally rendered as assistant prose. The typed
-    # subclass fails fast (the session re-raises TokenLimitExceeded unretried),
-    # and its class name is the part of it that survives a hosted turn's
-    # `turn_failed` string (`cloud_turn.__main__._scrub`). `mindshub_billing_stop`
-    # owns the detection, the copy, the reset hint and the origin gate, shared
-    # with the anthropic twin and the mid-stream lanes below.
+    # subclass fails fast (the session re-raises TokenLimitExceeded unretried).
+    # A hosted turn's `turn_failed` frame carries its class name in the `error`
+    # string and its reset hint as `reset_at` (see
+    # `cloud_turn.__main__.stream_turn`). `mindshub_billing_stop` owns the
+    # detection, the copy, the reset hint and the origin gate, shared with the
+    # anthropic twin and the mid-stream lanes below.
     billing_stop = mindshub_billing_stop(exc=exc, body=raw_body, status_code=exc.status_code)
     if billing_stop is not None:
         raise billing_stop from exc
@@ -258,8 +260,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # itself mean the model is missing. `classify_404` (shared with the Anthropic
     # mapper, ENG-1139) decides model-not-found vs. endpoint-misconfiguration.
     if exc.status_code == 404:
-        provider_msg = envelope.get("message") or body.get("message")
-        status_str = str(body.get("status") or envelope.get("status") or "")
+        provider_msg = parsed.envelope.message or parsed.top.message
+        status_str = str(parsed.top.status or parsed.envelope.status or "")
         raise classify_404(
             model, message=provider_msg, code=code, status=status_str,
         ) from exc
@@ -276,8 +278,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # only this one had the branch, and BYOK Anthropic had the bug untreated.
     _content = classify_content_rejection(
         error_type=etype,
-        message=envelope.get("message") or body.get("message"),
-        param=envelope.get("param") or body.get("param"),
+        message=parsed.envelope.message or parsed.top.message,
+        param=parsed.envelope.param or parsed.top.param,
     )
     if _content is not None:
         raise _content from exc
@@ -299,7 +301,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # forwarding our 429 and `Retry-After` lost its wait (ENG-1537).
     _velocity = raw_gate_reason == "rate_limited" or code == "rate_limited"
     transient = classify_transient(
-        exc.status_code, body, provider="The model provider", model=model,
+        exc.status_code, raw_body, provider="The model provider", model=model,
         retry_after=retry_after_seconds(exc),
         velocity_confirmed=_velocity,
     )
@@ -1380,15 +1382,15 @@ class OpenAIProvider(LLMProvider):
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
             # `mindshub_billing_stop` origin-checks it like the request-time
-            # mapper. NOT a
-            # no-op: an earlier revision claimed a mid-stream error carries no
-            # recoverable host so this was almost always inert, and that was
-            # wrong in the most dangerous direction. The bare `openai.APIError`
-            # raised here has no `.response` but DOES carry `.request` with the
-            # real URL, and answering 200 with the wallet code smuggled into an
-            # SSE frame is the remote's choice — so this is precisely where a
-            # hostile BYOK endpoint would aim. `response_origin_host` now falls
-            # back to `.request`, which is what makes this gate real.
+            # mapper. NOT a no-op: an earlier revision claimed a mid-stream
+            # error carries no recoverable host so this was almost always inert,
+            # and that was wrong in the most dangerous direction. The bare
+            # `openai.APIError` raised here has no `.response` but DOES carry
+            # `.request` with the real URL, and answering 200 with the wallet
+            # code smuggled into an SSE frame is the remote's choice — so this
+            # is precisely where a hostile BYOK endpoint would aim.
+            # `response_origin_host` now falls back to `.request`, which is what
+            # makes this gate real.
             billing_stop = mindshub_billing_stop(
                 exc=exc, body=getattr(exc, "body", None), status_code=None,
             )
@@ -1739,15 +1741,15 @@ class OpenAIProvider(LLMProvider):
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
             # `mindshub_billing_stop` origin-checks it like the request-time
-            # mapper. NOT a
-            # no-op: an earlier revision claimed a mid-stream error carries no
-            # recoverable host so this was almost always inert, and that was
-            # wrong in the most dangerous direction. The bare `openai.APIError`
-            # raised here has no `.response` but DOES carry `.request` with the
-            # real URL, and answering 200 with the wallet code smuggled into an
-            # SSE frame is the remote's choice — so this is precisely where a
-            # hostile BYOK endpoint would aim. `response_origin_host` now falls
-            # back to `.request`, which is what makes this gate real.
+            # mapper. NOT a no-op: an earlier revision claimed a mid-stream
+            # error carries no recoverable host so this was almost always inert,
+            # and that was wrong in the most dangerous direction. The bare
+            # `openai.APIError` raised here has no `.response` but DOES carry
+            # `.request` with the real URL, and answering 200 with the wallet
+            # code smuggled into an SSE frame is the remote's choice — so this
+            # is precisely where a hostile BYOK endpoint would aim.
+            # `response_origin_host` now falls back to `.request`, which is what
+            # makes this gate real.
             billing_stop = mindshub_billing_stop(
                 exc=exc, body=getattr(exc, "body", None), status_code=None,
             )

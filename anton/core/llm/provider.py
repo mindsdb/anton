@@ -684,8 +684,10 @@ class MindsHubBillingStop(TokenLimitExceeded):
     every existing catch working: the no-retry re-raise in
     ``ChatSession.turn_stream``, the verifier's ``_DENIED_VERDICT_ERRORS`` latch
     (both ``anton/core/session.py``), and cowork-server's
-    ``is_token_limit_error``. The subclass NAME is what survives a hosted turn:
-    ``cloud_turn.__main__._scrub`` sends only ``"TypeName: message"``.
+    ``is_token_limit_error``. Two parts of it survive a hosted turn's
+    ``turn_failed`` frame (``cloud_turn.__main__.stream_turn``): the subclass
+    NAME, as the ``"TypeName: message"`` string ``_scrub`` puts in ``error``,
+    and ``reset_at``, as its own key when the gateway sent one.
 
     ``reason`` is the gate's code, ``status_code`` the HTTP status (``None`` for
     a denial inside an open stream, which has no error status), and
@@ -718,11 +720,13 @@ class WalletEmptyError(MindsHubBillingStop):
 
 
 class AllowanceExhaustedError(MindsHubBillingStop):
-    """429 ``included_allowance_exhausted``: the org's free allowance is spent.
+    """429 ``included_allowance_exhausted``: the org has no free allowance left.
 
     Per the same ``resolve_model_access``, only an org with no confirmed
-    payment method gets this. The gateway sends ``reset_at`` for when the
-    allowance refills, when auth supplies one.
+    payment method gets this. It fires both for an org that spent its free
+    allowance and for one that never had a free allowance. The gateway sends
+    ``reset_at`` for when the allowance refills, when auth supplies one; for an
+    org that never had an allowance it sends none.
     """
 
 
@@ -896,11 +900,13 @@ class _BillingStopKind(NamedTuple):
 #
 # ``what`` never names how long the allowance window is: the window is auth's
 # configuration, and copy that stated it would go stale the day it changed.
+# The allowance copy does not say the allowance was used up either: the gate
+# sends the same code to an org that never had a free allowance at all.
 _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
     "wallet_empty": _BillingStopKind(
         WalletEmptyError, "your MindsHub credits are used up."),
     "included_allowance_exhausted": _BillingStopKind(
-        AllowanceExhaustedError, "your free MindsHub Air allowance is used up."),
+        AllowanceExhaustedError, "you have no free MindsHub Air allowance left."),
     "free_air_daily_spend_fuse_exceeded": _BillingStopKind(
         FreeServingPausedError,
         "free MindsHub Air is paused for everyone until the daily budget resets."),
@@ -1040,6 +1046,80 @@ def origin_is_known_third_party_host(host: str | None) -> bool:
     return host is not None and not is_mindshub_host(host)
 
 
+@dataclass(frozen=True)
+class ErrorBodyFields:
+    """The fields the error mappers read off one level of a provider error body.
+
+    Each value is what the wire sent under that key, or ``None`` when the key
+    is absent. Nothing is coerced: an endpoint can send a list or a number
+    where a string belongs, so each reader keeps its own type check.
+    """
+
+    code: object = None
+    type: object = None
+    message: object = None
+    param: object = None
+    detail: object = None
+    deny_detail: object = None
+    status: object = None
+
+    @classmethod
+    def from_dict(cls, fields: dict) -> ErrorBodyFields:
+        return cls(
+            code=fields.get("code"),
+            type=fields.get("type"),
+            message=fields.get("message"),
+            param=fields.get("param"),
+            detail=fields.get("detail"),
+            deny_detail=fields.get("deny_detail"),
+            status=fields.get("status"),
+        )
+
+
+@dataclass(frozen=True)
+class ProviderErrorBody:
+    """A provider error body, parsed once in both of its dialects.
+
+    The OpenAI SDK peels the ``error`` envelope before it stores the body
+    (``openai/_client.py`` does ``body.get("error", body)``), so the fields sit
+    at the top level there. The Anthropic SDK, and a proxy that delivers the
+    wire shape unmodified, keep them inside ``error``. ``top`` is the top level
+    and ``envelope`` the ``error`` object. Each reader picks its own order,
+    because the orders differ per field and per mapper. The Anthropic
+    top-level ``type`` is always ``"error"``, for one, so the Anthropic mapper
+    reads ``type`` off the envelope first.
+
+    ``has_envelope`` says whether ``error`` was an object at all. Without one,
+    ``envelope`` is all ``None``, and :func:`classify_transient` reads the top
+    level as the error object instead.
+    """
+
+    top: ErrorBodyFields
+    envelope: ErrorBodyFields
+    has_envelope: bool
+
+    @classmethod
+    def parse(cls, body: object) -> ProviderErrorBody:
+        """``body`` split into its two levels. Anything but a dict parses as empty."""
+        top = body if isinstance(body, dict) else {}
+        envelope = top.get("error")
+        has_envelope = isinstance(envelope, dict)
+        return cls(
+            top=ErrorBodyFields.from_dict(top),
+            envelope=ErrorBodyFields.from_dict(envelope if has_envelope else {}),
+            has_envelope=has_envelope,
+        )
+
+    @property
+    def code(self) -> object:
+        """``code``, top level first, then the envelope.
+
+        :func:`classify_transient` does not use this: when there is an
+        envelope, it reads the code off the envelope alone.
+        """
+        return self.top.code or self.envelope.code
+
+
 def wallet_denial_code(body: Any) -> str | None:
     """The M3 gate's billing code carried in an error body, if any.
 
@@ -1052,9 +1132,7 @@ def wallet_denial_code(body: Any) -> str | None:
     insufficient-credits 402) carry no such code and must stay generic — the
     remedy there is the user's own provider billing, not MindsHub credits.
     """
-    b = body if isinstance(body, dict) else {}
-    err = b.get("error") if isinstance(b.get("error"), dict) else {}
-    code = b.get("code") or err.get("code")
+    code = ProviderErrorBody.parse(body).code
     # isinstance first: `in` on a frozenset HASHES the value, so a hostile/buggy
     # endpoint sending a list `code` would otherwise TypeError the classifier
     # (every other wire-value membership check in these mappers uses tuples).
@@ -1094,9 +1172,11 @@ def mindshub_billing_stop(
     A provably foreign origin gets ``None`` whatever it carries (see
     :func:`origin_is_known_third_party`). On a BYOK endpoint the whole response
     is third-party controlled, and a spoofed billing card asks the user for
-    money. cowork-server's own origin checks run too late to stop it:
-    ``friendly_turn_error`` (``cowork/handlers/turn_errors.py``) matches
-    ``TokenLimitExceeded`` before any of them.
+    money. cowork-server cannot refuse it later. Its ``friendly_turn_error``
+    (``cowork/handlers/turn_errors.py``) origin-gates only its own reads of
+    the reason header and the body code. A later rung, ``is_token_limit_error``,
+    is an isinstance check with no origin gate, so it catches any
+    ``TokenLimitExceeded`` anton raises. The origin check has to happen here.
 
     ``status_code`` is the HTTP error status, which must be the gate's 402 or
     429; ``None`` means a denial inside an already-open stream, which has no
@@ -1151,12 +1231,11 @@ def mindshub_model_restriction(
     """
     if origin_is_known_third_party(exc) or status_code != 403:
         return None
-    b = body if isinstance(body, dict) else {}
-    err = b.get("error") if isinstance(b.get("error"), dict) else {}
+    parsed = ProviderErrorBody.parse(body)
     carriers = (
         _response_header(exc, "x-mindshub-deny-detail"),
-        b.get("deny_detail"),
-        err.get("deny_detail"),
+        parsed.top.deny_detail,
+        parsed.envelope.deny_detail,
     )
     if _MODEL_RESTRICTED not in carriers:
         return None
@@ -1232,14 +1311,16 @@ def classify_transient(
     at midnight — then be told it is not a credits problem. Unconfirmed 429s
     keep the pre-ENG-1537 behaviour: typed, honest, and failed fast.
     """
-    b = body if isinstance(body, dict) else {}
+    parsed = ProviderErrorBody.parse(body)
     # Two body dialects: Anthropic nests the error under `error` ({"error":
     # {"type": ...}}); the OpenAI SDK unwraps its envelope (`body.get("error",
     # body)`) so the type sits at the TOP level. Read the nested object when
     # present, otherwise treat the body itself as the error object — so the
     # mid-stream case classifies on BOTH providers (ENG-673, Sam's review).
-    err = b.get("error") if isinstance(b.get("error"), dict) else b
-    etype = err.get("type") or err.get("code")
+    # Unlike the other readers, a present envelope wins outright here: its
+    # `type` and `code` are read without falling back to the top level.
+    err = parsed.envelope if parsed.has_envelope else parsed.top
+    etype = err.type or err.code
     # A mid-stream failure has no real HTTP error status (it's smuggled into an
     # already-sent 200, or there's no status at all), so the SDK never retried it
     # → the session must. A request-time error carries a real 4xx/5xx → the SDK
@@ -1259,7 +1340,7 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
             status_code=status_code,
         )
-    if status_code == 429 and not b.get("detail"):
+    if status_code == 429 and not parsed.top.detail:
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
         # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
         # ``insufficient_quota``, the M3 gate's allowance and free-serving fuse
@@ -1268,7 +1349,7 @@ def classify_transient(
         # failure is permanent and must never enter the retry loop (ENG-1169).
         if etype == "insufficient_quota":
             return None
-        if wallet_denial_code(b):
+        if wallet_denial_code(body):
             # Deliberately NOT origin-gated (ENG-1693), for a plainer reason
             # than an earlier version of this comment claimed. It said gating
             # would make a hostile wallet code "retryable"; that is false —

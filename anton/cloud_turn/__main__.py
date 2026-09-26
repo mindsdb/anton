@@ -157,7 +157,8 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
     a bare ``turn_completed``. Any failure (parse or turn) -> one ``turn_failed``
-    with a scrubbed error string.
+    with a scrubbed error string, plus ``reset_at`` when the failure is a
+    MindsHub billing stop that knows when its limit lifts.
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
@@ -166,6 +167,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     the ticker and the delta loop cannot interleave mid-line - no lock needed.
     """
     from anton.core.llm.provider import (
+        MindsHubBillingStop,
         StreamComplete,
         StreamContextCompacted,
         StreamTaskProgress,
@@ -358,7 +360,14 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     except Exception as exc:
         # Full traceback -> stderr only; wire carries a short scrubbed string.
         logger.exception("cloud turn failed")
-        emit({"kind": "turn_failed", "error": _scrub(exc)})
+        failed = {"kind": "turn_failed", "error": _scrub(exc)}
+        # A billing stop's reset instant rides beside the string, so the host
+        # can say when the limit lifts. `reset_at` is already a normalized
+        # ISO-8601 instant (`parse_reset_at`), or None when the gateway sent
+        # no instant that parses, and then the key is left off.
+        if isinstance(exc, MindsHubBillingStop) and exc.reset_at:
+            failed["reset_at"] = exc.reset_at
+        emit(failed)
         terminal_emitted = True
     finally:
         # No terminal yet = BaseException/teardown path; emit one (guarded — a

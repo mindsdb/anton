@@ -15,6 +15,7 @@ from .provider import (
     LLMResponse,
     ProviderAuthError,
     ProviderConnectionInfo,
+    ProviderErrorBody,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -54,12 +55,11 @@ def _raise_for_bad_request(exc: anthropic.BadRequestError) -> None:
     if "prompt is too long" in msg or "context limit" in msg:
         raise ContextOverflowError(str(exc)) from exc
 
-    body = exc.body if isinstance(exc.body, dict) else {}
-    env = body.get("error") if isinstance(body.get("error"), dict) else {}
+    parsed = ProviderErrorBody.parse(exc.body)
     content = classify_content_rejection(
-        error_type=env.get("type") or body.get("type"),
-        message=env.get("message") or body.get("message"),
-        param=env.get("param") or body.get("param"),
+        error_type=parsed.envelope.type or parsed.top.type,
+        message=parsed.envelope.message or parsed.top.message,
+        param=parsed.envelope.param or parsed.top.param,
     )
     if content is not None:
         raise content from exc
@@ -99,6 +99,7 @@ def _raise_for_status_error(
         ) from exc
 
     body = exc.body if isinstance(exc.body, dict) else {}
+    parsed = ProviderErrorBody.parse(body)
 
     # The `detail` branch below can mint a MindsHub billing verdict, so it must
     # refuse a provably foreign origin; `mindshub_billing_stop`
@@ -111,7 +112,7 @@ def _raise_for_status_error(
     # repr next to our billing link, and an ungated one lets any BYOK endpoint
     # mint the credits card from a single JSON key with attacker-authored prose
     # in it.
-    _detail = body.get("detail")
+    _detail = parsed.top.detail
     if not _foreign and exc.status_code == 429 and isinstance(_detail, str) and _detail:
         msg = f"Server returned 429 — {_detail}"
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
@@ -154,11 +155,10 @@ def _raise_for_status_error(
     # the "permanent, switch models" framing instead of the misleading
     # "temporarily unavailable, try again" — can't drift between providers.
     if exc.status_code == 404:
-        envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
         raise classify_404(
             model,
-            message=envelope.get("message") or body.get("message"),
-            error_type=envelope.get("type"),
+            message=parsed.envelope.message or parsed.top.message,
+            error_type=parsed.envelope.type,
         ) from exc
 
     # A permanent rejection of the request's OWN content — the wrong SHAPE
@@ -169,19 +169,17 @@ def _raise_for_status_error(
     # so the heuristic and its wording can't drift: until ENG-2689 this branch
     # existed only there, which left BYOK Anthropic users with the raw bug —
     # four identical retries and a message telling them to try again.
-    _env = body.get("error") if isinstance(body.get("error"), dict) else {}
     _content = classify_content_rejection(
-        error_type=_env.get("type") or body.get("type"),
-        message=_env.get("message") or body.get("message"),
-        param=_env.get("param") or body.get("param"),
+        error_type=parsed.envelope.type or parsed.top.type,
+        message=parsed.envelope.message or parsed.top.message,
+        param=parsed.envelope.param or parsed.top.param,
     )
     if _content is not None:
         raise _content from exc
 
     # Body `code` in both dialects — the SDK may deliver the wire envelope
     # unmodified, unlike the openai client which peels it.
-    _env = body.get("error") if isinstance(body.get("error"), dict) else {}
-    _body_code = body.get("code") or _env.get("code")
+    _body_code = parsed.code
     # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
     # our gateway names it on the reason header and in the body code. Anything
     # else (a bare 429, a provider quota in an unrecognised dialect) keeps the

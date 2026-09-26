@@ -524,10 +524,9 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 # raised as its ModelRestrictedError subclass). These latch on the FIRST
 # occurrence and stay silent: the turn's work already succeeded, and telling
 # the user an internal check failed is a lie when the check was merely priced
-# out (in one 14-day window,
-# a baseline of 296 wallet-402s across 39 users, 208
-# were aux-surface calls like this one, across 33 of those users; every aux
-# one surfaced to the user as an internal error and an apology).
+# out (of a 14-day baseline of 296 wallet-402s across 39 users, 208 were
+# aux-surface calls like this one, across 33 of those users; every aux one
+# surfaced to the user as an internal error and an apology).
 #
 # ORDER MATTERS in the verdict loop: this clause must precede
 # _TRANSIENT_VERDICT_ERRORS. ModelUnavailableError subclasses ConnectionError →

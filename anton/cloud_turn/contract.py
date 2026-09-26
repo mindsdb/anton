@@ -47,6 +47,10 @@ Events written back on stdout (JSONL):
       history and compacts it again.
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
+      `error` is "TypeName: message", so a consumer reads the failure's kind
+      off the class name. A MindsHub billing stop that knows when its limit
+      lifts adds `"reset_at": "<ISO-8601 instant with a UTC offset>"`; every
+      other failure omits the key.
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
