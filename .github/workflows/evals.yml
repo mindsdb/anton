@@ -112,7 +112,7 @@ jobs:
 
       - name: Check out anton
         if: steps.fork.outputs.skip != '1'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: anton
           ref: ${{ env.ANTON_SHA }}
@@ -151,7 +151,7 @@ jobs:
 
       - name: Check out cowork-server
         if: steps.fork.outputs.skip != '1'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: mindsdb/cowork-server
           ref: ${{ env.COWORK_REF }}
@@ -161,7 +161,7 @@ jobs:
 
       - name: Check out cowork_evals
         if: steps.fork.outputs.skip != '1'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: mindsdb/cowork_evals
           ref: ${{ env.EVALS_REF }}
@@ -170,7 +170,7 @@ jobs:
 
       - name: Install uv
         if: steps.fork.outputs.skip != '1'
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           # The managed build runs `uv sync` in a fresh cowork-server worktree on
           # every new anton sha, so the build dir itself is never reused. uv's
@@ -249,7 +249,7 @@ jobs:
       # the only way to tell a harness bug from a gateway outage.
       - name: Upload run artifacts
         if: always() && steps.fork.outputs.skip != '1'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: eval-run-${{ steps.eval.outputs.run_id || github.run_id }}
           path: |
