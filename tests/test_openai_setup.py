@@ -225,6 +225,89 @@ class TestResolveMindsModels:
         r = minds_client.resolve_minds_models("https://x", "k")
         assert (r.planning, r.coding) == ("grok", "grok")
 
+    def _jev_only_catalog(self):
+        """An org with no wallet: paid chat models disabled, the zero-priced
+        decision models enabled."""
+        return self._rich_catalog([
+            {"id": "jev", "kind": "decision", "enabled": True, "embedding": False},
+            {"id": "jev-1.13.0", "kind": "decision", "enabled": True, "embedding": False},
+            {"id": "sonnet", "kind": "chat", "enabled": False, "embedding": False},
+            {"id": "haiku", "kind": "chat", "enabled": False, "embedding": False},
+        ])
+
+    def test_decision_models_are_never_picked(self, monkeypatch):
+        """Decision models answer the chat probe with 400
+        unsupported_model_kind, so a catalogue whose only enabled rows are
+        jev and jev-1.13.0 has no usable chat model: the pair falls back to
+        the tier defaults and the free-bucket escalation, never to jev."""
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._jev_only_catalog(),
+        )
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding, r.probe) == (
+            minds_client.MINDS_DEFAULT_PLANNING_MODEL,
+            minds_client.MINDS_DEFAULT_CODING_MODEL,
+            minds_client.MINDS_DEFAULT_CODING_MODEL,
+        )
+        assert r.free_fallback == minds_client.MINDS_FREE_TIER_MODEL
+
+    def test_decision_model_listed_first_does_not_win_the_fallback(self, monkeypatch):
+        """The ids[0] fallback lands on the first chat row, not on a decision
+        model the catalogue happens to list first."""
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._rich_catalog([
+                {"id": "jev", "kind": "decision", "enabled": True, "embedding": False},
+                {"id": "grok", "kind": "chat", "enabled": True, "embedding": False},
+            ]),
+        )
+        r = minds_client.resolve_minds_models("https://x", "k")
+        assert (r.planning, r.coding) == ("grok", "grok")
+
+    def test_jev_only_org_is_never_probed_with_jev(self, monkeypatch):
+        """End to end through resolve_and_probe: the chat probe asks for the
+        paid default, escalates to the free bucket, and never names jev."""
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._jev_only_catalog(),
+        )
+        results = {
+            "haiku": minds_client.LLMTestResult(
+                ok=False, error="model_disabled", http_status=403
+            ),
+            "mindshub_air": minds_client.LLMTestResult(ok=True),
+        }
+        seen: list[str] = []
+
+        def fake_test_llm(base_url, api_key, verify=True, model=None):
+            seen.append(model)
+            return results[model]
+
+        monkeypatch.setattr("anton.minds_client.test_llm", fake_test_llm)
+        models, result = minds_client.resolve_and_probe("https://x", "k")
+        assert result.ok
+        assert seen == ["haiku", "mindshub_air"]
+        assert (models.planning, models.coding) == (
+            minds_client.MINDS_FREE_TIER_MODEL,
+            minds_client.MINDS_FREE_TIER_MODEL,
+        )
+
+    def test_list_models_keeps_only_chat_kind_rows(self, monkeypatch):
+        """A present kind decides on its own; a row without kind (older
+        hosts) keeps the embedding rule."""
+        monkeypatch.setattr(
+            "anton.minds_client.minds_request",
+            lambda *a, **kw: self._rich_catalog([
+                {"id": "sonnet", "kind": "chat", "enabled": True},
+                {"id": "jev", "kind": "decision", "enabled": True},
+                {"id": "embed-large", "kind": "embedding", "enabled": True},
+                {"id": "grok", "enabled": True},
+                {"id": "embed-small", "enabled": True, "embedding": True},
+            ]),
+        )
+        assert minds_client.list_models("https://x", "k") == ["sonnet", "grok"]
+
 
 class TestMindsV1Base:
     """Host-aware base rule — same as AntonSettings.model_post_init (ENG-436)
