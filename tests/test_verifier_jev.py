@@ -233,21 +233,21 @@ async def test_a_credentials_failure_falls_back(workspace):
 
 async def test_a_jev_verdict_leaves_the_llm_latch_counters_alone(workspace):
     session, llm = _session(workspace)
-    session._verifier_no_verdict_failures = 1
+    session._verifier_latch.no_verdict_failures = 1
     await _run(session, _jev("COMPLETE", 0.99))
-    assert session._verifier_no_verdict_failures == 1
+    assert session._verifier_latch.no_verdict_failures == 1
 
 
 async def test_the_llm_re_probe_is_never_skipped_by_jev(workspace):
     # A latched session re-probing the LLM must get an LLM verdict, or the latch never clears.
     session, llm = _session(workspace)
-    session._verifier_latched = True
-    session._verifier_latch_reason = session._verifier_last_no_verdict = "hard"
-    session._verifier_latch_skips = 9  # the next check is the re-probe
+    session._verifier_latch.latched = True
+    session._verifier_latch.reason = session._verifier_latch.last_no_verdict = "hard"
+    session._verifier_latch.skips = 9  # the next check is the re-probe
     event, classify = await _run(session, _jev("COMPLETE", 0.99))
     classify.assert_not_called()
     llm.generate_object_code.assert_called_once()
-    assert session._verifier_latched is False
+    assert session._verifier_latch.latched is False
 
 
 async def test_the_client_follows_ssl_verify_and_is_reused(workspace):

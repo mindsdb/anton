@@ -13,17 +13,26 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2 as httpx
 import pytest
 
 from tests.conftest import make_mock_llm
 
-from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
+from anton.core.session import (
+    _VERIFIER_LATCH_REPROBE_TURNS,
+    _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED,
+    _SHARED_VERIFIER_LATCHES,
+    ChatSession,
+    ChatSessionConfig,
+    _VerifierVerdict,
+    _shared_verifier_latch,
+)
 from anton.core.llm.provider import (
     LLMResponse,
     ModelUnavailableError,
+    ProviderConnectionInfo,
     StreamComplete,
     StreamTaskProgress,
     StreamTextDelta,
@@ -430,7 +439,7 @@ async def test_deterministic_hard_failure_latches_after_one_diagnosis(workspace,
         assert verdict_calls == 2, (
             f"latched session kept calling the verifier ({verdict_calls} calls)"
         )
-        assert session._verifier_latched is True
+        assert session._verifier_latch.latched is True
         # Anchor on a substring unique to the ANNOUNCEMENT line. An earlier
         # assertion matched "latched after N consecutive hard failures", which
         # the per-turn *skip* log also contained — so it passed without ever
@@ -484,7 +493,7 @@ async def test_an_exhausted_ladder_latches_at_the_threshold(workspace):
 
         # An exhausted ladder is evidence about the model, not a tail sample
         # of its verbosity: the first turn diagnoses, the second latches.
-        assert session._verifier_latched is True, (
+        assert session._verifier_latch.latched is True, (
             "an exhausted ladder must count toward the latch"
         )
         # The ladder must run in FULL before anything counts, or this rule
@@ -494,7 +503,7 @@ async def test_an_exhausted_ladder_latches_at_the_threshold(workspace):
             f"expected the full ladder on each verifying turn, got "
             f"{mock_llm.generate_object_code.await_count} calls"
         )
-        assert session._verifier_latch_reason == "truncated", (
+        assert session._verifier_latch.reason == "truncated", (
             "the books must show what actually latched, not a fixed 'hard'"
         )
         assert diagnoses == 1, (
@@ -531,8 +540,8 @@ async def test_successful_verdict_clears_the_latch_counter(workspace):
                 pass
 
         # fail, succeed, fail → never two in a row.
-        assert session._verifier_latched is False
-        assert session._verifier_no_verdict_failures == 1
+        assert session._verifier_latch.latched is False
+        assert session._verifier_latch.no_verdict_failures == 1
     finally:
         await session.close()
 
@@ -905,7 +914,7 @@ async def test_latched_verifier_reprobes_and_can_recover(workspace):
             mock_llm.plan_stream = plan
             async for _ in session.turn_stream(f"step {turn}"):
                 pass
-        assert session._verifier_latched is True, "two hard failures must latch"
+        assert session._verifier_latch.latched is True, "two hard failures must latch"
         assert calls["n"] == 2
 
         # Run exactly enough turns to consume the skip budget and re-probe.
@@ -919,10 +928,10 @@ async def test_latched_verifier_reprobes_and_can_recover(workspace):
             f"expected exactly one re-probe call after {_VERIFIER_LATCH_REPROBE_TURNS} "
             f"skips, verifier was called {calls['n']}x total"
         )
-        assert session._verifier_latched is False, (
+        assert session._verifier_latch.latched is False, (
             "a successful re-probe must clear the latch"
         )
-        assert session._verifier_no_verdict_failures == 0
+        assert session._verifier_latch.no_verdict_failures == 0
     finally:
         await session.close()
 
@@ -964,10 +973,10 @@ async def test_transient_provider_errors_never_latch(workspace, exc_factory, lab
             async for _ in session.turn_stream(f"step {turn}"):
                 pass
 
-        assert session._verifier_latched is False, (
+        assert session._verifier_latch.latched is False, (
             "transient provider errors must never latch the session"
         )
-        assert session._verifier_no_verdict_failures == 0
+        assert session._verifier_latch.no_verdict_failures == 0
         # Verification keeps being attempted every turn, rather than being
         # switched off after two blips.
         assert calls["n"] == 4, (
@@ -1010,7 +1019,7 @@ async def test_failed_reprobe_stays_latched_without_rediagnosis(workspace, caplo
                 if state["n"] >= 3:
                     diagnoses += 1
 
-        assert session._verifier_latched is True, "failed re-probe must stay latched"
+        assert session._verifier_latch.latched is True, "failed re-probe must stay latched"
         assert diagnoses == 1, (
             f"failed re-probes must not re-diagnose, got {diagnoses}"
         )
@@ -1064,7 +1073,7 @@ async def test_latched_truncating_reprobe_stays_latched_without_rediagnosing(wor
             if state["n"] >= 3:
                 diagnoses += 1
 
-        assert session._verifier_latched is True, (
+        assert session._verifier_latch.latched is True, (
             "a truncating re-probe must not clear the latch"
         )
         assert diagnoses == 1, (
@@ -1189,10 +1198,10 @@ async def test_denied_verdict_latches_silently_on_first_occurrence(
         assert calls["n"] == 1, (
             f"denied verdict must latch on the first occurrence, got {calls['n']} calls"
         )
-        assert session._verifier_latched is True
+        assert session._verifier_latch.latched is True
         # Denied is not a capability failure — the hard counter stays clean so
         # a later hard failure still gets its honest one-per-session diagnosis.
-        assert session._verifier_no_verdict_failures == 0
+        assert session._verifier_latch.no_verdict_failures == 0
         announcements = [
             r for r in caplog.records
             if "latched after a deterministic denial" in r.message
@@ -1248,7 +1257,7 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
         assert calls["n"] == 2, (
             f"expected first call + one re-probe, got {calls['n']}"
         )
-        assert session._verifier_latched is True
+        assert session._verifier_latch.latched is True
         assert diagnoses == 0
         assert not any(
             _HANDBACK_ANCHOR in str(m.get("content", ""))
@@ -1266,9 +1275,8 @@ async def test_denied_reprobe_stays_latched_and_silent(workspace, caplog):
 # FAIL NEXT, which is only ever the last class and picks the re-probe window.
 # One string served both once, and "mixed" being absorbing was the result.
 #
-# All of this is session-scoped. Cowork rebuilds ChatSession per message, so a
-# persistent failure there still diagnoses per message; that is a separate,
-# unbuilt fix and nothing here covers it.
+# All of this runs on a session-owned latch. The host-shared latch is covered
+# at the end of this file.
 
 
 def _always_truncated():
@@ -1316,14 +1324,14 @@ async def test_a_failed_reprobe_updates_the_latch_attribution(workspace):
     try:
         for turn in range(2):
             await _run_one_turn(session, mock_llm, f"step {turn}")
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "hard"
+        assert session._verifier_latch.latched is True
+        assert session._verifier_latch.reason == "hard"
 
         for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
             await _run_one_turn(session, mock_llm, f"later {turn}")
 
         # The re-probe truncated, so the attribution is no longer purely hard.
-        assert session._verifier_latch_reason == "mixed", (
+        assert session._verifier_latch.reason == "mixed", (
             "a re-probe failing a different way must reach the books"
         )
     finally:
@@ -1350,12 +1358,12 @@ async def test_mixed_classes_do_not_depend_on_arrival_order(workspace):
     session = _make_session(workspace, mock_llm)
     try:
         await _run_one_turn(session, mock_llm, "step one")
-        assert session._verifier_latch_reason == "truncated"
+        assert session._verifier_latch.reason == "truncated"
 
         state["turn"] = 1
         await _run_one_turn(session, mock_llm, "step two")
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "mixed"
+        assert session._verifier_latch.latched is True
+        assert session._verifier_latch.reason == "mixed"
     finally:
         await session.close()
 
@@ -1382,14 +1390,14 @@ async def test_mixed_reached_the_other_way_round_is_still_mixed(workspace):
     session = _make_session(workspace, mock_llm)
     try:
         await _run_one_turn(session, mock_llm, "step one")
-        assert session._verifier_latch_reason == "hard"
-        assert session._verifier_latched is False, "one failure must not latch"
+        assert session._verifier_latch.reason == "hard"
+        assert session._verifier_latch.latched is False, "one failure must not latch"
 
         state["turn"] = 1
         await _run_one_turn(session, mock_llm, "step two")
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "mixed"
-        assert session._verifier_last_no_verdict == "truncated", (
+        assert session._verifier_latch.latched is True
+        assert session._verifier_latch.reason == "mixed"
+        assert session._verifier_latch.last_no_verdict == "truncated", (
             "the window follows the truncation that failed last"
         )
     finally:
@@ -1420,9 +1428,9 @@ async def test_a_denied_latch_keeps_naming_the_denial(workspace):
     session = _make_session(workspace, mock_llm)
     try:
         await _run_one_turn(session, mock_llm, "message one")
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "denied"
-        assert session._verifier_no_verdict_failures == 0, (
+        assert session._verifier_latch.latched is True
+        assert session._verifier_latch.reason == "denied"
+        assert session._verifier_latch.no_verdict_failures == 0, (
             "a denial latches on its own branch without counting"
         )
 
@@ -1430,12 +1438,12 @@ async def test_a_denied_latch_keeps_naming_the_denial(workspace):
             await _run_one_turn(session, mock_llm, f"later {turn}")
 
         assert calls["n"] == 2, "exactly one re-probe should have spent a call"
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "denied", (
+        assert session._verifier_latch.latched is True
+        assert session._verifier_latch.reason == "denied", (
             "a differently-failing re-probe is no evidence the denial was paid, "
             "and the actionable class must not vanish into 'mixed'"
         )
-        assert session._verifier_last_no_verdict == "hard", (
+        assert session._verifier_latch.last_no_verdict == "hard", (
             "the window still follows what failed last, not the books label"
         )
     finally:
@@ -1493,19 +1501,19 @@ async def test_the_short_window_is_given_back_when_truncation_stops(workspace):
     try:
         for turn in range(2):
             await _run_one_turn(session, mock_llm, f"step {turn}")
-        assert session._verifier_latch_reason == "hard"
+        assert session._verifier_latch.reason == "hard"
 
         for turn in range(_VERIFIER_LATCH_REPROBE_TURNS):
             await _run_one_turn(session, mock_llm, f"later {turn}")
-        assert session._verifier_latch_reason == "mixed", (
+        assert session._verifier_latch.reason == "mixed", (
             "the truncating re-probe joins the evidence"
         )
-        assert session._verifier_last_no_verdict == "truncated"
+        assert session._verifier_latch.last_no_verdict == "truncated"
 
         # Short window now, correctly: a truncation is what failed last.
         for turn in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED):
             await _run_one_turn(session, mock_llm, f"short {turn}")
-        assert session._verifier_last_no_verdict == "hard", (
+        assert session._verifier_latch.last_no_verdict == "hard", (
             "that re-probe hit the 400 again"
         )
 
@@ -1517,7 +1525,7 @@ async def test_the_short_window_is_given_back_when_truncation_stops(workspace):
             "a mixed latch whose last failure was a 400 must get the long window "
             "back; an absorbing 'mixed' re-probes at 3 turns forever"
         )
-        assert session._verifier_latch_reason == "mixed", (
+        assert session._verifier_latch.reason == "mixed", (
             "the accumulated evidence still includes the truncation"
         )
     finally:
@@ -1535,8 +1543,8 @@ async def test_a_truncation_latch_reprobes_within_the_short_window(workspace):
     try:
         for turn in range(2):
             await _run_one_turn(session, mock_llm, f"step {turn}")
-        assert session._verifier_latched is True
-        assert session._verifier_latch_reason == "truncated"
+        assert session._verifier_latch.latched is True
+        assert session._verifier_latch.reason == "truncated"
         # Two verifying turns, two budgets each.
         latch_calls = mock_llm.generate_object_code.await_count
         assert latch_calls == 4
@@ -1553,3 +1561,223 @@ async def test_a_truncation_latch_reprobes_within_the_short_window(workspace):
         )
     finally:
         await session.close()
+
+
+# ── Host-shared latch ────────────────────────────────────────────────────────
+#
+# A host that builds a session per message opts in with `shared_verifier_latch`.
+# Each message below builds a fresh session from its own fresh client, so only
+# equal endpoint, model, and key values can reach the same latch.
+
+_LOCAL = {
+    "provider": "openai-compatible",
+    "base_url": "http://localhost:1234/v1",
+    "model": "qwen3-8b",
+    "api_key": "test",
+}
+
+
+def _local_llm(verdict_side_effect, *, provider, base_url, model, api_key):
+    """A fresh mock client whose coding endpoint, model, and key are the given ones."""
+    mock_llm = make_mock_llm()
+    mock_llm.coding_provider.export_connection_info = MagicMock(
+        return_value=ProviderConnectionInfo(
+            provider=provider, api_key=api_key, base_url=base_url
+        )
+    )
+    mock_llm.coding_model = model
+    mock_llm.generate_object_code = AsyncMock(side_effect=verdict_side_effect)
+    return mock_llm
+
+
+async def _one_message(
+    workspace,
+    verdict_side_effect,
+    *,
+    shared=True,
+    endpoint=_LOCAL,
+    session_id="conv-shared",
+):
+    """Run one message on a new session and client, as a per-message host does.
+
+    ``session_id`` is the conversation. Returns the client, whether the turn streamed a diagnosis, and the
+    session's latch.
+    """
+    mock_llm = _local_llm(verdict_side_effect, **endpoint)
+    plan, state = _tool_then_text_plan()
+    mock_llm.plan_stream = plan
+    session = ChatSession(ChatSessionConfig(
+        llm_client=mock_llm,
+        workspace=workspace,
+        session_id=session_id,
+        shared_verifier_latch=shared,
+    ))
+    try:
+        async for _ in session.turn_stream("do the step"):
+            pass
+    finally:
+        await session.close()
+    return mock_llm, state["n"] >= 3, session._verifier_latch
+
+
+def _always_400():
+    async def reject(_schema, *, system, messages, max_tokens):
+        raise RuntimeError("400 tool_choice not supported")
+
+    return reject
+
+
+async def test_a_shared_hard_latch_diagnoses_once_across_messages(workspace):
+    """A local endpoint that rejects every verdict call must hand back once per
+    endpoint and model, not once per message, when the host shares the latch.
+    Each message is a different conversation: the latch belongs to the
+    endpoint and model, not to one conversation."""
+    with patch("anton.analytics.send_event") as send:
+        _, diagnosed1, _ = await _one_message(
+            workspace, _always_400(), session_id="conv-a"
+        )
+        _, diagnosed2, latch = await _one_message(
+            workspace, _always_400(), session_id="conv-b"
+        )
+        assert diagnosed1 is True, "the first failure still gets its diagnosis"
+        assert diagnosed2 is False, "the second failure latches without one"
+        assert latch.latched is True
+        assert latch.reason == "hard"
+
+        llm3, diagnosed3, _ = await _one_message(
+            workspace, _always_400(), session_id="conv-c"
+        )
+        books = send.call_args.kwargs
+
+    assert diagnosed3 is False
+    assert llm3.generate_object_code.await_count == 0, (
+        "a latched message must not call the verifier"
+    )
+    assert books["ended_by"] == "completed"
+    assert books["verification_skipped"] == "true"
+    assert books["verifier_failure"] == "latched_hard"
+
+
+async def test_a_shared_denied_latch_reprobes_after_the_window(workspace):
+    """A denial latches on message 1, the next nine messages skip, and the
+    eleventh re-probes, all on fresh sessions."""
+    def denied():
+        return TokenLimitExceeded(
+            "402: Your wallet has no balance to cover the model 'haiku'."
+        )
+
+    calls = 0
+    diagnoses = 0
+    for _ in range(_VERIFIER_LATCH_REPROBE_TURNS):
+        llm, diagnosed, latch = await _one_message(workspace, denied())
+        calls += llm.generate_object_code.await_count
+        diagnoses += diagnosed
+    assert latch.latched is True
+    assert calls == 1, (
+        f"denied latches on message 1 and skips the next nine, got {calls} calls"
+    )
+
+    llm, diagnosed, latch = await _one_message(workspace, denied())
+    diagnoses += diagnosed
+    assert llm.generate_object_code.await_count == 1, (
+        "the message after the window must re-probe"
+    )
+    assert latch.latched is True, "a denied re-probe stays latched"
+    assert diagnoses == 0, "a denial never streams a diagnosis"
+
+
+async def test_a_shared_truncation_latch_keeps_the_short_window(workspace):
+    """The short re-probe window after a truncation latch counts messages
+    across sessions, not turns inside one."""
+    calls = 0
+    for _ in range(2):
+        llm, _, latch = await _one_message(workspace, _always_truncated())
+        calls += llm.generate_object_code.await_count
+    assert latch.latched is True
+    assert latch.reason == "truncated"
+    assert calls == 4, "two messages reach the verifier, two budgets each"
+
+    for _ in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED - 1):
+        llm, _, _ = await _one_message(workspace, _always_truncated())
+        assert llm.generate_object_code.await_count == 0, (
+            "still inside the short window: no verdict call"
+        )
+
+    llm, _, _ = await _one_message(workspace, _always_truncated())
+    assert llm.generate_object_code.await_count > 0, (
+        "the short window must carry across messages and let the re-probe fire"
+    )
+
+
+async def test_a_success_in_one_message_clears_the_shared_count(workspace):
+    """fail, succeed, fail across three sessions is never two failures in a row,
+    so the third message must still get its diagnosis."""
+    verdict = _VerifierVerdict(status="COMPLETE", reason="done")
+
+    _, diagnosed1, first = await _one_message(workspace, _always_400())
+    assert first.no_verdict_failures == 1
+    await _one_message(workspace, [verdict])
+    assert first.no_verdict_failures == 0, (
+        "the success in message 2 must clear the state message 1 left"
+    )
+    _, diagnosed3, latch = await _one_message(workspace, _always_400())
+
+    assert diagnosed1 is True
+    assert diagnosed3 is True
+    assert latch is first
+    assert latch.latched is False
+    assert latch.no_verdict_failures == 1
+
+
+@pytest.mark.parametrize("field, other", [
+    ("provider", "anthropic"),
+    ("base_url", "http://localhost:11434/v1"),
+    ("model", "llama3.2"),
+    ("api_key", "another-account"),
+])
+async def test_another_endpoint_model_or_key_gets_its_own_latch(
+    workspace, field, other
+):
+    """A latch on one endpoint, model, and key never silences another."""
+    for _ in range(2):
+        _, _, latch = await _one_message(workspace, _always_400())
+    assert latch.latched is True
+
+    elsewhere = {**_LOCAL, field: other}
+    _, diagnosed, latch = await _one_message(
+        workspace, _always_400(), endpoint=elsewhere
+    )
+    assert diagnosed is True, f"a different {field} must not inherit the latch"
+    assert latch.latched is False
+    assert latch.no_verdict_failures == 1
+
+
+def test_equivalent_base_urls_share_one_latch():
+    """A trailing slash or a missing base_url is the same endpoint."""
+    with_slash = _shared_verifier_latch(
+        "openai-compatible", "http://localhost:1234/v1/", "qwen3-8b", "k"
+    )
+    without = _shared_verifier_latch(
+        "openai-compatible", "http://localhost:1234/v1", "qwen3-8b", "k"
+    )
+    assert with_slash is without
+    assert _shared_verifier_latch(
+        "anthropic", None, "m", "k"
+    ) is _shared_verifier_latch("anthropic", "", "m", "k")
+
+
+def test_the_registry_never_holds_the_raw_key():
+    """Only a digest of the credential is kept in process-wide state."""
+    _shared_verifier_latch("anthropic", None, "m", "sk-secret-value")
+    (key,) = _SHARED_VERIFIER_LATCHES
+    assert "sk-secret-value" not in key
+
+
+async def test_without_the_flag_each_message_diagnoses_again(workspace):
+    """Today's per-session behaviour for every host that does not opt in."""
+    _, diagnosed1, _ = await _one_message(workspace, _always_400(), shared=False)
+    _, diagnosed2, latch = await _one_message(workspace, _always_400(), shared=False)
+
+    assert diagnosed1 is True
+    assert diagnosed2 is True, "an unshared latch starts fresh per session"
+    assert latch.latched is False

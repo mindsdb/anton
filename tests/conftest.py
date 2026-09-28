@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from anton.core.llm.provider import LLMResponse, ProviderConnectionInfo, ToolCall, Usage
+from anton.core.session import _SHARED_VERIFIER_LATCHES
 
 # Tests that drive full turns reach the turn-cost analytics sink (ENG-1288):
 # _emit_turn_cost falls back to a fresh AntonSettings(), whose default sinks are
@@ -394,3 +395,15 @@ def _no_builtin_skills(tmp_path_factory, monkeypatch):
 
     empty = tmp_path_factory.mktemp("no-builtin-skills")
     monkeypatch.setattr(skills_mod, "_BUILTIN_SKILLS_ROOT", empty)
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_verifier_latches():
+    """Start and end every test with no host-shared verifier latch.
+
+    The registry is process state, so a latch one test leaves would otherwise
+    skip or re-probe the verifier in whichever test next uses the same key.
+    """
+    _SHARED_VERIFIER_LATCHES.clear()
+    yield
+    _SHARED_VERIFIER_LATCHES.clear()

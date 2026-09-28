@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
@@ -516,7 +517,7 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 # Verdict-call failures that are DETERMINISTIC DENIALS: the provider will give
-# the identical answer on every retry this session — a wallet that can't pay
+# the identical answer on every retry while the latch lives — a wallet that can't pay
 # for the verifier's model (TokenLimitExceeded, raised as one of its subclasses
 # for the gate's 402 ``wallet_empty`` / 429 ``included_allowance_exhausted`` /
 # 429 ``free_air_daily_spend_fuse_exceeded``, all matched on the exact code;
@@ -553,10 +554,10 @@ _LATCHING_VERDICT_FAILURES = ("hard", "truncated")
 # latches on its own branch at the first occurrence.
 _VERIFIER_LATCH_THRESHOLD = 2
 
-# Turns a latched session skips before spending one verdict call to see whether
-# the cause has gone away (user switched model, gateway fix shipped). Without a
-# re-probe the latch is permanent for the session and "reset on a successful
-# verdict" can never fire, since a latched session makes no verdict calls.
+# Turns a latch skips before spending one verdict call to see whether the cause
+# has gone away (user switched model, gateway fix shipped). Without a re-probe
+# the latch is permanent for its lifetime and "reset on a successful verdict"
+# can never fire, since a latched verifier makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
 
 # Shorter window when the last thing that failed was a truncation, because a
@@ -580,7 +581,7 @@ _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED = 3
 
 
 def _reprobe_turns_for(last_failure: str) -> int:
-    """Skipped turns before a latched session spends one verdict call again.
+    """Skipped turns before a latched verifier spends one verdict call again.
 
     Keyed on the LAST no-verdict class, not the accumulated latch reason: this
     is a prediction about what is failing now, and a truncation ten turns ago
@@ -589,6 +590,51 @@ def _reprobe_turns_for(last_failure: str) -> int:
     if last_failure == "truncated":
         return _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
     return _VERIFIER_LATCH_REPROBE_TURNS
+
+
+@dataclass
+class _VerifierLatch:
+    """Latch state for a verifier that produces no verdict the same way each time.
+
+    Owned by one session, or shared by the host across sessions on one coding
+    endpoint and model (see `ChatSessionConfig.shared_verifier_latch`).
+    """
+
+    no_verdict_failures: int = 0
+    latched: bool = False
+    skips: int = 0
+    # ACCUMULATED evidence: every class that produced no verdict since the
+    # last success ("hard", "truncated", "denied", or "mixed" once they
+    # differ). Feeds the skip log and the books.
+    reason: str = ""
+    # The LAST such class, which is a different question: it predicts what a
+    # re-probe would hit, so it picks the window. See `_reprobe_turns_for`.
+    last_no_verdict: str = ""
+
+
+# Process-wide latches for hosts that rebuild a session per message. Keyed on
+# the coding endpoint, model, and credential: a denial belongs to the account,
+# so a new api key gets a fresh latch. Only a digest of the key is held, and the
+# key is never logged, because a base_url can carry credentials. No eviction;
+# a host sees a handful of endpoints.
+_SHARED_VERIFIER_LATCHES: dict[tuple[str, str, str, str], _VerifierLatch] = {}
+
+
+def _shared_verifier_latch(
+    provider: str, base_url: str | None, model: str, api_key: str | None
+) -> _VerifierLatch:
+    """Return the process-wide latch for one coding endpoint, model, and key.
+
+    Creates it on first use. A trailing slash and a missing base_url are
+    normalised so equivalent endpoints share one latch.
+    """
+    key_digest = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+    key = (provider, (base_url or "").rstrip("/"), model, key_digest)
+    latch = _SHARED_VERIFIER_LATCHES.get(key)
+    if latch is None:
+        latch = _VerifierLatch()
+        _SHARED_VERIFIER_LATCHES[key] = latch
+    return latch
 
 
 # Floor for the tokens held back from the spend ceiling (ENG-1286).
@@ -1364,6 +1410,11 @@ class ChatSessionConfig:
     # process (the cloud pod) turn this off: several spend an LLM call on writes
     # that land after the turn's storage is gone. `memorize` is unaffected.
     background_memory: bool = True
+    # Share the verifier latch with every session in this process that also sets
+    # this, on the same coding endpoint and model. For hosts that build a session
+    # per message, so a verifier that fails every time diagnoses once, not once
+    # per message.
+    shared_verifier_latch: bool = False
     # Open MCP sessions (ENG-1816) discovered before this session was built —
     # their tools are already folded into `tools` above via
     # `anton.core.mcp.wiring.discover_mcp_tools[_async]`, called by the host
@@ -1443,18 +1494,19 @@ class ChatSession:
         # multi-step turn pays a full-history diagnosis call and shows the
         # "checking in" message (ENG-1155). Two such failures with no successful
         # verdict between them latch; a successful verdict clears it. Scoped to
-        # this session: Cowork rebuilds it per message, so a persistent failure
-        # there still diagnoses per message until a host carries this state.
-        self._verifier_no_verdict_failures = 0
-        self._verifier_latched = False
-        self._verifier_latch_skips = 0
-        # ACCUMULATED evidence: every class that produced no verdict since the
-        # last success ("hard", "truncated", "denied", or "mixed" once they
-        # differ). Feeds the skip log and the books.
-        self._verifier_latch_reason = ""
-        # The LAST such class, which is a different question: it predicts what a
-        # re-probe would hit, so it picks the window. See `_reprobe_turns_for`.
-        self._verifier_last_no_verdict = ""
+        # this session unless the host shares it: Cowork rebuilds the session
+        # per message, so without sharing a persistent failure diagnoses per
+        # message.
+        if config.shared_verifier_latch:
+            latch_conn = config.llm_client.coding_provider.export_connection_info()
+            self._verifier_latch = _shared_verifier_latch(
+                latch_conn.provider,
+                latch_conn.base_url,
+                config.llm_client.coding_model,
+                latch_conn.api_key,
+            )
+        else:
+            self._verifier_latch = _VerifierLatch()
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -1730,14 +1782,14 @@ class ChatSession:
         no evidence the wallet was topped up, and the re-probe turn books its
         own class anyway, so nothing is lost by keeping the actionable label.
         """
-        self._verifier_last_no_verdict = failure
-        current = self._verifier_latch_reason
+        self._verifier_latch.last_no_verdict = failure
+        current = self._verifier_latch.reason
         if current == "denied" or failure == "denied":
-            self._verifier_latch_reason = "denied"
+            self._verifier_latch.reason = "denied"
         elif not current or current == failure:
-            self._verifier_latch_reason = failure
+            self._verifier_latch.reason = failure
         elif current != "mixed":
-            self._verifier_latch_reason = "mixed"
+            self._verifier_latch.reason = "mixed"
 
     def _record_root_cause(
         self, tool_ok: bool | None, reason: str, result_text: str
@@ -5958,9 +6010,9 @@ class ChatSession:
             # already in history — unverified, but that beats a per-turn
             # interruption we know the cause of.
             # Re-probe occasionally so the latch can't outlive its cause: the
-            # user may switch off the broken model mid-session, or the gateway
-            # fix may land. Without this, "reset on a successful verdict" is
-            # unreachable — a latched session skips every verdict call, so there
+            # user may switch off the broken model while it is latched, or the
+            # gateway fix may land. Without this, "reset on a successful verdict"
+            # is unreachable — a latched verifier skips every verdict call, so there
             # is never another success to reset on. A re-probe that produces no
             # verdict stays latched and does NOT re-diagnose (the latched branch
             # below breaks before the diagnosis), so the cost is one FAILED
@@ -5970,10 +6022,10 @@ class ChatSession:
             # TransientProviderError still falls through to the honest
             # diagnosis and leaves the latch set — those never latch by
             # definition, so only a successful verdict clears it.
-            if self._verifier_latched:
-                self._verifier_latch_skips += 1
-                reprobe_turns = _reprobe_turns_for(self._verifier_last_no_verdict)
-                if self._verifier_latch_skips < reprobe_turns:
+            if self._verifier_latch.latched:
+                self._verifier_latch.skips += 1
+                reprobe_turns = _reprobe_turns_for(self._verifier_latch.last_no_verdict)
+                if self._verifier_latch.skips < reprobe_turns:
                     logger.info(
                         "completion-verifier skipped — latched (%s) "
                         "(skip %d/%d before re-probe); "
@@ -5983,11 +6035,11 @@ class ChatSession:
                         # leave the count below the threshold, so any sentence
                         # naming the threshold here would sometimes be false.
                         "deterministic denial: billing or model access"
-                        if self._verifier_latch_reason == "denied"
-                        else f"{self._verifier_latch_reason}, "
-                        f"{self._verifier_no_verdict_failures} verdict call(s) with "
-                        "no successful verdict since",
-                        self._verifier_latch_skips,
+                        if self._verifier_latch.reason == "denied"
+                        else f"{self._verifier_latch.reason}, "
+                        f"{self._verifier_latch.no_verdict_failures} verdict "
+                        "call(s) with no successful verdict since",
+                        self._verifier_latch.skips,
                         reprobe_turns, continuation,
                         self._max_continuations, tool_round,
                     )
@@ -6005,14 +6057,14 @@ class ChatSession:
                         # reason is always set before the latch, and guessing
                         # "hard" here would file a capability claim we never saw.
                         self._turn_cost.verifier_failure = (
-                            f"latched_{self._verifier_latch_reason}"
+                            f"latched_{self._verifier_latch.reason}"
                         )
                     break
                 logger.info(
                     "completion-verifier re-probing after %d skipped verifications",
-                    self._verifier_latch_skips,
+                    self._verifier_latch.skips,
                 )
-                self._verifier_latch_skips = 0
+                self._verifier_latch.skips = 0
 
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation (ENG-716). The
@@ -6021,7 +6073,7 @@ class ChatSession:
                 self._history, user_message
             )
             # Still latched here means this is the LLM re-probe: only an LLM verdict can clear it.
-            jev_result = None if self._verifier_latched else await self._jev_verdict(user_message)
+            jev_result = None if self._verifier_latch.latched else await self._jev_verdict(user_message)
             jev_decided = self._jev_decides(jev_result)
             verdict = (
                 _VerifierVerdict(status=jev_result.status, reason=f"Decided by Jev (p={jev_result.p_status:.2f}).")
@@ -6136,10 +6188,10 @@ class ChatSession:
                 # (transient provider error, a model the user has since changed)
                 # is no longer failing. A Jev verdict says nothing about the LLM.
                 if not jev_decided:
-                    self._verifier_no_verdict_failures = 0
-                    self._verifier_latched = False
-                    self._verifier_latch_reason = ""
-                    self._verifier_last_no_verdict = ""
+                    self._verifier_latch.no_verdict_failures = 0
+                    self._verifier_latch.latched = False
+                    self._verifier_latch.reason = ""
+                    self._verifier_latch.last_no_verdict = ""
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
@@ -6167,16 +6219,13 @@ class ChatSession:
                     # latched, so adding credits self-heals within
                     # _VERIFIER_LATCH_REPROBE_TURNS turns.
                     #
-                    # Scope note: the latch is ChatSession state, and Cowork
-                    # rebuilds the session PER MESSAGE — there it only spans
-                    # one message's continuations, the steady-state cost of a
-                    # persistent denial is one silent verdict call per
-                    # message, and top-up recovery is simply the next message.
-                    # The re-probe window above is long-session (CLI)
-                    # behaviour. The cross-message fix is server-side model
-                    # resolution (cowork-server, same ticket); this branch is
-                    # the guarantee the user is never told the turn failed.
-                    self._verifier_latched = True
+                    # Scope note: the latch lives as long as its owner. A
+                    # session-owned latch in a host that rebuilds the session
+                    # per message spans one message, so a top-up recovers on
+                    # the next one. A latch the host shares spans messages, so
+                    # a top-up recovers at the re-probe. Either way this branch
+                    # is the guarantee the user is never told the turn failed.
+                    self._verifier_latch.latched = True
                     # Through the same accumulator as every other class, but
                     # WITHOUT touching the counter: this branch latches on call
                     # one, so the threshold never applies to it.
@@ -6194,17 +6243,17 @@ class ChatSession:
                         self._turn_cost.verification_skipped = True
                     break
                 if verdict_failure in _LATCHING_VERDICT_FAILURES:
-                    self._verifier_no_verdict_failures += 1
+                    self._verifier_latch.no_verdict_failures += 1
                     # Before the latched check, so a failed re-probe joins the
                     # evidence rather than leaving the books naming only
                     # whichever class happened to latch first.
                     self._note_latch_class(verdict_failure)
-                    if self._verifier_latched:
+                    if self._verifier_latch.latched:
                         # A failed re-probe: the cause is still there. Stay
                         # latched with its own log line — re-announcing "latched
                         # after N failures" with an ever-growing N would read as
                         # a new event each cycle. No re-diagnosis (one per
-                        # session, ENG-1155).
+                        # latch).
                         logger.warning(
                             "completion-verifier re-probe failed — staying latched"
                         )
@@ -6212,18 +6261,22 @@ class ChatSession:
                         if self._turn_cost is not None:
                             self._turn_cost.verification_skipped = True
                         break
-                    if self._verifier_no_verdict_failures >= _VERIFIER_LATCH_THRESHOLD:
+                    if self._verifier_latch.no_verdict_failures >= _VERIFIER_LATCH_THRESHOLD:
                         # Threshold reached: the cause is established, so latch
                         # and skip the diagnosis on this turn too — a second
                         # "checking in" message plus a second full-history call
                         # buys nothing once the cause is known to recur. One
-                        # diagnosis per session (ENG-1155).
+                        # diagnosis per latch.
                         #
                         # Counted: a provider that rejects the call itself
                         # (ENG-1095's 400 on forced `tool_choice`) and a ladder
                         # exhausted by a narrating model. Not counted: anything
                         # in `_TRANSIENT_VERDICT_ERRORS`; a deterministic denial
-                        # latched on its own branch above.
+                        # latched on its own branch above. Also counted: any
+                        # untyped error, some of which depend on the conversation
+                        # (a content filter 400). On a host-shared latch, two of
+                        # those skip verification for every conversation on the
+                        # endpoint and model until the re-probe.
                         #
                         # Not strictly "consecutive": the counter is reset only
                         # by a *successful* verdict, since only a real verdict
@@ -6232,15 +6285,15 @@ class ChatSession:
                         # The reason carries the class, so the books can tell
                         # latched_hard from latched_truncated rather than
                         # mislabelling one as the other.
-                        self._verifier_latched = True
+                        self._verifier_latch.latched = True
                         logger.warning(
                             "completion-verifier latched after %d verdict calls that "
                             "produced no verdict (%s) with no successful verdict "
                             "between them — skipping verification until the next "
                             "re-probe, in %d turns",
-                            self._verifier_no_verdict_failures,
-                            self._verifier_latch_reason,
-                            _reprobe_turns_for(self._verifier_last_no_verdict),
+                            self._verifier_latch.no_verdict_failures,
+                            self._verifier_latch.reason,
+                            _reprobe_turns_for(self._verifier_latch.last_no_verdict),
                         )
                         # Unverified turn — see the latched-skip stamp above.
                         if self._turn_cost is not None:
