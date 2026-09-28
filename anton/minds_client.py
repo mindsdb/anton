@@ -228,12 +228,16 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
     """List the chat-model ids this key can actually use.
 
     Filters the catalogue on the fields that say whether a model is usable,
-    not just listed: ``embedding`` models can't chat, and ``enabled`` is
-    auth's wallet/allowance-aware access decision — a free-tier or
-    wallet-empty key sees paid models with ``enabled: false`` (clients must
-    not recompute access themselves; ENG-576). Entries without the flag are
-    kept, so older hosts that don't send it still work. The dead smart-router
-    aliases are dropped defensively.
+    not just listed: ``kind`` names what a model does, and only ``"chat"``
+    models can plan or code (a ``"decision"`` model such as jev answers the
+    chat probe with 400 invalid_param, "Model 'jev' does not support this
+    endpoint"; unsupported_model_kind is only auth's internal reason, which
+    inference does not forward); ``embedding`` models can't chat; and
+    ``enabled`` is auth's wallet/allowance-aware access decision:
+    a free-tier or wallet-empty key sees paid models with ``enabled: false``
+    (clients must not recompute access themselves; ENG-576). Entries without
+    ``kind`` or ``enabled`` are kept, so older hosts that don't send them
+    still work. The dead smart-router aliases are dropped defensively.
 
     Short timeout: the catalogue is advisory (callers fall back to defaults),
     so it must not double the worst-case spinner hang of the probe itself.
@@ -245,6 +249,11 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
     ids: list[str] = []
     for entry in entries or []:
         if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        # Older hosts send no kind; their rows fall through to the
+        # embedding check below.
+        kind = entry.get("kind")
+        if kind is not None and kind != "chat":
             continue
         if entry.get("embedding") or entry.get("enabled") is False:
             continue
