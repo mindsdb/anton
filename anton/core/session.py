@@ -5731,6 +5731,14 @@ class ChatSession:
                                     "Do not repeat it. Here is the content for your reference:\n\n"
                                     + result_text
                                 )
+                            elif tc.name == "ask_user":
+                                # ask_user answers via `elicit()` (StreamAskUser /
+                                # StreamAskUserAnswered), which bypasses the
+                                # generic tool-result relay entirely — without
+                                # this, a host reading only `tool_result` (the
+                                # cloud pod; see cloud_turn/contract.py) never
+                                # sees the answer JSON the model itself gets.
+                                yield StreamToolResult(name=tc.name, content=result_text, id=tc.id)
                     except Exception as exc:
                         # A raise is a definitive failure verdict (ENG-1276).
                         result_text = f"Tool '{tc.name}' failed: {exc}"

@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -168,3 +169,63 @@ async def test_session_close_terminates_scratchpad(tmp_path, monkeypatch):
     await session.close()
     assert pad._proc is None                              # manager released it
     assert proc.returncode is not None                    # OS process terminated
+
+
+# ── interactive turn: ask_user answered over stdin ───────────────────────────
+
+
+def test_interactive_turn_takes_an_answer_from_stdin(tmp_path):
+    """Real ChatSession + real ask_user registration: the question goes out
+    as an event, the answer comes back as a stdin line, the turn finishes."""
+    env = os.environ.copy()
+    # `sys.executable <script>` puts the script's own dir first on sys.path, not
+    # this repo, so an editable install pointing at a sibling checkout (a
+    # multi-worktree dev setup) would otherwise shadow this worktree's `anton`.
+    # Same fix as tests/e2e/harness.py's `_env()`: put the repo root first.
+    env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+    env["ANTON_CLOUD_WORKSPACE_PATH"] = str(tmp_path)
+    env["CLOUD_TURN_FAKE_MODE"] = "model"
+    env["ANTON_CLOUD_ASK_USER_TIMEOUT_SECONDS"] = "30"
+    env["CLOUD_TURN_FAKE_SCRIPT"] = json.dumps([
+        {"tool": {"id": "t1", "name": "ask_user", "input": {
+            "question": "Which database?",
+            "options": [{"value": "pg"}, {"value": "my"}],
+        }}},
+        {"text": "Using pg."},
+    ])
+    proc = subprocess.Popen(
+        [sys.executable, _HARNESS],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    watchdog = threading.Timer(120, proc.kill)
+    watchdog.start()
+    events = []
+    try:
+        proc.stdin.write((json.dumps(_req(interactive=True)) + "\n").encode())
+        proc.stdin.flush()
+        for raw in proc.stdout:
+            event = json.loads(raw)
+            events.append(event)
+            if event["kind"] == "ask_user":
+                answer = {"kind": "answer", "question_id": event["id"], "answer_id": "a1",
+                          "values": ["pg"], "text": "", "skipped": False}
+                proc.stdin.write((json.dumps(answer) + "\n").encode())
+                proc.stdin.flush()
+            if event["kind"] in ("turn_completed", "turn_failed"):
+                break
+    finally:
+        watchdog.cancel()
+        proc.stdin.close()
+        proc.wait(timeout=60)
+        stderr = proc.stderr.read().decode()
+
+    kinds = [e["kind"] for e in events]
+    assert kinds[-1] == "turn_completed", (kinds, stderr[-2000:])
+    question = next(e for e in events if e["kind"] == "ask_user")
+    assert [o["value"] for o in question["options"]] == ["pg", "my"]
+    answered = next(e for e in events if e["kind"] == "ask_user_answered")
+    assert answered["status"] == "answered"
+    assert answered["values"] == ["pg"]
+    assert answered["answer_id"] == "a1"
+    result = next(e for e in events if e["kind"] == "tool_result" and e["name"] == "ask_user")
+    assert '"answered"' in result["content"] and '"pg"' in result["content"]
