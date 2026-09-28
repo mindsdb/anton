@@ -229,7 +229,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         session_id: str | None = None,
         scratchpad_ds_env: dict[str, str] | None = None,
         workspace_env_overlay: dict[str, str] | None = None,
-        seed_pip: bool = True,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -256,7 +255,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # DS_* overlay for this pad's subprocess; None keeps legacy full-copy behaviour.
         self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
         self._workspace_env_overlay: dict[str, str] | None = workspace_env_overlay
-        self._seed_pip = seed_pip
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -418,7 +416,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                         "--python",
                         sys.executable,
                         "--system-site-packages",
-                        *(["--seed"] if self._seed_pip else []),
                         "--quiet",
                     ],
                     check=True,
@@ -1368,7 +1365,6 @@ def local_scratchpad_runtime_factory(
     session_id: str | None = None,
     scratchpad_ds_env: dict[str, str] | None = None,
     workspace_env_overlay: dict[str, str] | None = None,
-    seed_pip: bool = True,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1381,5 +1377,4 @@ def local_scratchpad_runtime_factory(
         session_id=session_id,
         scratchpad_ds_env=scratchpad_ds_env,
         workspace_env_overlay=workspace_env_overlay,
-        seed_pip=seed_pip,
     )

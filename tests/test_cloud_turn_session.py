@@ -174,8 +174,7 @@ def test_a_datasource_turn_without_a_turn_key_fails(tmp_path, monkeypatch):
 
 def test_scratchpad_uses_local_factory_and_is_workspace_bound(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
-    assert cfg.runtime_factory.func is local_scratchpad_runtime_factory
-    assert cfg.runtime_factory.keywords == {"seed_pip": False}
+    assert cfg.runtime_factory is local_scratchpad_runtime_factory
     assert cfg.workspace is not None
     # ENG-1694: `harness` names WHICH AGENT, and this pod image is "anton +
     # boot" — so the agent here IS anton. It said "cloud" until then, which

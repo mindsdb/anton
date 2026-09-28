@@ -113,15 +113,12 @@ def test_create_venv_surfaces_uvs_stderr_on_failure(tmp_path, monkeypatch):
         pad._create_venv()
 
 
-@pytest.mark.parametrize("seed_pip, expect_seed", [(True, True), (False, False)])
-def test_create_venv_seeds_pip_only_when_asked(tmp_path, monkeypatch, seed_pip, expect_seed):
-    # Cloud passes seed_pip=False: its installs use uv, and seeding pip onto
-    # the EFS workspace was ~15s of every new venv.
+def test_create_venv_does_not_seed_pip(tmp_path, monkeypatch):
+    # Installs always go through `uv pip install --python <venv>`, so a seeded
+    # pip was never used; on cloud it cost ~15s writing onto EFS per venv.
     import subprocess
 
-    pad = LocalScratchpadRuntime(
-        name="probe", _venvs_base=tmp_path, seed_pip=seed_pip, **_DEFAULTS
-    )
+    pad = make_pad(tmp_path)
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/fake/uv"))
     run = MagicMock()
     monkeypatch.setattr(subprocess, "run", run)
@@ -131,7 +128,7 @@ def test_create_venv_seeds_pip_only_when_asked(tmp_path, monkeypatch, seed_pip, 
     args = run.call_args.args[0]
     assert args[:2] == ["/fake/uv", "venv"]
     assert "--system-site-packages" in args
-    assert ("--seed" in args) is expect_seed
+    assert "--seed" not in args
 
 
 def _write_fake_python(tmp_path, *, exit_code, stderr_text):
