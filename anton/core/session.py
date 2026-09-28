@@ -6154,7 +6154,11 @@ class ChatSession:
                         # (ENG-1095's 400 on forced `tool_choice`) and a ladder
                         # exhausted by a narrating model. Not counted: anything
                         # in `_TRANSIENT_VERDICT_ERRORS`; a deterministic denial
-                        # latched on its own branch above.
+                        # latched on its own branch above. Also counted: any
+                        # untyped error, some of which depend on the conversation
+                        # (a content filter 400). On a host-shared latch, two of
+                        # those skip verification for every conversation on the
+                        # endpoint and model until the re-probe.
                         #
                         # Not strictly "consecutive": the counter is reset only
                         # by a *successful* verdict, since only a real verdict
