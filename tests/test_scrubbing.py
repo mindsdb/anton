@@ -265,6 +265,8 @@ class TestConcurrentTurnIsolation:
         assert "[DS_ACME_CRM_PROD__TOKEN]" in result_a
         assert "secret-for-turn-b" not in result_b
         assert "[DS_ACME_CRM_PROD__TOKEN]" in result_b
+
+
 class TestTurnKeyGoogleAdsDeveloperToken:
     def test_developer_token_is_scrubbed_and_login_customer_id_is_not(self, monkeypatch):
         from anton.core.datasources.data_vault import TurnKeyDataVault
