@@ -8,6 +8,7 @@ Event kinds match the controller contract: delta / turn_completed / turn_failed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -221,6 +222,7 @@ def test_interactive_turn_takes_an_answer_from_stdin(tmp_path):
 
     kinds = [e["kind"] for e in events]
     assert kinds[-1] == "turn_completed", (kinds, stderr[-2000:])
+    assert proc.returncode == 0, (proc.returncode, stderr[-2000:])
     question = next(e for e in events if e["kind"] == "ask_user")
     assert [o["value"] for o in question["options"]] == ["pg", "my"]
     answered = next(e for e in events if e["kind"] == "ask_user_answered")
@@ -233,7 +235,9 @@ def test_interactive_turn_takes_an_answer_from_stdin(tmp_path):
     # see cloud_turn/contract.py). The answer does reach the model, in the
     # pre-terminal `history` event the pod emits so cowork can replay this
     # turn's tool_use -> tool_result pair next turn.
-    history_event = next(e for e in events if e["kind"] == "history")
+    history_events = [e for e in events if e["kind"] == "history"]
+    assert len(history_events) == 1, history_events
+    history_event = history_events[0]
     ask_user_call_id = next(
         block["id"]
         for row in history_event["rows"]
@@ -247,3 +251,67 @@ def test_interactive_turn_takes_an_answer_from_stdin(tmp_path):
         if block.get("type") == "tool_result" and block.get("tool_use_id") == ask_user_call_id
     )
     assert '"answered"' in tool_result_block["content"] and '"pg"' in tool_result_block["content"]
+
+
+def test_interactive_turn_exits_cleanly_with_stdin_left_open(tmp_path):
+    """The live-pod exec never closes stdin after the turn. Reproduced here by
+    keeping the write end of the pipe open past ``turn_completed``.
+
+    Before the fix, the daemon answer-reader thread blocked in ``readline()``
+    on ``sys.stdin``'s own buffered reader, and interpreter shutdown aborted
+    trying to finalize it while the thread held its lock: rc -6, "Fatal Python
+    error: _enter_buffered_busy: could not acquire lock for
+    <_io.BufferedReader name='<stdin>'> at interpreter shutdown, possibly due
+    to daemon threads". The reader must use a private fd `sys` never
+    references, so nothing at shutdown needs that lock.
+    """
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+    env["ANTON_CLOUD_WORKSPACE_PATH"] = str(tmp_path)
+    env["CLOUD_TURN_FAKE_MODE"] = "model"
+    env["ANTON_CLOUD_ASK_USER_TIMEOUT_SECONDS"] = "30"
+    env["CLOUD_TURN_FAKE_SCRIPT"] = json.dumps([
+        {"tool": {"id": "t1", "name": "ask_user", "input": {
+            "question": "Which database?",
+            "options": [{"value": "pg"}, {"value": "my"}],
+        }}},
+        {"text": "Using pg."},
+    ])
+    proc = subprocess.Popen(
+        [sys.executable, _HARNESS],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    watchdog = threading.Timer(120, proc.kill)
+    watchdog.start()
+    events = []
+    stderr = ""
+    try:
+        proc.stdin.write((json.dumps(_req(interactive=True)) + "\n").encode())
+        proc.stdin.flush()
+        for raw in proc.stdout:
+            event = json.loads(raw)
+            events.append(event)
+            if event["kind"] == "ask_user":
+                answer = {"kind": "answer", "question_id": event["id"], "answer_id": "a1",
+                          "values": ["pg"], "text": "", "skipped": False}
+                proc.stdin.write((json.dumps(answer) + "\n").encode())
+                proc.stdin.flush()
+            if event["kind"] in ("turn_completed", "turn_failed"):
+                break
+        # Deliberately NOT closing proc.stdin here — the live-pod exec never
+        # closes the child's stdin either, so the process must still exit
+        # cleanly on its own with the write end still open.
+        proc.wait(timeout=60)
+        stderr = proc.stderr.read().decode()
+    finally:
+        watchdog.cancel()
+        with contextlib.suppress(Exception):
+            proc.stdin.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    kinds = [e["kind"] for e in events]
+    assert kinds[-1] == "turn_completed", (kinds, stderr[-2000:])
+    assert proc.returncode == 0, (proc.returncode, stderr[-2000:])
+    assert "Fatal Python error" not in stderr

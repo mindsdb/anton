@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 import time
+from typing import BinaryIO
 
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.elicitor import (
@@ -162,7 +163,9 @@ async def _settle_memory(session) -> None:
         logger.warning("memory settle failed (non-fatal)", exc_info=True)
 
 
-async def stream_turn(raw_line: str, emit, session_builder=None, stdin=None) -> None:
+async def stream_turn(
+    raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
+) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
@@ -418,9 +421,17 @@ async def stream_turn(raw_line: str, emit, session_builder=None, stdin=None) -> 
 
 def main(argv: list[str] | None = None) -> int:
     with _isolated_protocol_stdout() as emit:
-        # One bounded request line. The same buffered reader is then handed to
-        # the answer reader, so nothing it already buffered is lost.
-        stdin = sys.stdin.buffer
+        # A private binary reader over a dup'd fd 0 - never `sys.stdin` itself,
+        # and read before anything else touches fd 0 so no bytes are stranded
+        # in a different buffer. The live-pod exec never closes stdin, so the
+        # daemon answer-reader thread (stdin.py) is still blocked in readline()
+        # on this object when the interpreter shuts down. That used to be
+        # `sys.stdin.buffer`: at shutdown, finalizing `sys.stdin` needs its
+        # buffer's lock, the daemon thread already holds it, and the process
+        # aborts ("Fatal Python error: _enter_buffered_busy ... at interpreter
+        # shutdown"). A reader `sys` never references sidesteps that -
+        # finalization has nothing of its own to close here.
+        stdin = open(os.dup(0), "rb")
         raw_line = stdin.readline(MAX_REQUEST_BYTES + 1).decode("utf-8", errors="replace")
         asyncio.run(stream_turn(raw_line, emit, stdin=stdin))
     return 0

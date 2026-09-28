@@ -75,6 +75,8 @@ class CloudElicitor:
         try:
             return await asyncio.wait_for(asyncio.shield(question.future), timeout)
         except TimeoutError:
+            if question.future.done() and not question.future.cancelled():
+                return question.future.result()  # the answer landed as the timer fired
             question.closed = True
             return AskAnswer(status="timeout")
 

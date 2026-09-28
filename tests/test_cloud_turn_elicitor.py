@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -105,6 +106,23 @@ async def test_timeout_then_a_late_answer_is_not_found():
     elicitor.deliver(_answer(values=["pg"]))
     assert emitted[0]["reason"] == "not_found"
     assert elicitor.accepted_answer_id("q1") is None
+
+
+async def test_late_delivery_near_timeout_is_not_lost():
+    """deliver() resolves the future just before the deadline, then the loop
+    stalls (a blocking call elsewhere) past it. asyncio.wait_for's cancellation
+    can still fire on the shielded future even though it is already done —
+    ask() must return the delivered answer instead of reporting a lost
+    timeout, and the accepted answer_id must match."""
+    emitted = []
+    elicitor = CloudElicitor(emitted.append)
+    elicitor.timeout_s = 0.2
+    task = await _open(elicitor)
+    await asyncio.sleep(0.18)
+    elicitor.deliver(_answer(values=["pg"]))
+    time.sleep(0.05)  # block the loop past the 0.2s deadline
+    assert await task == AskAnswer(status="answered", values=("pg",), text="")
+    assert elicitor.accepted_answer_id("q1") == "a1"
 
 
 async def test_an_answer_after_end_is_not_found():
