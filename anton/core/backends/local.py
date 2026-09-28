@@ -416,7 +416,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                         "--python",
                         sys.executable,
                         "--system-site-packages",
-                        "--seed",
                         "--quiet",
                     ],
                     check=True,
