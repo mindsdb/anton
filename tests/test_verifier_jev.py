@@ -51,9 +51,6 @@ async def _classify(handler, timeout_s=2.0):
                                   timeout_s=timeout_s, client=client)
 
 
-# --- The Jev call itself ------------------------------------------------------
-
-
 def test_questions_carry_the_production_rubric():
     q = _jev_questions()
     assert list(q["status"]["criteria"]) == ["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"]
@@ -112,9 +109,6 @@ async def test_classify_stops_at_its_wall_clock_bound():
     assert time.monotonic() - started < 2
 
 
-# --- Credentials ----------------------------------------------------------------
-
-
 async def test_current_api_key_prefers_the_live_supplier():
     refreshing = OpenAIProvider(api_key="stale", base_url="https://api.mindshub.ai/v1",
                                 api_key_provider=AsyncMock(return_value="fresh"))
@@ -125,9 +119,6 @@ async def test_current_api_key_prefers_the_live_supplier():
     finally:
         await refreshing.aclose()
         await static.aclose()
-
-
-# --- In the verify loop --------------------------------------------------------
 
 
 class _Stream:
