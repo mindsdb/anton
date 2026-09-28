@@ -226,20 +226,26 @@ class TestResolveMindsModels:
         assert (r.planning, r.coding) == ("grok", "grok")
 
     def _jev_only_catalog(self):
-        """An org with no wallet: paid chat models disabled, the zero-priced
-        decision models enabled."""
+        """An org with no wallet and its mindshub_air allowance spent: every
+        chat model disabled, the zero-priced decision models enabled."""
         return self._rich_catalog([
             {"id": "jev", "kind": "decision", "enabled": True, "embedding": False},
             {"id": "jev-1.13.0", "kind": "decision", "enabled": True, "embedding": False},
-            {"id": "sonnet", "kind": "chat", "enabled": False, "embedding": False},
-            {"id": "haiku", "kind": "chat", "enabled": False, "embedding": False},
+            {"id": "sonnet", "kind": "chat", "enabled": False, "embedding": False,
+             "disabled_reason": "wallet_empty"},
+            {"id": "haiku", "kind": "chat", "enabled": False, "embedding": False,
+             "disabled_reason": "wallet_empty"},
+            {"id": "mindshub_air", "kind": "chat", "enabled": False, "embedding": False,
+             "disabled_reason": "included_allowance_exhausted"},
         ])
 
     def test_decision_models_are_never_picked(self, monkeypatch):
-        """Decision models answer the chat probe with 400
-        unsupported_model_kind, so a catalogue whose only enabled rows are
-        jev and jev-1.13.0 has no usable chat model: the pair falls back to
-        the tier defaults and the free-bucket escalation, never to jev."""
+        """Decision models answer the chat probe with 400 invalid_param, so a
+        catalogue whose only enabled rows are jev and jev-1.13.0 has no usable
+        chat model: the pair falls back to the tier defaults with mindshub_air
+        as free_fallback, never to jev. The escalation to mindshub_air never
+        fires for this org, because MindsHub answers the paid probe with a
+        402 (see test_jev_only_org_stops_at_the_wallet_empty_probe)."""
         monkeypatch.setattr(
             "anton.minds_client.minds_request",
             lambda *a, **kw: self._jev_only_catalog(),
@@ -265,33 +271,39 @@ class TestResolveMindsModels:
         r = minds_client.resolve_minds_models("https://x", "k")
         assert (r.planning, r.coding) == ("grok", "grok")
 
-    def test_jev_only_org_is_never_probed_with_jev(self, monkeypatch):
-        """End to end through resolve_and_probe: the chat probe asks for the
-        paid default, escalates to the free bucket, and never names jev."""
-        monkeypatch.setattr(
-            "anton.minds_client.minds_request",
-            lambda *a, **kw: self._jev_only_catalog(),
-        )
-        results = {
-            "haiku": minds_client.LLMTestResult(
-                ok=False, error="model_disabled", http_status=403
-            ),
-            "mindshub_air": minds_client.LLMTestResult(ok=True),
-        }
-        seen: list[str] = []
+    def test_jev_only_org_stops_at_the_wallet_empty_probe(self, monkeypatch):
+        """End to end through resolve_and_probe with MindsHub's real answers:
+        the chat probe asks for the paid default, MindsHub refuses it with
+        402 wallet_empty, and that denial is the one result setup gets to
+        print. A 402 is a billing stop, not a model-access denial, so nothing
+        escalates to mindshub_air (which MindsHub would refuse with 429
+        included_allowance_exhausted for this org), and jev is never named."""
+        probed: list[str] = []
 
-        def fake_test_llm(base_url, api_key, verify=True, model=None):
-            seen.append(model)
-            return results[model]
+        def fake_minds_request(url, api_key, method="GET", payload=None, **kwargs):
+            if method == "GET":
+                return self._jev_only_catalog()
+            model = json.loads(payload.decode())["model"]
+            probed.append(model)
+            if model == minds_client.MINDS_FREE_TIER_MODEL:
+                # The org never topped up, so its spent allowance is the block.
+                raise _http_error(429, {"error": {
+                    "code": "included_allowance_exhausted",
+                    "message": f"Your included allowance for '{model}' is exhausted.",
+                }})
+            raise _http_error(402, {"error": {
+                "code": "wallet_empty",
+                "message": f"Your wallet has no balance to cover the model '{model}'.",
+            }})
 
-        monkeypatch.setattr("anton.minds_client.test_llm", fake_test_llm)
+        monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
         models, result = minds_client.resolve_and_probe("https://x", "k")
-        assert result.ok
-        assert seen == ["haiku", "mindshub_air"]
-        assert (models.planning, models.coding) == (
-            minds_client.MINDS_FREE_TIER_MODEL,
-            minds_client.MINDS_FREE_TIER_MODEL,
+        assert probed == ["haiku"]
+        assert not result.ok and result.http_status == 402
+        assert result.error == (
+            "wallet_empty: Your wallet has no balance to cover the model 'haiku'."
         )
+        assert (models.planning, models.coding) == ("sonnet", "haiku")
 
     def test_list_models_keeps_only_chat_kind_rows(self, monkeypatch):
         """A present kind decides on its own; a row without kind (older

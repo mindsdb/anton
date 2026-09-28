@@ -230,8 +230,10 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
     Filters the catalogue on the fields that say whether a model is usable,
     not just listed: ``kind`` names what a model does, and only ``"chat"``
     models can plan or code (a ``"decision"`` model such as jev answers the
-    chat probe with 400 unsupported_model_kind); ``embedding`` models can't
-    chat; and ``enabled`` is auth's wallet/allowance-aware access decision —
+    chat probe with 400 invalid_param, "Model 'jev' does not support this
+    endpoint"; unsupported_model_kind is only auth's internal reason, which
+    inference does not forward); ``embedding`` models can't chat; and
+    ``enabled`` is auth's wallet/allowance-aware access decision:
     a free-tier or wallet-empty key sees paid models with ``enabled: false``
     (clients must not recompute access themselves; ENG-576). Entries without
     ``kind`` or ``enabled`` are kept, so older hosts that don't send them
