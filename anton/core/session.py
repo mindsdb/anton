@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
@@ -19,7 +20,8 @@ from pydantic import BaseModel, Field, field_validator
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
-from anton.core.llm.endpoints import classify_endpoint
+from anton.core.llm import jev as _jev
+from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
@@ -1130,6 +1132,15 @@ def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
         turn_cost.grace_granted = ",".join(sorted(tags))
 
 
+@functools.cache
+def _jev_questions() -> dict:
+    """The verifier's rubric as a Jev question, built from the same text."""
+    fields = _VerifierVerdict.model_fields
+    return _jev.build_questions(
+        fields["status"].description, _VERIFIER_JUDGMENT_RUBRIC, fields["close_to_done"].description
+    )
+
+
 def _build_verify_request(
     history: list[dict], user_message: str | None
 ) -> tuple[str, list[dict]]:
@@ -1396,6 +1407,11 @@ class ChatSession:
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
+        # getattr: hosts may pass settings objects that predate these fields.
+        self._jev_enabled = getattr(s, "verifier_jev", "on") == "on"
+        self._jev_model = getattr(s, "verifier_jev_model", "jev-1.13.0")
+        self._jev_timeout_s = getattr(s, "verifier_jev_timeout_s", 2.0)
+        self._jev_min_p = getattr(s, "verifier_jev_min_p", 0.8)
         # Per-turn raw-token ceiling (ENG-1286). getattr so a host passing an
         # older settings object doesn't break — absent means "no ceiling",
         # matching the pre-ENG-1286 behaviour rather than silently applying one.
@@ -3255,6 +3271,24 @@ class ChatSession:
             _root_cause_fields = self._root_causes.event_fields()
         except Exception:  # pragma: no cover - defensive
             _root_cause_fields = {}
+        # Only on turns where Jev was asked, so other turns stay as before.
+        _jev_fields = (
+            {
+                "jev_checks": str(tc.jev_checks),
+                "jev_decided": str(tc.jev_decided),
+                "jev_disagreements": str(tc.jev_disagreements),
+                "jev_errors": str(tc.jev_errors),
+                "jev_last_status": tc.jev_last_status,
+                "jev_last_ms": str(tc.jev_last_ms),
+                **(
+                    {"jev_last_p_complete": f"{tc.jev_last_p_complete:.3f}"}
+                    if tc.jev_last_p_complete is not None
+                    else {}
+                ),
+            }
+            if tc.jev_checks
+            else {}
+        )
         logger.info(
             # `attempt` alongside `turn`: `turn_index` is a history position,
             # so two attempts of one turn used to produce two indistinguishable
@@ -3268,7 +3302,7 @@ class ChatSession:
             "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
-            "by_role=%s %s",
+            "by_role=%s %s%s",
             self._session_id, turn_index, tc.attempt_id, tc.ended_by,
             str(tc.verification_skipped).lower(),
             tc.grace_granted or "-", tc.grace_tokens,
@@ -3287,6 +3321,7 @@ class ChatSession:
             # properties for weeks (ENG-1355) — the log is the sink that does
             # not depend on it.
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
+            "".join(f" {k}={v}" for k, v in _jev_fields.items()),
         )
 
         # Script traffic never reaches the analytics sink (ENG-1692).
@@ -3378,6 +3413,7 @@ class ChatSession:
                 # is the only sink, and its absence here is not evidence the
                 # classification is broken.
                 **_root_cause_fields,
+                **_jev_fields,
                 ended_by=tc.ended_by,
                 # Empty unless the turn ended on an exception — see
                 # `TurnCost.error_type`.
@@ -3802,6 +3838,64 @@ class ChatSession:
             "like you to continue. "
             "Do NOT retry automatically — wait for the user's response."
         )
+
+    async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
+        """Ask Jev for the verdict; None when it is off or the verifier isn't on MindsHub."""
+        if not self._jev_enabled:
+            return None
+        provider = self._llm.coding_provider
+        base_url = provider.export_connection_info().base_url or ""
+        # BYOK and every other non-MindsHub route keep the LLM verifier.
+        if classify_base_url(base_url) != ENDPOINT_MINDSHUB or not hasattr(provider, "current_api_key"):
+            return None
+        try:
+            api_key = await provider.current_api_key()
+        except Exception:
+            return _jev.JevVerdict(error="credentials")
+        if not api_key:
+            return None
+        return await _jev.classify(
+            base_url=base_url,
+            api_key=api_key,
+            model=self._jev_model,
+            state={
+                "request": (user_message or "").strip(),
+                "transcript": _render_verify_transcript(self._history),
+            },
+            questions=_jev_questions(),
+            timeout_s=self._jev_timeout_s,
+        )
+
+    def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
+        """Jev settles only a confident COMPLETE or WAITING; the rest needs the LLM's reason."""
+        return (
+            result is not None
+            and not result.error
+            and result.status in ("COMPLETE", "WAITING")
+            and result.p_status is not None
+            and result.p_status >= self._jev_min_p
+        )
+
+    def _record_jev(self, result: "_jev.JevVerdict", decided: bool, llm_status: str | None) -> None:
+        try:
+            tc = self._turn_cost
+            if tc is not None:
+                tc.jev_checks += 1
+                tc.jev_decided += int(decided)
+                tc.jev_errors += int(bool(result.error))
+                if not result.error and llm_status is not None and result.status != llm_status:
+                    tc.jev_disagreements += 1
+                tc.jev_last_status = result.status or result.error
+                tc.jev_last_p_complete = result.p_complete
+                tc.jev_last_ms = result.ms
+            logger.info(
+                "completion-verifier jev status=%s p=%s decided=%s llm=%s ms=%d model=%s error=%s",
+                result.status or "-",
+                "-" if result.p_status is None else f"{result.p_status:.3f}",
+                str(decided).lower(), llm_status or "-", result.ms, result.model or "-", result.error or "-",
+            )
+        except Exception:  # pragma: no cover - defensive; bookkeeping must not break a turn
+            logger.debug("completion-verifier jev bookkeeping failed", exc_info=True)
 
     async def _stream_handback_diagnosis(
         self, *, system: str, label: str, cancels_continuation: bool = False
@@ -5913,7 +6007,13 @@ class ChatSession:
             verifier_system, verify_messages = _build_verify_request(
                 self._history, user_message
             )
-            verdict = None
+            jev_result = await self._jev_verdict(user_message)
+            jev_decided = self._jev_decides(jev_result)
+            verdict = (
+                _VerifierVerdict(status=jev_result.status, reason=f"Decided by Jev (p={jev_result.p_status:.2f}).")
+                if jev_decided
+                else None
+            )
             # Which class of no-verdict failure this was. Everything except a
             # typed transient counts toward the latch; the class is kept so the
             # books can name it (ENG-1155/ENG-1858).
@@ -5922,7 +6022,8 @@ class ChatSession:
             # its TYPE on the turn books below (ENG-1858). `except ... as exc`
             # unbinds `exc` at the end of each clause, hence the copy.
             verdict_exc: BaseException | None = None
-            for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
+            # Skipped when Jev decided; otherwise exactly the LLM verifier as before.
+            for attempt, budget in enumerate(() if jev_decided else _VERIFIER_TOKEN_BUDGETS):
                 try:
                     verdict = await self._llm.generate_object_code(
                         _VerifierVerdict,
@@ -6012,14 +6113,19 @@ class ChatSession:
                     )
                     break
 
+            if jev_result is not None:
+                llm_status = verdict.status if verdict is not None and not jev_decided else None
+                self._record_jev(jev_result, jev_decided, llm_status)
+
             if verdict is not None:
-                # A working verdict clears the latch: whatever was failing
+                # A working LLM verdict clears the latch: whatever was failing
                 # (transient provider error, a model the user has since changed)
-                # is no longer failing.
-                self._verifier_no_verdict_failures = 0
-                self._verifier_latched = False
-                self._verifier_latch_reason = ""
-                self._verifier_last_no_verdict = ""
+                # is no longer failing. A Jev verdict says nothing about the LLM.
+                if not jev_decided:
+                    self._verifier_no_verdict_failures = 0
+                    self._verifier_latched = False
+                    self._verifier_latch_reason = ""
+                    self._verifier_last_no_verdict = ""
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
