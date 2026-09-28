@@ -37,7 +37,7 @@ class _FakeSession:
     only inspect the captured ChatSessionConfig, never the session."""
 
 
-def _build(tmp_path, monkeypatch, **req_overrides):
+def _build(tmp_path, monkeypatch, elicitor=None, **req_overrides):
     captured: dict = {}
 
     def fake_chat_session(config):
@@ -53,8 +53,23 @@ def _build(tmp_path, monkeypatch, **req_overrides):
 
     body = dict(protocol_version=1, conversation_id="conv_1", input="hello")
     body.update(req_overrides)
-    session = build_cloud_chat_session(TurnRequestV1(**body))
+    session = build_cloud_chat_session(TurnRequestV1(**body), elicitor=elicitor)
     return session, captured["config"]
+
+
+def test_no_elicitor_means_no_ask_user(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.elicitor is None
+    assert "ask_user" not in cfg.tool_allowlist
+
+
+def test_an_elicitor_enables_ask_user(tmp_path, monkeypatch):
+    elicitor = object()
+    _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
+    assert cfg.elicitor is elicitor
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"ask_user"}
+    # A console would let anton fall back to its terminal elicitor.
+    assert cfg.console is None
 
 
 # ── config-level safety ──────────────────────────────────────────────────────
