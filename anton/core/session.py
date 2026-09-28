@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
@@ -610,21 +611,23 @@ class _VerifierLatch:
 
 
 # Process-wide latches for hosts that rebuild a session per message. Keyed on
-# the coding endpoint and model only: the api key never enters the key, and the
+# the coding endpoint, model, and credential: a denial belongs to the account,
+# so a new api key gets a fresh latch. Only a digest of the key is held, and the
 # key is never logged, because a base_url can carry credentials. No eviction;
 # a host sees a handful of endpoints.
-_SHARED_VERIFIER_LATCHES: dict[tuple[str, str, str], _VerifierLatch] = {}
+_SHARED_VERIFIER_LATCHES: dict[tuple[str, str, str, str], _VerifierLatch] = {}
 
 
 def _shared_verifier_latch(
-    provider: str, base_url: str | None, model: str
+    provider: str, base_url: str | None, model: str, api_key: str | None
 ) -> _VerifierLatch:
-    """Return the process-wide latch for one coding endpoint and model.
+    """Return the process-wide latch for one coding endpoint, model, and key.
 
     Creates it on first use. A trailing slash and a missing base_url are
     normalised so equivalent endpoints share one latch.
     """
-    key = (provider, (base_url or "").rstrip("/"), model)
+    key_digest = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+    key = (provider, (base_url or "").rstrip("/"), model, key_digest)
     latch = _SHARED_VERIFIER_LATCHES.get(key)
     if latch is None:
         latch = _VerifierLatch()
@@ -1482,6 +1485,7 @@ class ChatSession:
                 latch_conn.provider,
                 latch_conn.base_url,
                 config.llm_client.coding_model,
+                latch_conn.api_key,
             )
         else:
             self._verifier_latch = _VerifierLatch()

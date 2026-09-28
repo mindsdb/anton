@@ -23,6 +23,7 @@ from tests.conftest import make_mock_llm
 from anton.core.session import (
     _VERIFIER_LATCH_REPROBE_TURNS,
     _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED,
+    _SHARED_VERIFIER_LATCHES,
     ChatSession,
     ChatSessionConfig,
     _VerifierVerdict,
@@ -1566,21 +1567,22 @@ async def test_a_truncation_latch_reprobes_within_the_short_window(workspace):
 #
 # A host that builds a session per message opts in with `shared_verifier_latch`.
 # Each message below builds a fresh session from its own fresh client, so only
-# equal endpoint and model values can reach the same latch.
+# equal endpoint, model, and key values can reach the same latch.
 
 _LOCAL = {
     "provider": "openai-compatible",
     "base_url": "http://localhost:1234/v1",
     "model": "qwen3-8b",
+    "api_key": "test",
 }
 
 
-def _local_llm(verdict_side_effect, *, provider, base_url, model):
-    """A fresh mock client whose coding endpoint and model are the given ones."""
+def _local_llm(verdict_side_effect, *, provider, base_url, model, api_key):
+    """A fresh mock client whose coding endpoint, model, and key are the given ones."""
     mock_llm = make_mock_llm()
     mock_llm.coding_provider.export_connection_info = MagicMock(
         return_value=ProviderConnectionInfo(
-            provider=provider, api_key="test", base_url=base_url
+            provider=provider, api_key=api_key, base_url=base_url
         )
     )
     mock_llm.coding_model = model
@@ -1731,11 +1733,12 @@ async def test_a_success_in_one_message_clears_the_shared_count(workspace):
     ("provider", "anthropic"),
     ("base_url", "http://localhost:11434/v1"),
     ("model", "llama3.2"),
+    ("api_key", "another-account"),
 ])
-async def test_another_endpoint_or_model_gets_its_own_latch(
+async def test_another_endpoint_model_or_key_gets_its_own_latch(
     workspace, field, other
 ):
-    """A latch on one endpoint and model never silences another."""
+    """A latch on one endpoint, model, and key never silences another."""
     for _ in range(2):
         _, _, latch = await _one_message(workspace, _always_400())
     assert latch.latched is True
@@ -1752,15 +1755,22 @@ async def test_another_endpoint_or_model_gets_its_own_latch(
 def test_equivalent_base_urls_share_one_latch():
     """A trailing slash or a missing base_url is the same endpoint."""
     with_slash = _shared_verifier_latch(
-        "openai-compatible", "http://localhost:1234/v1/", "qwen3-8b"
+        "openai-compatible", "http://localhost:1234/v1/", "qwen3-8b", "k"
     )
     without = _shared_verifier_latch(
-        "openai-compatible", "http://localhost:1234/v1", "qwen3-8b"
+        "openai-compatible", "http://localhost:1234/v1", "qwen3-8b", "k"
     )
     assert with_slash is without
-    assert _shared_verifier_latch("anthropic", None, "m") is _shared_verifier_latch(
-        "anthropic", "", "m"
-    )
+    assert _shared_verifier_latch(
+        "anthropic", None, "m", "k"
+    ) is _shared_verifier_latch("anthropic", "", "m", "k")
+
+
+def test_the_registry_never_holds_the_raw_key():
+    """Only a digest of the credential is kept in process-wide state."""
+    _shared_verifier_latch("anthropic", None, "m", "sk-secret-value")
+    (key,) = _SHARED_VERIFIER_LATCHES
+    assert "sk-secret-value" not in key
 
 
 async def test_without_the_flag_each_message_diagnoses_again(workspace):
