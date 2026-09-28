@@ -58,3 +58,19 @@ def test_turn_request_rejects_a_version_that_is_not_the_integer_one(version):
         TurnRequestV1.from_json(
             f'{{"protocol_version":{version},"conversation_id":"c","input":"hi"}}'
         )
+
+
+def _interactive_request(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
+    if value is not ...:
+        body["interactive"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+def test_interactive_true_is_read():
+    assert _interactive_request(True).interactive is True
+
+
+@pytest.mark.parametrize("value", [..., False, None, 1, "true", {"on": True}])
+def test_interactive_is_false_unless_a_real_true(value):
+    assert _interactive_request(value).interactive is False
