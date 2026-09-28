@@ -1396,9 +1396,10 @@ class ChatSessionConfig:
     # process (the cloud pod) turn this off: several spend an LLM call on writes
     # that land after the turn's storage is gone. `memorize` is unaffected.
     background_memory: bool = True
-    # Share the verifier latch with every session in this process on the same
-    # coding endpoint and model. For hosts that build a session per message, so
-    # a verifier that fails every time diagnoses once, not once per message.
+    # Share the verifier latch with every session in this process that also sets
+    # this, on the same coding endpoint and model. For hosts that build a session
+    # per message, so a verifier that fails every time diagnoses once, not once
+    # per message.
     shared_verifier_latch: bool = False
     # Open MCP sessions (ENG-1816) discovered before this session was built —
     # their tools are already folded into `tools` above via
@@ -6130,7 +6131,7 @@ class ChatSession:
                         # latched with its own log line — re-announcing "latched
                         # after N failures" with an ever-growing N would read as
                         # a new event each cycle. No re-diagnosis (one per
-                        # latch, ENG-1155).
+                        # latch).
                         logger.warning(
                             "completion-verifier re-probe failed — staying latched"
                         )
@@ -6143,7 +6144,7 @@ class ChatSession:
                         # and skip the diagnosis on this turn too — a second
                         # "checking in" message plus a second full-history call
                         # buys nothing once the cause is known to recur. One
-                        # diagnosis per latch (ENG-1155).
+                        # diagnosis per latch.
                         #
                         # Counted: a provider that rejects the call itself
                         # (ENG-1095's 400 on forced `tool_choice`) and a ladder

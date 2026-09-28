@@ -21,6 +21,8 @@ import pytest
 from tests.conftest import make_mock_llm
 
 from anton.core.session import (
+    _VERIFIER_LATCH_REPROBE_TURNS,
+    _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED,
     ChatSession,
     ChatSessionConfig,
     _VerifierVerdict,
@@ -1587,11 +1589,16 @@ def _local_llm(verdict_side_effect, *, provider, base_url, model):
 
 
 async def _one_message(
-    workspace, verdict_side_effect, *, shared=True, endpoint=_LOCAL
+    workspace,
+    verdict_side_effect,
+    *,
+    shared=True,
+    endpoint=_LOCAL,
+    session_id="conv-shared",
 ):
     """Run one message on a new session and client, as a per-message host does.
 
-    Returns the client, whether the turn streamed a diagnosis, and the
+    ``session_id`` is the conversation. Returns the client, whether the turn streamed a diagnosis, and the
     session's latch.
     """
     mock_llm = _local_llm(verdict_side_effect, **endpoint)
@@ -1600,7 +1607,7 @@ async def _one_message(
     session = ChatSession(ChatSessionConfig(
         llm_client=mock_llm,
         workspace=workspace,
-        session_id="conv-shared",
+        session_id=session_id,
         shared_verifier_latch=shared,
     ))
     try:
@@ -1620,16 +1627,24 @@ def _always_400():
 
 async def test_a_shared_hard_latch_diagnoses_once_across_messages(workspace):
     """A local endpoint that rejects every verdict call must hand back once per
-    endpoint and model, not once per message, when the host shares the latch."""
+    endpoint and model, not once per message, when the host shares the latch.
+    Each message is a different conversation: the latch belongs to the
+    endpoint and model, not to one conversation."""
     with patch("anton.analytics.send_event") as send:
-        llm1, diagnosed1, _ = await _one_message(workspace, _always_400())
-        llm2, diagnosed2, latch = await _one_message(workspace, _always_400())
+        _, diagnosed1, _ = await _one_message(
+            workspace, _always_400(), session_id="conv-a"
+        )
+        _, diagnosed2, latch = await _one_message(
+            workspace, _always_400(), session_id="conv-b"
+        )
         assert diagnosed1 is True, "the first failure still gets its diagnosis"
         assert diagnosed2 is False, "the second failure latches without one"
         assert latch.latched is True
         assert latch.reason == "hard"
 
-        llm3, diagnosed3, _ = await _one_message(workspace, _always_400())
+        llm3, diagnosed3, _ = await _one_message(
+            workspace, _always_400(), session_id="conv-c"
+        )
         books = send.call_args.kwargs
 
     assert diagnosed3 is False
@@ -1642,8 +1657,8 @@ async def test_a_shared_hard_latch_diagnoses_once_across_messages(workspace):
 
 
 async def test_a_shared_denied_latch_reprobes_after_the_window(workspace):
-    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS
-
+    """A denial latches on message 1, the next nine messages skip, and the
+    eleventh re-probes, all on fresh sessions."""
     def denied():
         return TokenLimitExceeded(
             "402: Your wallet has no balance to cover the model 'haiku'."
@@ -1651,7 +1666,7 @@ async def test_a_shared_denied_latch_reprobes_after_the_window(workspace):
 
     calls = 0
     diagnoses = 0
-    for message in range(_VERIFIER_LATCH_REPROBE_TURNS):
+    for _ in range(_VERIFIER_LATCH_REPROBE_TURNS):
         llm, diagnosed, latch = await _one_message(workspace, denied())
         calls += llm.generate_object_code.await_count
         diagnoses += diagnosed
@@ -1670,17 +1685,17 @@ async def test_a_shared_denied_latch_reprobes_after_the_window(workspace):
 
 
 async def test_a_shared_truncation_latch_keeps_the_short_window(workspace):
-    from anton.core.session import _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
-
+    """The short re-probe window after a truncation latch counts messages
+    across sessions, not turns inside one."""
     calls = 0
-    for message in range(2):
+    for _ in range(2):
         llm, _, latch = await _one_message(workspace, _always_truncated())
         calls += llm.generate_object_code.await_count
     assert latch.latched is True
     assert latch.reason == "truncated"
     assert calls == 4, "two messages reach the verifier, two budgets each"
 
-    for message in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED - 1):
+    for _ in range(_VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED - 1):
         llm, _, _ = await _one_message(workspace, _always_truncated())
         assert llm.generate_object_code.await_count == 0, (
             "still inside the short window: no verdict call"
@@ -1720,7 +1735,8 @@ async def test_a_success_in_one_message_clears_the_shared_count(workspace):
 async def test_another_endpoint_or_model_gets_its_own_latch(
     workspace, field, other
 ):
-    for message in range(2):
+    """A latch on one endpoint and model never silences another."""
+    for _ in range(2):
         _, _, latch = await _one_message(workspace, _always_400())
     assert latch.latched is True
 
@@ -1734,6 +1750,7 @@ async def test_another_endpoint_or_model_gets_its_own_latch(
 
 
 def test_equivalent_base_urls_share_one_latch():
+    """A trailing slash or a missing base_url is the same endpoint."""
     with_slash = _shared_verifier_latch(
         "openai-compatible", "http://localhost:1234/v1/", "qwen3-8b"
     )
