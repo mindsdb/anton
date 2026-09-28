@@ -227,5 +227,23 @@ def test_interactive_turn_takes_an_answer_from_stdin(tmp_path):
     assert answered["status"] == "answered"
     assert answered["values"] == ["pg"]
     assert answered["answer_id"] == "a1"
-    result = next(e for e in events if e["kind"] == "tool_result" and e["name"] == "ask_user")
-    assert '"answered"' in result["content"] and '"pg"' in result["content"]
+    # ask_user answers via elicit(), which bypasses ChatSession's generic
+    # per-tool-call dispatch loop entirely — its result never reaches the
+    # wire as a `tool_result` event (that kind is scratchpad-`dump`-only;
+    # see cloud_turn/contract.py). The answer does reach the model, in the
+    # pre-terminal `history` event the pod emits so cowork can replay this
+    # turn's tool_use -> tool_result pair next turn.
+    history_event = next(e for e in events if e["kind"] == "history")
+    ask_user_call_id = next(
+        block["id"]
+        for row in history_event["rows"]
+        for block in row["content"]
+        if block.get("type") == "tool_use" and block.get("name") == "ask_user"
+    )
+    tool_result_block = next(
+        block
+        for row in history_event["rows"]
+        for block in row["content"]
+        if block.get("type") == "tool_result" and block.get("tool_use_id") == ask_user_call_id
+    )
+    assert '"answered"' in tool_result_block["content"] and '"pg"' in tool_result_block["content"]
