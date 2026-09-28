@@ -21,6 +21,7 @@ Safety posture (all internal — nothing here is on the wire):
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import hmac
 import json
@@ -844,7 +845,8 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         tool_allowlist=CLOUD_TOOL_ALLOWLIST | {td.name for td in mcp_tool_defs},
         mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
         background_memory=False,            # one turn per pod: no end-of-turn LLM passes
-        runtime_factory=local_scratchpad_runtime_factory,
+        # Installs go through `uv pip install`; seeding pip onto the EFS venv costs ~15s.
+        runtime_factory=functools.partial(local_scratchpad_runtime_factory, seed_pip=False),
         workspace_env_overlay=_datasource_workspace_env(request, settings),
         web_search_enabled=False,
         web_fetch_enabled=False,
