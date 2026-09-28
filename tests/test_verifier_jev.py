@@ -134,13 +134,13 @@ class _Stream:
         return self._items.pop(0)
 
 
-def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v1", llm_status="COMPLETE"):
+def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v1", llm_status="COMPLETE", ssl_verify=None):
     from anton.core.tools.registry import ToolOutcome
 
     llm = make_mock_llm()
     llm.generate_object_code = AsyncMock(return_value=_VerifierVerdict(status=llm_status, reason="llm reason"))
     llm.coding_provider.export_connection_info = MagicMock(
-        return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=base_url)
+        return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=base_url, ssl_verify=ssl_verify)
     )
     llm.coding_provider.current_api_key = AsyncMock(return_value="k")
     calls = iter([
@@ -236,3 +236,26 @@ async def test_a_jev_verdict_leaves_the_llm_latch_counters_alone(workspace):
     session._verifier_no_verdict_failures = 1
     await _run(session, _jev("COMPLETE", 0.99))
     assert session._verifier_no_verdict_failures == 1
+
+
+async def test_the_llm_re_probe_is_never_skipped_by_jev(workspace):
+    # A latched session re-probing the LLM must get an LLM verdict, or the latch never clears.
+    session, llm = _session(workspace)
+    session._verifier_latched = True
+    session._verifier_latch_reason = session._verifier_last_no_verdict = "hard"
+    session._verifier_latch_skips = 9  # the next check is the re-probe
+    event, classify = await _run(session, _jev("COMPLETE", 0.99))
+    classify.assert_not_called()
+    llm.generate_object_code.assert_called_once()
+    assert session._verifier_latched is False
+
+
+async def test_the_client_follows_ssl_verify_and_is_reused(workspace):
+    session, llm = _session(workspace, ssl_verify=False)
+    client = MagicMock(aclose=AsyncMock())
+    with patch("anton.core.session.httpx.AsyncClient", return_value=client) as make_client:
+        event, classify = await _run(session, _jev("COMPLETE", 0.99))
+    make_client.assert_called_once()
+    assert make_client.call_args.kwargs["verify"] is False
+    assert classify.call_args.kwargs["client"] is client
+    client.aclose.assert_awaited_once()

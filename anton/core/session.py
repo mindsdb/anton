@@ -1412,6 +1412,8 @@ class ChatSession:
         self._jev_model = getattr(s, "verifier_jev_model", "jev-1.13.0")
         self._jev_timeout_s = getattr(s, "verifier_jev_timeout_s", 2.0)
         self._jev_min_p = getattr(s, "verifier_jev_min_p", 0.8)
+        # Created on first use and reused, so later checks skip the TLS handshake.
+        self._jev_http: httpx.AsyncClient | None = None
         # Per-turn raw-token ceiling (ENG-1286). getattr so a host passing an
         # older settings object doesn't break — absent means "no ceiling",
         # matching the pre-ENG-1286 behaviour rather than silently applying one.
@@ -2513,8 +2515,12 @@ class ChatSession:
             finally:
                 # Provider clients own an HTTP pool. This runs even if the
                 # steps above raise, or the pool outlives the process.
-                if self._llm is not None:
-                    await self._llm.aclose()
+                try:
+                    if self._jev_http is not None:
+                        await self._jev_http.aclose()
+                finally:
+                    if self._llm is not None:
+                        await self._llm.aclose()
 
     async def emit(self, event) -> None:
         """Push an out-of-band event to the host, if one is listening.
@@ -3844,7 +3850,8 @@ class ChatSession:
         if not self._jev_enabled:
             return None
         provider = self._llm.coding_provider
-        base_url = provider.export_connection_info().base_url or ""
+        info = provider.export_connection_info()
+        base_url = info.base_url or ""
         # BYOK and every other non-MindsHub route keep the LLM verifier.
         if classify_base_url(base_url) != ENDPOINT_MINDSHUB or not hasattr(provider, "current_api_key"):
             return None
@@ -3854,6 +3861,9 @@ class ChatSession:
             return _jev.JevVerdict(error="credentials")
         if not api_key:
             return None
+        if self._jev_http is None:
+            # Same TLS setting as the provider, e.g. behind an intercepting proxy.
+            self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
         return await _jev.classify(
             base_url=base_url,
             api_key=api_key,
@@ -3864,6 +3874,7 @@ class ChatSession:
             },
             questions=_jev_questions(),
             timeout_s=self._jev_timeout_s,
+            client=self._jev_http,
         )
 
     def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
@@ -6007,7 +6018,8 @@ class ChatSession:
             verifier_system, verify_messages = _build_verify_request(
                 self._history, user_message
             )
-            jev_result = await self._jev_verdict(user_message)
+            # Still latched here means this is the LLM re-probe: only an LLM verdict can clear it.
+            jev_result = None if self._verifier_latched else await self._jev_verdict(user_message)
             jev_decided = self._jev_decides(jev_result)
             verdict = (
                 _VerifierVerdict(status=jev_result.status, reason=f"Decided by Jev (p={jev_result.p_status:.2f}).")
