@@ -1131,3 +1131,41 @@ def test_the_ask_user_carve_out_reaches_the_prompt_only_when_the_tool_is_there()
 
     without_tool = _build([])
     assert "ask_user" not in without_tool
+
+
+# ── validate_answer ──────────────────────────────────────────────────────────
+
+from anton.core.interaction.elicit import GUI_ANSWER_HINT, validate_answer  # noqa: E402
+
+
+def test_validate_answer_accepts_one_offered_value():
+    assert validate_answer(_choice(), ("pg",), "") is None
+
+
+def test_validate_answer_accepts_free_text_when_custom_allowed():
+    assert validate_answer(_choice(), (), "duckdb") is None
+
+
+def test_validate_answer_accepts_several_values_on_multi_select():
+    assert validate_answer(_choice(select="many"), ("pg", "my"), "") is None
+
+
+@pytest.mark.parametrize(
+    "request_over,values,text",
+    [
+        ({}, (), ""),                          # empty answer
+        ({}, ("sqlite",), ""),                 # never offered
+        ({"select": "many"}, ("pg", "pg"), ""),  # duplicate
+        ({}, ("pg", "my"), ""),                # two values on select=one
+        ({"allow_custom": False}, (), "duckdb"),  # text not invited
+    ],
+    ids=["empty", "not-offered", "duplicate", "many-on-one", "text-not-allowed"],
+)
+def test_validate_answer_rejects(request_over, values, text):
+    assert validate_answer(_choice(**request_over), values, text) == "invalid_option"
+
+
+def test_gui_answer_hint_mentions_buttons_text_and_skip():
+    assert "buttons" in GUI_ANSWER_HINT
+    assert "free-form" in GUI_ANSWER_HINT
+    assert "skip" in GUI_ANSWER_HINT

@@ -11,6 +11,7 @@ widget yet).
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -21,12 +22,14 @@ from anton.core.llm.provider import (
 )
 
 __all__ = [
+    "GUI_ANSWER_HINT",
     "MAX_QUESTIONS_PER_TURN",
     "AskAnswer",
     "AskOption",
     "AskRequest",
     "Elicitor",
     "elicit",
+    "validate_answer",
     "validate_request",
 ]
 
@@ -43,6 +46,13 @@ MAX_QUESTIONS_PER_TURN = 8
 # model should narrow the question instead.
 MIN_OPTIONS = 2
 MAX_OPTIONS = 10
+
+# The `answer_hint` of every host that renders a question as a card with
+# buttons, a free-form input and a Skip control (cowork desktop and web).
+GUI_ANSWER_HINT = (
+    "The user sees the options as clickable buttons and may also type a "
+    "free-form answer, or skip the question entirely."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +164,30 @@ def validate_request(request: AskRequest) -> bool:
     if request.default_value and request.default_value not in values:
         return False
     return len(set(values)) == len(values)
+
+
+def validate_answer(
+    request: AskRequest, values: Sequence[str], text: str
+) -> str | None:
+    """Why *values* / *text* is not an acceptable answer to *request*, or None.
+
+    Lives next to `validate_request` so every host that takes answers from
+    outside the process (the cloud pod today) applies the same rules. There
+    is one reason on purpose: the user only needs to know the answer was not
+    accepted, and a host maps it onto its own error shape.
+    """
+    if not values and not text:
+        return "invalid_option"
+    offered = {option.value for option in request.options}
+    if any(value not in offered for value in values):
+        return "invalid_option"
+    if len(set(values)) != len(values):
+        return "invalid_option"
+    if request.select == "one" and len(values) > 1:
+        return "invalid_option"
+    if text and not request.allow_custom:
+        return "invalid_option"
+    return None
 
 
 async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
