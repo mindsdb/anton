@@ -113,6 +113,27 @@ def test_create_venv_surfaces_uvs_stderr_on_failure(tmp_path, monkeypatch):
         pad._create_venv()
 
 
+@pytest.mark.parametrize("seed_pip, expect_seed", [(True, True), (False, False)])
+def test_create_venv_seeds_pip_only_when_asked(tmp_path, monkeypatch, seed_pip, expect_seed):
+    # Cloud passes seed_pip=False: its installs use uv, and seeding pip onto
+    # the EFS workspace was ~15s of every new venv.
+    import subprocess
+
+    pad = LocalScratchpadRuntime(
+        name="probe", _venvs_base=tmp_path, seed_pip=seed_pip, **_DEFAULTS
+    )
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/fake/uv"))
+    run = MagicMock()
+    monkeypatch.setattr(subprocess, "run", run)
+
+    pad._create_venv()
+
+    args = run.call_args.args[0]
+    assert args[:2] == ["/fake/uv", "venv"]
+    assert "--system-site-packages" in args
+    assert ("--seed" in args) is expect_seed
+
+
 def _write_fake_python(tmp_path, *, exit_code, stderr_text):
     """A fake venv "python" that fails a specific way when invoked as
     ``<path> -c "..."`` — stands in for a real dyld crash without needing one."""
