@@ -139,6 +139,29 @@ def check_venv_writable() -> list[str]:
     return []
 
 
+#: One module per tree the Dockerfile compiles: stdlib, dependencies, anton.
+BYTECODE_MODULES = ("json", "openai", "anton.cloud_turn.session")
+
+
+def check_bytecode() -> list[str]:
+    """Every turn is a new process, and the pod cannot write .pyc files.
+
+    Without compiled bytecode in the image each turn recompiles everything it
+    imports from source, which cost seconds before the first LLM call.
+    """
+    import importlib.util
+
+    missing = []
+    for name in BYTECODE_MODULES:
+        spec = importlib.util.find_spec(name)
+        origin = spec.origin if spec else None
+        if not origin or not os.path.exists(importlib.util.cache_from_source(origin)):
+            missing.append(name)
+    if missing:
+        return [f"bytecode: no compiled .pyc for {', '.join(missing)}"]
+    return []
+
+
 CHECKS = (
     check_runtime_user,
     check_version,
@@ -146,6 +169,7 @@ CHECKS = (
     check_scratchpad_boot,
     check_runtime_uv,
     check_venv_writable,
+    check_bytecode,
 )
 
 

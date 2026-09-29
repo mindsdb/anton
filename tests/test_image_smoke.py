@@ -119,3 +119,13 @@ def test_the_dockerfile_runs_the_smoke_below_the_runtime_user(smoke):
     user_line = next(i for i, ln in enumerate(dockerfile) if ln.strip() == "USER 1000")
     smoke_line = next(i for i, ln in enumerate(dockerfile) if "image_smoke.py" in ln)
     assert smoke_line > user_line
+
+
+def test_bytecode_passes_when_every_module_has_a_pyc(smoke, monkeypatch):
+    monkeypatch.setattr(smoke.os.path, "exists", lambda _: True)
+    assert smoke.check_bytecode() == []
+
+
+def test_bytecode_names_the_modules_without_a_pyc(smoke, monkeypatch):
+    monkeypatch.setattr(smoke.os.path, "exists", lambda path: "openai" not in path)
+    assert smoke.check_bytecode() == ["bytecode: no compiled .pyc for openai"]
