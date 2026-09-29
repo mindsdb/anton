@@ -2,9 +2,19 @@
 
 The controller writes the TurnRequestV1 line first and, for an interactive
 turn, one line per answer the user gives (format in contract.py). The request
-line and the answer lines must come through the SAME buffered reader
-(``sys.stdin.buffer``): a second reader over fd 0 would miss whatever the first
-one had already buffered.
+line and the answer lines must come through the SAME buffered reader: a second
+reader opened later would miss whatever bytes the first one had already
+buffered past the request line.
+
+That shared reader must be a private one over a dup of fd 0, never
+``sys.stdin``/``sys.stdin.buffer`` itself: the reader here runs in a daemon
+thread and blocks in ``readline()`` for the life of the turn (the live-pod
+exec never closes stdin), so at interpreter shutdown ``sys.stdin``'s own
+buffer would still be busy. Finalizing ``sys.stdin`` then needs that buffer's
+lock, the daemon thread already holds it, and the process aborts ("Fatal
+Python error: _enter_buffered_busy ... at interpreter shutdown"). A reader
+``sys`` never references sidesteps that - finalization has nothing of its own
+to close here.
 
 A thread rather than ``loop.connect_read_pipe``: it works with any stdin (a
 pipe in the pod, a file or BytesIO in tests) and survives EOF without special
