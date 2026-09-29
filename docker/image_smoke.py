@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 
 # Both entrypoints read one bounded thing from stdin and stop at EOF, so an empty
 # stdin drives a complete, harmless run: cloud_turn fails to parse the empty line
@@ -27,14 +29,43 @@ import sys
 EMPTY_STDIN = b""
 TIMEOUT_S = 120
 
+# The wrappers the Dockerfile writes, as argv so tests can point them elsewhere.
+LAUNCHER_CMD = ["/usr/local/bin/cloud-turn"]
+RESIDENT_CMD = ["/usr/local/bin/cloud-turn-resident"]
+RAN_DIRECTLY = b"running the turn directly"
+
+
+def run_command(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(argv, input=EMPTY_STDIN, capture_output=True, timeout=TIMEOUT_S)
+
 
 def run_module(module: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        [sys.executable, "-m", module],
-        input=EMPTY_STDIN,
-        capture_output=True,
-        timeout=TIMEOUT_S,
-    )
+    return run_command([sys.executable, "-m", module])
+
+
+def one_terminal_event(label: str, proc: subprocess.CompletedProcess[bytes]) -> list[str]:
+    """Exactly one line on stdout, and it must be a terminal event.
+
+    The controller reads the terminal off the EVENT, not off the exit code, so a
+    process that exits 0 having printed nothing is a turn that hangs until the
+    stall timer fires.
+    """
+    if proc.returncode != 0:
+        tail = proc.stderr.decode(errors="replace")[-2000:]
+        return [f"{label}: exited {proc.returncode}\n{tail}"]
+
+    lines = [ln for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
+    if len(lines) != 1:
+        return [
+            f"{label}: expected 1 protocol line on stdout, got {len(lines)}: {lines[:5]}"
+        ]
+    try:
+        event = json.loads(lines[0])
+    except ValueError as exc:
+        return [f"{label}: stdout line is not JSON ({exc}): {lines[0][:200]!r}"]
+    if event.get("kind") != "turn_failed":
+        return [f"{label}: expected a turn_failed terminal, got {event.get('kind')!r}"]
+    return []
 
 
 def check_runtime_user() -> list[str]:
@@ -75,28 +106,74 @@ def check_cloud_turn() -> list[str]:
     """`python -m anton.cloud_turn` is what the controller execs for a whole turn.
 
     Empty stdin fails to parse, which is the shortest path that still loads the
-    entire turn graph and writes to the protocol descriptor. Exactly one line, and
-    it must be a terminal event: the controller reads the terminal off the EVENT,
-    not off the exit code, so a process that exits 0 having printed nothing is a
-    turn that hangs until the stall timer fires.
+    entire turn graph and writes to the protocol descriptor.
     """
-    proc = run_module("anton.cloud_turn")
-    if proc.returncode != 0:
-        tail = proc.stderr.decode(errors="replace")[-2000:]
-        return [f"cloud_turn: exited {proc.returncode}\n{tail}"]
+    return one_terminal_event("cloud_turn", run_module("anton.cloud_turn"))
 
-    lines = [ln for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
-    if len(lines) != 1:
-        return [
-            f"cloud_turn: expected 1 protocol line on stdout, got {len(lines)}: {lines[:5]}"
-        ]
+
+def check_launcher_without_resident() -> list[str]:
+    """`/usr/local/bin/cloud-turn` is what the controller execs when it runs the resident.
+
+    Nothing listens here, as on a pod created before the controller enabled it,
+    so the launcher must run the turn itself and say so.
+    """
+    proc = run_command(LAUNCHER_CMD)
+    failures = one_terminal_event("cloud-turn", proc)
+    if not failures and RAN_DIRECTLY not in proc.stderr:
+        failures.append("cloud-turn: ran the turn without reporting the direct run")
+    return failures
+
+
+def _wait_for_resident(launcher, resident: subprocess.Popen[bytes]) -> str:
+    """Wait until the resident answers "ready"; return why it did not, or ""."""
+    deadline = time.monotonic() + TIMEOUT_S
+    while True:
+        sock, reason = launcher.connect_to_resident(launcher.SOCKET_NAME, resident.pid, TIMEOUT_S)
+        if sock is not None:
+            sock.close()
+            return ""
+        # Until the interpreter binds the name, there is nothing to connect to.
+        starting = reason.startswith("no resident process") and resident.poll() is None
+        if not starting or time.monotonic() > deadline:
+            return reason
+        time.sleep(0.05)
+
+
+def check_launcher_through_resident() -> list[str]:
+    """`/usr/local/bin/cloud-turn-resident` is the pod's main process when enabled.
+
+    A resident that cannot preload, fork or hand the streams over leaves every
+    turn on the slow direct path, silently. It is not PID 1 here, so the
+    launcher is told its pid.
+    """
+    from anton.cloud_turn import launcher
+
+    resident = subprocess.Popen(
+        RESIDENT_CMD, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    failures: list[str] = []
     try:
-        event = json.loads(lines[0])
-    except ValueError as exc:
-        return [f"cloud_turn: stdout line is not JSON ({exc}): {lines[0][:200]!r}"]
-    if event.get("kind") != "turn_failed":
-        return [f"cloud_turn: expected a turn_failed terminal, got {event.get('kind')!r}"]
-    return []
+        not_ready = _wait_for_resident(launcher, resident)
+        if not_ready:
+            failures.append(f"cloud-turn-resident: never became ready: {not_ready}")
+        else:
+            proc = run_command([*LAUNCHER_CMD, "--resident-pid", str(resident.pid)])
+            failures.extend(one_terminal_event("cloud-turn through the resident", proc))
+            if RAN_DIRECTLY in proc.stderr:
+                failures.append("cloud-turn through the resident: ran the turn directly instead")
+    finally:
+        if resident.poll() is None:
+            resident.send_signal(signal.SIGTERM)
+        try:
+            _, err = resident.communicate(timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            resident.kill()
+            _, err = resident.communicate()
+            failures.append("cloud-turn-resident: did not exit on SIGTERM")
+        if resident.returncode != 0:
+            tail = err.decode(errors="replace")[-2000:]
+            failures.append(f"cloud-turn-resident: exited {resident.returncode}\n{tail}")
+    return failures
 
 
 def check_scratchpad_boot() -> list[str]:
@@ -143,6 +220,8 @@ CHECKS = (
     check_runtime_user,
     check_version,
     check_cloud_turn,
+    check_launcher_without_resident,
+    check_launcher_through_resident,
     check_scratchpad_boot,
     check_runtime_uv,
     check_venv_writable,
@@ -153,7 +232,7 @@ def run_checks(checks=CHECKS) -> list[str]:
     """Run every check and collect what failed.
 
     A check that raises counts as a failed check rather than a crashed script: one
-    broken check must not hide the verdict of the other five, and a smoke that
+    broken check must not hide the verdict of the others, and a smoke that
     dies partway through is indistinguishable from one that never ran.
     """
     failures: list[str] = []
