@@ -421,17 +421,14 @@ async def stream_turn(
 
 def main(argv: list[str] | None = None) -> int:
     with _isolated_protocol_stdout() as emit:
-        # A private binary reader over a dup'd fd 0 - never `sys.stdin` itself,
-        # and read before anything else touches fd 0 so no bytes are stranded
-        # in a different buffer. The live-pod exec never closes stdin, so the
-        # daemon answer-reader thread (stdin.py) is still blocked in readline()
-        # on this object when the interpreter shuts down. That used to be
-        # `sys.stdin.buffer`: at shutdown, finalizing `sys.stdin` needs its
-        # buffer's lock, the daemon thread already holds it, and the process
-        # aborts ("Fatal Python error: _enter_buffered_busy ... at interpreter
-        # shutdown"). A reader `sys` never references sidesteps that -
-        # finalization has nothing of its own to close here.
+        # A private reader over a dup of fd 0, never `sys.stdin` (why: see the
+        # cloud_turn/stdin.py docstring).
         stdin = open(os.dup(0), "rb")
+        # Then point fd 0 itself at /dev/null, so no child process spawned
+        # during the turn inherits the answer pipe and swallows an answer line.
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(devnull, 0)
+        os.close(devnull)
         raw_line = stdin.readline(MAX_REQUEST_BYTES + 1).decode("utf-8", errors="replace")
         asyncio.run(stream_turn(raw_line, emit, stdin=stdin))
     return 0

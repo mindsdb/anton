@@ -472,10 +472,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 [self._venv_python, "-c", "print('ok')"],
                 capture_output=True,
                 timeout=5,
-                # No stdin: without it a child inherits fd 0, which in an
-                # interactive cloud turn is the answer pipe - this child could
-                # read (and lose) an answer line meant for the turn.
-                stdin=subprocess.DEVNULL,
             )
             ok = result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
             if not ok:
@@ -1300,10 +1296,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # Same UTF-8 mode as the scratchpad process, so pip/uv output on a
             # non-UTF-8 host locale doesn't come back as mojibake (ENG-824).
             env=_utf8_env(os.environ),
-            # No stdin: without it a child inherits fd 0, which in an
-            # interactive cloud turn is the answer pipe - this child could
-            # read (and lose) an answer line meant for the turn.
-            stdin=asyncio.subprocess.DEVNULL,
         )
         try:
             stdout, _ = await asyncio.wait_for(

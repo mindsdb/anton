@@ -179,22 +179,6 @@ def test_verify_clears_a_stale_error_when_the_interpreter_is_missing(tmp_path):
     assert pad._last_verify_error is None
 
 
-def test_verify_venv_python_never_reads_stdin(tmp_path, monkeypatch):
-    # In an interactive cloud turn, fd 0 is the answer pipe; a child spawned
-    # without an explicit stdin would inherit it and could read (and lose) an
-    # answer line meant for the turn (ENG-3049).
-    import subprocess
-
-    pad = make_pad(tmp_path)
-    pad._venv_python = sys.executable
-    run = MagicMock(return_value=MagicMock(returncode=0, stdout=b"ok", stderr=b""))
-    monkeypatch.setattr(subprocess, "run", run)
-
-    pad._verify_venv_python()
-
-    assert run.call_args.kwargs["stdin"] == subprocess.DEVNULL
-
-
 def test_verify_captures_an_exception_reason(tmp_path):
     if sys.platform == "win32":
         pytest.skip("posix-only: exec-permission semantics differ on Windows")
@@ -206,31 +190,6 @@ def test_verify_captures_an_exception_reason(tmp_path):
 
     assert pad._verify_venv_python() is False
     assert pad._last_verify_error
-
-
-async def test_install_packages_never_reads_stdin(tmp_path, monkeypatch):
-    # Same reasoning as _verify_venv_python: in an interactive cloud turn fd 0
-    # is the answer pipe, so the pip/uv install subprocess must not inherit it
-    # (ENG-3049).
-    pad = make_pad(tmp_path)
-    pad._venv_python = sys.executable
-    monkeypatch.setattr(pad, "_ensure_venv", lambda: None)
-    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
-    seen: dict = {}
-
-    class _Stop(Exception):
-        pass
-
-    async def fake_spawn(*_args, **kwargs):
-        seen.update(kwargs)
-        raise _Stop
-
-    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", fake_spawn)
-
-    with pytest.raises(_Stop):
-        await pad.install_packages(["cowsay"])
-
-    assert seen["stdin"] == local.asyncio.subprocess.DEVNULL
 
 
 def test_ensure_venv_failure_message_includes_the_verify_detail(tmp_path, monkeypatch):
