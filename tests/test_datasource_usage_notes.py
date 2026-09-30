@@ -94,3 +94,26 @@ def test_blank_or_non_string_notes_are_skipped(vault, value):
     ctx = build_datasource_context(vault, usage_notes={"langfuse": value})
 
     assert "Usage notes" not in ctx
+
+
+def test_notes_precede_the_google_drive_availability_paragraph(tmp_path):
+    v = LocalDataVault(tmp_path)
+    v.save("google_drive", "work", {"auth_type": "oauth", "access_token": "t"})
+
+    ctx = build_datasource_context(v, usage_notes={"google_drive": "DRIVE-NOTE"})
+
+    assert ctx.index("DRIVE-NOTE") < ctx.index("Connected Google Drive accounts are available")
+
+
+def test_two_engines_render_two_headings_in_first_connection_order(tmp_path):
+    v = LocalDataVault(tmp_path)
+    v.save("postgres", "db", {"host": "h", "password": "p"})
+    v.save("langfuse", "prod", {"public_key": "pk", "secret_key": "sk"})
+    order = [c["engine"] for c in v.list_connections()]
+    assert set(order) == {"postgres", "langfuse"}
+
+    ctx = build_datasource_context(v, usage_notes={"postgres": "PG-NOTE", "langfuse": "LF-NOTE"})
+
+    assert ctx.count("### Usage notes:") == 2
+    positions = {e: ctx.index(f"(engine `{e}`)") for e in order}
+    assert sorted(positions, key=positions.get) == order

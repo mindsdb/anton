@@ -13,6 +13,7 @@ write the files, nothing else.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .discovery.notes import EXEC_OUTPUT_MAX
@@ -947,6 +948,11 @@ variable.\
 """
 
 
+# Text that `build_datasource_context` renders after the last slug block.
+_NOTES_MARK = "\n### Usage notes: "
+_DRIVE_PARAGRAPH_MARK = "\nConnected Google Drive accounts are available"
+
+
 def _datasource_section(
     catalog: str, declared_sources: list[str] | tuple[str, ...], data_notes: str
 ) -> str:
@@ -973,7 +979,11 @@ def _datasource_section(
         # Gathered cells that read a `DS_*` variable are evidence of a source
         # the model forgot to declare: keep the catalog then.
         return catalog if "DS_" in data_notes else _NO_DATASOURCES_NOTE
-    header, sep, rest = catalog.partition("\n### Slug: `")
+    # Usage notes and the Drive paragraph trail the last slug block; cut them
+    # off first so filtering that block does not drop them with it.
+    body, _, drive_paragraph = catalog.partition(_DRIVE_PARAGRAPH_MARK)
+    body, _, notes_tail = body.partition(_NOTES_MARK)
+    header, sep, rest = body.partition("\n### Slug: `")
     if not sep:
         return catalog
     blocks = ["### Slug: `" + b for b in rest.split("\n### Slug: `")]
@@ -986,13 +996,23 @@ def _datasource_section(
             kept.append(block)
     if not kept:
         return catalog
-    return header + "\n" + "\n".join(kept)
+
+    def has_kept_engine(engine: str) -> bool:
+        return any(b.startswith(f"### Slug: `{engine}-") for b in kept)
+
+    out = (header + "\n" + "\n".join(kept)).rstrip("\n")
+    if notes_tail:
+        for note in (_NOTES_MARK[1:] + notes_tail).split(_NOTES_MARK):
+            m = re.search(r"\(engine `([^`]+)`\)", note.splitlines()[0])
+            if m and has_kept_engine(m.group(1)):
+                out += "\n\n" + note.rstrip("\n")
+    if drive_paragraph and has_kept_engine("google_drive"):
+        out += "\n\n" + (_DRIVE_PARAGRAPH_MARK[1:] + drive_paragraph).rstrip("\n")
+    return out
 
 
 def _slug_tokens(line: str) -> list[str]:
     """Searchable names from a catalog line: the slug, its label, the engine."""
-    import re
-
     tokens = re.findall(r"`([^`]+)`", line)  # the slug in backticks
     m = re.search(r"label:\s*(.+)$", line)
     if m and m.group(1).strip() != "(none)":

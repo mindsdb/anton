@@ -129,6 +129,40 @@ def test_datasource_section_keeps_the_whole_catalog_when_unsure():
     assert prompts._datasource_section("", [], "") == ""
 
 
+def _catalog_with_notes(tmp_path):
+    """Real renderer output: google_drive-work sorts before postgres-db, and
+    both engines' notes trail the last slug block."""
+    from anton.core.datasources.data_vault import LocalDataVault
+    from anton.utils.datasources import build_datasource_context
+
+    vault = LocalDataVault(tmp_path)
+    vault.save("google_drive", "work", {"auth_type": "oauth", "access_token": "t"})
+    vault.save("postgres", "db", {"host": "h", "password": "p"})
+    return build_datasource_context(
+        vault, usage_notes={"google_drive": "DRIVE-NOTE", "postgres": "PG-NOTE"}
+    )
+
+
+def test_datasource_section_keeps_notes_of_the_kept_engine_when_the_last_block_is_dropped(tmp_path):
+    section = prompts._datasource_section(_catalog_with_notes(tmp_path), ["google_drive-work"], "")
+
+    assert "DS_GOOGLE_DRIVE_WORK__ACCESS_TOKEN" in section
+    assert "DS_POSTGRES_DB__HOST" not in section
+    assert "DRIVE-NOTE" in section
+    assert "(engine `google_drive`)" in section
+    assert "Connected Google Drive accounts are available" in section
+
+
+def test_datasource_section_drops_notes_of_a_filtered_out_engine(tmp_path):
+    section = prompts._datasource_section(_catalog_with_notes(tmp_path), ["postgres-db"], "")
+
+    assert "DS_POSTGRES_DB__HOST" in section
+    assert "PG-NOTE" in section
+    assert "DRIVE-NOTE" not in section
+    assert "google_drive" not in section.replace("DS_GOOGLE_DRIVE", "")
+    assert "Connected Google Drive accounts are available" not in section
+
+
 def test_fetch_prompt_embeds_the_datasource_catalog():
     catalog = "\n\n## Connected Data Sources\n- `hubspot-main` (hubspot) → DS_HUBSPOT_MAIN__ACCESS_TOKEN"
     system = prompts.build_fetch_data_system_prompt(
