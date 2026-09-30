@@ -58,3 +58,20 @@ def test_turn_request_rejects_a_version_that_is_not_the_integer_one(version):
         TurnRequestV1.from_json(
             f'{{"protocol_version":{version},"conversation_id":"c","input":"hi"}}'
         )
+
+
+def test_turn_request_parses_the_connectors_block():
+    connectors = {"google_drive": {"usage_notes": "Pass supportsAllDrives=true."}}
+    request = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "c", "input": "q",
+        "connectors": connectors,
+    }))
+    assert request.connectors == connectors
+
+
+@pytest.mark.parametrize("value", [None, "x", ["google_drive"], 3])
+def test_a_missing_or_non_object_connectors_block_parses_to_none(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "q"}
+    if value is not None:
+        body["connectors"] = value
+    assert TurnRequestV1.from_json(json.dumps(body)).connectors is None
