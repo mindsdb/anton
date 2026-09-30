@@ -7,6 +7,7 @@ import re
 import shutil
 import uuid
 import yaml
+from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -425,13 +426,42 @@ def default_user_label(vault: "DataVault", engine: str) -> str:
     return ensure_unique_user_label(vault, engine)
 
 
-def build_datasource_context(vault: DataVault, active_only: str | None = None) -> str:
+def _resolve_usage_notes(
+    engine: str,
+    usage_notes: "Mapping[str, str] | None",
+    registry: DatasourceRegistry,
+) -> str:
+    """The usage notes to render for `engine`, or "".
+
+    `usage_notes` is the host's map (ChatSessionConfig.connector_usage_notes).
+    None means the host sent none (the CLI): anton's registry is the source.
+    A map, even an empty one, is the only source: anton's registry shares
+    engine ids with cowork-server connectors that are different connectors
+    (e.g. gmail is IMAP here, the Gmail API there).
+    """
+    if usage_notes is None:
+        engine_def = registry.get(engine)
+        text = getattr(engine_def, "usage_notes", "") if engine_def else ""
+    else:
+        text = usage_notes.get(engine, "")
+    return text.strip() if isinstance(text, str) else ""
+
+
+def build_datasource_context(
+    vault: DataVault,
+    active_only: str | None = None,
+    usage_notes: "Mapping[str, str] | None" = None,
+) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
 
     Shows the LLM what data sources are connected and which environment
     variable names to use — without exposing any credential values.
 
     If active_only is set, only the matching slug is included.
+
+    `usage_notes` maps engine -> agent-facing notes; each connected engine's
+    notes are rendered once, after all connection blocks. See
+    `_resolve_usage_notes` for how None differs from a map.
     """
     try:
         vault = vault or LocalDataVault()
@@ -474,10 +504,14 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
     # datasources.md on every construction (no caching) — with N
     # connections that was N full re-parses per turn before this change.
     registry = DatasourceRegistry()
+    # Engines in first-render order, so notes are emitted once per engine.
+    rendered_engines: list[str] = []
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"
         if active_only and slug != active_only:
             continue
+        if c["engine"] not in rendered_engines:
+            rendered_engines.append(c["engine"])
         # read_record gives fields + secure_keys in one call; fall back to load
         # for any vault backend that doesn't implement it.
         if hasattr(vault, "read_record"):
@@ -525,6 +559,16 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
             # this drove the (now removed) listing.
             if _parse_picked_files(fields.get("_picked_files")):
                 google_drive_has_picked_files = True
+    for engine in rendered_engines:
+        notes = _resolve_usage_notes(engine, usage_notes, registry)
+        if not notes:
+            continue
+        engine_def = registry.get(engine)
+        lines.append(
+            f"\n### Usage notes: {engine_def.display_name if engine_def else engine} "
+            f"(engine `{engine}`)"
+        )
+        lines.append(notes)
     if google_drive_oauth_connected or google_drive_has_picked_files:
         lines.append(
             "\nConnected Google Drive accounts are available through Google OAuth credentials "
