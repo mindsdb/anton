@@ -23,6 +23,7 @@ import selectors
 import signal
 import socket
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Callable
@@ -119,10 +120,12 @@ def _exit_code(status: object) -> int:
 def _finish_like_interpreter_exit(code: int) -> NoReturn:
     """End a fork the way a fresh interpreter ends, without unwinding the resident's stack.
 
-    ``os._exit`` alone skips atexit handlers, and the turn relies on them: the
-    analytics flush that delivers ``turn_completed`` is one.
+    ``os._exit`` alone skips what a normal exit runs first: joining non-daemon
+    threads, then the atexit handlers. The turn relies on both, the analytics
+    flush that delivers ``turn_completed`` is an atexit handler.
     """
     try:
+        threading._shutdown()
         atexit._run_exitfuncs()
     except BaseException:
         traceback.print_exc()
