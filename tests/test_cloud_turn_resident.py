@@ -315,6 +315,33 @@ def test_sigterm_lets_the_running_turn_finish_then_exits(start_resident):
     assert res.proc.wait(timeout=10) == 0
 
 
+def test_a_hand_off_that_arrives_after_sigterm_is_refused(start_resident):
+    """A turn forked while the pod is going away would be killed with it: fail it at once."""
+    res = start_resident("probe")
+    busy = res.launch(json.dumps({"sleep": 3}), wait=False)  # keeps the resident alive after SIGTERM
+    time.sleep(0.5)
+    late = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    late.connect(launcher.socket_address(res.name))
+    assert late.recv(1) == launcher.READY
+    res.proc.send_signal(signal.SIGTERM)
+    time.sleep(0.3)
+
+    stdin_read, stdin_write = os.pipe()
+    os.write(stdin_write, b"{}\n")
+    os.close(stdin_write)
+    out_read, out_write = os.pipe()
+    socket.send_fds(late, [launcher.HANDOFF], [stdin_read, out_write, out_write])
+    os.close(stdin_read)
+    os.close(out_write)
+    late.settimeout(10)
+
+    assert late.recv(16) == b""  # closed, no exit code: nothing was forked
+    assert os.read(out_read, 4096) == b""
+    os.close(out_read)
+    late.close()
+    _collect(busy)
+
+
 def test_after_sigterm_new_turns_go_the_direct_way(start_resident):
     res = start_resident("turn")
     busy = start_resident("probe")

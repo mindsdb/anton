@@ -232,7 +232,9 @@ class _Resident:
             conn.close()
             return
         self._forget(conn)
-        if message != HANDOFF or len(fds) != 3:
+        # Told "ready" before a SIGTERM: a turn forked now would die with the pod,
+        # so closing fails it at once instead of after the grace period.
+        if message != HANDOFF or len(fds) != 3 or self._stopping_since is not None:
             for fd in fds:
                 os.close(fd)
             conn.close()
