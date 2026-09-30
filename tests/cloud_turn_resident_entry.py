@@ -50,6 +50,12 @@ def _probe() -> int:
     os.write(1, (json.dumps(state) + "\n").encode())
     if orders.get("atexit_file"):
         atexit.register(Path(orders["atexit_file"]).write_text, "ran")
+    if orders.get("thread_file"):
+        def finish_late(path: str = orders["thread_file"]) -> None:
+            time.sleep(0.5)
+            Path(path).write_text("ran")
+
+        threading.Thread(target=finish_late).start()
     time.sleep(orders.get("sleep", 0))
     return orders.get("exit", 0)
 

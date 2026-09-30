@@ -219,6 +219,15 @@ def test_atexit_handlers_registered_by_the_turn_run(start_resident, tmp_path):
     assert marker.read_text() == "ran"
 
 
+def test_the_fork_waits_for_the_turns_threads_like_an_interpreter_exit(start_resident, tmp_path):
+    res = start_resident("probe")
+    marker = tmp_path / "thread.txt"
+
+    _probe(res, thread_file=str(marker))
+
+    assert marker.read_text() == "ran"
+
+
 def test_the_turns_environment_is_closed_to_other_processes(start_resident):
     res = start_resident("probe")
 
