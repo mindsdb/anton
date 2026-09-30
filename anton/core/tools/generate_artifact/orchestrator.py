@@ -368,9 +368,17 @@ def _datasource_context(session) -> str:
         vault = _vault(session)
         if not _list_connections(vault):
             return ""
+        from collections.abc import Mapping
+
         from anton.utils.datasources import build_datasource_context
 
-        return build_datasource_context(vault) or ""
+        # Same notes as the chat prompt: the backend generator writes its own
+        # API calls, so it hits the same API traps. A non-mapping (e.g. a test
+        # double's auto-attribute) reads as "host sent none".
+        notes = getattr(session, "_connector_usage_notes", None)
+        if not isinstance(notes, Mapping):
+            notes = None
+        return build_datasource_context(vault, usage_notes=notes) or ""
     except Exception:  # noqa: BLE001
         return ""
 
