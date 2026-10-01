@@ -15,9 +15,10 @@ never confirmed.
 Lives here rather than in either tool package because these files are a
 property of the artifact folder, not of whichever tool touches them.
 
-The same holds for the folder's other reserved names (housekeeping files and
-directories). cowork-server imports `NON_CONTENT_NAMES` from here; consumers
-match it against the first component of an artifact-relative path.
+This module also owns the folder's other reserved names (housekeeping files
+and directories). `NON_CONTENT_NAMES` is every top-level name that is never
+artifact content; consumers match it against the first component of an
+artifact-relative path, and cowork-server imports it from here.
 """
 
 from __future__ import annotations

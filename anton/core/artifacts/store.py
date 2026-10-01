@@ -47,11 +47,10 @@ from anton.core.artifacts.internal_files import (
 logger = logging.getLogger(__name__)
 
 
-# Aliases imported by `publish_access` and `publisher`.
-_HOUSEKEEPING_FILES = HOUSEKEEPING_FILES
-# Matched whole-path in `_reconcile`, so a nested `sub/README.md` is still content.
+# `publish_access` and `publisher` import both names below.
+# Files are matched whole-path in `_reconcile`, so a nested `sub/README.md`
+# is still content; dirs are matched on the first path component.
 _EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
-# Matched on the first path component.
 _HOUSEKEEPING_DIRS = HOUSEKEEPING_DIRS
 
 # Same character whitelist projects_store uses — keeps slug shapes
