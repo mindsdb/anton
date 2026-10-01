@@ -24,6 +24,8 @@ import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.tools.tool_handlers import (
+    _artifact_content_mtime,
+    lint_changed_artifact_files,
     snapshot_existing_artifact_mtimes,
     track_edits_since,
     handle_create_artifact,
@@ -266,6 +268,64 @@ async def test_content_write_next_to_state_files_is_an_edit(session, root):
     track_edits_since(session, ArtifactStore(root), before)
 
     assert session._artifacts_touched == {slug}
+
+
+async def test_nested_name_matching_a_non_content_name_is_an_edit(session, root):
+    """Only the first path component decides: `static/prd.md` is content."""
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    target = root / slug / "static" / "prd.md"
+    target.parent.mkdir()
+    target.write_text("x")
+    _bump_mtime(target)
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}
+
+
+def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
+    folder = tmp_path / "art"
+    folder.mkdir()
+    good = folder / "index.html"
+    good.write_text("x")
+    os.utime(good, (1000, 1000))
+    gone = folder / "gone.html"
+    gone.write_text("x")
+
+    real_stat = Path.stat
+
+    def flaky(self, *a, **k):
+        if self.name == "gone.html":
+            raise FileNotFoundError(str(self))
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", flaky)
+
+    assert _artifact_content_mtime(folder) == 1000.0
+
+
+def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):
+    import anton.core.tools.tool_handlers as th
+
+    class Store:
+        root = tmp_path
+
+    folder = tmp_path / "art"
+    (folder / ".revisions").mkdir(parents=True)
+    (folder / "metadata.json").write_text("{}")
+    (folder / ".revisions" / "x.html").write_text("<broken")
+    index = folder / "index.html"
+    index.write_text("<html></html>")
+    monkeypatch.setattr(
+        th, "_artifact_linters", lambda: {".html": lambda p: [f"bad {p.name}"]}
+    )
+
+    messages = lint_changed_artifact_files(Store(), {"art": 0.0})
+
+    assert messages == ["art/index.html — bad index.html"]
 
 
 async def test_edit_without_reopening_stamps_provenance_too(session, root):

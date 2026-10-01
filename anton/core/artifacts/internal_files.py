@@ -17,8 +17,11 @@ property of the artifact folder, not of whichever tool touches them.
 
 This module also owns the folder's other reserved names (housekeeping files
 and directories). `NON_CONTENT_NAMES` is every top-level name that is never
-artifact content; consumers match it against the first component of an
-artifact-relative path, and cowork-server imports it from here.
+artifact content; cowork-server, `tool_handlers` and `publish_access` match it
+against the first component of an artifact-relative path, `store._reconcile`
+matches files whole-path (a nested `sub/README.md` stays in `files[]`), and the
+publisher bundle matches the basename at any depth. cowork-server imports it
+from here.
 """
 
 from __future__ import annotations

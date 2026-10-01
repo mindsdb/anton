@@ -13,7 +13,12 @@ import secrets
 import zipfile
 from pathlib import Path
 
-from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
+from anton.core.artifacts.internal_files import (
+    GENERATION_INPUT_FILES,
+    PUBLISHED_FILENAME,
+    REVISIONS_DIRNAME,
+    STATE_SNAPSHOT_FILENAME,
+)
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.artifacts.store import _EXCLUDED_FROM_FILES, _HOUSEKEEPING_DIRS
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
@@ -42,7 +47,7 @@ FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-state
 
 # Local snapshot of the last-published state key schema (for the client-side
 # schema-change warning). Never bundled.
-_STATE_SNAPSHOT = ".state_manifest.published.json"
+_STATE_SNAPSHOT = STATE_SNAPSHOT_FILENAME
 # Names inside an artifact folder that are housekeeping or generation inputs
 # (prd.md, discovery.json, ...) — never bundled. The store's definition, so
 # what the agent hides from `files[]` and what the bundle omits cannot drift.
@@ -65,7 +70,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # inputs (PRD, tech spec, discovery state) are the user's working documents,
 # not deliverables — they are hidden from `files[]` and must stay out of the
 # public bundle for the same reason.
-_BUNDLE_SKIP_NAMES = {".published.json", ".revisions"} | GENERATION_INPUT_FILES
+_BUNDLE_SKIP_NAMES = {PUBLISHED_FILENAME, REVISIONS_DIRNAME} | GENERATION_INPUT_FILES
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without

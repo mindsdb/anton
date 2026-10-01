@@ -515,12 +515,11 @@ def test_non_content_names_is_the_union():
 
 def test_publisher_excludes_exactly_the_housekeeping_set():
     """The bundle omits what the store hides from files[] (housekeeping and
-    generation inputs): one definition, three consumers."""
+    generation inputs)."""
     from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES, NON_CONTENT_NAMES
-    from anton.core.artifacts.store import _EXCLUDED_FROM_FILES, _HOUSEKEEPING_DIRS
+    from anton.core.artifacts.store import _HOUSEKEEPING_DIRS
     from anton.publisher import _BUNDLE_SKIP_NAMES, _FULLSTACK_EXCLUDED
 
-    assert _FULLSTACK_EXCLUDED == _EXCLUDED_FROM_FILES | _HOUSEKEEPING_DIRS
     assert GENERATION_INPUT_FILES <= _BUNDLE_SKIP_NAMES
     assert ".revisions" in _HOUSEKEEPING_DIRS
     assert _FULLSTACK_EXCLUDED == NON_CONTENT_NAMES

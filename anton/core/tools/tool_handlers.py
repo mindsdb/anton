@@ -131,23 +131,46 @@ def _artifact_content_mtime(folder: Path) -> float:
     """Max mtime across an artifact folder's user-content files.
 
     Housekeeping and runtime files (`NON_CONTENT_NAMES`) are matched on the
-    first path component.
+    first path component and pruned without descending. A file that vanishes
+    mid-walk is skipped rather than zeroing the whole result, which would read
+    as a change in the next snapshot.
     """
     from anton.core.artifacts.internal_files import NON_CONTENT_NAMES
 
+    def _file_mtime(path: Path) -> float | None:
+        try:
+            if path.is_symlink() or not path.is_file():
+                return None
+            return path.stat().st_mtime
+        except OSError:
+            return None
+
+    latest = 0.0
     try:
-        return max(
-            (
-                p.stat().st_mtime
-                for p in folder.rglob("*")
-                if p.is_file()
-                and not p.is_symlink()
-                and p.relative_to(folder).parts[0] not in NON_CONTENT_NAMES
-            ),
-            default=0.0,
-        )
+        entries = list(folder.iterdir())
     except OSError:
         return 0.0
+    for entry in entries:
+        if entry.name in NON_CONTENT_NAMES:
+            continue
+        try:
+            if entry.is_symlink():
+                continue
+            is_dir = entry.is_dir()
+        except OSError:
+            continue
+        if not is_dir:
+            candidates = [entry]
+        else:
+            try:
+                candidates = list(entry.rglob("*"))
+            except OSError:
+                continue
+        for path in candidates:
+            mtime = _file_mtime(path)
+            if mtime is not None and mtime > latest:
+                latest = mtime
+    return latest
 
 
 def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
@@ -243,6 +266,8 @@ def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
     edited (mtime moved since `before`), so findings reach the agent as
     tool-result text right away, not only via a later open()/list().
     """
+    from anton.core.artifacts.internal_files import NON_CONTENT_NAMES
+
     linters = _artifact_linters()
     if not linters:
         return []
@@ -253,9 +278,12 @@ def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
         if current is None or current <= prev_mtime:
             continue
 
-        for path in (store.root / slug).rglob("*"):
+        artifact_dir = store.root / slug
+        for path in artifact_dir.rglob("*"):
             linter = linters.get(path.suffix.lower())
             if linter is None or not path.is_file():
+                continue
+            if path.relative_to(artifact_dir).parts[0] in NON_CONTENT_NAMES:
                 continue
             try:
                 if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
