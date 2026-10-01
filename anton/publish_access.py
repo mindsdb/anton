@@ -13,11 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-# The store owns the one definition of what is housekeeping rather than user
-# content (backend.log, the STATE driver's SQLite files, the publisher's schema
-# snapshot, the revision journal). Matching here is against the path's first
-# component, so directories are a separate set, same as in the store.
-from anton.core.artifacts.store import _EXCLUDED_FROM_FILES, _HOUSEKEEPING_DIRS
+from anton.core.artifacts.store import iter_content_files
 
 logger = logging.getLogger(__name__)
 
@@ -193,23 +189,8 @@ def _user_files(folder: Path) -> list[Path]:
     discovery.json, ...): otherwise `_pick_primary`'s `files[0]` fallback
     could name an internal document as the artifact's entry point.
     """
-    out: list[Path] = []
-    try:
-        for p in folder.rglob("*"):
-            if not p.is_file() or p.is_symlink():
-                continue
-            rel = p.relative_to(folder)
-            top = rel.parts[0] if rel.parts else ""
-            if top in _EXCLUDED_FROM_FILES or top in _HOUSEKEEPING_DIRS:
-                continue
-            out.append(p)
-    except OSError:
-        return []
-    try:
-        out.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        pass
-    return out
+    found = sorted(iter_content_files(folder), key=lambda item: item[1].st_mtime, reverse=True)
+    return [path for path, _ in found]
 
 
 def _pick_primary(folder: Path, files: list[Path], primary_hint: str | None = None) -> Path | None:

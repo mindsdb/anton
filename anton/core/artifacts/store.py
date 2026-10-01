@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import stat
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +43,7 @@ from anton.core.artifacts.internal_files import (
     HOUSEKEEPING_DIRS,
     HOUSEKEEPING_FILES,
     METADATA_FILENAME,
+    NON_CONTENT_NAMES,
     README_FILENAME,
 )
 
@@ -47,11 +51,41 @@ from anton.core.artifacts.internal_files import (
 logger = logging.getLogger(__name__)
 
 
-# `publish_access` and `publisher` import both names below.
+# `publisher` imports both names below.
 # Files are matched whole-path in `_reconcile`, so a nested `sub/README.md`
 # is still content; dirs are matched on the first path component.
 _EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
 _HOUSEKEEPING_DIRS = HOUSEKEEPING_DIRS
+
+
+def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Yield (path, lstat) for each regular file that is artifact content.
+
+    Top-level `NON_CONTENT_NAMES` are pruned without descending and symlinks
+    are never followed. An entry or directory that errors is skipped on its
+    own; a missing `folder` yields nothing. Order is unspecified.
+    """
+    stack = [(folder, True)]
+    while stack:
+        current, is_root = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            if is_root and entry.name in NON_CONTENT_NAMES:
+                continue
+            path = Path(entry.path)
+            try:
+                st = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                stack.append((path, False))
+            elif stat.S_ISREG(st.st_mode):
+                yield path, st
+
 
 # Same character whitelist projects_store uses — keeps slug shapes
 # consistent across antontron's project names AND artifact slugs.
