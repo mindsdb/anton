@@ -211,7 +211,7 @@ async def test_gen_verify_backend_stateful_wiring(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
     monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
     monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
-    monkeypatch.setattr(orchestrator, "_datasource_context", lambda s: "")
+    monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda s: None)
     err = await orchestrator._gen_verify_backend(st)
     assert err is None
     assert [t for t, _ in captured["injections"]] == ["backend.py", "state_manifest.json"]
@@ -243,7 +243,7 @@ async def test_gen_verify_backend_stateless_wiring(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
     monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
     monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
-    monkeypatch.setattr(orchestrator, "_datasource_context", lambda s: "")
+    monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda s: None)
     err = await orchestrator._gen_verify_backend(st)
     assert err is None
     assert [t for t, _ in captured["injections"]] == ["backend.py"]
@@ -440,7 +440,7 @@ def test_datasource_context_is_defensive_against_mock_session():
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
-        assert orchestrator._datasource_context(AsyncMock()) == ""
+        assert orchestrator._datasource_catalog(AsyncMock()) is None
         assert orchestrator._known_connection_hints(AsyncMock()) == []
 
 

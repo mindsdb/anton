@@ -501,7 +501,7 @@ async def generate(
     """
     from .attachments import resolve_attachments
     from .discovery import checkpoint as cp
-    from .orchestrator import _datasource_context, run
+    from .orchestrator import _datasource_catalog, run
     from .spend import SpendGuard
     from .state import GenState
     from .debug_trace import make_trace
@@ -519,6 +519,7 @@ async def generate(
         is_fullstack=artifact_type != "html-app",
     )
 
+    catalog = _datasource_catalog(session)
     state = GenState(
         session=session,
         artifact_type=artifact_type,
@@ -529,7 +530,8 @@ async def generate(
         agent_understanding=agent_understanding,
         known_data=known_data,
         user_preferences=user_preferences,
-        datasource_context=_datasource_context(session),
+        datasource_context=catalog.render() if catalog else "",
+        datasource_catalog=catalog,
         scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
         progress=progress,

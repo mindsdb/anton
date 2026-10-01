@@ -7,7 +7,14 @@ import pytest
 
 import anton.utils.datasources as ds
 from anton.core.datasources.data_vault import LocalDataVault
+from anton.core.datasources.datasource_registry import DatasourceRegistry
 from anton.utils.datasources import build_datasource_context
+
+
+@pytest.fixture(autouse=True)
+def _no_user_registry(tmp_path, monkeypatch):
+    """Keep the developer's ~/.anton/datasources.md out of the real registry."""
+    monkeypatch.setattr(DatasourceRegistry, "_USER_PATH", tmp_path / "no-user-registry.md")
 
 
 @pytest.fixture
@@ -78,6 +85,40 @@ def test_none_falls_back_to_the_anton_registry(vault, monkeypatch):
 
     assert "### Usage notes: PostgreSQL (engine `postgres`)" in ctx
     assert "REGISTRY-NOTE" in ctx
+
+
+def test_each_engine_is_looked_up_in_the_registry_once(vault, monkeypatch):
+    calls = []
+
+    class _CountingRegistry(_FakeRegistry):
+        def get(self, engine):
+            calls.append(engine)
+            return super().get(engine)
+
+    monkeypatch.setattr(ds, "DatasourceRegistry", _CountingRegistry)
+    vault.save("postgres", "db", {"host": "h", "password": "p"})
+    vault.save("postgres", "replica", {"host": "h2", "password": "p"})
+
+    ctx = build_datasource_context(vault, usage_notes=None)
+
+    assert "### Usage notes: PostgreSQL (engine `postgres`)" in ctx
+    assert sorted(calls) == ["langfuse", "postgres"]
+
+
+def test_a_non_mapping_host_value_renders_no_notes_and_skips_the_registry(
+    vault, monkeypatch, caplog
+):
+    monkeypatch.setattr(ds, "DatasourceRegistry", _FakeRegistry)
+    vault.save("postgres", "db", {"host": "h", "password": "p"})
+
+    with caplog.at_level("WARNING", logger=ds.logger.name):
+        ctx = build_datasource_context(vault, usage_notes=["langfuse"])
+
+    assert "### Slug: `langfuse-prod`" in ctx
+    assert "### Slug: `postgres-db`" in ctx
+    assert "Usage notes" not in ctx
+    assert "REGISTRY-NOTE" not in ctx
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
 
 
 def test_a_host_map_even_empty_disables_the_registry(vault, monkeypatch):

@@ -7,8 +7,9 @@ import re
 import shutil
 import uuid
 import yaml
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -429,62 +430,112 @@ def default_user_label(vault: "DataVault", engine: str) -> str:
 def _resolve_usage_notes(
     engine: str,
     usage_notes: "Mapping[str, str] | None",
-    registry: DatasourceRegistry,
+    engine_def: "DatasourceEngine | None",
 ) -> str:
     """The usage notes to render for `engine`, or "".
 
     `usage_notes` is the host's map (ChatSessionConfig.connector_usage_notes).
-    None means the host sent none (the CLI): anton's registry is the source.
-    A map, even an empty one, is the only source: anton's registry shares
-    engine ids with cowork-server connectors that are different connectors
-    (e.g. gmail is IMAP here, the Gmail API there).
+    None means the host sent none (the CLI): anton's registry entry
+    `engine_def` is the source. A map, even an empty one, is the only source:
+    anton's registry shares engine ids with cowork-server connectors that are
+    different connectors (e.g. gmail is IMAP here, the Gmail API there).
     """
     if usage_notes is None:
-        engine_def = registry.get(engine)
         text = getattr(engine_def, "usage_notes", "") if engine_def else ""
     else:
         text = usage_notes.get(engine, "")
     return text.strip() if isinstance(text, str) else ""
 
 
-def build_datasource_context(
-    vault: DataVault,
-    active_only: str | None = None,
+_DATASOURCES_HEADING = "\n\n## Connected Data Sources"
+_DATASOURCES_INTRO = (
+    "Each connection has a Slug (a stable machine identifier, e.g. "
+    "`postgres-7e8971c3`) and a Label (a human-readable name the user "
+    "gave it, e.g. \"prod-db\"; may be unset). "
+    "Credentials are pre-injected as namespaced DS_<ENGINE_NAME>__<FIELD> "
+    "environment variables. Use them directly in scratchpad code "
+    "(e.g. DS_POSTGRES_PROD_DB__HOST). "
+    "Never read the data vault files directly.\n"
+    "If you see `[DS_<NAME>]` patterns in scratchpad output, those are "
+    "scrub-markers where a secret value was redacted before returning "
+    "text to you — the actual value IS injected in the env var. Reference "
+    "it by slug; never treat the bracket form as a literal credential "
+    "or pass it back as a value to any tool.\n"
+)
+_GOOGLE_DRIVE_PARAGRAPH = (
+    "\nConnected Google Drive accounts are available through Google OAuth credentials "
+    "in the injected `DS_GOOGLE_DRIVE_<CONNECTION>__...` environment variables. "
+    "Only claim Google Drive access if you can actually use those credentials successfully."
+)
+
+
+@dataclass(frozen=True)
+class CatalogConnection:
+    """One connection of a `DatasourceCatalog`: the names a caller can match
+    against, and the connection's rendered block."""
+
+    slug: str
+    engine: str
+    # The registry's display name, or the engine id when the registry has none.
+    engine_name: str
+    # "" when the user gave none.
+    label: str
+    block: str
+    # Whether this connection makes the Google Drive availability paragraph apply.
+    google_drive_access: bool = False
+
+
+@dataclass(frozen=True)
+class DatasourceCatalog:
+    """The `## Connected Data Sources` section as data, so it can be rendered
+    for a subset of its connections."""
+
+    connections: tuple[CatalogConnection, ...]
+    # engine -> its rendered usage-notes section; only engines that have notes.
+    notes: Mapping[str, str]
+
+    def render(self, slugs: Collection[str] | None = None) -> str:
+        """The section for the connections in `slugs` (all when None).
+
+        Usage notes follow the connection blocks, once per engine of a kept
+        connection; the Google Drive paragraph comes last, and only when a
+        kept connection makes it apply.
+        """
+        kept = [c for c in self.connections if slugs is None or c.slug in slugs]
+        lines = [_DATASOURCES_HEADING, _DATASOURCES_INTRO]
+        lines.extend(c.block for c in kept)
+        for engine in dict.fromkeys(c.engine for c in kept):
+            if engine in self.notes:
+                lines.append(self.notes[engine])
+        if any(c.google_drive_access for c in kept):
+            lines.append(_GOOGLE_DRIVE_PARAGRAPH)
+        return "\n".join(lines)
+
+
+def collect_datasource_catalog(
+    vault: DataVault | None,
     usage_notes: "Mapping[str, str] | None" = None,
-) -> str:
-    """Build a system-prompt section listing available DS_* env vars by name.
+) -> DatasourceCatalog | None:
+    """The vault's connections as a `DatasourceCatalog` (DS_* names, never
+    values), or None when there are none or the vault cannot list them.
 
-    Shows the LLM what data sources are connected and which environment
-    variable names to use — without exposing any credential values.
-
-    If active_only is set, only the matching slug is included.
-
-    `usage_notes` maps engine -> agent-facing notes; each connected engine's
-    notes are rendered once, after all connection blocks. See
-    `_resolve_usage_notes` for how None differs from a map.
+    `usage_notes` maps engine -> agent-facing notes; see `_resolve_usage_notes`
+    for how None differs from a map. Any other value is treated as an empty
+    map: the host did send something, so anton's registry must not stand in.
     """
     try:
         vault = vault or LocalDataVault()
         conns = vault.list_connections()
     except Exception:
-        return ""
+        return None
     if not conns:
-        return ""
-    lines = ["\n\n## Connected Data Sources"]
-    lines.append(
-        "Each connection has a Slug (a stable machine identifier, e.g. "
-        "`postgres-7e8971c3`) and a Label (a human-readable name the user "
-        "gave it, e.g. \"prod-db\"; may be unset). "
-        "Credentials are pre-injected as namespaced DS_<ENGINE_NAME>__<FIELD> "
-        "environment variables. Use them directly in scratchpad code "
-        "(e.g. DS_POSTGRES_PROD_DB__HOST). "
-        "Never read the data vault files directly.\n"
-        "If you see `[DS_<NAME>]` patterns in scratchpad output, those are "
-        "scrub-markers where a secret value was redacted before returning "
-        "text to you — the actual value IS injected in the env var. Reference "
-        "it by slug; never treat the bracket form as a literal credential "
-        "or pass it back as a value to any tool.\n"
-    )
+        return None
+    if usage_notes is not None and not isinstance(usage_notes, Mapping):
+        logger.warning(
+            "connector usage notes are a %s, not a mapping; rendering none",
+            type(usage_notes).__name__,
+        )
+        usage_notes = {}
     # Google Drive's drive.file OAuth scope only covers files the app created
     # itself, plus files explicitly granted via the Google Picker (persisted
     # as a `_picked_files` vault field).
@@ -495,33 +546,32 @@ def build_datasource_context(
     # unscoped, and named files from other projects. cowork-server renders the
     # scoped list itself, via ConnectionsService.picked_files_by_project() ->
     # the harness prompt suffix, which is the single renderer. All we track
-    # here is *whether* any exist, so the availability paragraph below still
-    # fires for a Picker-only connection exactly as it always has.
-    google_drive_oauth_connected = False
-    google_drive_has_picked_files = False
-    # Hoisted out of the loop below: this function is rebuilt on every chat
-    # turn, and DatasourceRegistry() parses the full built-in + user
-    # datasources.md on every construction (no caching) — with N
-    # connections that was N full re-parses per turn before this change.
+    # here is *whether* any exist, so the availability paragraph still fires
+    # for a Picker-only connection exactly as it always has.
+    #
+    # One registry per call, and one lookup per engine: DatasourceRegistry()
+    # parses the full built-in + user datasources.md on every construction
+    # (no caching), and this runs on every chat turn.
     registry = DatasourceRegistry()
-    # Engines in first-render order, so notes are emitted once per engine.
-    rendered_engines: list[str] = []
+    engine_defs: dict[str, DatasourceEngine | None] = {}
+    connections: list[CatalogConnection] = []
     for c in conns:
-        slug = f"{c['engine']}-{c['name']}"
-        if active_only and slug != active_only:
-            continue
-        if c["engine"] not in rendered_engines:
-            rendered_engines.append(c["engine"])
+        engine = c["engine"]
+        slug = f"{engine}-{c['name']}"
+        if engine not in engine_defs:
+            engine_defs[engine] = registry.get(engine)
+        engine_def = engine_defs[engine]
+        engine_name = engine_def.display_name if engine_def else engine
         # read_record gives fields + secure_keys in one call; fall back to load
         # for any vault backend that doesn't implement it.
         if hasattr(vault, "read_record"):
-            record = vault.read_record(c["engine"], c["name"]) or {}
+            record = vault.read_record(engine, c["name"]) or {}
             fields = record.get("fields", {}) or {}
             secure_keys = record.get("secure_keys")
         else:
-            fields = vault.load(c["engine"], c["name"]) or {}
+            fields = vault.load(engine, c["name"]) or {}
             secure_keys = None
-        prefix = _slug_env_prefix(c["engine"], c["name"])
+        prefix = _slug_env_prefix(engine, c["name"])
         # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`,
         # `_user_label`) — they're not credential env vars the agent should
         # reference.
@@ -532,9 +582,8 @@ def build_datasource_context(
             fields.get("_label", "")
         ).strip()
 
-        lines.append(f"\n### Slug: `{slug}` — Label: {user_label or '(none)'}")
-        engine_def = registry.get(c["engine"])
-        lines.append(f"Engine: {engine_def.display_name if engine_def else c['engine']}")
+        lines = [f"\n### Slug: `{slug}` — Label: {user_label or '(none)'}"]
+        lines.append(f"Engine: {engine_name}")
         # Same non-secret allowlist `_connection_identity()` encodes
         # (host/database/email, secure_keys-gated) — inlined here as
         # independent lines instead of one collapsed string.
@@ -551,31 +600,51 @@ def build_datasource_context(
         for var in var_names:
             lines.append(f" - {var}")
 
-        if c["engine"] == "google_drive":
-            if fields.get("auth_type") == "oauth":
-                google_drive_oauth_connected = True
-            # Parsed, not merely truthy-checked: a `_picked_files` holding only
-            # malformed entries must read as "none", the same way it did when
-            # this drove the (now removed) listing.
-            if _parse_picked_files(fields.get("_picked_files")):
-                google_drive_has_picked_files = True
-    for engine in rendered_engines:
-        notes = _resolve_usage_notes(engine, usage_notes, registry)
-        if not notes:
-            continue
-        engine_def = registry.get(engine)
-        lines.append(
-            f"\n### Usage notes: {engine_def.display_name if engine_def else engine} "
-            f"(engine `{engine}`)"
+        # Parsed, not merely truthy-checked: a `_picked_files` holding only
+        # malformed entries must read as "none", the same way it did when
+        # this drove the (now removed) listing.
+        google_drive_access = engine == "google_drive" and (
+            fields.get("auth_type") == "oauth"
+            or bool(_parse_picked_files(fields.get("_picked_files")))
         )
-        lines.append(notes)
-    if google_drive_oauth_connected or google_drive_has_picked_files:
-        lines.append(
-            "\nConnected Google Drive accounts are available through Google OAuth credentials "
-            "in the injected `DS_GOOGLE_DRIVE_<CONNECTION>__...` environment variables. "
-            "Only claim Google Drive access if you can actually use those credentials successfully."
+        connections.append(
+            CatalogConnection(
+                slug=slug,
+                engine=engine,
+                engine_name=engine_name,
+                label=user_label,
+                block="\n".join(lines),
+                google_drive_access=google_drive_access,
+            )
         )
-    return "\n".join(lines)
+    notes: dict[str, str] = {}
+    for engine, engine_def in engine_defs.items():
+        text = _resolve_usage_notes(engine, usage_notes, engine_def)
+        if text:
+            notes[engine] = (
+                f"\n### Usage notes: {engine_def.display_name if engine_def else engine} "
+                f"(engine `{engine}`)\n{text}"
+            )
+    return DatasourceCatalog(connections=tuple(connections), notes=notes)
+
+
+def build_datasource_context(
+    vault: DataVault,
+    active_only: str | None = None,
+    usage_notes: "Mapping[str, str] | None" = None,
+) -> str:
+    """Build a system-prompt section listing available DS_* env vars by name.
+
+    Shows the LLM what data sources are connected and which environment
+    variable names to use — without exposing any credential values.
+
+    If active_only is set, only the matching slug is included, with only its
+    engine's usage notes. `usage_notes`: see `collect_datasource_catalog`.
+    """
+    catalog = collect_datasource_catalog(vault, usage_notes)
+    if catalog is None:
+        return ""
+    return catalog.render([active_only] if active_only else None)
 
 
 def _connection_identity(fields: dict, secure_keys: list | None = None) -> str | None:

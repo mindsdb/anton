@@ -19,6 +19,7 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
 DATA_LOOP_MAX: int = 3
@@ -227,6 +228,9 @@ class GenState:
     # connected. Filled by the entry point; rendered into the call kickoff so
     # the gathering step knows what it can query.
     datasource_context: str = ""
+    # The same connections as data, rendered by the backend prompt for only
+    # the declared sources. None when nothing is connected.
+    datasource_catalog: "DatasourceCatalog | None" = None
     # The `## Scratchpads already in this session` section of the gathering
     # kickoff (`discovery.prompts.render_scratchpads_context`): the pads the
     # calling agent already ran, so the step reuses them instead of guessing
