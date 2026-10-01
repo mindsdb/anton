@@ -24,7 +24,6 @@ import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.tools.tool_handlers import (
-    _artifact_content_mtime,
     lint_changed_artifact_files,
     snapshot_existing_artifact_mtimes,
     track_edits_since,
@@ -284,27 +283,6 @@ async def test_nested_name_matching_a_non_content_name_is_an_edit(session, root)
     track_edits_since(session, ArtifactStore(root), before)
 
     assert session._artifacts_touched == {slug}
-
-
-def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
-    folder = tmp_path / "art"
-    folder.mkdir()
-    good = folder / "index.html"
-    good.write_text("x")
-    os.utime(good, (1000, 1000))
-    gone = folder / "gone.html"
-    gone.write_text("x")
-
-    real_lstat = Path.lstat
-
-    def flaky(self):
-        if self.name == "gone.html":
-            raise FileNotFoundError(str(self))
-        return real_lstat(self)
-
-    monkeypatch.setattr(Path, "lstat", flaky)
-
-    assert _artifact_content_mtime(folder) == 1000.0
 
 
 def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):

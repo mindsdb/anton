@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import re
-import stat
 import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -51,11 +50,10 @@ from anton.core.artifacts.internal_files import (
 logger = logging.getLogger(__name__)
 
 
-# `publisher` imports both names below.
-# Files are matched whole-path in `_reconcile`, so a nested `sub/README.md`
-# is still content; dirs are matched on the first path component.
+# `_reconcile` matches these file names against the whole relative path and
+# `HOUSEKEEPING_DIRS` against its first component. The only difference from
+# `iter_content_files` is a top-level directory named like a housekeeping file.
 _EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
-_HOUSEKEEPING_DIRS = HOUSEKEEPING_DIRS
 
 
 def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
@@ -64,8 +62,11 @@ def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
     Top-level `NON_CONTENT_NAMES` are pruned without descending and symlinks
     are never followed. An entry or directory that errors is skipped on its
     own; a missing `folder` yields nothing. Order is unspecified.
+
+    Directories are told apart by the scan's own entry type, so only files
+    cost a stat call (none at all on Windows, where the scan carries it).
     """
-    stack = [(folder, True)]
+    stack = [(os.fspath(folder), True)]
     while stack:
         current, is_root = stack.pop()
         try:
@@ -76,15 +77,16 @@ def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
         for entry in entries:
             if is_root and entry.name in NON_CONTENT_NAMES:
                 continue
-            path = Path(entry.path)
             try:
-                st = path.lstat()
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append((entry.path, False))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
-            if stat.S_ISDIR(st.st_mode):
-                stack.append((path, False))
-            elif stat.S_ISREG(st.st_mode):
-                yield path, st
+            yield Path(entry.path), st
 
 
 # Same character whitelist projects_store uses — keeps slug shapes
@@ -453,7 +455,7 @@ class ArtifactStore:
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
             rel = p.relative_to(folder).as_posix()
-            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
+            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in HOUSEKEEPING_DIRS:
                 continue
             try:
                 st = p.stat()

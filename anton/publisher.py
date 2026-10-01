@@ -15,12 +15,12 @@ from pathlib import Path
 
 from anton.core.artifacts.internal_files import (
     GENERATION_INPUT_FILES,
+    NON_CONTENT_NAMES,
     PUBLISHED_FILENAME,
     REVISIONS_DIRNAME,
     STATE_SNAPSHOT_FILENAME,
 )
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
-from anton.core.artifacts.store import _EXCLUDED_FROM_FILES, _HOUSEKEEPING_DIRS
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
@@ -49,11 +49,11 @@ FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-state
 # schema-change warning). Never bundled.
 _STATE_SNAPSHOT = STATE_SNAPSHOT_FILENAME
 # Names inside an artifact folder that are housekeeping or generation inputs
-# (prd.md, discovery.json, ...) — never bundled. The store's definition, so
-# what the agent hides from `files[]` and what the bundle omits cannot drift.
+# (prd.md, discovery.json, ...) — never bundled. The same set the store hides
+# from `files[]`, so what the agent sees and what the bundle omits cannot drift.
 # `_zip_fullstack` is allowlist-based, so root files are not bundled anyway;
 # the set guards static/ and any future change to that allowlist.
-_FULLSTACK_EXCLUDED = _EXCLUDED_FROM_FILES | _HOUSEKEEPING_DIRS
+_FULLSTACK_EXCLUDED = NON_CONTENT_NAMES
 
 
 class StatePublishBlocked(Exception):

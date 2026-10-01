@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 from pathlib import Path
 
 from anton.core.artifacts.store import iter_content_files
+from anton.core.tools.tool_handlers import _artifact_content_mtime
 from anton.publish_access import _user_files
 
 
@@ -16,6 +18,31 @@ def _touch(path: Path, text: str = "x") -> Path:
 
 def _names(folder: Path) -> set[str]:
     return {p.relative_to(folder).as_posix() for p, _ in iter_content_files(folder)}
+
+
+class _StatFails:
+    """A scan entry whose stat call fails, as for a file removed mid-walk."""
+
+    def __init__(self, entry):
+        self._entry = entry
+
+    def __getattr__(self, name):
+        return getattr(self._entry, name)
+
+    def stat(self, *, follow_symlinks=True):
+        raise OSError(errno.EIO, "boom", self._entry.path)
+
+
+def _fail_stat_for(monkeypatch, path: Path) -> None:
+    real_scandir = os.scandir
+    target = os.fspath(path)
+
+    @contextlib.contextmanager
+    def scandir(where):
+        with real_scandir(where) as it:
+            yield [_StatFails(e) if e.path == target else e for e in it]
+
+    monkeypatch.setattr(os, "scandir", scandir)
 
 
 def test_prunes_non_content_top_level_but_keeps_nested_namesakes(tmp_path):
@@ -50,18 +77,11 @@ def test_yields_lstat_result(tmp_path):
     assert st.st_size == 5
 
 
-def test_file_whose_lstat_fails_is_skipped_others_yielded(tmp_path, monkeypatch):
+def test_file_whose_stat_fails_is_skipped_others_yielded(tmp_path, monkeypatch):
     _touch(tmp_path / "good.txt")
     bad = _touch(tmp_path / "bad.txt")
     _touch(tmp_path / "sub" / "also_good.txt")
-    real_lstat = Path.lstat
-
-    def flaky_lstat(self):
-        if self == bad:
-            raise OSError(errno.EIO, "boom")
-        return real_lstat(self)
-
-    monkeypatch.setattr(Path, "lstat", flaky_lstat)
+    _fail_stat_for(monkeypatch, bad)
 
     assert _names(tmp_path) == {"good.txt", "sub/also_good.txt"}
 
@@ -88,14 +108,14 @@ def test_missing_folder_yields_nothing(tmp_path):
 
 def test_user_files_survive_one_unreadable_entry(tmp_path, monkeypatch):
     _touch(tmp_path / "index.html")
-    bad = _touch(tmp_path / "bad.txt")
-    real_lstat = Path.lstat
+    _fail_stat_for(monkeypatch, _touch(tmp_path / "bad.txt"))
 
-    def flaky_lstat(self):
-        if self == bad:
-            raise OSError(errno.EIO, "boom")
-        return real_lstat(self)
+    assert [p.name for p in _user_files(tmp_path)] == ["index.html"]
 
-    monkeypatch.setattr(Path, "lstat", flaky_lstat)
 
-    assert "index.html" in {p.name for p in _user_files(tmp_path)}
+def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
+    good = _touch(tmp_path / "index.html")
+    os.utime(good, (1000, 1000))
+    _fail_stat_for(monkeypatch, _touch(tmp_path / "gone.html"))
+
+    assert _artifact_content_mtime(tmp_path) == 1000.0

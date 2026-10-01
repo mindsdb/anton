@@ -17,12 +17,9 @@ property of the artifact folder, not of whichever tool touches them.
 
 This module also owns the folder's other reserved names (housekeeping files
 and directories). `NON_CONTENT_NAMES` is every top-level name that is never
-artifact content; cowork-server, `tool_handlers` and `publish_access` match it
-against the first component of an artifact-relative path, `store._reconcile`
-matches files whole-path (a nested `sub/README.md` stays in `files[]`). The
-fullstack bundle excludes these names by basename at any depth; the html bundle
-uses the smaller `publisher._BUNDLE_SKIP_NAMES` on any path component.
-cowork-server imports it from here.
+artifact content: match it against the first component of an artifact-relative
+path, or walk with `store.iter_content_files`. cowork-server imports it from
+here. Consumers that match differently say so where they do it.
 """
 
 from __future__ import annotations
@@ -69,8 +66,8 @@ HOUSEKEEPING_FILES = frozenset({
     STATE_SNAPSHOT_FILENAME,
 })
 
-# Separate from the file set: the store matches files whole-path and
-# directories on the first path component.
+# Separate from the file set because `store._reconcile` matches the two
+# differently (see there).
 HOUSEKEEPING_DIRS = frozenset({REVISIONS_DIRNAME})
 
 NON_CONTENT_NAMES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES | HOUSEKEEPING_DIRS
