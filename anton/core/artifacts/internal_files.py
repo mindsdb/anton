@@ -14,6 +14,10 @@ never confirmed.
 
 Lives here rather than in either tool package because these files are a
 property of the artifact folder, not of whichever tool touches them.
+
+The same holds for the folder's other reserved names (housekeeping files and
+directories). cowork-server imports `NON_CONTENT_NAMES` from here; consumers
+match it against the first component of an artifact-relative path.
 """
 
 from __future__ import annotations
@@ -35,3 +39,33 @@ GENERATION_INPUT_FILES = frozenset({
     API_SPEC_FILENAME,
     DISCOVERY_FILENAME,
 })
+
+
+METADATA_FILENAME = "metadata.json"
+README_FILENAME = "README.md"
+PUBLISHED_FILENAME = ".published.json"
+BACKEND_LOG_FILENAME = "backend.log"
+# The local STATE driver's SQLite database; -wal/-shm carry the freshest writes.
+STATE_DB_FILENAME = ".anton_state.db"
+STATE_SNAPSHOT_FILENAME = ".state_manifest.published.json"
+REVISIONS_DIRNAME = ".revisions"
+
+# Store-owned, publish-state or running-backend files, not authored content.
+# `state_manifest.json` is deliberately absent: it is a deliverable the
+# publisher bundles.
+HOUSEKEEPING_FILES = frozenset({
+    METADATA_FILENAME,
+    README_FILENAME,
+    PUBLISHED_FILENAME,
+    BACKEND_LOG_FILENAME,
+    STATE_DB_FILENAME,
+    f"{STATE_DB_FILENAME}-wal",
+    f"{STATE_DB_FILENAME}-shm",
+    STATE_SNAPSHOT_FILENAME,
+})
+
+# Separate from the file set: the store matches files whole-path and
+# directories on the first path component.
+HOUSEKEEPING_DIRS = frozenset({REVISIONS_DIRNAME})
+
+NON_CONTENT_NAMES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES | HOUSEKEEPING_DIRS

@@ -33,50 +33,27 @@ from anton.core.artifacts.models import (
     ProvenanceEntry,
     TurnEntry,
 )
-from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
+# BACKEND_LOG_FILENAME is re-exported for backend_launcher and generate_artifact.
+from anton.core.artifacts.internal_files import (
+    BACKEND_LOG_FILENAME,
+    GENERATION_INPUT_FILES,
+    HOUSEKEEPING_DIRS,
+    HOUSEKEEPING_FILES,
+    METADATA_FILENAME,
+    PUBLISHED_FILENAME,
+    README_FILENAME,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-METADATA_FILENAME = "metadata.json"
-README_FILENAME = "README.md"
-PUBLISHED_FILENAME = ".published.json"
-BACKEND_LOG_FILENAME = "backend.log"
-
-# Files the store owns, hold publish-state, or belong to a running backend —
-# not artifact content the agent authored. Mirrors cowork-server's
-# artifacts-service housekeeping set (`cowork/services/artifacts.py:132`) so the
-# agent's view and the UI agree on what counts as an artifact file; this is the
-# one definition — `anton/publish_access.py` and `publisher._FULLSTACK_EXCLUDED`
-# import it.
-# `backend.log` is here for that agreement: it is the launched backend's runtime
-# log, written into the artifact folder by `launch_artifact_backend`, and every
-# other copy of this set already excluded it.
-# The `.anton_state.db*` trio is the local STATE driver's SQLite database (the
-# -wal/-shm side files carry the freshest writes) and
-# `.state_manifest.published.json` is the publisher's schema snapshot — all
-# runtime/publish bookkeeping of a stateful backend, never authored content.
-# `state_manifest.json` itself is NOT here: it is a deliverable the publisher
-# bundles. NOTE: cowork-server's copy of this set does not know these names yet.
-_HOUSEKEEPING_FILES = {
-    METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME, BACKEND_LOG_FILENAME,
-    ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
-    ".state_manifest.published.json",
-}
-
-# Kept separate from the housekeeping set rather than merged into it: these are
-# authored by the generation tools, not owned by the store, and the set above
-# mirrors cowork-server's — folding these in would quietly make that claim
-# false. Both are excluded from `files[]`; only the reason differs.
-_EXCLUDED_FROM_FILES = _HOUSEKEEPING_FILES | set(GENERATION_INPUT_FILES)
-
-# Reserved DIRECTORIES, matched on the artifact-relative path's first component
-# rather than by exact name (`.revisions` is the private revision journal).
-# Separate from the sets above because those are matched whole-path: a
-# directory name folded in there would only ever match a file literally called
-# `.revisions`.
-_HOUSEKEEPING_DIRS = {".revisions"}
+# Aliases imported by `publish_access` and `publisher`.
+_HOUSEKEEPING_FILES = HOUSEKEEPING_FILES
+# Matched whole-path in `_reconcile`, so a nested `sub/README.md` is still content.
+_EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
+# Matched on the first path component.
+_HOUSEKEEPING_DIRS = HOUSEKEEPING_DIRS
 
 # Same character whitelist projects_store uses — keeps slug shapes
 # consistent across antontron's project names AND artifact slugs.
