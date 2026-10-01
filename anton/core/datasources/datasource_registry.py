@@ -40,9 +40,8 @@ class DatasourceEngine:
     # True for engines defined in ~/.anton/datasources.md
     custom: bool = False
     # Agent-facing notes on using this engine's API once connected (traps,
-    # efficient endpoints, auth quirks). Rendered by build_datasource_context
-    # only for a connected engine, and only when the host passed no notes of
-    # its own (ChatSessionConfig.connector_usage_notes is None), i.e. the CLI.
+    # efficient endpoints, auth quirks). Used only when the host sends none,
+    # i.e. the CLI; see ChatSessionConfig.connector_usage_notes.
     # Writing rules: English, imperative, no #/##/### headings outside code
     # fences, per-method differences by field name, never where credentials live.
     usage_notes: str = ""

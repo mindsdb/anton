@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anton.utils.datasources import DATASOURCES_HEADER
+
 from .discovery.notes import EXEC_OUTPUT_MAX
 
 # The body markers are quoted to the model in several places here and parsed in
@@ -944,11 +946,11 @@ and costs a regeneration:
 """
 
 
-_NO_DATASOURCES_NOTE = """\
-## Connected Data Sources
-None are used by this artifact: leave `SECRETS` empty and read no `DS_*`
-variable.\
-"""
+_NO_DATASOURCES_NOTE = (
+    f"{DATASOURCES_HEADER}\n"
+    "None are used by this artifact: leave `SECRETS` empty and read no `DS_*`\n"
+    "variable."
+)
 
 
 def _datasource_section(

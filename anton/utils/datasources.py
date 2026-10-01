@@ -432,22 +432,19 @@ def _resolve_usage_notes(
     usage_notes: "Mapping[str, str] | None",
     engine_def: "DatasourceEngine | None",
 ) -> str:
-    """The usage notes to render for `engine`, or "".
-
-    `usage_notes` is the host's map (ChatSessionConfig.connector_usage_notes).
-    None means the host sent none (the CLI): anton's registry entry
-    `engine_def` is the source. A map, even an empty one, is the only source:
-    anton's registry shares engine ids with cowork-server connectors that are
-    different connectors (e.g. gmail is IMAP here, the Gmail API there).
-    """
+    """The usage notes to render for `engine`, or "": from the host's map, or
+    from anton's registry entry `engine_def` only when the host sent None
+    (see ChatSessionConfig.connector_usage_notes)."""
     if usage_notes is None:
-        text = getattr(engine_def, "usage_notes", "") if engine_def else ""
+        text = engine_def.usage_notes if engine_def else ""
     else:
         text = usage_notes.get(engine, "")
     return text.strip() if isinstance(text, str) else ""
 
 
-_DATASOURCES_HEADING = "\n\n## Connected Data Sources"
+# The section heading; the artifact prompts quote it, so it lives here once.
+DATASOURCES_HEADER = "## Connected Data Sources"
+_DATASOURCES_HEADING = "\n\n" + DATASOURCES_HEADER
 _DATASOURCES_INTRO = (
     "Each connection has a Slug (a stable machine identifier, e.g. "
     "`postgres-7e8971c3`) and a Label (a human-readable name the user "
@@ -481,8 +478,9 @@ class CatalogConnection:
     # "" when the user gave none.
     label: str
     block: str
-    # Whether this connection makes the Google Drive availability paragraph apply.
-    google_drive_access: bool = False
+    # A paragraph rendered once after all usage notes when any kept
+    # connection carries it (the Google Drive availability paragraph), or "".
+    footer: str = ""
 
 
 # eq=False: `notes` is a dict, so a generated __hash__ would raise; a catalog
@@ -500,8 +498,7 @@ class DatasourceCatalog:
         """The section for the connections in `slugs` (all when None).
 
         Usage notes follow the connection blocks, once per engine of a kept
-        connection; the Google Drive paragraph comes last, and only when a
-        kept connection makes it apply.
+        connection; footers come last, each once.
         """
         _reject_bare_string(slugs)
         kept = [c for c in self.connections if slugs is None or c.slug in slugs]
@@ -510,8 +507,7 @@ class DatasourceCatalog:
         for engine in dict.fromkeys(c.engine for c in kept):
             if engine in self.notes:
                 lines.append(self.notes[engine])
-        if any(c.google_drive_access for c in kept):
-            lines.append(_GOOGLE_DRIVE_PARAGRAPH)
+        lines.extend(dict.fromkeys(c.footer for c in kept if c.footer))
         return "\n".join(lines)
 
 
@@ -530,9 +526,9 @@ def collect_datasource_catalog(
     """The vault's connections as a `DatasourceCatalog` (DS_* names, never
     values), or None when there are none or the vault cannot list them.
 
-    `usage_notes` maps engine -> agent-facing notes; see `_resolve_usage_notes`
-    for how None differs from a map. Any other value is treated as an empty
-    map: the host did send something, so anton's registry must not stand in.
+    `usage_notes`: see ChatSessionConfig.connector_usage_notes. A value that
+    is not a mapping is treated as an empty map: the host did send something,
+    so anton's registry must not stand in.
 
     `slugs`, when given, leaves every other connection out before its record
     is read: a remote vault fetches each record over the network.
@@ -568,17 +564,23 @@ def collect_datasource_catalog(
     # parses the full built-in + user datasources.md on every construction
     # (no caching), and this runs on every chat turn.
     registry = DatasourceRegistry()
-    engine_defs: dict[str, DatasourceEngine | None] = {}
+    engine_names: dict[str, str] = {}
+    notes: dict[str, str] = {}
     connections: list[CatalogConnection] = []
     for c in conns:
         engine = c["engine"]
         slug = f"{engine}-{c['name']}"
         if slugs is not None and slug not in slugs:
             continue
-        if engine not in engine_defs:
-            engine_defs[engine] = registry.get(engine)
-        engine_def = engine_defs[engine]
-        engine_name = engine_def.display_name if engine_def else engine
+        if engine not in engine_names:
+            engine_def = registry.get(engine)
+            engine_names[engine] = engine_def.display_name if engine_def else engine
+            text = _resolve_usage_notes(engine, usage_notes, engine_def)
+            if text:
+                notes[engine] = (
+                    f"\n### Usage notes: {engine_names[engine]} (engine `{engine}`)\n{text}"
+                )
+        engine_name = engine_names[engine]
         # read_record gives fields + secure_keys in one call; fall back to load
         # for any vault backend that doesn't implement it.
         if hasattr(vault, "read_record"):
@@ -631,17 +633,9 @@ def collect_datasource_catalog(
                 engine_name=engine_name,
                 label=user_label,
                 block="\n".join(lines),
-                google_drive_access=google_drive_access,
+                footer=_GOOGLE_DRIVE_PARAGRAPH if google_drive_access else "",
             )
         )
-    notes: dict[str, str] = {}
-    for engine, engine_def in engine_defs.items():
-        text = _resolve_usage_notes(engine, usage_notes, engine_def)
-        if text:
-            notes[engine] = (
-                f"\n### Usage notes: {engine_def.display_name if engine_def else engine} "
-                f"(engine `{engine}`)\n{text}"
-            )
     return DatasourceCatalog(connections=tuple(connections), notes=notes)
 
 

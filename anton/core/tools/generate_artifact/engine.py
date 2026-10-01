@@ -519,7 +519,6 @@ async def generate(
         is_fullstack=artifact_type != "html-app",
     )
 
-    catalog = _datasource_catalog(session)
     state = GenState(
         session=session,
         artifact_type=artifact_type,
@@ -530,8 +529,7 @@ async def generate(
         agent_understanding=agent_understanding,
         known_data=known_data,
         user_preferences=user_preferences,
-        datasource_context=catalog.render() if catalog else "",
-        datasource_catalog=catalog,
+        datasource_catalog=_datasource_catalog(session),
         scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
         progress=progress,

@@ -24,7 +24,8 @@ def _offline_turn(tmp_path, monkeypatch):
         llm_client_mod.LLMClient, "from_settings",
         classmethod(lambda cls, settings: make_mock_llm()),
     )
-    # The real wiring imports the `mcp` package, which is not a test dependency.
+    # MCP discovery is not under test here; stubbing the module also keeps the
+    # test runnable in an env that lacks the `mcp` runtime dependency.
     wiring = types.ModuleType("anton.core.mcp.wiring")
     wiring.discover_mcp_tools = lambda vault, connections: ([], [])
     monkeypatch.setitem(sys.modules, "anton.core.mcp.wiring", wiring)

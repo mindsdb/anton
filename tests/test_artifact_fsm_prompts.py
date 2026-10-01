@@ -5,19 +5,10 @@ import re
 import json
 from pathlib import Path
 
-import pytest
-
 from anton.core.datasources.data_vault import LocalDataVault
-from anton.core.datasources.datasource_registry import DatasourceRegistry
 from anton.core.tools.generate_artifact import prompts
 from anton.core.tools.generate_artifact.state import GenState
 from anton.utils.datasources import collect_datasource_catalog
-
-
-@pytest.fixture(autouse=True)
-def _no_user_registry(tmp_path, monkeypatch):
-    """Keep the developer's ~/.anton/datasources.md out of the real registry."""
-    monkeypatch.setattr(DatasourceRegistry, "_USER_PATH", tmp_path / "no-user-registry.md")
 
 
 def _state(**kw):
