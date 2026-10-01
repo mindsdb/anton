@@ -13,6 +13,7 @@ Standard library only, run as ``python -I -S <this file>``: importing the
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import socket
 import struct
@@ -28,10 +29,24 @@ NOT_READY = b"N"
 HANDOFF = b"T"
 
 _PEERCRED = struct.Struct("3i")
+_PR_SET_DUMPABLE = 4
 
 
 def socket_address(name: str) -> str:
     return "\0" + name
+
+
+def forbid_same_user_access() -> None:
+    """Keep other processes of the pod's user out of this process through /proc.
+
+    Cell code runs as the same user. Without this it can read the environment
+    and open the descriptors of whoever holds the turn's streams, and write
+    events the controller trusts. Inherited by forks, reset by exec.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
 
 
 def connect_to_resident(name: str, resident_pid: int, timeout: float) -> tuple[socket.socket | None, str]:
@@ -101,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resident-pid", type=int, default=1, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
+    try:
+        forbid_same_user_access()
+    except OSError as exc:
+        # A direct turn has no such protection either; losing it is not worth losing the turn.
+        print(f"cloud-turn launcher: could not close /proc access: {exc}", file=sys.stderr, flush=True)
     sock, reason = connect_to_resident(args.socket, args.resident_pid, READY_TIMEOUT_SECONDS)
     if sock is None:
         run_turn_directly(reason)

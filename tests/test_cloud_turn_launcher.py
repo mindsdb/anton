@@ -117,6 +117,31 @@ def test_a_ready_resident_gets_the_streams_and_its_exit_code_is_returned(tmp_pat
     assert "running the turn directly" not in stderr
 
 
+def test_the_launcher_is_closed_to_other_processes_while_it_holds_the_streams(tmp_path, resident):
+    """It holds the exec stdout for the whole turn: same-uid cell code must not
+    open it through /proc and write events the controller would trust."""
+    name, fake = resident
+    opened: dict[str, object] = {}
+
+    def play(conn):
+        pid, _, _ = launcher._PEERCRED.unpack(
+            conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, launcher._PEERCRED.size)
+        )
+        try:
+            os.close(os.open(f"/proc/{pid}/fd/1", os.O_WRONLY))
+            opened["stdout"] = "opened"
+        except PermissionError:
+            opened["stdout"] = "denied"
+        conn.sendall(launcher.NOT_READY)
+        fake.receive(conn)
+
+    fake.start(play)
+    _run_launcher(tmp_path, name, resident_pid=os.getpid())
+    fake.close()
+
+    assert opened["stdout"] == "denied"
+
+
 def test_a_resident_that_is_not_ready_gets_no_streams(tmp_path, resident):
     name, fake = resident
 

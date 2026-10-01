@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import ctypes
 import gc
 import importlib
 import logging
@@ -29,7 +28,14 @@ import traceback
 from collections.abc import Callable
 from typing import NoReturn
 
-from anton.cloud_turn.launcher import HANDOFF, NOT_READY, READY, SOCKET_NAME, socket_address
+from anton.cloud_turn.launcher import (
+    HANDOFF,
+    NOT_READY,
+    READY,
+    SOCKET_NAME,
+    forbid_same_user_access,
+    socket_address,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,31 +78,16 @@ HANDOFF_TIMEOUT_SECONDS = 5.0
 #: How long a SIGTERM waits for running turns; under the pod's 30 s grace period.
 SHUTDOWN_GRACE_SECONDS = 25.0
 
-_PR_SET_DUMPABLE = 4
-
 
 def preload_turn_modules() -> None:
     for name in PRELOAD_MODULES:
         importlib.import_module(name)
 
 
-def _forbid_same_user_access() -> None:
-    """Keep other processes of the pod's user out of this process and its forks.
-
-    Cell code runs as the same user and could otherwise read every turn's
-    environment and descriptors through /proc. Exec resets it, so cells keep
-    the default.
-    """
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
-        errno = ctypes.get_errno()
-        raise OSError(errno, os.strerror(errno))
-
-
 def _prepare(preload: Callable[[], None]) -> bool:
     started = time.monotonic()
     try:
-        _forbid_same_user_access()
+        forbid_same_user_access()
         preload()
     except Exception:
         logger.exception("resident process setup failed; every turn runs directly")
