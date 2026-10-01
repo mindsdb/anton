@@ -66,15 +66,20 @@ def test_file_whose_lstat_fails_is_skipped_others_yielded(tmp_path, monkeypatch)
     assert _names(tmp_path) == {"good.txt", "sub/also_good.txt"}
 
 
-def test_unreadable_directory_is_skipped_others_yielded(tmp_path):
+def test_unreadable_directory_is_skipped_others_yielded(tmp_path, monkeypatch):
     _touch(tmp_path / "good.txt")
     locked = tmp_path / "locked"
     _touch(locked / "hidden.txt")
-    locked.chmod(0)
-    try:
-        assert _names(tmp_path) == {"good.txt"}
-    finally:
-        locked.chmod(0o700)
+    real_scandir = os.scandir
+
+    def flaky_scandir(path):
+        if os.fspath(path) == os.fspath(locked):
+            raise PermissionError(errno.EACCES, "denied", os.fspath(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", flaky_scandir)
+
+    assert _names(tmp_path) == {"good.txt"}
 
 
 def test_missing_folder_yields_nothing(tmp_path):
@@ -84,13 +89,13 @@ def test_missing_folder_yields_nothing(tmp_path):
 def test_user_files_survive_one_unreadable_entry(tmp_path, monkeypatch):
     _touch(tmp_path / "index.html")
     bad = _touch(tmp_path / "bad.txt")
-    real_stat = os.stat
+    real_lstat = Path.lstat
 
-    def flaky_stat(path, *args, **kwargs):
-        if os.fspath(path) == os.fspath(bad):
+    def flaky_lstat(self):
+        if self == bad:
             raise OSError(errno.EIO, "boom")
-        return real_stat(path, *args, **kwargs)
+        return real_lstat(self)
 
-    monkeypatch.setattr(os, "stat", flaky_stat)
+    monkeypatch.setattr(Path, "lstat", flaky_lstat)
 
     assert "index.html" in {p.name for p in _user_files(tmp_path)}

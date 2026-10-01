@@ -295,14 +295,14 @@ def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
     gone = folder / "gone.html"
     gone.write_text("x")
 
-    real_stat = Path.stat
+    real_lstat = Path.lstat
 
-    def flaky(self, *a, **k):
+    def flaky(self):
         if self.name == "gone.html":
             raise FileNotFoundError(str(self))
-        return real_stat(self, *a, **k)
+        return real_lstat(self)
 
-    monkeypatch.setattr(Path, "stat", flaky)
+    monkeypatch.setattr(Path, "lstat", flaky)
 
     assert _artifact_content_mtime(folder) == 1000.0
 
