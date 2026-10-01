@@ -529,18 +529,24 @@ class LLMClient:
 
     @classmethod
     def from_settings(cls, settings: AntonSettings) -> LLMClient:
-        from .anthropic import AnthropicProvider
         from .openai import OpenAIProvider
+
+        def build_anthropic(effort: str | None) -> LLMProvider:
+            # Imported only when a role needs it: the SDK costs about a second
+            # per pod turn under gVisor, and MindsHub turns never use it.
+            from .anthropic import AnthropicProvider
+
+            return AnthropicProvider(
+                api_key=settings.anthropic_api_key,
+                reasoning_effort=effort,
+            )
 
         api_version = getattr(settings, "openai_api_version", None)
         compatible_flavor = _resolve_openai_compatible_flavor(settings)
         # Each factory takes the per-role effort so planning and coding stay
         # independent even when they resolve to the same provider type.
         providers = {
-            "anthropic": lambda effort: AnthropicProvider(
-                api_key=settings.anthropic_api_key,
-                reasoning_effort=effort,
-            ),
+            "anthropic": build_anthropic,
             "openai": lambda effort: OpenAIProvider(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,

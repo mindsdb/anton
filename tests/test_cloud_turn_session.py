@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 # Bound at import so the constants below are built from the real class, which
 # `_pin_today` later replaces on the module.
 from datetime import datetime as _stdlib_datetime
@@ -1317,3 +1321,39 @@ def test_no_mcp_sessions_means_no_cleanup_call_on_construction_failure(tmp_path,
 
     with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
         build_cloud_chat_session(request)
+
+
+# ── provider SDK imports ─────────────────────────────────────────────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_a_minds_cloud_turn_does_not_import_the_anthropic_sdk(tmp_path):
+    """The pod pays for every SDK a turn imports, and a MindsHub turn never
+    talks to Anthropic directly. A fresh interpreter, because this pytest
+    process has already imported anthropic through other tests."""
+    code = textwrap.dedent(
+        """
+        import sys
+        from anton.cloud_turn.contract import TurnRequestV1
+        from anton.cloud_turn.session import build_cloud_chat_session
+
+        build_cloud_chat_session(TurnRequestV1(
+            protocol_version=1,
+            conversation_id="conv_1",
+            input="hello",
+            llm={"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"},
+        ))
+        loaded = [m for m in ("anthropic", "anton.core.llm.anthropic") if m in sys.modules]
+        assert not loaded, f"imported by a minds-cloud turn: {loaded}"
+        assert "openai" in sys.modules, "the turn did not build its provider"
+        """
+    )
+    # A developer's ANTON_ROUTER_PROVIDER=anthropic would build an Anthropic role.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTON_")}
+    env[_WORKSPACE_PATH_ENV] = str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, env=env, cwd=str(_REPO_ROOT),
+    )
+    assert result.returncode == 0, result.stderr
