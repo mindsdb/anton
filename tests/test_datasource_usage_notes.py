@@ -158,3 +158,28 @@ def test_two_engines_render_two_headings_in_first_connection_order(tmp_path):
     assert ctx.count("### Usage notes:") == 2
     positions = {e: ctx.index(f"(engine `{e}`)") for e in order}
     assert sorted(positions, key=positions.get) == order
+
+
+def test_active_only_reads_no_record_of_an_excluded_connection(tmp_path):
+    """A remote vault fetches each record over the network, so a connection
+    that is not rendered must not be read."""
+    reads = []
+
+    class _CountingVault(LocalDataVault):
+        def read_record(self, engine, name):
+            reads.append((engine, name))
+            return super().read_record(engine, name)
+
+        def load(self, engine, name):
+            reads.append((engine, name))
+            return super().load(engine, name)
+
+    v = _CountingVault(tmp_path / "vault")
+    v.save("langfuse", "prod", {"public_key": "pk", "secret_key": "sk"})
+    v.save("postgres", "db", {"host": "h", "password": "p"})
+    reads.clear()
+
+    ctx = build_datasource_context(v, active_only="langfuse-prod", usage_notes={})
+
+    assert "DS_LANGFUSE_PROD__PUBLIC_KEY" in ctx
+    assert reads == [("langfuse", "prod")]

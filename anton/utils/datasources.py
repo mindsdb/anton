@@ -515,6 +515,7 @@ class DatasourceCatalog:
 def collect_datasource_catalog(
     vault: DataVault | None,
     usage_notes: "Mapping[str, str] | None" = None,
+    slugs: Collection[str] | None = None,
 ) -> DatasourceCatalog | None:
     """The vault's connections as a `DatasourceCatalog` (DS_* names, never
     values), or None when there are none or the vault cannot list them.
@@ -522,6 +523,9 @@ def collect_datasource_catalog(
     `usage_notes` maps engine -> agent-facing notes; see `_resolve_usage_notes`
     for how None differs from a map. Any other value is treated as an empty
     map: the host did send something, so anton's registry must not stand in.
+
+    `slugs`, when given, leaves every other connection out before its record
+    is read: a remote vault fetches each record over the network.
     """
     try:
         vault = vault or LocalDataVault()
@@ -540,9 +544,9 @@ def collect_datasource_catalog(
     # itself, plus files explicitly granted via the Google Picker (persisted
     # as a `_picked_files` vault field).
     #
-    # Those granted files are deliberately NOT listed here (ENG-2071). Listing
-    # them needs the *current project* to scope by, and `projects` is a cowork
-    # concept this function has no access to — so the list rendered here was
+    # Those granted files are deliberately NOT listed here. Listing them needs
+    # the *current project* to scope by, and `projects` is a cowork concept
+    # this function has no access to — so the list rendered here was
     # unscoped, and named files from other projects. cowork-server renders the
     # scoped list itself, via ConnectionsService.picked_files_by_project() ->
     # the harness prompt suffix, which is the single renderer. All we track
@@ -558,6 +562,8 @@ def collect_datasource_catalog(
     for c in conns:
         engine = c["engine"]
         slug = f"{engine}-{c['name']}"
+        if slugs is not None and slug not in slugs:
+            continue
         if engine not in engine_defs:
             engine_defs[engine] = registry.get(engine)
         engine_def = engine_defs[engine]
@@ -641,10 +647,10 @@ def build_datasource_context(
     If active_only is set, only the matching slug is included, with only its
     engine's usage notes. `usage_notes`: see `collect_datasource_catalog`.
     """
-    catalog = collect_datasource_catalog(vault, usage_notes)
-    if catalog is None:
-        return ""
-    return catalog.render([active_only] if active_only else None)
+    catalog = collect_datasource_catalog(
+        vault, usage_notes, slugs=[active_only] if active_only else None
+    )
+    return catalog.render() if catalog is not None else ""
 
 
 def _connection_identity(fields: dict, secure_keys: list | None = None) -> str | None:
