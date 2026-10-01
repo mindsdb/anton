@@ -232,6 +232,42 @@ async def test_housekeeping_only_mtime_bump_is_not_an_edit(session, root):
     assert session._artifacts_touched == set()
 
 
+@pytest.mark.parametrize(
+    "rel",
+    [".anton_state.db-wal", "backend.log", "prd.md", ".revisions/r1.json"],
+)
+async def test_non_content_write_is_not_an_edit(session, root, rel):
+    """A running backend writes its SQLite store and log into the artifact
+    folder during a cell; none of that is the agent editing the artifact."""
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    target = root / slug / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x")
+    _bump_mtime(target)
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == set()
+
+
+async def test_content_write_next_to_state_files_is_an_edit(session, root):
+    slug = await _create(session)
+    (root / slug / ".anton_state.db").write_text("x")
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    index = root / slug / "index.html"
+    index.write_text("<html>v2</html>")
+    _bump_mtime(index)
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}
+
+
 async def test_edit_without_reopening_stamps_provenance_too(session, root):
     slug = await _create(session)
     session._artifacts_touched.clear()

@@ -130,16 +130,11 @@ def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = 
 def _artifact_content_mtime(folder: Path) -> float:
     """Max mtime across an artifact folder's user-content files.
 
-    Excludes the store's own housekeeping files, mirroring cowork-server's
-    `content_mtime` gate so both sides agree on what "changed" means.
+    Housekeeping and runtime files (`NON_CONTENT_NAMES`) are matched on the
+    first path component.
     """
-    from anton.core.artifacts.store import (
-        METADATA_FILENAME,
-        PUBLISHED_FILENAME,
-        README_FILENAME,
-    )
+    from anton.core.artifacts.internal_files import NON_CONTENT_NAMES
 
-    housekeeping = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
     try:
         return max(
             (
@@ -147,7 +142,7 @@ def _artifact_content_mtime(folder: Path) -> float:
                 for p in folder.rglob("*")
                 if p.is_file()
                 and not p.is_symlink()
-                and str(p.relative_to(folder)) not in housekeeping
+                and p.relative_to(folder).parts[0] not in NON_CONTENT_NAMES
             ),
             default=0.0,
         )

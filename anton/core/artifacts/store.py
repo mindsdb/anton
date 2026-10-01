@@ -40,7 +40,6 @@ from anton.core.artifacts.internal_files import (
     HOUSEKEEPING_DIRS,
     HOUSEKEEPING_FILES,
     METADATA_FILENAME,
-    PUBLISHED_FILENAME,
     README_FILENAME,
 )
 
