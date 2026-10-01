@@ -456,13 +456,13 @@ class ArtifactStore:
             if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
                 continue
             try:
-                stat = p.stat()
+                st = p.stat()
             except OSError:
                 continue
             mtime_iso = datetime.fromtimestamp(
-                stat.st_mtime, timezone.utc
+                st.st_mtime, timezone.utc
             ).isoformat(timespec="seconds")
-            entries.append(FileEntry(path=rel, bytes=stat.st_size, modifiedAt=mtime_iso))
+            entries.append(FileEntry(path=rel, bytes=st.st_size, modifiedAt=mtime_iso))
 
         def _fingerprint(files: list[FileEntry]) -> list[tuple]:
             return sorted((f.path, f.bytes, f.modifiedAt) for f in files)
