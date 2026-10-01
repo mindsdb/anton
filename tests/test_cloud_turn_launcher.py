@@ -200,6 +200,37 @@ def test_a_resident_that_never_answers_times_out(resident):
     assert reason == "resident process not ready after 0s"
 
 
+def test_a_full_listen_queue_does_not_hang_the_connect():
+    """A resident that stopped accepting fills its queue; the launcher must still fall back."""
+    name = _socket_name()
+    stuck = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stuck.bind(launcher.socket_address(name))
+    stuck.listen(0)
+    queued = []
+    while True:
+        waiting = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        waiting.setblocking(False)
+        try:
+            waiting.connect(launcher.socket_address(name))
+        except BlockingIOError:
+            waiting.close()
+            break
+        queued.append(waiting)
+    result: list[tuple[socket.socket | None, str]] = []
+    connecting = threading.Thread(
+        target=lambda: result.append(launcher.connect_to_resident(name, os.getpid(), timeout=0.5)),
+        daemon=True,
+    )
+
+    connecting.start()
+    connecting.join(timeout=5)
+
+    assert not connecting.is_alive(), "connect() blocked past the launcher's timeout"
+    assert result[0] == (None, "resident process is not accepting connections")
+    for sock in [*queued, stuck]:
+        sock.close()
+
+
 def test_a_resident_that_closes_before_answering_is_not_ready(resident):
     name, fake = resident
     fake.start(lambda conn: None)

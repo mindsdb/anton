@@ -18,6 +18,7 @@ import os
 import socket
 import struct
 import sys
+import time
 from typing import NoReturn
 
 #: Abstract unix socket name (no leading NUL) the resident holds for the pod's lifetime.
@@ -54,11 +55,19 @@ def connect_to_resident(name: str, resident_pid: int, timeout: float) -> tuple[s
 
     The peer is checked before anything is read or sent: while the resident is
     not listening, any process in the pod could hold the name, and it must never
-    receive the turn's stdin.
+    receive the turn's stdin. ``timeout`` covers connecting and the answer together:
+    a resident that stops accepting fills its listen queue, and a blocking connect
+    would then wait forever.
     """
+    deadline = time.monotonic() + timeout
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
     try:
         sock.connect(socket_address(name))
+    except (BlockingIOError, TimeoutError):
+        # Linux refuses a full queue at once; a kernel that queues the connect waits out the timeout.
+        sock.close()
+        return None, "resident process is not accepting connections"
     except OSError as exc:
         sock.close()
         return None, f"no resident process ({exc.strerror})"
@@ -66,7 +75,7 @@ def connect_to_resident(name: str, resident_pid: int, timeout: float) -> tuple[s
     if pid != resident_pid or uid != os.getuid():
         sock.close()
         return None, f"socket is held by pid {pid} uid {uid}, not the resident process"
-    sock.settimeout(timeout)
+    sock.settimeout(max(0.0, deadline - time.monotonic()))
     try:
         answer = sock.recv(1)
     except TimeoutError:
