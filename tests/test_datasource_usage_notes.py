@@ -8,7 +8,7 @@ import pytest
 import anton.utils.datasources as ds
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
-from anton.utils.datasources import build_datasource_context
+from anton.utils.datasources import build_datasource_context, collect_datasource_catalog
 
 
 @pytest.fixture(autouse=True)
@@ -183,3 +183,28 @@ def test_active_only_reads_no_record_of_an_excluded_connection(tmp_path):
 
     assert "DS_LANGFUSE_PROD__PUBLIC_KEY" in ctx
     assert reads == [("langfuse", "prod")]
+
+
+def test_a_bare_string_for_slugs_is_rejected_not_matched_by_substring(vault):
+    with pytest.raises(TypeError):
+        collect_datasource_catalog(vault, slugs="langfuse-prod")
+
+
+def test_rendering_with_a_bare_string_for_slugs_is_rejected(vault):
+    catalog = collect_datasource_catalog(vault, usage_notes={})
+
+    with pytest.raises(TypeError):
+        catalog.render("langfuse-prod")
+
+
+def test_usage_notes_cannot_be_passed_positionally(vault):
+    with pytest.raises(TypeError):
+        collect_datasource_catalog(vault, {"langfuse": "LF-NOTE"})
+    with pytest.raises(TypeError):
+        build_datasource_context(vault, None, {"langfuse": "LF-NOTE"})
+
+
+def test_a_catalog_is_hashable(vault):
+    catalog = collect_datasource_catalog(vault, usage_notes={"langfuse": "LF-NOTE"})
+
+    assert isinstance(hash(catalog), int)

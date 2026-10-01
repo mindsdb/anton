@@ -485,7 +485,9 @@ class CatalogConnection:
     google_drive_access: bool = False
 
 
-@dataclass(frozen=True)
+# eq=False: `notes` is a dict, so a generated __hash__ would raise; a catalog
+# is an identity object and nothing compares two by value.
+@dataclass(frozen=True, eq=False)
 class DatasourceCatalog:
     """The `## Connected Data Sources` section as data, so it can be rendered
     for a subset of its connections."""
@@ -501,6 +503,7 @@ class DatasourceCatalog:
         connection; the Google Drive paragraph comes last, and only when a
         kept connection makes it apply.
         """
+        _reject_bare_string(slugs)
         kept = [c for c in self.connections if slugs is None or c.slug in slugs]
         lines = [_DATASOURCES_HEADING, _DATASOURCES_INTRO]
         lines.extend(c.block for c in kept)
@@ -512,8 +515,15 @@ class DatasourceCatalog:
         return "\n".join(lines)
 
 
+def _reject_bare_string(slugs: Collection[str] | None) -> None:
+    # A str is a Collection[str], so `slug in slugs` would test substrings.
+    if isinstance(slugs, str):
+        raise TypeError("slugs must be a collection of slugs, not a single str")
+
+
 def collect_datasource_catalog(
     vault: DataVault | None,
+    *,
     usage_notes: "Mapping[str, str] | None" = None,
     slugs: Collection[str] | None = None,
 ) -> DatasourceCatalog | None:
@@ -527,6 +537,7 @@ def collect_datasource_catalog(
     `slugs`, when given, leaves every other connection out before its record
     is read: a remote vault fetches each record over the network.
     """
+    _reject_bare_string(slugs)
     try:
         vault = vault or LocalDataVault()
         conns = vault.list_connections()
@@ -637,6 +648,7 @@ def collect_datasource_catalog(
 def build_datasource_context(
     vault: DataVault,
     active_only: str | None = None,
+    *,
     usage_notes: "Mapping[str, str] | None" = None,
 ) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
@@ -648,7 +660,7 @@ def build_datasource_context(
     engine's usage notes. `usage_notes`: see `collect_datasource_catalog`.
     """
     catalog = collect_datasource_catalog(
-        vault, usage_notes, slugs=[active_only] if active_only else None
+        vault, usage_notes=usage_notes, slugs=[active_only] if active_only else None
     )
     return catalog.render() if catalog is not None else ""
 
