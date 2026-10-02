@@ -927,6 +927,11 @@ class OpenAIProvider(LLMProvider):
     FLAVOR_OPENAI = "openai"  # Direct OpenAI BYOK — uses Responses API.
     FLAVOR_MINDS_PASSTHROUGH = "minds-passthrough"  # mdb.ai — chat.completions w/ native tools.
     FLAVOR_OPENAI_COMPATIBLE_GENERIC = "openai-compatible-generic"  # third-party.
+    # The Responses transport (FLAVOR_OPENAI) reports truncation and failures,
+    # forwards tool_result images and attaches trace headers. Hosts that pin
+    # anton to a branch check this before moving direct OpenAI onto it; older
+    # builds lacked those and should stay on chat.completions.
+    RESPONSES_TRANSPORT_READY = True
 
     async def aclose(self) -> None:
         client = getattr(self, "_client", None)

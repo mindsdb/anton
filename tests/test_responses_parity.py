@@ -205,3 +205,7 @@ class TestRequestShape:
                             response=SimpleNamespace(status="completed", usage=_usage())),
         ])
         assert client.responses.create.call_args.kwargs["store"] is False
+
+
+def test_hosts_can_detect_the_ready_responses_transport():
+    assert OpenAIProvider.RESPONSES_TRANSPORT_READY is True
