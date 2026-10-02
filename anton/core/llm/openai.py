@@ -1516,8 +1516,14 @@ class OpenAIProvider(LLMProvider):
 
         if system and SESSION_CONTEXT_MARKER in system:
             static, session = system.split(SESSION_CONTEXT_MARKER, 1)
-            system = static
+            # Lookups happen only at breakpoints and top-level `instructions`
+            # cannot carry one, so the static prompt rides as the first
+            # developer block with an explicit breakpoint at its end.
+            system = ""
             responses_input = [
+                {"role": "developer", "type": "message",
+                 "content": [{"type": "input_text", "text": static,
+                              "prompt_cache_breakpoint": {"mode": "explicit"}}]},
                 {"role": "developer", "type": "message",
                  "content": SESSION_CONTEXT_MARKER.strip() + "\n" + session},
                 *responses_input,
