@@ -121,6 +121,7 @@ STYLE = '''
 html[data-theme="dark"]{--bg:#101820;--panel:#182534;--ink:#f0f5fc;--muted:#b5c7dc;--line:#3a4c60;--accent:#79abff;--warning:#ffb77b}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,sans-serif}
 main{max-width:1120px;margin:auto;padding:32px 24px 64px}h1{font-size:32px;line-height:1.2;letter-spacing:-.03em}h2{font-size:20px;margin:0 0 16px}
+h1,h2,p,li,a{overflow-wrap:anywhere}
 header{padding:12px 0 22px}section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px;margin:18px 0}
 .table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:10px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:14px}thead th{background:var(--bg)}
 label{font-weight:600}select{font:inherit;margin:0 0 18px 12px;padding:8px 16px;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px}
