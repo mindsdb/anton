@@ -2278,6 +2278,19 @@ class ChatSession:
                 workspace_ctx = build_workspace_discovery_context(self._scratchpads)
             except Exception:
                 workspace_ctx = ""
+            # Bounded snapshot of files the request names plus the artifact
+            # catalogue — volatile, so it also rides the tail.
+            try:
+                from anton.core.tools.tool_handlers import resolve_artifact_store
+                from anton.core.utils.project_snapshot import build_project_snapshot_context
+
+                workspace_ctx += build_project_snapshot_context(
+                    getattr(self._scratchpads, "workspace_path", None),
+                    user_message,
+                    resolve_artifact_store(self),
+                )
+            except Exception:
+                pass
 
         # Ensure the registry is populated before we extract tool prompts.
         self._build_tools()
