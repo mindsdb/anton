@@ -855,3 +855,22 @@ ASK_USER_TOOL = ToolDef(
     },
     handler=handle_ask_user,
 )
+
+
+# Local direct-report experiment
+_start = CREATE_ARTIFACT_TOOL.description.index("AFTER REGISTERING")
+_end = CREATE_ARTIFACT_TOOL.description.index("Pick `type`", _start)
+CREATE_ARTIFACT_TOOL.description = (
+    CREATE_ARTIFACT_TOOL.description[:_start]
+    + "AFTER REGISTERING: use the direct read/build/verify path for specified "
+      "local HTML/Markdown reports. Use generate_artifact for fullstack apps "
+      "or requirements discovery. "
+    + CREATE_ARTIFACT_TOOL.description[_end:])
+GENERATE_ARTIFACT_TOOL.description = GENERATE_ARTIFACT_TOOL.description.replace(
+    "Use INSTEAD OF writing files yourself in the scratchpad.",
+    "Use for fullstack apps or requirements discovery. Specified local reports "
+    "use the direct scratchpad path instead.")
+GENERATE_ARTIFACT_TOOL.prompt = (
+    "ARTIFACT ROUTING: generate_artifact performs discovery, brief confirmation, "
+    "requirements, specification, generation and verification for fullstack or "
+    "underspecified work. Specified local reports use the direct path in the ARTIFACTS section.")
