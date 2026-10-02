@@ -230,8 +230,12 @@ _DS_PREFIX_RE = re.compile(r"\b(DS_[A-Z0-9_]+)__[A-Z0-9_]+\b")
 def _extract_sources_from_text(text: str) -> list[str]:
     sources: list[str] = []
     for match in _URL_RE.findall(text):
-        parsed = urlparse(match)
-        host = (parsed.hostname or "").lower()
+        try:
+            host = (urlparse(match).hostname or "").lower()
+        except ValueError:
+            # `_URL_RE` also matches URL-shaped regex literals, whose `[`
+            # urlparse rejects as a malformed IPv6 host.
+            continue
         host = host.removeprefix("www.")
         if not host:
             continue

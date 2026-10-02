@@ -4,7 +4,8 @@ import weakref
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
@@ -455,6 +456,105 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     return parsed, None, False
 
 
+#: Name given to a replayed tool call the provider never named (ENG-2420).
+#: History items must carry one — the Responses API declares ``name`` required
+#: — and a name outside the CURRENT tool list already replays fine: anton
+#: rebuilds its tool list every round (``_build_tools()`` in the session's tool
+#: loop, so `recall_skill` can add tools mid-turn), which means a call to a
+#: tool that is no longer offered is an ordinary, working shape in history.
+UNNAMED_REPLAYED_TOOL = "unavailable_tool_call"
+
+
+def usable_call_id(value: object) -> bool:
+    """True when `value` can be replayed as a tool-call handle.
+
+    Non-empty *string*, not merely truthy: a dict or list id is valid JSON and
+    passes a truthiness check, then fails much later and much less legibly.
+    Both provider APIs use string ids, so the strictness costs nothing. Same
+    test cowork-server's `sanitize_turn_history_rows` applies to pod rows.
+    """
+    return isinstance(value, str) and bool(value)
+
+
+def ensure_replayable_tool_call(tc: ToolCall) -> ToolCall:
+    """Return `tc` with anything that cannot be replayed made replayable.
+
+    ENG-2420: the readers can build a call with an empty `id`. Three provider
+    shapes reach it, and only the first is the one the bug was filed for — a
+    `function_call_arguments.delta` with no preceding `output_item.added`; an
+    `output_item.added` that DOES arrive carrying a blank `call_id`; and an
+    item labelled as something other than `function_call`. The last two never
+    touch the buffer path, so guarding that path alone would miss them.
+
+    Every *yield* in the readers was already guarded on a truthy id. Only the
+    append that builds the turn's result was not, so an id-less call escaped
+    into `session.history`, and the next request serialised it back out
+    verbatim (``"call_id": block["id"]``). The provider then rejects the whole
+    request — ``400 Invalid 'input[N].call_id': empty string`` — on that turn
+    and on every later turn of the conversation, which never recovers on its
+    own: the only trimming path anton has runs on a caught
+    `ContextOverflowError` or on pressure computed from a successful
+    response's usage, and a 400 produces neither.
+
+    **Salvage, never drop**, and both halves matter:
+
+    - An unusable **id** is replaced with a minted one. The call then
+      dispatches normally and its `tool_result` pairs with the minted id.
+    - An unusable **name** is replaced with `UNNAMED_REPLAYED_TOOL`, which
+      restores the pre-fix behaviour for that shape: the registry raises
+      ``Tool ... not found``, the dispatcher turns that into an ordinary
+      ``Tool 'x' failed`` tool_result, and the model re-emits the call inside
+      the same turn. Dropping it instead looked tidier and was worse — the
+      three non-streaming paths call `raise_on_empty_response`
+      (`anthropic.py`, and both OpenAI ones) but the streaming paths do not,
+      so a dropped sole call ends a streaming turn silently with no error at
+      all. That is the failure this function exists to avoid, so it must not
+      introduce it through the name (review: pnewsam on #471).
+
+    Returning unconditionally is deliberate: it is what keeps this layer, the
+    read-time repair in `repair_replayed_tool_ids`, and the session/boot belts
+    agreeing about the same two fields. They disagreed in the first revision
+    and a stored ``{"id": "call_x", "name": ""}`` block slipped through all
+    three.
+
+    The minted id is random (`call_anton_*`) because it is minted ONCE, at
+    generation, and then persisted with the rest of this turn's rows. The
+    read-time repair uses a different prefix (`call_repaired_*`) and a
+    deterministic id, because it re-runs on every load and is never written
+    back — a random id there would change the replayed prefix every turn and
+    miss the prompt cache. The two prefixes also make it obvious in a log
+    which layer fixed a given call.
+    """
+    import logging as _logging
+    import uuid as _uuid
+
+    log = _logging.getLogger(__name__)
+
+    if not usable_call_id(tc.id):
+        was = tc.id
+        # Mutated in place: every caller constructs the ToolCall immediately
+        # before this call, and the readers already mutate one after the fact
+        # (`tool_calls[-1].repaired = True` on the Anthropic max_tokens path).
+        tc.id = f"call_anton_{_uuid.uuid4().hex}"
+        log.warning(
+            "ENG-2420: tool call %r arrived with an unusable id (%r); minted %s "
+            "so the call can still run and replay.",
+            tc.name, was, tc.id,
+        )
+
+    if not usable_call_id(tc.name):
+        was = tc.name
+        tc.name = UNNAMED_REPLAYED_TOOL
+        log.warning(
+            "ENG-2420: tool call %s arrived with an unusable name (%r); renamed "
+            "to %r so it fails as a normal tool_result the model can recover "
+            "from, instead of vanishing from the turn.",
+            tc.id, was, tc.name,
+        )
+
+    return tc
+
+
 def damaged_tool_call_result(tc: ToolCall) -> dict | None:
     """The `tool_result` to answer an unfinished tool call with, or None.
 
@@ -553,6 +653,91 @@ class ContextOverflowError(Exception):
 
 class TokenLimitExceeded(Exception):
     """Raised when the LLM returns 429 due to billing/token limits."""
+
+
+def parse_reset_at(value: object) -> str | None:
+    """``value`` as a normalized ISO-8601 instant, or ``None`` when it is not one.
+
+    An instant needs a UTC offset: a naive timestamp names a different moment
+    in every timezone, so a card that counted down to it would be wrong for
+    most readers. Anything else (a non-string, junk, an HTTP-date) is dropped
+    rather than passed on, because every consumer would have to re-validate it.
+    The result is ``datetime.isoformat()``'s extended form, which a browser's
+    ``Date`` parses; Python accepts compact forms that it does not.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.isoformat()
+
+
+class MindsHubBillingStop(TokenLimitExceeded):
+    """The MindsHub authorization gate refused a request the org cannot pay for.
+
+    Base of the three denials the gate names; only the subclasses are raised,
+    by :func:`mindshub_billing_stop`. Subclassing ``TokenLimitExceeded`` keeps
+    every existing catch working: the no-retry re-raise in
+    ``ChatSession.turn_stream``, the verifier's ``_DENIED_VERDICT_ERRORS`` latch
+    (both ``anton/core/session.py``), and cowork-server's
+    ``is_token_limit_error``. Two parts of it survive a hosted turn's
+    ``turn_failed`` frame (``cloud_turn.__main__.stream_turn``): the subclass
+    NAME, as the ``"TypeName: message"`` string ``_scrub`` puts in ``error``,
+    and ``reset_at``, as its own key when the gateway sent one.
+
+    ``reason`` is the gate's code, ``status_code`` the HTTP status (``None`` for
+    a denial inside an open stream, which has no error status), and
+    ``reset_at`` the instant the limit lifts when the gateway sent one that
+    parses (see :func:`parse_reset_at`).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        status_code: int | None = None,
+        reset_at: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+        self.reset_at = parse_reset_at(reset_at)
+
+
+class WalletEmptyError(MindsHubBillingStop):
+    """402 ``wallet_empty``: the wallet cannot pay for the requested model.
+
+    Per auth's ``resolve_model_access`` (``auth/entitlements/services/access.py``)
+    a free-bucket model with allowance left is served regardless of the wallet,
+    so this fires for a priced model, or for the free one once its allowance is
+    spent by an org that has a payment method.
+    """
+
+
+class AllowanceExhaustedError(MindsHubBillingStop):
+    """429 ``included_allowance_exhausted``: the org has no free allowance left.
+
+    Per the same ``resolve_model_access``, only an org with no confirmed
+    payment method gets this. It fires both for an org that spent its free
+    allowance and for one that never had a free allowance. The gateway sends
+    ``reset_at`` for when the allowance refills, when auth supplies one; for an
+    org that never had an allowance it sends none.
+    """
+
+
+class FreeServingPausedError(MindsHubBillingStop):
+    """429 ``free_air_daily_spend_fuse_exceeded``: free serving is paused fleet-wide.
+
+    The gateway's daily free-serving budget tripped. The caller did nothing
+    unusual, and adding credit lifts it at once. ``reset_at`` is the end of the
+    UTC day. Waiting inside a turn cannot help, so it is a billing stop, never
+    a transient retry.
+    """
 
 
 class ProviderAuthError(ConnectionError):
@@ -696,13 +881,41 @@ _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
 )
 
-# The MindsHub M3 authorization gate's out-of-credits deny codes (ENG-1169):
-# ``wallet_empty`` rides a 402, ``included_allowance_exhausted`` a 429 (with NO
-# FastAPI ``detail``, so the legacy 429-quota branch never sees it). Both are
-# permanent for the identical request — they belong on the out-of-credits card,
-# never in the retry loop. The gate's velocity 429 (``rate_limited``) is NOT
-# here on purpose: that one means "slow down", and stays transient.
-_WALLET_DENIAL_CODES = frozenset({"wallet_empty", "included_allowance_exhausted"})
+class _BillingStopKind(NamedTuple):
+    """Which typed error a gate billing code raises, and what its message says."""
+
+    error_type: type[MindsHubBillingStop]
+    what: str
+
+
+# The MindsHub authorization gate's billing deny codes:
+# ``wallet_empty`` rides a 402; ``included_allowance_exhausted`` and
+# ``free_air_daily_spend_fuse_exceeded`` ride a 429 (with NO FastAPI ``detail``,
+# so the legacy 429-quota branch never sees them). All three stop only an org
+# whose wallet cannot pay, and all three are permanent for the identical request
+# inside a turn: they belong on a billing card, never in the retry loop. The
+# fuse resets at the end of the UTC day, which no retry budget waits out. The
+# gate's velocity 429 (``rate_limited``) is NOT here on purpose: that one means
+# "slow down", and stays transient.
+#
+# ``what`` never names how long the allowance window is: the window is auth's
+# configuration, and copy that stated it would go stale the day it changed.
+# The allowance copy does not say the allowance was used up either: the gate
+# sends the same code to an org that never had a free allowance at all.
+_MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
+    "wallet_empty": _BillingStopKind(
+        WalletEmptyError, "your MindsHub credits are used up."),
+    "included_allowance_exhausted": _BillingStopKind(
+        AllowanceExhaustedError, "you have no free MindsHub Air allowance left."),
+    "free_air_daily_spend_fuse_exceeded": _BillingStopKind(
+        FreeServingPausedError,
+        "free MindsHub Air is paused for everyone until the daily budget resets."),
+}
+_WALLET_DENIAL_CODES = frozenset(_MINDSHUB_BILLING_STOPS)
+
+_MINDSHUB_BILLING_CTA = (
+    "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+)
 
 
 # Hosts that ARE the MindsHub gateway. Only a response from one of these may
@@ -833,23 +1046,204 @@ def origin_is_known_third_party_host(host: str | None) -> bool:
     return host is not None and not is_mindshub_host(host)
 
 
-def wallet_denial_code(body: Any) -> str | None:
-    """The M3 gate's out-of-credits code carried in an error body, if any.
+@dataclass(frozen=True)
+class ErrorBodyFields:
+    """The fields the error mappers read off one level of a provider error body.
 
-    Reads ``code`` from both dialects — the SDK-unwrapped top level (OpenAI
-    SDK peels the ``error`` envelope, ENG-747) and the wire envelope
-    (Anthropic SDK / proxies that deliver it unmodified). Detection is
-    code-exact on purpose: BYOK 402s (e.g. OpenRouter's insufficient-credits
-    402) carry no such code and must stay generic — the remedy there is the
-    user's own provider billing, not MindsHub credits.
+    Each value is what the wire sent under that key, or ``None`` when the key
+    is absent. Nothing is coerced: an endpoint can send a list or a number
+    where a string belongs, so each reader keeps its own type check.
     """
-    b = body if isinstance(body, dict) else {}
-    err = b.get("error") if isinstance(b.get("error"), dict) else {}
-    code = b.get("code") or err.get("code")
+
+    code: object = None
+    type: object = None
+    message: object = None
+    param: object = None
+    detail: object = None
+    deny_detail: object = None
+    status: object = None
+
+    @classmethod
+    def from_dict(cls, fields: dict) -> ErrorBodyFields:
+        return cls(
+            code=fields.get("code"),
+            type=fields.get("type"),
+            message=fields.get("message"),
+            param=fields.get("param"),
+            detail=fields.get("detail"),
+            deny_detail=fields.get("deny_detail"),
+            status=fields.get("status"),
+        )
+
+
+@dataclass(frozen=True)
+class ProviderErrorBody:
+    """A provider error body, parsed once in both of its dialects.
+
+    The OpenAI SDK peels the ``error`` envelope before it stores the body
+    (``openai/_client.py`` does ``body.get("error", body)``), so the fields sit
+    at the top level there. The Anthropic SDK, and a proxy that delivers the
+    wire shape unmodified, keep them inside ``error``. ``top`` is the top level
+    and ``envelope`` the ``error`` object. Each reader picks its own order,
+    because the orders differ per field and per mapper. The Anthropic
+    top-level ``type`` is always ``"error"``, for one, so the Anthropic mapper
+    reads ``type`` off the envelope first.
+
+    ``has_envelope`` says whether ``error`` was an object at all. Without one,
+    ``envelope`` is all ``None``, and :func:`classify_transient` reads the top
+    level as the error object instead.
+    """
+
+    top: ErrorBodyFields
+    envelope: ErrorBodyFields
+    has_envelope: bool
+
+    @classmethod
+    def parse(cls, body: object) -> ProviderErrorBody:
+        """``body`` split into its two levels. Anything but a dict parses as empty."""
+        top = body if isinstance(body, dict) else {}
+        envelope = top.get("error")
+        has_envelope = isinstance(envelope, dict)
+        return cls(
+            top=ErrorBodyFields.from_dict(top),
+            envelope=ErrorBodyFields.from_dict(envelope if has_envelope else {}),
+            has_envelope=has_envelope,
+        )
+
+    @property
+    def code(self) -> object:
+        """``code``, top level first, then the envelope.
+
+        :func:`classify_transient` does not use this: when there is an
+        envelope, it reads the code off the envelope alone.
+        """
+        return self.top.code or self.envelope.code
+
+
+def wallet_denial_code(body: Any) -> str | None:
+    """The M3 gate's billing code carried in an error body, if any.
+
+    One of ``wallet_empty``, ``included_allowance_exhausted`` or
+    ``free_air_daily_spend_fuse_exceeded`` (the keys of
+    ``_MINDSHUB_BILLING_STOPS``). Reads ``code`` from both dialects — the
+    SDK-unwrapped top level (OpenAI SDK peels the ``error`` envelope, ENG-747)
+    and the wire envelope (Anthropic SDK / proxies that deliver it unmodified).
+    Detection is code-exact on purpose: BYOK 402s (e.g. OpenRouter's
+    insufficient-credits 402) carry no such code and must stay generic — the
+    remedy there is the user's own provider billing, not MindsHub credits.
+    """
+    code = ProviderErrorBody.parse(body).code
     # isinstance first: `in` on a frozenset HASHES the value, so a hostile/buggy
     # endpoint sending a list `code` would otherwise TypeError the classifier
     # (every other wire-value membership check in these mappers uses tuples).
     return code if isinstance(code, str) and code in _WALLET_DENIAL_CODES else None
+
+
+def _response_header(exc: BaseException, name: str) -> str:
+    """Header ``name`` off the response ``exc`` carries, or ``""`` without one.
+
+    A bare mid-stream ``openai.APIError`` has no ``.response`` at all, and a
+    header value is always a string on a real response, so anything else reads
+    as absent.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return ""
+    value = resp.headers.get(name, "")
+    return value if isinstance(value, str) else ""
+
+
+def mindshub_billing_stop(
+    *, exc: BaseException, body: Any, status_code: int | None,
+) -> MindsHubBillingStop | None:
+    """The typed billing stop for a MindsHub gate denial, or ``None`` if ``exc`` is not one.
+
+    Shared by both provider mappers and the OpenAI mid-stream lanes, so the
+    subclass, its copy and the origin gate are decided in one place. The caller
+    raises the result ``from exc``.
+
+    The reason comes from the body code (both dialects, see
+    :func:`wallet_denial_code`) or, for a body that lost its code, the
+    ``X-MindsHub-Reason`` header. ``reset_at`` comes only from the
+    ``X-MindsHub-Reset-At`` header: the OpenAI SDK keeps just the ``error``
+    envelope of the body, so the gateway's top-level ``reset_at`` field is gone
+    by the time the error gets here.
+
+    A provably foreign origin gets ``None`` whatever it carries (see
+    :func:`origin_is_known_third_party`). On a BYOK endpoint the whole response
+    is third-party controlled, and a spoofed billing card asks the user for
+    money. cowork-server cannot refuse it later. Its ``friendly_turn_error``
+    (``cowork/handlers/turn_errors.py``) origin-gates only its own reads of
+    the reason header and the body code. A later rung, ``is_token_limit_error``,
+    is an isinstance check with no origin gate, so it catches any
+    ``TokenLimitExceeded`` anton raises. The origin check has to happen here.
+
+    ``status_code`` is the HTTP error status, which must be the gate's 402 or
+    429; ``None`` means a denial inside an already-open stream, which has no
+    error status to check.
+    """
+    if origin_is_known_third_party(exc):
+        return None
+    if status_code is not None and status_code not in (402, 429):
+        return None
+    reason = wallet_denial_code(body)
+    if reason is None:
+        header_reason = _response_header(exc, "x-mindshub-reason")
+        if header_reason in _MINDSHUB_BILLING_STOPS:
+            reason = header_reason
+    if reason is None:
+        return None
+    kind = _MINDSHUB_BILLING_STOPS[reason]
+    if status_code is None:
+        lead = kind.what[:1].upper() + kind.what[1:]
+    else:
+        lead = f"Server returned {status_code}: {kind.what}"
+    return kind.error_type(
+        f"{lead} {_MINDSHUB_BILLING_CTA}",
+        reason=reason,
+        status_code=status_code,
+        reset_at=_response_header(exc, "x-mindshub-reset-at"),
+    )
+
+
+def mindshub_model_restriction(
+    *, exc: BaseException, body: Any, status_code: int, model: str,
+) -> ModelRestrictedError | None:
+    """The typed error for a gateway 403 caused by an org admin's model rule, or ``None``.
+
+    Shared by both provider mappers, so the carriers, the copy and the origin
+    gate are decided in one place. The caller raises the result ``from exc``.
+
+    The gateway puts ``permission_denied`` on ``error.code`` and
+    ``X-MindsHub-Reason`` for every 403 it refuses, so neither one tells a
+    model rule apart from a member whose role cannot run the product. The
+    ``model_restricted`` deny detail does. The gateway sends it twice: as the
+    ``X-MindsHub-Deny-Detail`` header, and as ``deny_detail`` inside the
+    ``error`` object. Either copy is enough. ``body`` is read in both dialects,
+    like :func:`wallet_denial_code`: the OpenAI SDK peels the ``error``
+    envelope, so the field sits at the top level there, and the Anthropic SDK
+    keeps the envelope.
+
+    A provably foreign origin gets ``None`` whatever it carries (see
+    :func:`origin_is_known_third_party`). On a BYOK endpoint the whole response
+    is third-party controlled, and this copy tells the user that their own
+    org's admin blocked the model.
+    """
+    if origin_is_known_third_party(exc) or status_code != 403:
+        return None
+    parsed = ProviderErrorBody.parse(body)
+    carriers = (
+        _response_header(exc, "x-mindshub-deny-detail"),
+        parsed.top.deny_detail,
+        parsed.envelope.deny_detail,
+    )
+    if _MODEL_RESTRICTED not in carriers:
+        return None
+    return ModelRestrictedError(
+        f"An admin in your organization restricted the model '{model}'. "
+        "Choose another model in Settings.",
+        model=model,
+    )
 
 
 def retry_after_seconds(exc: BaseException) -> float | None:
@@ -917,14 +1311,16 @@ def classify_transient(
     at midnight — then be told it is not a credits problem. Unconfirmed 429s
     keep the pre-ENG-1537 behaviour: typed, honest, and failed fast.
     """
-    b = body if isinstance(body, dict) else {}
+    parsed = ProviderErrorBody.parse(body)
     # Two body dialects: Anthropic nests the error under `error` ({"error":
     # {"type": ...}}); the OpenAI SDK unwraps its envelope (`body.get("error",
     # body)`) so the type sits at the TOP level. Read the nested object when
     # present, otherwise treat the body itself as the error object — so the
     # mid-stream case classifies on BOTH providers (ENG-673, Sam's review).
-    err = b.get("error") if isinstance(b.get("error"), dict) else b
-    etype = err.get("type") or err.get("code")
+    # Unlike the other readers, a present envelope wins outright here: its
+    # `type` and `code` are read without falling back to the top level.
+    err = parsed.envelope if parsed.has_envelope else parsed.top
+    etype = err.type or err.code
     # A mid-stream failure has no real HTTP error status (it's smuggled into an
     # already-sent 200, or there's no status at all), so the SDK never retried it
     # → the session must. A request-time error carries a real 4xx/5xx → the SDK
@@ -944,15 +1340,16 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
             status_code=status_code,
         )
-    if status_code == 429 and not b.get("detail"):
+    if status_code == 429 and not parsed.top.detail:
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
         # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
-        # ``insufficient_quota``, the M3 gate's allowance 429 carries a wallet
-        # code); the guards here are defense for direct callers — a billing
+        # ``insufficient_quota``, the M3 gate's allowance and free-serving fuse
+        # 429s carry a billing code); the guards here are defense for direct
+        # callers, and for a mapper whose origin gate refused the code — a billing
         # failure is permanent and must never enter the retry loop (ENG-1169).
         if etype == "insufficient_quota":
             return None
-        if wallet_denial_code(b):
+        if wallet_denial_code(body):
             # Deliberately NOT origin-gated (ENG-1693), for a plainer reason
             # than an earlier version of this comment claimed. It said gating
             # would make a hostile wallet code "retryable"; that is false —
@@ -1020,6 +1417,9 @@ class ModelUnavailableError(ConnectionError):
       model (an upgrade fixes it).
     - ``model_disabled`` — an admin kill switch (an upgrade does NOT fix it).
 
+    An org admin's model rule is the subclass :class:`ModelRestrictedError`,
+    with code ``model_restricted``.
+
     Subclasses ConnectionError so call sites that only know the legacy
     ConnectionError mapping keep working unchanged; typed consumers
     (cowork-server's turn-error mapping) read ``code``/``model`` to pick the
@@ -1032,10 +1432,41 @@ class ModelUnavailableError(ConnectionError):
         self.model = model
 
 
+# The gateway's deny detail for a 403 that an org admin's model rule caused,
+# and the ``code`` that :class:`ModelRestrictedError` carries for it.
+_MODEL_RESTRICTED = "model_restricted"
+
+
+class ModelRestrictedError(ModelUnavailableError):
+    """403 with the ``model_restricted`` deny detail: an org admin restricted the model.
+
+    Only :func:`mindshub_model_restriction` raises it. Credits do not lift it,
+    so its copy carries no billing link, and the remedy is choosing another
+    model. A 403 ``permission_denied`` without the deny detail is not this
+    error: it stays the generic ConnectionError.
+
+    Subclassing ``ModelUnavailableError`` keeps every existing catch working:
+    the no-retry re-raise in ``ChatSession.turn_stream`` and the verifier's
+    ``_DENIED_VERDICT_ERRORS`` latch (both ``anton/core/session.py``), and
+    ``_default_turn_error_action`` in ``anton/chat.py``. The class NAME is what
+    survives a hosted turn: ``cloud_turn.__main__._scrub`` sends only
+    ``"TypeName: message"``.
+    """
+
+    def __init__(self, message: str, *, model: str) -> None:
+        super().__init__(message, code=_MODEL_RESTRICTED, model=model)
+
+
 class ContentValidationError(ConnectionError):
     """Raised when the provider permanently rejects a request over content
     already in conversation history — a schema/shape mismatch (e.g. an image
     block built for the wrong provider), not a provider-availability issue.
+
+    Also the BASE of ``ContentTooLargeError`` (ENG-2689), so callers that want
+    "the provider permanently refused our content, repair the history and stop
+    retrying" should keep testing against THIS type; only callers choosing
+    user-facing copy need to distinguish the subtype, because the remedies
+    differ. Raise the subclass, catch the parent.
 
     Distinct from every other permanent-failure type here in one way that
     matters: retrying the IDENTICAL request fails identically every time,
@@ -1055,6 +1486,170 @@ class ContentValidationError(ConnectionError):
     def __init__(self, message: str, *, code: str = "content_validation") -> None:
         super().__init__(message)
         self.code = code
+
+
+class ContentTooLargeError(ContentValidationError):
+    """The provider permanently refused the request because content already in
+    history is too BIG for it — an image whose pixel dimensions or byte size
+    exceed what the model accepts (ENG-2689) — rather than the wrong SHAPE.
+
+    Split from its parent for one reason: the remedy differs, and only the user
+    can apply it. A shape mismatch is our own serialization bug, repaired
+    server-side, and "we fixed it, keep going" is honest copy. A size refusal
+    gets the same repair (the offending image is stripped so the conversation
+    is not stuck re-sending it forever), but the user still has to attach
+    something smaller — so telling them it is fixed and they can carry on is
+    not true. Hence a distinct type, and downstream, a distinct card.
+
+    Subclasses ContentValidationError so every existing caller keeps behaving
+    correctly without knowing the subtype exists: the session's no-retry rule
+    and cowork-server's history repair both key on the parent.
+
+    The class NAME is load-bearing. A remote/pod turn crosses the wire as
+    ``"<ExceptionType>: <message>"`` (``anton.cloud_turn.__main__._scrub``), so
+    on the hosted path the type name is the ONLY discriminator the host
+    receives — the ``code`` attribute does not survive the trip.
+    """
+
+    def __init__(self, message: str, *, code: str = "content_too_large") -> None:
+        super().__init__(message, code=code)
+
+
+# Phrases that identify a permanent, content-SHAPED rejection (ENG-1992) in the
+# two dialects we have actually observed. Matched on the provider's prose
+# because no provider gives this a structured code.
+_CONTENT_SHAPE_PHRASES = (
+    "supported values are",
+    "does not match any of the expected tags",
+)
+
+# The shape phrases above are generic enum-validation prose: a provider emits
+# "Supported values are: ..." for ANY bad enum, `reasoning_effort` and
+# `tool_choice` included. On their own they are not evidence that the rejected
+# thing was CONTENT — and acting on them is destructive, because downstream a
+# content rejection strips every image block from the conversation's stored
+# history. A `reasoning_effort` typo must not cost the user their images while
+# leaving the real configuration error unfixed (review of #484).
+#
+# So a phrase must be corroborated: either the `param` points into a content
+# array, or the message names a content-block type. Quoted matching, because
+# these dialects quote the offending and permitted tags — and an unquoted
+# provider simply falls through to the old generic handling, which is the safe
+# direction to be wrong in.
+_CONTENT_BLOCK_TOKENS = (
+    "image", "image_url", "input_image", "input_file", "input_audio",
+    "input_text", "output_text", "refusal", "tool_use", "tool_result",
+    "document", "computer_screenshot",
+)
+
+
+def _names_a_content_block(message_low: str) -> bool:
+    return any(
+        f"'{tok}'" in message_low or f'"{tok}"' in message_low
+        for tok in _CONTENT_BLOCK_TOKENS
+    )
+
+# ...and a content-SIZE rejection (ENG-2689). Observed live as OpenAI's
+# "requires 32400 patches after processing, exceeding the limit of 30000.
+# Please resize the image and try again"; Anthropic phrases the same refusal as
+# "image dimensions exceed max allowed size" / "image exceeds N MB maximum".
+_CONTENT_SIZE_PHRASES = ("resize", "too large", "exceed", "dimension")
+
+# Cap on how much provider prose is quoted back to the user. Long enough for
+# the observed sentence and its remedy, short enough that a provider echoing a
+# chunk of the request can't turn an error card into a wall of text.
+_MAX_PROVIDER_DETAIL_CHARS = 300
+
+
+def _quote_provider(message: str) -> str:
+    """Credential-scrubbed, whitespace-collapsed, length-capped provider prose,
+    safe to show a user. Scrubbed because some dialects echo request content
+    back inside the error message, and this string ends up on screen."""
+    from anton.utils.datasources import scrub_credentials
+
+    detail = " ".join(scrub_credentials(message).split())
+    if len(detail) > _MAX_PROVIDER_DETAIL_CHARS:
+        detail = detail[: _MAX_PROVIDER_DETAIL_CHARS - 1].rstrip() + "\u2026"
+    return detail
+
+
+def classify_content_rejection(
+    *, error_type: str | None, message: str | None, param: str | None = None,
+) -> "ContentValidationError | None":
+    """Classify a 400 that blames the request's OWN content, else None.
+
+    Shared by the OpenAI-compatible and Anthropic status-error mappers for the
+    same reason ``classify_404`` is (ENG-1139): the heuristic and its exact
+    wording must not drift between providers. Before ENG-2689 only the OpenAI
+    mapper had this branch at all, so a BYOK-Anthropic user hit the identical
+    bug with none of the handling.
+
+    Two families, both permanent, both meaning "retrying the identical request
+    fails identically forever":
+
+    * **shape** (ENG-1992) — a content block reached the provider in a form it
+      cannot parse. Our bug; repaired server-side; nothing for the user to do.
+    * **size** (ENG-2689) — an image exceeds the provider's pixel or byte
+      limit. Not our bug; repaired the same way so the conversation survives,
+      but the user must re-attach something smaller.
+
+    Size is tested FIRST as a tie-break, not because anything observed needs
+    it: neither live body satisfies both tests today (the OpenAI patch-limit
+    400 carries ``param="input"``, and Anthropic's dimension refusal puts its
+    content path in the MESSAGE, not the param — checked, both miss the shape
+    predicate). It is ordered anyway because a body that ever satisfies both
+    is far more likely to be a size refusal carrying a content-indexed param
+    than a shape refusal that talks about resizing, and the size copy names a
+    concrete limit and remedy where the shape copy can only say "unsupported
+    format". Settling the tie-break now costs one line; discovering it later
+    costs another user.
+
+    Over-matching here is not free: downstream this triggers stripping EVERY
+    image block from the conversation's stored history. So the size family
+    additionally requires the provider to have mentioned an image at all — a
+    400 about, say, a too-long text field must never cost the user their
+    images. Deliberately conservative: an unrecognised 400 keeps its old
+    behaviour rather than risking a destructive false positive.
+    """
+    if (error_type or "").strip().lower() != "invalid_request_error":
+        return None
+
+    raw = message or ""
+    low = raw.lower()
+    par = (param or "").lower()
+
+    if "image" in low and any(phrase in low for phrase in _CONTENT_SIZE_PHRASES):
+        return ContentTooLargeError(
+            "An image in this conversation is too large for the model to "
+            f"accept. The provider said: {_quote_provider(raw)} "
+            "That image will be removed automatically so the conversation can "
+            "continue \u2014 re-attach a smaller or lower-resolution copy if you "
+            "still need it."
+        )
+
+    # A param pointing into a content array is evidence on its own.
+    _content_param = ".content[" in par or par.endswith(".content")
+    # Otherwise the phrase needs the message to name a content-block type AND
+    # the provider not to have pointed at some other field. Both live dialects
+    # satisfy that: the OpenAI one carries a content-indexed `param`, the
+    # Anthropic one carries no `param` at all. A param that is present and is
+    # NOT a content path is positive evidence the rejected thing was not
+    # content — `modalities` legitimately takes the value 'image', so
+    # "Supported values are: 'image', 'audio'" for a bad `modalities` would
+    # otherwise still reach the repair that deletes the user's images.
+    _corroborated_phrase = (
+        not par
+        and any(phrase in low for phrase in _CONTENT_SHAPE_PHRASES)
+        and _names_a_content_block(low)
+    )
+    if _content_param or _corroborated_phrase:
+        return ContentValidationError(
+            "The model provider rejected part of this conversation's content "
+            "(an attachment or image in an unsupported format). That content "
+            "will be removed automatically so the conversation can continue."
+        )
+
+    return None
 
 
 def classify_404(
@@ -1167,12 +1762,25 @@ class EndpointConfigurationError(ConnectionError):
 CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     ContextOverflowError,
     TokenLimitExceeded,
+    # Subclasses of TokenLimitExceeded, listed for the same reason as
+    # ContentTooLargeError below. The base is never raised on its own.
+    MindsHubBillingStop,
+    WalletEmptyError,
+    AllowanceExhaustedError,
+    FreeServingPausedError,
     ProviderAuthError,
     StructuredOutputError,
     TransientProviderError,
     ProviderOverloadedError,
     ModelUnavailableError,
+    # Subclass of ModelUnavailableError, listed by name for the same reason as
+    # ContentTooLargeError below.
+    ModelRestrictedError,
     ContentValidationError,
+    # Subclass of ContentValidationError, so isinstance() already covered
+    # it — listed anyway because the triage test compares NAMES, which is
+    # what makes a new type fail at authoring time rather than in prod.
+    ContentTooLargeError,
     EndpointConfigurationError,
 )
 

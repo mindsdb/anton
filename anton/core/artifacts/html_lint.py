@@ -21,7 +21,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _RUNNER_SCRIPT = Path(__file__).with_name("_html_lint_runner.js")
-_TIMEOUT_SECONDS = 8
+# Public: callers that treat `None` from `lint_html` as "could not check"
+# read these to say WHY in their own diagnostics (generate_artifact's
+# `verify_frontend` traces the reason a browser check was skipped).
+BROWSER_ENV_VAR = "ANTON_HTML_LINT_BROWSER"
+TIMEOUT_SECONDS = 8
 _RESULT_START = "RESULT_JSON_START"
 _RESULT_END = "RESULT_JSON_END"
 
@@ -47,13 +51,37 @@ def lint_html(path: Path) -> list[HtmlFinding] | None:
     read/cell that triggered it.
     """
     try:
-        return _lint_html(path)
+        # Absolute on purpose: Electron's `loadFile` resolves a relative path
+        # against its own app directory, not the cwd, and reports the page
+        # itself as ERR_FILE_NOT_FOUND — which the runner then returns as an
+        # empty page plus a failed request for the target.
+        return _lint_target(str(Path(path).resolve()))
     except Exception:
         return None
 
 
-def _lint_html(path: Path) -> list[HtmlFinding] | None:
-    browser = _discover_browser()
+def lint_url(url: str) -> list[HtmlFinding] | None:
+    """Load a page served over http(s) — the fullstack frontend from its own
+    running backend — and flag the same things `lint_html` does (S-02).
+
+    Same `None` / `[]` contract. Over http the runner also reports a 4xx/5xx
+    response for the page's own origin as a failed request, so a missing
+    asset in `static/` or a `fetch()` to a route the backend does not serve
+    shows up the way a missing local file does under file://. Anything that
+    is not an http(s) URL is refused as `None`: a file path belongs to
+    `lint_html`, and nothing else is a page.
+    """
+    if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        return _lint_target(url)
+    except Exception:
+        return None
+
+
+def _lint_target(target: str) -> list[HtmlFinding] | None:
+    """Run the Electron runner on `target` (an absolute path or a URL)."""
+    browser = discover_browser()
     if browser is None:
         return None
 
@@ -63,7 +91,7 @@ def _lint_html(path: Path) -> list[HtmlFinding] | None:
     #   picks the runner up from the env instead, in its lint-mode entry point.
     env = {
         **os.environ,
-        "ANTON_HTML_LINT_TARGET": str(path),
+        "ANTON_HTML_LINT_TARGET": target,
         "ANTON_HTML_LINT_RUNNER": str(_RUNNER_SCRIPT),
     }
     try:
@@ -71,7 +99,7 @@ def _lint_html(path: Path) -> list[HtmlFinding] | None:
             [browser, str(_RUNNER_SCRIPT), "--headless=new", "--disable-gpu"],
             env=env,
             capture_output=True,
-            timeout=_TIMEOUT_SECONDS,
+            timeout=TIMEOUT_SECONDS,
             text=True,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -83,8 +111,10 @@ def _lint_html(path: Path) -> list[HtmlFinding] | None:
     return _findings_from_result(result)
 
 
-def _discover_browser() -> str | None:
-    browser = os.environ.get("ANTON_HTML_LINT_BROWSER")
+def discover_browser() -> str | None:
+    """The browser binary `lint_html` would run, or None when the env var is
+    unset or names nothing executable (neither a file nor on PATH)."""
+    browser = os.environ.get(BROWSER_ENV_VAR)
     if not browser:
         return None
     if os.path.isfile(browser) and os.access(browser, os.X_OK):

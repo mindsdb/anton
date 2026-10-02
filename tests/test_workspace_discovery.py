@@ -62,15 +62,20 @@ class TestDiscoveryBlock:
         assert "campaigns/" in block
         assert ".env" not in block
 
-    def test_live_pad_labeled_active_system_pads_hidden(self, tmp_path):
+    def test_live_state_does_not_change_block_and_system_pads_hidden(self, tmp_path):
         mgr = make_manager(tmp_path)
         seed_agent_pads(mgr, ["catanah"])
-        # Simulate live pads: one agent-recorded, one system-created.
+        idle = build_workspace_discovery_context(mgr)
+        # Simulate live pads: one agent-recorded, one system-created. A pad
+        # being live used to add "(active)", which flipped between turns and
+        # re-wrote the conversation cache; the block must not depend on it.
         mgr._pads["catanah"] = object()
         mgr._pads["artifact-slug-pad"] = object()
-        block = build_workspace_discovery_context(mgr)
-        assert "catanah (active)" in block
-        assert "artifact-slug-pad" not in block
+        live = build_workspace_discovery_context(mgr)
+        assert "catanah" in live
+        assert "(active)" not in live
+        assert "artifact-slug-pad" not in live
+        assert live == idle
 
     def test_snapshotted_pad_carries_no_age(self, tmp_path):
         # A pad with an on-disk snapshot used to render "(snapshot 4m old)".

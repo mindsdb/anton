@@ -84,13 +84,11 @@ class TestClientUsageListener:
         await client.plan(system="s", messages=[])
         await client.code(system="s", messages=[])
         await client.summarize(system="s", messages=[])
-        await client.gate(system="s", messages=[])
 
         assert seen == [
             ("planning", "planner"),
             ("coding", "coder"),
             ("router", "coder"),   # router defaults to the coding role
-            ("router", "coder"),
         ]
 
     @pytest.mark.asyncio
@@ -162,6 +160,8 @@ def _bare_session(**overrides) -> ChatSession:
     s._session_id = "conv-123"
     s._harness = "cowork"
     s._surface = "desktop"
+    s._user_id = None
+    s._organization_id = None
     s._turn_count = 4
     s._cancel_event = overrides.pop("cancel_event", MagicMock(is_set=lambda: False))
     s._settings = overrides.pop("settings", None)
@@ -204,6 +204,24 @@ class TestEmitTurnCost:
         with patch("anton.analytics.send_event") as send:
             s._emit_turn_cost()
         assert send.call_args.kwargs["surface"] == ""
+
+    def test_account_key_is_stamped_and_empty_when_the_host_did_not_say(self):
+        """ENG-2121: the turn carries the account that ran it, so completed
+        work joins sign-up, install and payment. Opaque ids only, never an
+        email. Unset is "", matching `surface`."""
+        sub = "0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30"
+        org = "7c6a1d2e-5f30-4d18-bb44-0f2b5c719e3a"
+        s = _bare_session(_user_id=sub, _organization_id=org)
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.call_args.kwargs["user_id"] == sub
+        assert send.call_args.kwargs["organization_id"] == org
+
+        s = _bare_session()
+        with patch("anton.analytics.send_event") as send:
+            s._emit_turn_cost()
+        assert send.call_args.kwargs["user_id"] == ""
+        assert send.call_args.kwargs["organization_id"] == ""
 
     def test_books_close_and_listener_disarms(self):
         s = _bare_session()
@@ -263,7 +281,6 @@ class TestTurnResetsBooks:
         from anton.core.session import ChatSessionConfig
 
         session = ChatSession(ChatSessionConfig(llm_client=llm))
-        monkeypatch.setattr(session, "_router_enabled", False, raising=False)
 
         books: list[TurnCost] = []
         totals: list[int] = []

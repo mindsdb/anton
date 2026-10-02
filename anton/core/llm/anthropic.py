@@ -15,6 +15,7 @@ from .provider import (
     LLMResponse,
     ProviderAuthError,
     ProviderConnectionInfo,
+    ProviderErrorBody,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -27,15 +28,41 @@ from .provider import (
     TransientProviderError,
     Usage,
     classify_404,
+    classify_content_rejection,
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
-    wallet_denial_code,
+    ensure_replayable_tool_call,
+    mindshub_billing_stop,
+    mindshub_model_restriction,
     raise_on_empty_response,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_for_bad_request(exc: anthropic.BadRequestError) -> None:
+    """Classify the 400s we can name. Returns when we cannot, so the caller
+    re-raises the SDK error exactly as it does today.
+
+    The openai.py twin carries the full rationale; the trap is identical here.
+    ``BadRequestError`` subclasses ``APIStatusError``, so the clause below
+    matches a 400 first and its bare ``raise`` re-raises out of the whole
+    ``try`` — ``_raise_for_status_error`` never sees a 400, on either provider.
+    """
+    msg = str(exc).lower()
+    if "prompt is too long" in msg or "context limit" in msg:
+        raise ContextOverflowError(str(exc)) from exc
+
+    parsed = ProviderErrorBody.parse(exc.body)
+    content = classify_content_rejection(
+        error_type=parsed.envelope.type or parsed.top.type,
+        message=parsed.envelope.message or parsed.top.message,
+        param=parsed.envelope.param or parsed.top.param,
+    )
+    if content is not None:
+        raise content from exc
 
 
 def _raise_for_status_error(
@@ -50,9 +77,15 @@ def _raise_for_status_error(
 
     - 401 → ProviderAuthError (canonical provider-credential refusal).
     - 429 WITH a quota ``detail`` → TokenLimitExceeded (keeps its own card).
-    - 402/429 with an M3 gate wallet code (``wallet_empty`` /
-      ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
-      → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
+    - 402/429 with an M3 gate billing code (``wallet_empty`` /
+      ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
+      body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
+      subclass from ``mindshub_billing_stop`` (ENG-1169). Code-exact: BYOK
+      402s stay generic.
+    - 403 with the gateway's ``model_restricted`` deny detail
+      (``X-MindsHub-Deny-Detail`` header or ``error.deny_detail``)
+      → ModelRestrictedError from ``mindshub_model_restriction``. A 403
+      ``permission_denied`` without the detail stays generic.
     - 404 → ModelUnavailableError or EndpointConfigurationError via the
       shared ``classify_404`` (ENG-1139) — permanent, non-duplicated copy
       instead of the generic "temporarily unavailable, try again".
@@ -66,9 +99,11 @@ def _raise_for_status_error(
         ) from exc
 
     body = exc.body if isinstance(exc.body, dict) else {}
+    parsed = ProviderErrorBody.parse(body)
 
-    # Computed once, up front: several branches below can mint a MindsHub
-    # billing verdict and each must refuse a provably foreign origin (ENG-1693).
+    # The `detail` branch below can mint a MindsHub billing verdict, so it must
+    # refuse a provably foreign origin; `mindshub_billing_stop`
+    # applies the same gate to the gate's billing codes itself.
     _foreign = origin_is_known_third_party(exc)
 
     # Origin-gated, and `str`-guarded to match the openai twin. Two bugs the
@@ -77,44 +112,41 @@ def _raise_for_status_error(
     # repr next to our billing link, and an ungated one lets any BYOK endpoint
     # mint the credits card from a single JSON key with attacker-authored prose
     # in it.
-    _detail = body.get("detail")
+    _detail = parsed.top.detail
     if not _foreign and exc.status_code == 429 and isinstance(_detail, str) and _detail:
         msg = f"Server returned 429 — {_detail}"
         msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
-    # MindsHub M3 wallet taxonomy (ENG-1169) — same branch as the openai twin
-    # so the mapping can't drift. Today the gateway's anthropic-dialect lane
-    # strips both the code and the X-MindsHub-* headers (tracked separately),
-    # so this fires only against a fixed gateway or a proxy that preserves
-    # them — but a wallet denial that DOES arrive here must hit the credits
-    # card, not the generic copy. Code/reason-exact: a BYOK Anthropic billing
-    # error carries neither and stays generic.
-    # ENG-1693 — see the openai twin for the full reasoning. Both carriers are
-    # third-party controlled on a BYOK endpoint, and cowork-server's own gates
-    # run too late because anton converts a wallet denial into a typed error
-    # that is matched above all origin logic.
-    # Read once, UNGATED, then used two different ways below.
+    # MindsHub M3 billing taxonomy, through the helper the openai twin uses so
+    # the mapping can't drift. The gateway's Anthropic lane re-envelopes a gate
+    # denial with only `error.type` and `error.message`, so the body code never
+    # reaches this mapper from the gateway. The lane passes the X-MindsHub-*
+    # headers through: the reason arrives on X-MindsHub-Reason and the reset
+    # instant on X-MindsHub-Reset-At, and `mindshub_billing_stop` reads both.
+    # A body code from a sender that keeps it maps the same way. A BYOK
+    # Anthropic billing error carries neither carrier and stays generic.
+    # `mindshub_billing_stop` also owns the origin gate: both carriers are
+    # third-party controlled on a BYOK endpoint.
+    billing_stop = mindshub_billing_stop(exc=exc, body=body, status_code=exc.status_code)
+    if billing_stop is not None:
+        raise billing_stop from exc
+
+    # An org admin's model rule, through the helper the openai twin uses so the
+    # mapping can't drift. The Anthropic SDK keeps the wire envelope, so the
+    # body copy of the deny detail sits at `error.deny_detail` here. A 403
+    # `permission_denied` without the detail stays generic.
+    restriction = mindshub_model_restriction(
+        exc=exc, body=body, status_code=exc.status_code, model=model,
+    )
+    if restriction is not None:
+        raise restriction from exc
+
+    # Read UNGATED, for the velocity check below only: a velocity limit is not
+    # a billing verdict, so the origin gate does not apply to it.
     raw_gate_reason = ""
     if getattr(exc, "response", None) is not None:
         raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
-    # Gated form — only this one may pick a BILLING verdict.
-    gate_reason = "" if _foreign else raw_gate_reason
-    wallet_code = None if _foreign else (
-        wallet_denial_code(body) or (
-            gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
-        )
-    )
-    if exc.status_code in (402, 429) and wallet_code:
-        what = (
-            "your MindsHub credits are used up."
-            if wallet_code == "wallet_empty"
-            else "your included token allowance is exhausted."
-        )
-        raise TokenLimitExceeded(
-            f"Server returned {exc.status_code} — {what} Add credits at "
-            "https://console.mindshub.ai/settings/organization/billing to continue."
-        ) from exc
 
     # A 404 from the Anthropic Messages API means the model isn't recognized
     # (there's no alternate route to misconfigure on this fixed endpoint) —
@@ -123,17 +155,31 @@ def _raise_for_status_error(
     # the "permanent, switch models" framing instead of the misleading
     # "temporarily unavailable, try again" — can't drift between providers.
     if exc.status_code == 404:
-        envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
         raise classify_404(
             model,
-            message=envelope.get("message") or body.get("message"),
-            error_type=envelope.get("type"),
+            message=parsed.envelope.message or parsed.top.message,
+            error_type=parsed.envelope.type,
         ) from exc
+
+    # A permanent rejection of the request's OWN content — the wrong SHAPE
+    # (ENG-1992) or an image too large for the model (ENG-2689). Retrying the
+    # identical request fails identically every time, so it must never reach
+    # the transient classifier or the generic "try again in a moment" copy
+    # below. Shared with the openai.py mapper (see classify_content_rejection)
+    # so the heuristic and its wording can't drift: until ENG-2689 this branch
+    # existed only there, which left BYOK Anthropic users with the raw bug —
+    # four identical retries and a message telling them to try again.
+    _content = classify_content_rejection(
+        error_type=parsed.envelope.type or parsed.top.type,
+        message=parsed.envelope.message or parsed.top.message,
+        param=parsed.envelope.param or parsed.top.param,
+    )
+    if _content is not None:
+        raise _content from exc
 
     # Body `code` in both dialects — the SDK may deliver the wire envelope
     # unmodified, unlike the openai client which peels it.
-    _env = body.get("error") if isinstance(body.get("error"), dict) else {}
-    _body_code = body.get("code") or _env.get("code")
+    _body_code = parsed.code
     # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
     # our gateway names it on the reason header and in the body code. Anything
     # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
@@ -257,9 +303,7 @@ class AnthropicProvider(LLMProvider):
         try:
             response = await self._client.messages.create(**kwargs)
         except anthropic.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "prompt is too long" in msg or "context limit" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except anthropic.APIStatusError as exc:
             _raise_for_status_error(exc, model=model)
@@ -280,9 +324,14 @@ class AnthropicProvider(LLMProvider):
             if block.type == "text":
                 content_text += block.text
             elif block.type == "tool_use":
-                tool_calls.append(
+                # Anthropic's reader has no empty-id BUFFER path — a missing
+                # `content_block_start` appends nothing at all — but `block.id`
+                # is written straight through, so a relay that sends a blank id
+                # produces the identical poisoned history (ENG-2420). The guard
+                # belongs on the VALUE, not on the missing-start case.
+                tool_calls.append(ensure_replayable_tool_call(
                     ToolCall(id=block.id, name=block.name, input=block.input)
-                )
+                ))
 
         # The SDK hands back an already-parsed `input`, so unlike the streaming
         # path there is no raw JSON to check: `stop_reason` is the only evidence
@@ -379,8 +428,22 @@ class AnthropicProvider(LLMProvider):
                                 "id": block.id,
                                 "name": block.name,
                                 "json_parts": [],
+                                # Same record-don't-re-derive rule as both
+                                # OpenAI readers. Nothing updates id/name after
+                                # this on the Anthropic path, so the two are
+                                # equivalent here today — the flag keeps them
+                                # equivalent if that ever changes.
+                                "started": False,
                             }
-                            yield StreamToolUseStart(id=block.id, name=block.name)
+                            # Gated like both OpenAI readers, which this path
+                            # did not match. Unguarded, a blank id opened a UI
+                            # step keyed "" that nothing could retire: the
+                            # marker that actually closes a step carries the
+                            # call's id, which is now the MINTED one
+                            # (review: pnewsam on #471).
+                            if block.id and block.name:
+                                blocks[idx]["started"] = True
+                                yield StreamToolUseStart(id=block.id, name=block.name)
                         elif block.type in ("thinking", "redacted_thinking"):
                             # Adaptive thinking (triggered by output_config.effort,
                             # set above when self._reasoning_effort is configured)
@@ -416,21 +479,23 @@ class AnthropicProvider(LLMProvider):
                             # the session what the body was missing. See
                             # `safe_parse_tool_input`.
                             parsed_input, parse_error, repaired = safe_parse_tool_input(raw_json)
-                            tool_calls.append(
+                            tool_calls.append(ensure_replayable_tool_call(
                                 ToolCall(
                                     id=info["id"], name=info["name"], input=parsed_input,
                                     parse_error=parse_error, repaired=repaired,
                                 )
-                            )
-                            yield StreamToolUseEnd(id=info["id"])
+                            ))
+                            # Gated on whether a Start was emitted, and on the
+                            # ORIGINAL id rather than the minted one — an End
+                            # with no Start is a worse event stream than neither.
+                            if info.get("started"):
+                                yield StreamToolUseEnd(id=info["id"])
 
                     elif event.type == "message_delta":
                         stop_reason = event.delta.stop_reason
                         output_tokens = event.usage.output_tokens
         except anthropic.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "prompt is too long" in msg or "context limit" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except anthropic.APIStatusError as exc:
             _raise_for_status_error(exc, model=model)

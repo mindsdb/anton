@@ -308,6 +308,30 @@ class LLMClient:
         self._notify_usage("coding", self._coding_model, response.usage, listener)
         return response
 
+    async def code_stream(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+        native_web_tools: set[str] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        listener = self.usage_listener
+        async for event in self._coding_provider.stream(
+            model=self._coding_model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens or self._max_tokens,
+            native_web_tools=native_web_tools,
+        ):
+            if isinstance(event, StreamComplete):
+                self._notify_usage(
+                    "coding", self._coding_model, event.response.usage, listener
+                )
+            yield event
+
     async def summarize(
         self,
         *,
@@ -327,35 +351,6 @@ class LLMClient:
                 model=self._router_model,
                 system=system,
                 messages=messages,
-                max_tokens=max_tokens or self._max_tokens,
-            ),
-            role=self._router_auth_role,
-        )
-        self._notify_usage("router", self._router_model, response.usage, listener)
-        return response
-
-    async def gate(
-        self,
-        *,
-        system: str,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        tool_choice: dict | None = None,
-        max_tokens: int | None = None,
-    ) -> LLMResponse:
-        """One cheap gating call on the router role — see `anton.core.llm.thalamus`.
-
-        No ``native_web_tools``: the thalamus must never do work itself,
-        only answer from context or delegate.
-        """
-        listener = self.usage_listener
-        response = await _call_with_auth_confirmation(
-            lambda: self._router_provider.complete(
-                model=self._router_model,
-                system=system,
-                messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
                 max_tokens=max_tokens or self._max_tokens,
             ),
             role=self._router_auth_role,

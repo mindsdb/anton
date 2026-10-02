@@ -24,8 +24,9 @@ with `/llm` in chat or by running `anton setup`. All keys are persisted to
 
 [MindsHub](https://mindshub.ai) is the default and recommended choice. During
 setup Anton resolves the planning and coding models from the server's live
-model catalogue — picking the models your key is actually entitled to use —
-and validates the connection with a real request against that configuration:
+model catalogue, picking the chat models your key is actually entitled to use
+(embedding and decision models such as Jev are skipped), and validates the
+connection with a real request against that configuration:
 
 - Latest frontier models
 - Faster responses

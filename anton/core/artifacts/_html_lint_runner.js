@@ -1,6 +1,8 @@
 // Checked-in runner for html_lint.py — not agent-authored.
-// Target file path comes via ANTON_HTML_LINT_TARGET (env, not argv, to
-// avoid mixing Chromium switches with a positional file argument).
+// Target comes via ANTON_HTML_LINT_TARGET (env, not argv, to avoid mixing
+// Chromium switches with a positional argument): a file path, loaded through
+// file://, or an http(s) URL — the fullstack page served by its own running
+// backend, where the relative /api/* fetches resolve.
 //
 // Loads the page in a hidden, sandboxed BrowserWindow and reports one JSON
 // blob between RESULT_JSON_START/RESULT_JSON_END on stdout: console errors
@@ -54,7 +56,13 @@ app.whenReady().then(() => {
     return;
   }
 
-  let targetDirUrl = pathToFileURL(path.dirname(path.resolve(targetPath))).href;
+  // "Own" scope for console errors and failed requests: the page's directory
+  // for a file, the origin for a URL (the backend serves both the page and
+  // its /api/*, so a failing route counts as the page's own problem).
+  const isUrl = /^https?:\/\//i.test(targetPath);
+  let targetDirUrl = isUrl
+    ? new URL(targetPath).origin
+    : pathToFileURL(path.dirname(path.resolve(targetPath))).href;
   if (!targetDirUrl.endsWith('/')) targetDirUrl += '/';
 
   const win = new BrowserWindow({
@@ -93,6 +101,15 @@ app.whenReady().then(() => {
     }
   });
 
+  // Over http a missing asset or an unserved route is not a network error
+  // but a completed response with a 4xx/5xx status — report it the same way
+  // file:// reports ERR_FILE_NOT_FOUND. Own-scope only, like the above.
+  win.webContents.session.webRequest.onCompleted((details) => {
+    if (details.url.startsWith(targetDirUrl) && details.statusCode >= 400) {
+      result.failedRequests.push({ url: details.url, error: 'HTTP ' + details.statusCode });
+    }
+  });
+
   win.webContents.session.webRequest.onBeforeRequest((details, callback) => {
     let url;
     try {
@@ -114,8 +131,7 @@ app.whenReady().then(() => {
     callback({ redirectURL: 'data:text/plain,' });
   });
 
-  win
-    .loadFile(targetPath)
+  (isUrl ? win.loadURL(targetPath) : win.loadFile(targetPath))
     .catch(() => {})
     .finally(() => {
       setTimeout(async () => {

@@ -23,9 +23,14 @@ from anton.core.llm import provider as provider_mod
 from anton.core.llm.provider import (
     CURATED_PROVIDER_ERRORS,
     PROVIDER_FAILURE_KINDS,
+    ContentTooLargeError,
     ContentValidationError,
+    AllowanceExhaustedError,
     ContextOverflowError,
     EndpointConfigurationError,
+    FreeServingPausedError,
+    MindsHubBillingStop,
+    ModelRestrictedError,
     ModelUnavailableError,
     ProviderAuthError,
     ProviderOverloadedError,
@@ -33,6 +38,7 @@ from anton.core.llm.provider import (
     StructuredOutputError,
     TokenLimitExceeded,
     TransientProviderError,
+    WalletEmptyError,
     classify_transient,
     provider_failure_kind,
 )
@@ -245,6 +251,20 @@ async def test_a_non_transient_failure_still_summarizes():
 _CURATED_SAMPLES = {
     ContextOverflowError: lambda: ContextOverflowError("too long"),
     TokenLimitExceeded: lambda: TokenLimitExceeded("out of credits"),
+    MindsHubBillingStop: lambda: MindsHubBillingStop(
+        "billing stop", reason="wallet_empty", status_code=402,
+    ),
+    WalletEmptyError: lambda: WalletEmptyError(
+        "credits used up", reason="wallet_empty", status_code=402,
+    ),
+    AllowanceExhaustedError: lambda: AllowanceExhaustedError(
+        "allowance used up", reason="included_allowance_exhausted", status_code=429,
+        reset_at="2026-10-01T00:00:00Z",
+    ),
+    FreeServingPausedError: lambda: FreeServingPausedError(
+        "free serving paused", reason="free_air_daily_spend_fuse_exceeded",
+        status_code=429, reset_at="2026-09-25T00:00:00Z",
+    ),
     ProviderAuthError: lambda: ProviderAuthError("Invalid API key"),
     StructuredOutputError: lambda: StructuredOutputError("no tool call"),
     TransientProviderError: _unreachable,
@@ -252,7 +272,11 @@ _CURATED_SAMPLES = {
     ModelUnavailableError: lambda: ModelUnavailableError(
         "no such model", code="model_not_found", model="x"
     ),
+    ModelRestrictedError: lambda: ModelRestrictedError(
+        "An admin in your organization restricted the model 'x'.", model="x"
+    ),
     ContentValidationError: lambda: ContentValidationError("bad image block"),
+    ContentTooLargeError: lambda: ContentTooLargeError("image too big"),
     EndpointConfigurationError: lambda: EndpointConfigurationError("bad base url"),
 }
 

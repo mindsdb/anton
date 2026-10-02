@@ -26,7 +26,15 @@ The measurement events are the two that report on Anton's own work rather than
 on something you did: what a turn cost, and how the memory-retrieval step
 behaved while assembling a prompt.
 
-**No personal data or query content is ever sent** — no prompts, no message
+**When Anton runs inside MindsHub Cowork** (the desktop app or the browser
+version) and you are signed in, the per-turn event also carries your MindsHub
+**account id and organisation id**. These are the same opaque ids Cowork and
+the MindsHub console already use for their own analytics, so the turn is
+counted against your account rather than your machine. They are random
+identifiers, not your email address or name. The standalone `anton` CLI never
+sends them.
+
+**No query content is ever sent** — no prompts, no message
 text, no tool output, no file contents, no file paths, no credentials, no
 hostnames, no email addresses. The installation ID is a one-way SHA-256 hash of
 the machine's network adapter address, truncated to 16 hex characters; the raw

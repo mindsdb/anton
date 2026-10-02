@@ -142,6 +142,10 @@ _SENTINEL_REASONS = {
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own
     # bad argument, not an environment wall (ENG-1635).
     "package_install_rejected": (TIER_SELF, "invalid_argument"),
+    # The single-scratchpad guard's challenge to a NEW pad name. Guidance the
+    # agent acts on by reusing the pad it already has (the outcome is even
+    # `ok=True`), so it is the agent's own argument choice, never a wall.
+    "new_scratchpad_challenged": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),
@@ -169,6 +173,12 @@ _SENTINEL_REASONS = {
     # Could be environment or config and the sentinel does not say which, so it
     # stays out of every trip rung until something distinguishes them.
     "launch_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `generate_artifact` stopped somewhere inside its own pipeline. The
+    # single string it returns names the node, but the causes behind that
+    # node span everything from a truncated spec to a missing data source, so
+    # one sentinel cannot pick a tier honestly. Unclassified until the
+    # pipeline reports a cause rather than a location.
+    "pipeline": (TIER_UNCLASSIFIED, "unclassified"),
     # `read_image`'s catch-all read failure wraps a bare `except Exception`, so
     # one sentinel covers a permissions wall, a corrupt file the agent itself
     # wrote, and a decode bug. Nothing here distinguishes them, so it stays out
@@ -177,6 +187,19 @@ _SENTINEL_REASONS = {
     # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
     # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
     "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # MCP connectors (ENG-1816): a rejected/expired token needs a user
+    # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
+    # — the agent cannot fix this by retrying, so it's a genuine wall.
+    "mcp_permanent_error": (TIER_WALL, "auth_missing"),
+    # A rate limit or transport hiccup — already retried once inside
+    # McpSession.call_tool before this reason ever reaches a ToolOutcome, so
+    # reaching here means the provider is still down, not a one-off blip.
+    "mcp_transient_error": (TIER_TRANSIENT, "mcp_transient"),
+    # The MCP tool itself reported is_error=True. A bare "the tool failed" text
+    # covers both a bad argument the agent passed and a genuine provider-side
+    # wall, with nothing here to tell them apart — stays out of every trip
+    # rung, same reasoning as `read_failed`/`bmp_convert_failed` above.
+    "mcp_tool_error": (TIER_UNCLASSIFIED, "unclassified"),
 }
 
 # Identifier extraction, per class. Kept narrow on purpose: a wrong identifier

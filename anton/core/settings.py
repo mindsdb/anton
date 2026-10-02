@@ -1,21 +1,11 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
 #
 class CoreSettings(BaseSettings):
     model_config = {"env_prefix": "ANTON_", "extra": "ignore"}
-
-    # Router — cheap front-model gating (ENG-648). When enabled, every text
-    # turn first hits the router model, which either answers trivial/from-
-    # context requests directly or delegates to the planning model (optionally
-    # preloading skills). The mechanism is the "thalamus" (see
-    # anton/core/llm/thalamus.py); the user-facing knobs stay "router". Off by
-    # default until evaluated; flip with ANTON_ROUTER_ENABLED=true.
-    router_enabled: bool = False
-    # Output budget for the gating call. Deliberately small: a direct
-    # answer that doesn't fit here is evidence the turn wasn't trivial,
-    # and the router treats truncation as "delegate".
-    router_max_tokens: int = 1024
 
     # Output-token budget per planning/coding LLM call. Was a hardcoded
     # fallback in LLMClient.from_settings (always 8192, because this field
@@ -34,6 +24,13 @@ class CoreSettings(BaseSettings):
     # is skipped). Raise to 2 to also skip trivial single-tool-round turns once
     # verdict logs confirm they're rarely INCOMPLETE (ENG-716).
     verify_min_tool_rounds: int = 1
+    # Jev settles confident COMPLETE/WAITING verdicts on MindsHub; everything else,
+    # and every BYOK setup, uses the LLM verifier as before. "off" is the kill switch.
+    verifier_jev: Literal["on", "off"] = "on"
+    verifier_jev_model: str = "jev-1.13.0"
+    verifier_jev_timeout_s: float = 2.0
+    # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
+    verifier_jev_min_p: float = 0.8
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
     # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #

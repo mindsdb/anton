@@ -307,13 +307,13 @@ def test_the_workflow_bounds_the_job_so_a_hang_cannot_hold_a_runner():
 
 
 def test_single_valued_cases_still_demand_that_exact_verdict():
-    """The acceptable-set change must not have loosened the other four cases.
+    """The acceptable-set change must not have loosened the single-valued cases.
 
-    Four of the five fixtures exist because the *wrong label is the bug* — a
-    recovered error judged INCOMPLETE force-continues (ENG-1134), a genuine
-    question judged INCOMPLETE makes the agent answer itself (ENG-716), an
-    environment wall judged INCOMPLETE walks into the wall (ENG-836). Those
-    must stay single-valued.
+    Every fixture but the two hallucinated-success ones exists because the
+    *wrong label is the bug* — a recovered error judged INCOMPLETE
+    force-continues (ENG-1134), a genuine question judged INCOMPLETE makes the
+    agent answer itself (ENG-716), an environment wall judged INCOMPLETE walks
+    into the wall (ENG-836). Those must stay single-valued.
     """
     by_name = {c.name: c for c in ev._CASES}
 
@@ -326,7 +326,22 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         # failed as "truncated" because the TRANSCRIPT was clipped, not
         # the answer.
         "long_complete_reply": "COMPLETE",
+        # ENG-2686: INCOMPLETE here IS the incident — the honest N/D reply
+        # was force-continued into invented fares. And the three risk
+        # controls guard the over-correction: a one-shot give-up must not
+        # become STUCK, a requested estimate and a computed total must not
+        # become "unsourced".
+        "honest_unobtainable_data": "STUCK",
+        "one_attempt_give_up": "INCOMPLETE",
+        "user_requested_estimate": "COMPLETE",
+        "computed_total_clipped_source": "COMPLETE",
+        # And the shadow-replay finding: a failed attempt followed by asking
+        # the user is WAITING. INCOMPLETE here IS ENG-716's incident.
+        "asks_user_after_one_failed_attempt": "WAITING",
     }
+    assert set(single) | {"implied_success_data_never_arrived", "disclaimered_fabrication"} == set(by_name), (
+        "a new case was added without deciding here whether it is single-valued"
+    )
     for name, verdict in single.items():
         assert by_name[name].acceptable == (verdict,), (
             f"{name} must accept only {verdict}; the alternative label IS the "
@@ -334,24 +349,32 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         )
 
 
-def test_only_the_hallucinated_success_case_accepts_two_verdicts():
-    """One deliberate exception, and it must not spread quietly.
+def test_only_the_hallucinated_success_cases_accept_two_verdicts():
+    """Two deliberate exceptions, both the same invariant, and it must not
+    spread quietly.
 
     ENG-1134's safeguard is "never accept a hallucinated success as done", which
-    both INCOMPLETE and STUCK satisfy. COMPLETE and WAITING must never be
-    acceptable there — those are the failure.
+    both INCOMPLETE and STUCK satisfy. ENG-2686 added the disclaimered variant
+    of the same incident (invented figures passed as COMPLETE behind an
+    "indicative" label). COMPLETE and WAITING must never be acceptable in
+    either — those are the failure.
     """
     multi = [c for c in ev._CASES if len(c.acceptable) > 1]
 
-    assert [c.name for c in multi] == ["implied_success_data_never_arrived"], (
-        f"exactly one case may accept multiple verdicts; found "
+    assert [c.name for c in multi] == [
+        "implied_success_data_never_arrived",
+        "disclaimered_fabrication",
+    ], (
+        f"exactly two cases may accept multiple verdicts; found "
         f"{[c.name for c in multi]}"
     )
-    acceptable = set(multi[0].acceptable)
-    assert acceptable == {"INCOMPLETE", "STUCK"}
-    assert not acceptable & {"COMPLETE", "WAITING"}, (
-        "accepting COMPLETE or WAITING here would delete the ENG-1134 safeguard"
-    )
+    for case in multi:
+        acceptable = set(case.acceptable)
+        assert acceptable == {"INCOMPLETE", "STUCK"}, case.name
+        assert not acceptable & {"COMPLETE", "WAITING"}, (
+            f"{case.name}: accepting COMPLETE or WAITING here would delete the "
+            "hallucinated-success safeguard"
+        )
 
 
 def test_the_recovered_case_asks_one_unambiguous_question():
@@ -455,6 +478,30 @@ def test_an_alias_outside_the_pin_map_is_recorded_but_not_asserted():
     assert ev._SERVED == {"gpt-terra": "gpt-5.6-terra"}
 
 
+def test_an_alias_echo_is_recorded_as_not_disclosed_and_never_a_repoint(monkeypatch):
+    """ENG-2892: the gateway now returns the alias as `model`. That is no
+    information about the served model, not a repoint — the check must not
+    raise, must record the blindness where the report will show it, and must
+    keep failing a GENUINE repoint (a different real id)."""
+    monkeypatch.setattr(ev, "_SERVED", {})
+    ev._check_served_model("haiku", "haiku")  # must not raise
+    assert "not disclosed" in ev._SERVED["haiku"]
+    assert ev._SERVED["haiku"].startswith("haiku")
+    # The guard is still armed for a real repoint of the same slot.
+    with pytest.raises(ev.AliasRepointed):
+        ev._check_served_model("haiku", "claude-sonnet-5")
+    # And the pinned id itself is still accepted and recorded verbatim.
+    ev._check_served_model("haiku", "claude-haiku-4-5-20251001")
+    assert ev._SERVED["haiku"] == "claude-haiku-4-5-20251001"
+    # A confirmed match wins over the echo test: when the alias IS the pinned
+    # real id (a one-off `VERIFIER_EVAL_*_MODEL=<real id>` run), the gateway
+    # did disclose and the report must not claim blindness (#490 self-review,
+    # finding 2 — the echo branch used to run first and mislabel it).
+    monkeypatch.setitem(ev._EXPECTED_SERVED, "gpt-5.6-luna", "gpt-5.6-luna")
+    ev._check_served_model("gpt-5.6-luna", "gpt-5.6-luna")
+    assert ev._SERVED["gpt-5.6-luna"] == "gpt-5.6-luna"
+
+
 @pytest.mark.parametrize("served", [None, "", 0, object()])
 def test_a_missing_served_id_is_not_treated_as_a_repoint(served):
     """A provider that omits `model` says nothing about which model ran.
@@ -536,3 +583,260 @@ def test_a_served_id_cannot_inject_lines_into_the_report(alias):
     assert recorded is not None, "a poisoned id must still be recorded, not dropped"
     assert "\n" not in recorded, f"newline survived sanitisation: {recorded!r}"
     assert len(recorded) <= 80, "the sanitiser's length cap did not apply"
+
+
+def test_only_the_one_attempt_control_is_recorded_not_gated_on_a_model():
+    """The skip path must not spread quietly.
+
+    One control carries a measured label slip on haiku and is recorded there
+    rather than gated. Every incident case stays gated on every model: a
+    fabrication fixture that is only "recorded" somewhere ships the
+    fabrication there.
+    """
+    skipping = [c for c in ev._CASES if c.skip_models]
+    assert [c.name for c in skipping] == ["one_attempt_give_up"], (
+        f"only the one-attempt control may skip a model; found "
+        f"{[c.name for c in skipping]}"
+    )
+    case = skipping[0]
+    assert case.skip_models == ("haiku",)
+    # Still gated somewhere in the matrix, at the trade-off guard's count.
+    assert ev._NARRATING_MODEL not in case.skip_models
+    assert ev._runs_for(case) == 12
+
+
+def test_run_overrides_are_only_the_premature_give_up_guard():
+    overridden = [c for c in ev._CASES if c.runs is not None]
+    assert [c.name for c in overridden] == ["one_attempt_give_up"]
+
+
+def test_fabrication_guards_run_at_the_higher_count():
+    """The two hallucinated-success cases guard a low-rate laundering
+    regression, and N=3 misses a 1-in-6 COMPLETE rate 58% of the time."""
+    by_name = {c.name: c for c in ev._CASES}
+    for name in ("implied_success_data_never_arrived", "disclaimered_fabrication"):
+        assert ev._runs_for(by_name[name]) == ev._STUCK_RUNS, name
+    # And the plain single-valued controls still run at the default.
+    assert ev._runs_for(by_name["stopped_partway"]) == ev._RUNS
+
+
+def test_recorded_not_gated_pairs_are_excluded_at_parametrization_not_skipped():
+    """verifier-eval.yml's out-of-money branch passes only when every skip in
+    the junit carries GATEWAY_UNAVAILABLE, so a design skip would turn a
+    starved run from a warning into a red misconfiguration.
+    """
+    ids = {p.id for p in ev._MATRIX}
+    assert "one_attempt_give_up-haiku" not in ids
+    assert "one_attempt_give_up-mindshub_air" in ids
+    assert len(ev._MATRIX) == len(ev._CASES) * len(ev._MODELS) - 1
+    import inspect
+
+    assert "pytest.skip(" not in inspect.getsource(ev.test_verdict)
+
+
+# --- ENG-2863: the two-tier scope decision in verifier-eval.yml ------------
+
+import importlib.util as _ilu
+
+_SCOPE_PATH = Path(__file__).resolve().parent.parent / ".github/scripts/verifier_eval_scope.py"
+_spec = _ilu.spec_from_file_location("verifier_eval_scope", _SCOPE_PATH)
+scope = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(scope)
+
+
+def test_every_scope_marker_resolves_to_a_span_in_the_code():
+    """A renamed function must fail here, not silently turn the matrix off.
+
+    The workflow decides full-matrix vs guard-only by intersecting the PR's
+    hunks with these symbols' line spans. A marker that resolves to nothing
+    would make every PR touching that code run the one-call guard, and the
+    rubric would be unguarded again (the ENG-1334 failure in a new coat).
+    """
+    root = Path(__file__).resolve().parent.parent
+    for path, names in scope.SPAN_MARKERS.items():
+        spans = scope.marker_spans((root / path).read_text(), names)
+        missing = [n for n in names if n not in spans]
+        assert not missing, f"{path}: scope markers resolve to nothing: {missing}"
+    # Pinned by EQUALITY, not subset: review of #486 deleted six entries one
+    # at a time and the subset asserts passed every time. Removing a marker is
+    # a deliberate edit to this test, with a reason.
+    assert set(scope.SPAN_MARKERS) == {"anton/core/session.py", "anton/core/llm/client.py"}
+    assert set(scope.SPAN_MARKERS["anton/core/session.py"]) == {
+        "_VerifierVerdict", "_VERIFIER_TOKEN_BUDGETS", "_VERIFIER_NO_PREAMBLE",
+        "_VERIFIER_JUDGMENT_RUBRIC", "_build_verify_request", "_render_verify_transcript",
+        "_render_tool_result_content", "_clip_keep_cause", "_IMAGE_PLACEHOLDER",
+    }
+    # The forced-tool-call body, not only the delegators that call it: a
+    # tool_choice mutation inside _generate_object_with read "guard" before.
+    assert set(scope.SPAN_MARKERS["anton/core/llm/client.py"]) == {
+        "_generate_object_with", "_call_with_auth_confirmation",
+        "generate_object", "generate_object_code",
+    }
+    assert set(scope.ALWAYS_FULL) == {
+        "tests/test_verifier_verdict_live.py", "anton/core/llm/structured.py",
+        ".github/scripts/verifier_eval_scope.py",
+    }
+
+
+def test_scope_counts_a_body_edit_inside_a_marker_and_ignores_one_outside():
+    src = (
+        "X = 1\n"
+        "def _render_verify_transcript(h):\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    return a + b\n"
+        "\n"
+        "async def turn_stream(self):\n"
+        "    y = _VERIFIER_TOKEN_BUDGETS\n"
+        "    return y\n"
+    )
+    spans = scope.marker_spans(src, ("_render_verify_transcript", "_VERIFIER_TOKEN_BUDGETS"))
+    assert spans == {"_render_verify_transcript": [(2, 5)]}  # the constant is only *used* here
+    inside = scope.parse_hunks("@@ -4 +4 @@\n-    b = 2\n+    b = 3\n")
+    outside = scope.parse_hunks("@@ -8 +8 @@\n-    y = _VERIFIER_TOKEN_BUDGETS\n+    y = 0\n")
+    assert scope.touched(inside, spans, spans) == {"_render_verify_transcript"}
+    assert scope.touched(outside, spans, spans) == set()
+    # A pure insertion (zero-length old side) inside the span counts too.
+    insertion = scope.parse_hunks("@@ -3,0 +4 @@\n+    c = 9\n")
+    assert scope.touched(insertion, spans, spans) == {"_render_verify_transcript"}
+    # And a pure DELETION whose zero-length new side lands on the span's first
+    # line: old side is outside the span, so only the max(length, 1) treatment
+    # of the new side can catch it (review of #486: the insertion case above
+    # passed via the non-empty new side and never exercised that guard).
+    deletion = scope.parse_hunks("@@ -7 +2,0 @@\n-    gone = 1\n")
+    assert scope.touched(deletion, spans, spans) == {"_render_verify_transcript"}
+
+
+def test_guard_mode_selects_exactly_the_truncation_guard():
+    workflow = _WORKFLOW.read_text()
+    assert ".github/scripts/verifier_eval_scope.py" in workflow
+    # The scope output reaches pytest through env, never as `${{ }}` in the
+    # run line (review of #486): an expression interpolated into shell is an
+    # injection point if the script's output is ever widened.
+    assert "PYTEST_ARGS: ${{ steps.scope.outputs.pytest_args }}" in workflow
+    assert "--junitxml=eval-junit.xml $PYTEST_ARGS" in workflow
+    run_step = workflow.split("Run verdict-quality eval")[1].split("Assert the eval actually executed")[0]
+    assert "${{ steps.scope.outputs.pytest_args }}" not in run_step.split("run:")[1]
+    # And the guard-only summary is its own gated step, not a grep of $GITHUB_OUTPUT.
+    assert "if: steps.scope.outputs.scope == 'guard'" in workflow
+    assert 'grep -q "^scope=guard"' not in workflow
+    assert "fetch-depth: 0" in workflow
+    # The -k expression must select an existing test, and only one function.
+    matches = [n for n in dir(ev) if n.startswith("test_") and scope.GUARD_K in n]
+    assert matches == ["test_narrating_model_reaches_a_verdict_at_shipped_budgets"]
+    # ...which must reach EVERY pinned alias, or a repoint of the unreached one
+    # goes unnoticed on guard runs (ENG-1687's latency guarantee; round-2
+    # review of #486, finding 6). It is parametrized over `_MODELS`.
+    import inspect
+
+    src = inspect.getsource(ev.test_narrating_model_reaches_a_verdict_at_shipped_budgets)
+    assert 'parametrize("model", _MODELS)' in src and "_client(model)" in src
+    assert set(ev._EXPECTED_SERVED) <= set(ev._MODELS)
+    # And the scope step never reaches for pytest.skip.
+    step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
+    assert "pytest.skip" not in step
+
+
+def test_a_failing_scope_decision_falls_back_to_the_full_matrix(tmp_path, monkeypatch):
+    """Fail CLOSED. If the decision cannot be made (bad revision, git error,
+    unparsable file), the answer is the full matrix — never a red job for an
+    unrelated reason, and never the one-call guard."""
+    out = tmp_path / "gh_output"
+    monkeypatch.setattr(scope, "decide", lambda b, h: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc = scope.main(["--base", "x", "--head", "y", "--github-output", str(out)])
+    assert rc == 0
+    text = out.read_text()
+    assert "scope=full" in text and "pytest_args=\n" in text
+
+
+def test_decide_diffs_from_the_merge_base_not_the_base_tip(tmp_path, monkeypatch):
+    """pull_request.base.sha is the base branch TIP. After the PR branched, the
+    base gained a commit touching an ALWAYS_FULL file; the PR itself touched only
+    turn_stream. Against the tip that reads "full" (the base's own change shows
+    up as a reverse hunk); against the merge base it is "guard"."""
+    import subprocess
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q", "-b", "staging")
+    git("config", "user.email", "t@example.com"); git("config", "user.name", "t")
+    (tmp_path / "anton/core/llm").mkdir(parents=True); (tmp_path / "tests").mkdir(); (tmp_path / "scripts").mkdir()
+    session = tmp_path / "anton/core/session.py"
+    session.write_text(
+        "def _render_verify_transcript(h):\n    return h\n\n"
+        "async def turn_stream(self):\n    return 1\n"
+    )
+    (tmp_path / "anton/core/llm/client.py").write_text("def generate_object():\n    pass\n")
+    (tmp_path / "tests/test_verifier_verdict_live.py").write_text("# eval\n")
+    git("add", "."); git("commit", "-q", "-m", "base")
+    branch_point = git("rev-parse", "HEAD")
+    # The PR: touches turn_stream only.
+    git("checkout", "-q", "-b", "pr")
+    session.write_text(session.read_text().replace("return 1", "return 2"))
+    git("commit", "-q", "-am", "pr edit")
+    pr_head = git("rev-parse", "HEAD")
+    # The base moves on and touches an ALWAYS_FULL file.
+    git("checkout", "-q", "staging")
+    (tmp_path / "tests/test_verifier_verdict_live.py").write_text("# eval changed on staging\n")
+    git("commit", "-q", "-am", "verifier work landed on staging")
+    base_tip = git("rev-parse", "HEAD")
+    assert base_tip != branch_point
+
+    monkeypatch.chdir(tmp_path)
+    verdict, reasons = scope.decide(base_tip, pr_head)
+    assert verdict == "guard", reasons
+    # And a PR that really touches a marker still reads full from the same base tip.
+    git("checkout", "-q", "pr")
+    session.write_text(session.read_text().replace("return h", "return list(h)"))
+    git("commit", "-q", "-am", "renderer edit")
+    verdict, reasons = scope.decide(base_tip, git("rev-parse", "HEAD"))
+    assert verdict == "full" and any("_render_verify_transcript" in r for r in reasons), reasons
+
+
+def test_the_workflow_fails_closed_and_lists_the_scope_script_as_a_trigger():
+    """The YAML half of the scope decision, pinned like the Python half
+    (round-2 review of #486, finding 8): the empty-payload fallback must be
+    the FULL matrix, never the guard; and the script must be a trigger path so
+    a change to the decision itself proves the eval still runs."""
+    workflow = _WORKFLOW.read_text()
+    step = workflow.split("Decide eval scope")[1].split("Run verdict-quality eval")[0]
+    fallback = step.split("if [ -z")[1].split("fi")[0]
+    assert 'echo "scope=full"' in fallback
+    assert 'echo "pytest_args="' in fallback
+    assert "scope=guard" not in fallback
+    paths = workflow.split("paths:")[1].split("concurrency:")[0]
+    assert '- ".github/scripts/verifier_eval_scope.py"' in paths
+    assert '- "tests/test_verifier_verdict_live.py"' in paths
+
+
+def test_a_decorated_marker_span_starts_at_its_first_decorator():
+    """`node.lineno` is the def line; a decorator added above a marker would
+    otherwise sit outside its span and read "guard" (review of #486)."""
+    src = "import functools\n\n@functools.lru_cache\n@something\ndef _render_verify_transcript(h):\n    return h\n"
+    spans = scope.marker_spans(src, ("_render_verify_transcript",))
+    assert spans == {"_render_verify_transcript": [(3, 6)]}
+    hit = scope.touched(scope.parse_hunks("@@ -3 +3 @@\n-@functools.lru_cache\n+@functools.cache\n"), spans, spans)
+    assert hit == {"_render_verify_transcript"}
+
+
+def test_every_assignment_of_a_marker_counts_including_augmented():
+    """A later re-assignment is the one that takes effect, and `+=` is an
+    AugAssign; keeping only the first Assign span read "guard" on both
+    (review of #486)."""
+    src = (
+        "_VERIFIER_JUDGMENT_RUBRIC = (\n"
+        '    "a"\n'
+        ")\n"
+        "X = 1\n"
+        '_VERIFIER_JUDGMENT_RUBRIC = "b"\n'
+        'Y = 2\n'
+        '_VERIFIER_JUDGMENT_RUBRIC += "c"\n'
+    )
+    spans = scope.marker_spans(src, ("_VERIFIER_JUDGMENT_RUBRIC",))
+    assert spans == {"_VERIFIER_JUDGMENT_RUBRIC": [(1, 3), (5, 5), (7, 7)]}
+    for line in (2, 5, 7):
+        assert scope.touched(scope.parse_hunks(f"@@ -{line} +{line} @@\n-x\n+y\n"), spans, spans) == {
+            "_VERIFIER_JUDGMENT_RUBRIC"
+        }, line
+    assert scope.touched(scope.parse_hunks("@@ -4 +4 @@\n-X = 1\n+X = 2\n"), spans, spans) == set()

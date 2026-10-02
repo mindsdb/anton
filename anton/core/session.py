@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import hashlib
 import httpx2 as httpx
 import random
 from collections.abc import AsyncIterator, Callable
@@ -12,13 +14,15 @@ import re
 import sys
 from typing import TYPE_CHECKING, List, Literal
 import os
+import uuid
 
 from pydantic import BaseModel, Field, field_validator
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
-from anton.core.llm.endpoints import classify_endpoint
+from anton.core.llm import jev as _jev
+from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
@@ -29,7 +33,7 @@ from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
-from anton.memory.history_store import is_user_turn
+from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
@@ -40,6 +44,7 @@ from anton.core.llm.prompts import (
 )
 from anton.core.llm.provider import (
     CURATED_PROVIDER_ERRORS,
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
@@ -62,11 +67,6 @@ from anton.core.llm.provider import (
     provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
-from anton.core.llm.thalamus import (
-    ACTION_RESPOND,
-    ThalamicDecision,
-    gate_turn,
-)
 from anton.core.llm.tracing import (
     VALID_SURFACES,
     TraceContext,
@@ -79,6 +79,7 @@ from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
+    GENERATE_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -95,6 +96,7 @@ from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     build_workspace_discovery_context,
+    cell_failure_reason,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
@@ -262,6 +264,7 @@ if TYPE_CHECKING:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
     from anton.core.llm.client import LLMClient
+    from anton.core.mcp.client import McpSession
     from anton.core.memory.cortex import Cortex
     from anton.core.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
@@ -325,7 +328,13 @@ def _stamp_user_content(
 class _VerifierVerdict(BaseModel):
     """Structured verdict from the completion verifier (runs on the cheap
     coding model). The field descriptions below double as the verifier's
-    instructions — see LLMClient.generate_object_code (ENG-716)."""
+    instructions — see LLMClient.generate_object_code (ENG-716).
+
+    Field order (``status`` first) is load-bearing. Putting ``reason`` first
+    removed haiku's one-attempt label slip, 24/24, but dropped the ENG-836
+    environment wall to 22/24 STUCK on the same model; the wall is the
+    shipped guarantee, so the order stays.
+    """
 
     status: Literal["COMPLETE", "WAITING", "INCOMPLETE", "STUCK"] = Field(
         description=(
@@ -338,15 +347,51 @@ class _VerifierVerdict(BaseModel):
             "failed step wasn't essential to the answer — is still COMPLETE; do NOT "
             "mark a turn incomplete just because an earlier tool call failed. A "
             "finished task followed by an optional 'want me to…?' offer is still "
-            "COMPLETE.\n"
+            "COMPLETE. "
+            # A disclaimer was laundering the hallucinated-success safeguard:
+            # invented figures labelled "indicative" passed as COMPLETE, the
+            # verifier's reason crediting the reply for disclosing them
+            # (ENG-2686).
+            "NOT COMPLETE: values the assistant presents as the product of a "
+            "search, lookup, build, or comparison that the tool results show "
+            "did not succeed. Calling them 'indicative', 'estimated', or "
+            "'typical', or disclosing that they are not verified, does not make "
+            "them obtained and does not make the reply honest about their "
+            "origin: an honest reply marks values it could not obtain as "
+            "unavailable, and a reply that supplies them anyway is INCOMPLETE or "
+            "STUCK, never COMPLETE — delivering them is not a recovery. A figure "
+            "the assistant computed from data that DID arrive, or an estimate the "
+            "user explicitly asked for, is fine. So is a genuine empty result: a "
+            "search or query that ran and found nothing matching is a COMPLETE "
+            "answer of 'none', not a blocker.\n"
             "- WAITING: the assistant's latest message asks the user a question it "
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
-            "unfinished; the correct action is to wait for the user's reply.\n"
+            "unfinished; the correct action is to wait for the user's reply. "
+            # Without this carve-out INCOMPLETE's early-stop sentence reads as
+            # penalising the ask itself: 8 of 31 production WAITING turns
+            # re-scored INCOMPLETE on an earlier wording, which is ENG-716.
+            "It includes asking the user to provide, attach, re-upload, share, "
+            "connect, or authorise something the assistant needs (a file, a "
+            "link, a Drive connection, credentials), or to make a decision — "
+            "even after a single failed attempt. Asking is a valid stop, never a "
+            "premature one.\n"
             "- INCOMPLETE: the assistant stopped partway through the requested task "
             "WITHOUT asking the user anything, and could keep going on its own — "
             "including when it implied success but the data its answer actually "
-            "depends on errored or came back empty and was never recovered.\n"
+            "depends on errored or came back empty and was never recovered. This "
+            "also covers an honest 'I couldn't get it' that stopped EARLY: one "
+            "failed attempt with an obvious alternative untried (another page, "
+            "source, query, or method) is INCOMPLETE when the assistant simply "
+            "stopped or moved on — the honesty is right, the stopping is "
+            "premature. Count the distinct failed approaches: one is INCOMPLETE, "
+            "however plainly the gap is reported, because a second approach was "
+            "still open; if your reason would say the assistant 'gave up without "
+            "trying alternatives', the status is INCOMPLETE, not STUCK. If it "
+            "instead asked the user for what it needs, that is WAITING (above), "
+            "not INCOMPLETE. It does NOT cover a value the assistant already "
+            "failed to obtain by two or more distinct approaches; that is STUCK "
+            "(below), whatever the assistant says it will try next.\n"
             "- STUCK: a hard blocker prevents completion (missing credentials, an "
             "unavailable service, or a permission the assistant does not have). "
             # Environment walls must be named explicitly or the verifier files
@@ -360,7 +405,30 @@ class _VerifierVerdict(BaseModel):
             "this environment (no root/sudo, package manager blocked). Repeated "
             "failed workarounds for the same underlying blocker mean STUCK, not "
             "INCOMPLETE — even if the assistant says it will try another "
-            "approach."
+            "approach. "
+            # The clauses above are keyed on thrashing, which an honest
+            # assistant does not do: it reports the gap and stops, so it
+            # matched none of them and was force-continued into fabricating
+            # the requested shape (ENG-2686).
+            "Likewise an honest, documented gap, once the transcript shows TWO OR "
+            "MORE distinct failed approaches for data or a tool the task needs "
+            # A bare "came back empty" claimed the shape COMPLETE carves out as
+            # a genuine none-found answer, and STUCK is the later bullet.
+            "(blocked, no access, came back empty because the source failed "
+            "rather than because nothing matched, cannot be installed), or that "
+            "the required tool is absent from this environment, and the assistant "
+            "told the user plainly what it could not get instead of guessing — "
+            "judged on the failed attempts in the transcript, not on the "
+            "assistant's stated intent, so two distinct failures on the same "
+            "blocker are enough whatever it says it will try next. It stays STUCK "
+            "even when a partial or template result was delivered with the "
+            "missing values marked as unavailable: the only way to 'keep going' "
+            "would be to invent the values. "
+            # Two failed approaches then an ask matches this clause and WAITING
+            # both, and the hand-back would re-ask what the assistant just did.
+            "If the assistant instead asked the "
+            "user to supply what it could not get, that is WAITING (above), not "
+            "STUCK."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
@@ -372,7 +440,13 @@ class _VerifierVerdict(BaseModel):
             "nothing blocking or uncertain. False for anything that needs "
             "substantially more work, or where you aren't sure. Defaults to "
             "false, so an unsure model errs toward asking the user rather "
-            "than assuming it's almost done."
+            "than assuming it's almost done. "
+            # Unqualified, this contradicted INCOMPLETE's one-attempt clause and
+            # stranded a turn at the spend ceiling one call short of done.
+            "Always false when the remaining work "
+            "depends on data or a tool the assistant already failed to obtain "
+            "and has no untried route to — that is a blocker, not a small "
+            "remaining step."
         ),
     )
 
@@ -443,17 +517,19 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 # Verdict-call failures that are DETERMINISTIC DENIALS: the provider will give
-# the identical answer on every retry this session — a wallet that can't pay
-# for the verifier's model (TokenLimitExceeded: 402 ``wallet_empty`` / 429
-# ``included_allowance_exhausted``, both code-exact per ENG-1169; velocity 429s
-# map to TransientProviderError and never land here) or a model id that doesn't
-# resolve for this key (ModelUnavailableError: 404 model-not-found / 403
-# model-access-denied). These latch on the FIRST occurrence and stay silent:
-# the turn's work already succeeded, and telling the user an internal check
-# failed is a lie when the check was merely priced out (ENG-1632 —
-# of that ticket's 14-day baseline of 296 wallet-402s across 39 users, 208
-# were aux-surface calls like this one, across 33 of those users; every aux
-# one surfaced to the user as an internal error and an apology).
+# the identical answer on every retry while the latch lives — a wallet that can't pay
+# for the verifier's model (TokenLimitExceeded, raised as one of its subclasses
+# for the gate's 402 ``wallet_empty`` / 429 ``included_allowance_exhausted`` /
+# 429 ``free_air_daily_spend_fuse_exceeded``, all matched on the exact code;
+# velocity 429s map to TransientProviderError and never land here) or a model
+# id that doesn't resolve for this key (ModelUnavailableError: 404
+# model-not-found / 403 model-access-denied / 403 model-restricted, the last
+# raised as its ModelRestrictedError subclass). These latch on the FIRST
+# occurrence and stay silent: the turn's work already succeeded, and telling
+# the user an internal check failed is a lie when the check was merely priced
+# out (of a 14-day baseline of 296 wallet-402s across 39 users, 208 were
+# aux-surface calls like this one, across 33 of those users; every aux one
+# surfaced to the user as an internal error and an apology).
 #
 # ORDER MATTERS in the verdict loop: this clause must precede
 # _TRANSIENT_VERDICT_ERRORS. ModelUnavailableError subclasses ConnectionError →
@@ -478,10 +554,10 @@ _LATCHING_VERDICT_FAILURES = ("hard", "truncated")
 # latches on its own branch at the first occurrence.
 _VERIFIER_LATCH_THRESHOLD = 2
 
-# Turns a latched session skips before spending one verdict call to see whether
-# the cause has gone away (user switched model, gateway fix shipped). Without a
-# re-probe the latch is permanent for the session and "reset on a successful
-# verdict" can never fire, since a latched session makes no verdict calls.
+# Turns a latch skips before spending one verdict call to see whether the cause
+# has gone away (user switched model, gateway fix shipped). Without a re-probe
+# the latch is permanent for its lifetime and "reset on a successful verdict"
+# can never fire, since a latched verifier makes no verdict calls.
 _VERIFIER_LATCH_REPROBE_TURNS = 10
 
 # Shorter window when the last thing that failed was a truncation, because a
@@ -505,7 +581,7 @@ _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED = 3
 
 
 def _reprobe_turns_for(last_failure: str) -> int:
-    """Skipped turns before a latched session spends one verdict call again.
+    """Skipped turns before a latched verifier spends one verdict call again.
 
     Keyed on the LAST no-verdict class, not the accumulated latch reason: this
     is a prediction about what is failing now, and a truncation ten turns ago
@@ -514,6 +590,51 @@ def _reprobe_turns_for(last_failure: str) -> int:
     if last_failure == "truncated":
         return _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED
     return _VERIFIER_LATCH_REPROBE_TURNS
+
+
+@dataclass
+class _VerifierLatch:
+    """Latch state for a verifier that produces no verdict the same way each time.
+
+    Owned by one session, or shared by the host across sessions on one coding
+    endpoint and model (see `ChatSessionConfig.shared_verifier_latch`).
+    """
+
+    no_verdict_failures: int = 0
+    latched: bool = False
+    skips: int = 0
+    # ACCUMULATED evidence: every class that produced no verdict since the
+    # last success ("hard", "truncated", "denied", or "mixed" once they
+    # differ). Feeds the skip log and the books.
+    reason: str = ""
+    # The LAST such class, which is a different question: it predicts what a
+    # re-probe would hit, so it picks the window. See `_reprobe_turns_for`.
+    last_no_verdict: str = ""
+
+
+# Process-wide latches for hosts that rebuild a session per message. Keyed on
+# the coding endpoint, model, and credential: a denial belongs to the account,
+# so a new api key gets a fresh latch. Only a digest of the key is held, and the
+# key is never logged, because a base_url can carry credentials. No eviction;
+# a host sees a handful of endpoints.
+_SHARED_VERIFIER_LATCHES: dict[tuple[str, str, str, str], _VerifierLatch] = {}
+
+
+def _shared_verifier_latch(
+    provider: str, base_url: str | None, model: str, api_key: str | None
+) -> _VerifierLatch:
+    """Return the process-wide latch for one coding endpoint, model, and key.
+
+    Creates it on first use. A trailing slash and a missing base_url are
+    normalised so equivalent endpoints share one latch.
+    """
+    key_digest = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+    key = (provider, (base_url or "").rstrip("/"), model, key_digest)
+    latch = _SHARED_VERIFIER_LATCHES.get(key)
+    if latch is None:
+        latch = _VerifierLatch()
+        _SHARED_VERIFIER_LATCHES[key] = latch
+    return latch
 
 
 # Floor for the tokens held back from the spend ceiling (ENG-1286).
@@ -568,9 +689,17 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "the assistant's final answer depends on data that never arrived and was not "
     "recovered another way. A tool that failed but the assistant worked around — "
     "getting what it needed elsewhere, or the failed step being inessential — and "
-    "then answered from is COMPLETE. Conversely, an assistant that implied success "
+    "then answered from is COMPLETE. An assistant whose two or more distinct "
+    "approaches all failed, or that found the needed tool absent, and said plainly "
+    "what it could not obtain — leaving those values marked unavailable rather "
+    "than guessing — is STUCK, not INCOMPLETE, even if the rest was delivered and "
+    "whatever it says it will try next; one failed attempt with an obvious "
+    "alternative untried is INCOMPLETE — unless the assistant asked the user for "
+    "the file, link, access, or decision it needs, which is WAITING even after one "
+    "attempt. Conversely, an assistant that implied success "
     "while the data its answer relies on errored or came back empty is INCOMPLETE, "
-    "not COMPLETE."
+    "not COMPLETE — and supplying such values with a disclaimer that they are "
+    "indicative or unverified is still implying success, not honesty."
 )
 
 def _safe_error_detail(exc: BaseException) -> str:
@@ -1051,6 +1180,15 @@ def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
         turn_cost.grace_granted = ",".join(sorted(tags))
 
 
+@functools.cache
+def _jev_questions() -> dict:
+    """The verifier's rubric as a Jev question, built from the same text."""
+    fields = _VerifierVerdict.model_fields
+    return _jev.build_questions(
+        fields["status"].description, _VERIFIER_JUDGMENT_RUBRIC, fields["close_to_done"].description
+    )
+
+
 def _build_verify_request(
     history: list[dict], user_message: str | None
 ) -> tuple[str, list[dict]]:
@@ -1128,6 +1266,33 @@ def _validated_surface(value: str | None) -> str | None:
     return cleaned
 
 
+def _validated_account_id(value: str | None) -> str | None:
+    """Keep only a UUID-shaped account id, in canonical lowercase form (ENG-2121).
+
+    Hosts supply this, so it is untrusted like ``surface``. The ids it carries
+    (the Keycloak ``sub`` and the active organisation) are UUIDs everywhere
+    they are minted, and nothing else may pass: an email address or other free
+    text in this field would reach PostHog as a ``distinct_id``, which is new
+    personal data on the event and a key that joins nothing.
+
+    The rejected value is deliberately NOT logged, unlike ``_validated_surface``:
+    the likeliest wrong value here is an email address, and logging it would
+    put personal data in the user's log file for the sake of a warning.
+
+    Never raises. Telemetry must not be able to fail a turn.
+    """
+    if value is None:
+        return None
+    try:
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        return str(uuid.UUID(cleaned))
+    except Exception:
+        logger.warning("ignoring an account id that is not a UUID")
+        return None
+
+
 @dataclass
 class ChatSessionConfig:
     """All construction parameters for a ChatSession.
@@ -1150,6 +1315,12 @@ class ChatSessionConfig:
     system_prompt_context: SystemPromptContext = field(default_factory=SystemPromptContext)
     workspace: Workspace | None = None
     data_vault: DataVault | None = None
+    # Agent-facing usage notes per connector engine (engine -> markdown),
+    # rendered by build_datasource_context for connected engines only. None
+    # means the host sent none (the CLI, or an older cowork-server), so notes
+    # come from anton's datasources.md registry. A dict, even an empty one, is
+    # the only source; see anton.utils.datasources._resolve_usage_notes.
+    connector_usage_notes: dict[str, str] | None = None
     workspace_env_overlay: dict[str, str] | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
@@ -1189,6 +1360,27 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # Whether this host renders a streaming tool's live tail — the last lines
+    # of the file a tool is writing, relayed as the `tool_peek` progress phase
+    # (`ToolRegistry.dispatch_tool`). Only the CLI has a footer for it today;
+    # cowork-server's formatter and the cloud pod's wire would carry it as
+    # unrenderable noise that also spends their progress throttle window. A
+    # capability the host declares, like `elicitor`, never inferred from
+    # `surface` or `console`: those answer different questions.
+    live_tool_peek: bool = False
+    # WHO the user is, for analytics attribution only (ENG-2121): the Keycloak
+    # ``sub`` and the active organisation id, both UUIDs. ``turn_completed``
+    # is keyed on ``user_id`` when it is set, which is the same distinct_id the
+    # console, the desktop renderer and the auth service's billing mirror use,
+    # so a completed turn joins the person who signed up and paid. None when
+    # the host did not say (the CLI, an older host); the event then stays keyed
+    # on the install fingerprint, as before.
+    #
+    # Never an email address or a name: anything that is not a UUID is dropped
+    # at construction (``_validated_account_id``). Nothing in the turn reads
+    # these; they only ride the analytics event.
+    user_id: str | None = None
+    organization_id: str | None = None
     proactive_dashboards: bool = False
     # When True (default), Anton acts on reasonable defaults and surfaces its
     # assumptions inline instead of stopping to ask ("do first, ask later").
@@ -1215,10 +1407,6 @@ class ChatSessionConfig:
     # None + no console means questions are unavailable and the tools that
     # need one are not registered.
     elicitor: Elicitor | None = None
-    # Cheap front-model routing (ENG-648). None (default) defers to the
-    # settings' `router_enabled` (ANTON_ROUTER_ENABLED); hosts pass an
-    # explicit bool to override per session.
-    router_enabled: bool | None = None
     # When set, only these tool names survive the build; ``None`` = full desktop
     # set. Applied on every ``_build_tools`` call so a lazy rebuild can't leak a
     # non-allowlisted tool.
@@ -1228,6 +1416,19 @@ class ChatSessionConfig:
     # process (the cloud pod) turn this off: several spend an LLM call on writes
     # that land after the turn's storage is gone. `memorize` is unaffected.
     background_memory: bool = True
+    # Share the verifier latch with every session in this process that also sets
+    # this, on the same coding endpoint and model. For hosts that build a session
+    # per message, so a verifier that fails every time diagnoses once, not once
+    # per message.
+    shared_verifier_latch: bool = False
+    # Open MCP sessions (ENG-1816) discovered before this session was built —
+    # their tools are already folded into `tools` above via
+    # `anton.core.mcp.wiring.discover_mcp_tools[_async]`, called by the host
+    # BEFORE constructing this config (not after: see that module's
+    # docstring for why the ordering is load-bearing). Carried here only so
+    # `ChatSession.close()` can tear them down at turn end, the same way it
+    # already closes the LLM client's transports.
+    mcp_sessions: list["McpSession"] = field(default_factory=list)
 
 
 class ChatSession:
@@ -1265,6 +1466,13 @@ class ChatSession:
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
+        # getattr: hosts may pass settings objects that predate these fields.
+        self._jev_enabled = getattr(s, "verifier_jev", "on") == "on"
+        self._jev_model = getattr(s, "verifier_jev_model", "jev-1.13.0")
+        self._jev_timeout_s = getattr(s, "verifier_jev_timeout_s", 2.0)
+        self._jev_min_p = getattr(s, "verifier_jev_min_p", 0.8)
+        # Created on first use and reused, so later checks skip the TLS handshake.
+        self._jev_http: httpx.AsyncClient | None = None
         # Per-turn raw-token ceiling (ENG-1286). getattr so a host passing an
         # older settings object doesn't break — absent means "no ceiling",
         # matching the pre-ENG-1286 behaviour rather than silently applying one.
@@ -1292,35 +1500,23 @@ class ChatSession:
         # multi-step turn pays a full-history diagnosis call and shows the
         # "checking in" message (ENG-1155). Two such failures with no successful
         # verdict between them latch; a successful verdict clears it. Scoped to
-        # this session: Cowork rebuilds it per message, so a persistent failure
-        # there still diagnoses per message until a host carries this state.
-        self._verifier_no_verdict_failures = 0
-        self._verifier_latched = False
-        self._verifier_latch_skips = 0
-        # ACCUMULATED evidence: every class that produced no verdict since the
-        # last success ("hard", "truncated", "denied", or "mixed" once they
-        # differ). Feeds the skip log and the books.
-        self._verifier_latch_reason = ""
-        # The LAST such class, which is a different question: it predicts what a
-        # re-probe would hit, so it picks the window. See `_reprobe_turns_for`.
-        self._verifier_last_no_verdict = ""
+        # this session unless the host shares it: Cowork rebuilds the session
+        # per message, so without sharing a persistent failure diagnoses per
+        # message.
+        if config.shared_verifier_latch:
+            latch_conn = config.llm_client.coding_provider.export_connection_info()
+            self._verifier_latch = _shared_verifier_latch(
+                latch_conn.provider,
+                latch_conn.base_url,
+                config.llm_client.coding_model,
+                latch_conn.api_key,
+            )
+        else:
+            self._verifier_latch = _VerifierLatch()
         self._context_pressure_threshold = s.context_pressure_threshold
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._llm = config.llm_client
-        # Router (ENG-648): explicit host override wins; otherwise the
-        # settings flag (ANTON_ROUTER_ENABLED). getattr-guarded because
-        # tests pass bare CoreSettings-shaped objects.
-        self._router_enabled = (
-            config.router_enabled
-            if config.router_enabled is not None
-            else bool(getattr(s, "router_enabled", False))
-        )
-        self._router_max_tokens = int(getattr(s, "router_max_tokens", 1024))
-        # Monotonic counter for thalamus-preloaded tool_use ids. Deliberately
-        # separate from `_turn_count`, which only increments at end of turn —
-        # preloads happen before that, so reusing it would repeat ids.
-        self._thalamus_recall_counter = 0
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -1331,6 +1527,7 @@ class ChatSession:
         self._background_memory = config.background_memory
         self._memory_writes: set[asyncio.Task] = set()
         self._started_at = config.started_at
+        self._mcp_sessions = list(config.mcp_sessions)
         self._extra_tools = config.tools
         self._tool_allowlist = config.tool_allowlist
         # Deferred tool bundles: tools tagged with `unlock_skill`
@@ -1339,6 +1536,7 @@ class ChatSession:
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
+        self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
@@ -1356,14 +1554,29 @@ class ChatSession:
                 else tool
                 for tool in self._extra_tools
             ]
+        # Repaired at the ingress every surface shares — desktop, the cloud pod
+        # and the CLI all arrive here — so a conversation ENG-2420 already
+        # poisoned starts replying again on its next turn instead of 400ing
+        # forever. Count-preserving on purpose: `_seed_len` below and
+        # `last_compaction`'s `covered_through` are positional, and the host
+        # maps that count onto its OWN message list.
         self._history: list[dict] = (
-            list(config.initial_history) if config.initial_history else []
+            repair_replayed_tool_ids(list(config.initial_history))[0]
+            if config.initial_history else []
         )
-        # Seed length + how many leading history messages the last compaction
-        # folded into its summary — lets a host map the compaction back onto
-        # its own message list (see `last_compaction`).
+        # Seed length + the last compaction's own record (its summary text and
+        # how many leading history messages it folded) — lets a host map the
+        # compaction back onto its own message list (see `last_compaction`).
         self._seed_len = len(self._history)
-        self._last_compacted_count: int | None = None
+        self._last_compaction: dict | None = None
+        # Bookkeeping that keeps `covered_through` in the SEED's coordinates
+        # while `_history` drifts away from them: each compaction replaces the
+        # turns it folded with entries of its own, so the next one counts from
+        # a shifted list. `_compaction_sealed` is the one-way door for when
+        # history stops mirroring the seed at all (see `hard_truncate_history`).
+        self._seed_covered = 0
+        self._synthetic_prefix_len = 0
+        self._compaction_sealed = False
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
@@ -1374,6 +1587,9 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self.live_tool_peek = config.live_tool_peek
+        self._user_id = _validated_account_id(config.user_id)
+        self._organization_id = _validated_account_id(config.organization_id)
         # Per-turn token cost books (ENG-1288). Created and armed at each
         # turn's start; emitted and disarmed in the turn's finally. None
         # outside a turn.
@@ -1554,13 +1770,13 @@ class ChatSession:
         resummarized). `covered_through`: how many of `initial_history`'s
         messages are now folded into it — map this count onto your own
         message list to find the cutoff.
+
+        A snapshot written when the compaction succeeded, not read back from
+        `_history[0]` on demand: the last-resort marker overwrites that slot
+        without recording a compaction, so a late read would pair an earlier
+        compaction's count with the marker's "no summary is available" text.
         """
-        if self._last_compacted_count is None:
-            return None
-        return {
-            "summary": self._history[0]["content"],
-            "covered_through": min(self._last_compacted_count, self._seed_len),
-        }
+        return self._last_compaction
 
 
     def _note_latch_class(self, failure: str) -> None:
@@ -1573,14 +1789,14 @@ class ChatSession:
         no evidence the wallet was topped up, and the re-probe turn books its
         own class anyway, so nothing is lost by keeping the actionable label.
         """
-        self._verifier_last_no_verdict = failure
-        current = self._verifier_latch_reason
+        self._verifier_latch.last_no_verdict = failure
+        current = self._verifier_latch.reason
         if current == "denied" or failure == "denied":
-            self._verifier_latch_reason = "denied"
+            self._verifier_latch.reason = "denied"
         elif not current or current == failure:
-            self._verifier_latch_reason = failure
+            self._verifier_latch.reason = failure
         elif current != "mixed":
-            self._verifier_latch_reason = "mixed"
+            self._verifier_latch.reason = "mixed"
 
     def _record_root_cause(
         self, tool_ok: bool | None, reason: str, result_text: str
@@ -1896,6 +2112,37 @@ class ChatSession:
             role, len(merged_blocks),
         )
 
+    @staticmethod
+    def _ensure_replayable_calls(response) -> None:
+        """Belt for ENG-2420: make every call on `response` replayable.
+
+        The provider readers already guarantee this
+        (`ensure_replayable_tool_call`), so this is expected to be a permanent
+        no-op — it logs at ERROR when it is not, because the only way it fires
+        is a reader missing its guard. It exists because the cost of one
+        escaping is not a failed call but a conversation that can never be used
+        again.
+
+        Salvages rather than drops, for the same reason the readers do and for
+        one more: this runs before the tool loop reads `tool_calls`, and
+        emptying that list would leave the round with no calls and no content,
+        so both `_append_history` calls below become no-ops and the loop
+        re-issues an identical request until `_max_tool_rounds`
+        (review: pnewsam on #471). Salvaging cannot change the list's length,
+        so that shape is unreachable by construction rather than by a guard.
+        """
+        from anton.core.llm.provider import ensure_replayable_tool_call, usable_call_id
+
+        calls = getattr(response, "tool_calls", None) or []
+        broken = [tc for tc in calls if not (usable_call_id(tc.id) and usable_call_id(tc.name))]
+        if broken:
+            logging.getLogger(__name__).error(
+                "ENG-2420: %d tool call(s) reached the session unreplayable — "
+                "a provider reader is missing its guard.", len(broken),
+            )
+            for tc in broken:
+                ensure_replayable_tool_call(tc)
+
     def _validate_history_for_provider(self, messages: list[dict]) -> None:
         """Defensive pre-flight: warn (don't raise) if the messages
         list still violates the chat-API structural invariants.
@@ -1936,6 +2183,22 @@ class ChatSession:
                 return
 
     def _record_cell_explainability(
+        self, *, pad_name: str, description: str, cell
+    ) -> None:
+        # Runs after the cell has finished, so a raise here would be reported
+        # to the model as a failure of a tool call that succeeded.
+        try:
+            self._collect_cell_explainability(
+                pad_name=pad_name, description=description, cell=cell
+            )
+        except Exception as exc:
+            logger.warning(
+                "explainability bookkeeping failed for scratchpad %s: %s",
+                pad_name,
+                exc,
+            )
+
+    def _collect_cell_explainability(
         self, *, pad_name: str, description: str, cell
     ) -> None:
         if self._active_explainability is None:
@@ -2000,7 +2263,11 @@ class ChatSession:
             md_context = self._workspace.build_anton_md_context()
 
         # Inject connected datasource context without credentials
-        ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
+        ds_ctx = build_datasource_context(
+            self._data_vault,
+            active_only=self._active_datasource,
+            usage_notes=self._connector_usage_notes,
+        )
 
         # Turn-start workspace discovery (ENG-578): volatile, so it rides the
         # tail — never the cache-stable prefix. Best-effort; a failure here
@@ -2291,6 +2558,7 @@ class ChatSession:
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -2298,10 +2566,26 @@ class ChatSession:
             await self._reap_tracked_backends()
             await self._scratchpads.close_all()
         finally:
-            # Provider clients own an HTTP pool. This runs even if the steps
-            # above raise, or the pool outlives the process.
-            if self._llm is not None:
-                await self._llm.aclose()
+            # Guaranteed even if either step above raises — ScratchpadManager
+            # has no internal try/except around each pad's own close(), so
+            # without this, one bad scratchpad close would leak every open
+            # MCP session's transport (httpx2.AsyncClient + SDK task group)
+            # for the rest of this turn, same reasoning as the LLM client
+            # cleanup below it already gets.
+            try:
+                if self._mcp_sessions:
+                    from anton.core.mcp.wiring import close_mcp_sessions
+
+                    await close_mcp_sessions(self._mcp_sessions)
+            finally:
+                # Provider clients own an HTTP pool. This runs even if the
+                # steps above raise, or the pool outlives the process.
+                try:
+                    if self._jev_http is not None:
+                        await self._jev_http.aclose()
+                finally:
+                    if self._llm is not None:
+                        await self._llm.aclose()
 
     async def emit(self, event) -> None:
         """Push an out-of-band event to the host, if one is listening.
@@ -2488,6 +2772,11 @@ class ChatSession:
         else:
             user_content = old_text
 
+        # Set only where a durable compaction is recorded, and read at the end
+        # of this function: the record's text must be the body built there, and
+        # taking it in the same statement as the count is what keeps the marker
+        # below out of it.
+        recorded = False
         try:
             # Never above the client's own ceiling: a host that configures a
             # smaller `max_tokens` (or a distinct router model with a lower
@@ -2546,12 +2835,17 @@ class ChatSession:
                     f"{len(old_turns)} earlier turns were dropped to fit the "
                     "context window. No summary of them is available."
                 )
-                # Deliberately no `_last_compacted_count`: the host must not
-                # persist and replay this as the conversation's summary.
+                # Deliberately not `recorded`: the host must not persist
+                # and replay this as the conversation's summary. Sealed on top
+                # of that: the folded turns are now gone rather than summarized,
+                # so a LATER compaction would report them as covered by a
+                # summary that never saw them — that one loses turns, where an
+                # unrecorded compaction only costs a replay.
+                self._compaction_sealed = True
             else:
                 summary = summary_response.content
                 # Record the compaction ONLY on success.
-                self._last_compacted_count = compacted_count
+                recorded = True
         except Exception as exc:
             # Don't discard history on failure — losing the earlier turns is
             # worse than carrying them. Leave `self._history` untouched and let
@@ -2581,6 +2875,16 @@ class ChatSession:
         )
         summary_msg = {"role": "user", "content": summary_body}
 
+        # `compacted_count` indexes the CURRENT history, which an earlier
+        # compaction may already have rewritten as [summary, separator?, rest]:
+        # its leading `_synthetic_prefix_len` entries are ours, not seed
+        # messages, and everything after them starts where the last compaction
+        # stopped. Counted before the prefix below replaces it.
+        covered = min(
+            self._seed_covered + max(0, compacted_count - self._synthetic_prefix_len),
+            self._seed_len,
+        )
+
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
@@ -2589,8 +2893,13 @@ class ChatSession:
                 {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
             ]
+            self._synthetic_prefix_len = 2
         else:
             self._history = [summary_msg] + recent_turns
+            self._synthetic_prefix_len = 1
+        self._seed_covered = covered
+        if recorded and not self._compaction_sealed:
+            self._last_compaction = {"summary": summary_body, "covered_through": covered}
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -2647,6 +2956,73 @@ class ChatSession:
             return True  # _cancel_event fired
         except asyncio.TimeoutError:
             return False  # slept the full delay
+
+    _IMAGE_REMOVED_PLACEHOLDER = (
+        "[An image here could not be sent to the model and was removed "
+        "automatically so this conversation could continue. Re-share it if you "
+        "still need it referenced.]"
+    )
+
+    def _strip_image_blocks_from_history(self) -> int:
+        """Replace every image block in history with a placeholder; return the
+        count removed.
+
+        Runs when the provider PERMANENTLY rejects content already in history.
+        Retrying is pointless because the request is rebuilt from this same
+        history every time — so unless the poison is removed, every later turn
+        re-sends it and fails identically. That is the difference between a
+        dead turn and a dead conversation.
+
+        cowork-server does this in its own store (ENG-1992) and rebuilds the
+        session each turn, so for that host this is a harmless no-op on a
+        history about to be discarded. The standalone CLI keeps ONE long-lived
+        session and has no such store: without this, its next turn re-sends the
+        same image forever (review of #484). Doing it here makes the error
+        message's promise true for every host rather than only the one that
+        happens to implement it.
+
+        Every image goes, not just the offending one: the provider's index is
+        request-relative and cannot be mapped back to a history entry reliably
+        across dialects. Blunt, and the same trade-off ENG-1992 already took.
+        """
+        removed = 0
+
+        def _strip(content):
+            nonlocal removed
+            if not isinstance(content, list):
+                return content, False
+            out, changed = [], False
+            for block in content:
+                if not isinstance(block, dict):
+                    out.append(block)
+                    continue
+                # Both shapes, matching the pair this file already uses at
+                # its other two image sites. `turn_stream` accepts the
+                # OpenAI-style `image_url` as public input and the provider
+                # translates it onward, so stripping only `image` left that
+                # shape in history to be re-sent on the next turn — the exact
+                # failure this repair exists to stop (review of #484).
+                if block.get("type") in ("image", "image_url"):
+                    out.append({"type": "text", "text": self._IMAGE_REMOVED_PLACEHOLDER})
+                    changed = True
+                    removed += 1
+                    continue
+                if block.get("type") == "tool_result":
+                    nested, nested_changed = _strip(block.get("content"))
+                    if nested_changed:
+                        out.append({**block, "content": nested})
+                        changed = True
+                        continue
+                out.append(block)
+            return (out if changed else content), changed
+
+        for msg in self._history:
+            if not isinstance(msg, dict):
+                continue
+            new_content, changed = _strip(msg.get("content"))
+            if changed:
+                msg["content"] = new_content
+        return removed
 
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
@@ -2801,11 +3177,14 @@ class ChatSession:
         else:
             self._history = [placeholder, separator, *tail]
 
-        # A hard truncate discards the compacted summary — history[0] is now
-        # the truncation placeholder, not the summary. Clear the compaction
-        # record so `last_compaction` reports None (keep-full-history) rather
-        # than letting a host persist the placeholder as the durable summary.
-        self._last_compacted_count = None
+        # A hard truncate discards the compacted summary — the turns it covered
+        # are gone from history, so replaying it next turn would describe
+        # material the host would also replay in full. Clear the record so
+        # `last_compaction` reports None (keep-full-history), and seal it: what
+        # survives here is a 4-message tail at an unknown offset, so nothing
+        # later in this session can map a count back onto the seed.
+        self._last_compaction = None
+        self._compaction_sealed = True
 
     async def plan_with_recovery(
         self,
@@ -2963,6 +3342,24 @@ class ChatSession:
             _root_cause_fields = self._root_causes.event_fields()
         except Exception:  # pragma: no cover - defensive
             _root_cause_fields = {}
+        # Only on turns where Jev was asked, so other turns stay as before.
+        _jev_fields = (
+            {
+                "jev_checks": str(tc.jev_checks),
+                "jev_decided": str(tc.jev_decided),
+                "jev_disagreements": str(tc.jev_disagreements),
+                "jev_errors": str(tc.jev_errors),
+                "jev_last_status": tc.jev_last_status,
+                "jev_last_ms": str(tc.jev_last_ms),
+                **(
+                    {"jev_last_p_complete": f"{tc.jev_last_p_complete:.3f}"}
+                    if tc.jev_last_p_complete is not None
+                    else {}
+                ),
+            }
+            if tc.jev_checks
+            else {}
+        )
         logger.info(
             # `attempt` alongside `turn`: `turn_index` is a history position,
             # so two attempts of one turn used to produce two indistinguishable
@@ -2976,7 +3373,7 @@ class ChatSession:
             "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
-            "by_role=%s %s",
+            "by_role=%s %s%s",
             self._session_id, turn_index, tc.attempt_id, tc.ended_by,
             str(tc.verification_skipped).lower(),
             tc.grace_granted or "-", tc.grace_tokens,
@@ -2995,6 +3392,7 @@ class ChatSession:
             # properties for weeks (ENG-1355) — the log is the sink that does
             # not depend on it.
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
+            "".join(f" {k}={v}" for k, v in _jev_fields.items()),
         )
 
         # Script traffic never reaches the analytics sink (ENG-1692).
@@ -3086,6 +3484,7 @@ class ChatSession:
                 # is the only sink, and its absence here is not evidence the
                 # classification is broken.
                 **_root_cause_fields,
+                **_jev_fields,
                 ended_by=tc.ended_by,
                 # Empty unless the turn ended on an exception — see
                 # `TurnCost.error_type`.
@@ -3191,6 +3590,14 @@ class ChatSession:
                 # (ENG-1945). "" when the host did not say; never a guess —
                 # `_validated_surface` already rejected anything unrecognised.
                 surface=str(getattr(self, "_surface", None) or ""),
+                # WHO ran the turn (ENG-2121). `user_id` becomes the event's
+                # distinct_id in `anton.analytics._posthog_body`, so the turn
+                # lands on the same PostHog person as sign-up, install and
+                # payment and the staff/test exclusion reaches it. Opaque UUIDs
+                # only, already validated at construction; "" when the host did
+                # not say, and then the event stays keyed on the install.
+                user_id=str(getattr(self, "_user_id", None) or ""),
+                organization_id=str(getattr(self, "_organization_id", None) or ""),
                 anton_version=_anton_version,
                 # Join keys: the same session/turn identity the MindsHub
                 # trace headers carry, so an analytics row links back to
@@ -3345,6 +3752,17 @@ class ChatSession:
             # Analytics must never affect the tool call that just ran.
             pass
 
+    def spend_ceiling_reached(self) -> bool:
+        """Public read of the turn's spend ceiling, for long-running tools.
+
+        `generate_artifact` runs a whole pipeline inside a single tool-use
+        round, so the loop-level check in `_spend_ceiling_stops_the_tool_loop`
+        cannot see it overspend (I-20). It reads this instead of the private
+        method — a tool reaching into `_`-prefixed session internals is how
+        `_output_token_cap` ended up broken by a refactor (I-08).
+        """
+        return self._spend_ceiling_reached()
+
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.
 
@@ -3491,6 +3909,69 @@ class ChatSession:
             "like you to continue. "
             "Do NOT retry automatically — wait for the user's response."
         )
+
+    async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
+        """Ask Jev for the verdict; None when it is off or the verifier isn't on MindsHub."""
+        if not self._jev_enabled:
+            return None
+        provider = self._llm.coding_provider
+        info = provider.export_connection_info()
+        base_url = info.base_url or ""
+        # BYOK and every other non-MindsHub route keep the LLM verifier.
+        if classify_base_url(base_url) != ENDPOINT_MINDSHUB or not hasattr(provider, "current_api_key"):
+            return None
+        try:
+            api_key = await provider.current_api_key()
+        except Exception:
+            return _jev.JevVerdict(error="credentials")
+        if not api_key:
+            return None
+        if self._jev_http is None:
+            # Same TLS setting as the provider, e.g. behind an intercepting proxy.
+            self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
+        return await _jev.classify(
+            base_url=base_url,
+            api_key=api_key,
+            model=self._jev_model,
+            state={
+                "request": (user_message or "").strip(),
+                "transcript": _render_verify_transcript(self._history),
+            },
+            questions=_jev_questions(),
+            timeout_s=self._jev_timeout_s,
+            client=self._jev_http,
+        )
+
+    def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
+        """Jev settles only a confident COMPLETE or WAITING; the rest needs the LLM's reason."""
+        return (
+            result is not None
+            and not result.error
+            and result.status in ("COMPLETE", "WAITING")
+            and result.p_status is not None
+            and result.p_status >= self._jev_min_p
+        )
+
+    def _record_jev(self, result: "_jev.JevVerdict", decided: bool, llm_status: str | None) -> None:
+        try:
+            tc = self._turn_cost
+            if tc is not None:
+                tc.jev_checks += 1
+                tc.jev_decided += int(decided)
+                tc.jev_errors += int(bool(result.error))
+                if not result.error and llm_status is not None and result.status != llm_status:
+                    tc.jev_disagreements += 1
+                tc.jev_last_status = result.status or result.error
+                tc.jev_last_p_complete = result.p_complete
+                tc.jev_last_ms = result.ms
+            logger.info(
+                "completion-verifier jev status=%s p=%s decided=%s llm=%s ms=%d model=%s error=%s",
+                result.status or "-",
+                "-" if result.p_status is None else f"{result.p_status:.3f}",
+                str(decided).lower(), llm_status or "-", result.ms, result.model or "-", result.error or "-",
+            )
+        except Exception:  # pragma: no cover - defensive; bookkeeping must not break a turn
+            logger.debug("completion-verifier jev bookkeeping failed", exc_info=True)
 
     async def _stream_handback_diagnosis(
         self, *, system: str, label: str, cancels_continuation: bool = False
@@ -3801,107 +4282,6 @@ class ChatSession:
             # Cerebellum learning is best-effort, so just drop the buffer.
             cb.reset()
 
-    async def _gate_turn(self) -> ThalamicDecision | None:
-        """Run the cheap routing call for the turn just appended to history.
-
-        Returns None — meaning "proceed to the planning model as if no
-        thalamus existed" — on any thalamus failure. Routing must never be
-        able to break a turn; it can only save one.
-        """
-        try:
-            summaries = (
-                self._skill_store.list_summaries()
-                if self._skill_store is not None
-                else []
-            )
-        except Exception:
-            summaries = []
-        try:
-            return await gate_turn(
-                self._llm,
-                history=self._history,
-                skill_summaries=summaries,
-                max_tokens=self._router_max_tokens,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Router call failed (%s) — falling through to the planning model.",
-                exc,
-            )
-            return None
-
-    def _inject_recalled_skills(self, labels: list[str]) -> None:
-        """Preload thalamus-named skills as a synthetic recall_skill exchange.
-
-        Appends an assistant `tool_use` + user `tool_result` pair to
-        history, byte-identical in payload to what the planning model
-        would have gotten by calling `recall_skill` itself — but without
-        spending a full-context planning round on the fetch. Labels must
-        match exactly (no fuzzy fallback: a wrong preload is worse than
-        none), unknown labels are dropped silently, and at most 3 skills
-        load per turn. Built-ins and user skills resolve through the same
-        SkillStore that `recall_skill` uses.
-        """
-        if not labels:
-            return
-        store = self._skill_store
-        if store is None:
-            return
-        from anton.core.tools.recall_skill import (
-            _already_in_history,
-            _format_skill_response,
-        )
-
-        self._thalamus_recall_counter += 1
-        tool_uses: list[dict] = []
-        results: list[dict] = []
-        seen: set[str] = set()
-        for label in labels:
-            label = (label or "").strip()
-            if not label or label in seen:
-                continue
-            seen.add(label)
-            if len(tool_uses) >= 3:
-                break
-            try:
-                skill = store.load(label)
-            except Exception:
-                skill = None
-            if skill is None:
-                continue
-            # Unlock gated tools before the skip below, so a preload
-            # registers the bundle even when it won't re-inject the body.
-            self._register_tool_bundle(skill.label)
-            # Skip skills whose full body is already in context — mirrors
-            # handle_recall_skill's stub path so a preload can't duplicate a
-            # procedure the planning model already has (wasted tokens).
-            if _already_in_history(self, skill.label):
-                continue
-            content = _format_skill_response(skill)
-            try:
-                store.increment_recommended(skill.label, stage=1)
-            except Exception:
-                pass
-            tu_id = f"thalamus_recall_{self._thalamus_recall_counter}_{len(tool_uses)}"
-            tool_uses.append(
-                {
-                    "type": "tool_use",
-                    "id": tu_id,
-                    "name": "recall_skill",
-                    "input": {"label": skill.label},
-                }
-            )
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tu_id,
-                    "content": content,
-                }
-            )
-        if tool_uses:
-            self._append_history({"role": "assistant", "content": tool_uses})
-            self._append_history({"role": "user", "content": results})
-
     def _open_ds_turn_scope(self) -> None:
         """Open this turn's DS_* scope and rebuild it from the session's vault.
 
@@ -4177,41 +4557,7 @@ class ChatSession:
 
         _turn_exc: BaseException | None = None
         try:
-            # Cheap front-model routing (ENG-648). Text-only turns first
-            # hit the thalamus model, which either answers trivial/from-
-            # context requests directly (skipping the full prompt + tool
-            # schemas + planning model entirely) or delegates, optionally
-            # preloading skills into history so the planning model doesn't
-            # spend a round on recall_skill. Image turns skip the thalamus —
-            # attachments imply real work. The thalamus buffers rather than
-            # streams: direct answers are short by construction
-            # (router_max_tokens), and a delegate decision must never leak
-            # preamble text to the user.
-            routed_direct = False
-            if self._router_enabled and isinstance(user_input, str):
-                decision = await self._gate_turn()
-                if decision is not None and decision.action == ACTION_RESPOND:
-                    self._append_history(
-                        {"role": "assistant", "content": decision.text}
-                    )
-                    assistant_text_parts.append(decision.text)
-                    yield StreamTextDelta(text=decision.text)
-                    yield StreamComplete(
-                        response=decision.response
-                        or LLMResponse(content=decision.text)
-                    )
-                    routed_direct = True
-                elif decision is not None:
-                    # Delegating: surface the gate call's usage as its own
-                    # StreamComplete so token accounting counts it, exactly
-                    # like a planning round (the loop below emits more). The
-                    # gate hits every turn, so dropping it would under-report.
-                    if decision.response is not None:
-                        yield StreamComplete(response=decision.response)
-                    if decision.skills:
-                        self._inject_recalled_skills(decision.skills)
-
-            while not routed_direct:
+            while True:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):
@@ -4367,6 +4713,54 @@ class ChatSession:
                     # the auto-retry below sends a malformed history
                     # and we get the same 400 forever.
                     self._seal_dangling_tool_uses("interrupted by error")
+
+                    # A permanent rejection of content already in history
+                    # (ENG-1992 shape, ENG-2689 size). The request is rebuilt
+                    # from the SAME stored history on every attempt, so it is
+                    # byte-identical each time and fails identically each time
+                    # — the provider's own docstring says so. Retrying it spent
+                    # four full requests on a refusal that was permanent by
+                    # construction, injected a "diagnose and fix the issue"
+                    # note the model cannot act on, and delayed by ~34s the
+                    # repair that actually unsticks the conversation.
+                    #
+                    # Raised HERE, after the seal above, rather than with the
+                    # other early-raise types at the top of this handler: the
+                    # failure can land mid-tool-round, and a dangling tool_use
+                    # left in history would 400 the NEXT turn too — turning a
+                    # repairable conversation into a differently-broken one.
+                    if isinstance(_agent_exc, ContentValidationError):
+                        # Remove the poison before giving up, so the NEXT turn
+                        # isn't refused for the same content. Without this the
+                        # turn dies and the conversation dies with it.
+                        _removed = self._strip_image_blocks_from_history()
+                        if _removed:
+                            logger.info(
+                                "content rejected permanently — stripped %d image "
+                                "block(s) from history so the conversation can continue",
+                                _removed,
+                            )
+                            # Save it NOW. The turn-end `_persist_history()` is
+                            # below this raise and never runs, and `close()`
+                            # does not save either — so without this the repair
+                            # lives only in memory and `/resume` reloads the
+                            # original image and repeats the refusal forever
+                            # (review of #484). Failure-safe: this runs on the
+                            # error path, where an escape would turn a handled
+                            # failure into a dead turn.
+                            try:
+                                self._persist_history()
+                            except Exception:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "could not persist the repaired history; a "
+                                    "resumed session may resend the rejected image",
+                                    exc_info=True,
+                                )
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "content_rejected"
+                        )
+                        raise
+
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to
                         # recover. A TransientProviderError reaching here is a
@@ -4990,6 +5384,7 @@ class ChatSession:
                         break
 
                 # Build assistant message with content blocks
+                self._ensure_replayable_calls(llm_response)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(
@@ -5173,14 +5568,10 @@ class ChatSession:
                                 if cell is not None:
                                     tool_ok = not (cell.error or "").strip()
                                     # Same source `tool_handlers` uses for its
-                                    # ToolOutcome: the traceback's LAST line is
-                                    # the cause, and it is the runtime's own
+                                    # ToolOutcome, and the runtime's own
                                     # output rather than anything the model
-                                    # wrote (ENG-1492).
-                                    _cell_err = (cell.error or "").strip()
-                                    tool_reason = (
-                                        _cell_err.splitlines()[-1][:160] if _cell_err else ""
-                                    )
+                                    # wrote.
+                                    tool_reason = cell_failure_reason(cell.error)
                                 if cell is not None:
                                     self._record_cell_explainability(
                                         pad_name=tc.input.get("name", ""),
@@ -5630,9 +6021,9 @@ class ChatSession:
             # already in history — unverified, but that beats a per-turn
             # interruption we know the cause of.
             # Re-probe occasionally so the latch can't outlive its cause: the
-            # user may switch off the broken model mid-session, or the gateway
-            # fix may land. Without this, "reset on a successful verdict" is
-            # unreachable — a latched session skips every verdict call, so there
+            # user may switch off the broken model while it is latched, or the
+            # gateway fix may land. Without this, "reset on a successful verdict"
+            # is unreachable — a latched verifier skips every verdict call, so there
             # is never another success to reset on. A re-probe that produces no
             # verdict stays latched and does NOT re-diagnose (the latched branch
             # below breaks before the diagnosis), so the cost is one FAILED
@@ -5642,10 +6033,10 @@ class ChatSession:
             # TransientProviderError still falls through to the honest
             # diagnosis and leaves the latch set — those never latch by
             # definition, so only a successful verdict clears it.
-            if self._verifier_latched:
-                self._verifier_latch_skips += 1
-                reprobe_turns = _reprobe_turns_for(self._verifier_last_no_verdict)
-                if self._verifier_latch_skips < reprobe_turns:
+            if self._verifier_latch.latched:
+                self._verifier_latch.skips += 1
+                reprobe_turns = _reprobe_turns_for(self._verifier_latch.last_no_verdict)
+                if self._verifier_latch.skips < reprobe_turns:
                     logger.info(
                         "completion-verifier skipped — latched (%s) "
                         "(skip %d/%d before re-probe); "
@@ -5655,11 +6046,11 @@ class ChatSession:
                         # leave the count below the threshold, so any sentence
                         # naming the threshold here would sometimes be false.
                         "deterministic denial: billing or model access"
-                        if self._verifier_latch_reason == "denied"
-                        else f"{self._verifier_latch_reason}, "
-                        f"{self._verifier_no_verdict_failures} verdict call(s) with "
-                        "no successful verdict since",
-                        self._verifier_latch_skips,
+                        if self._verifier_latch.reason == "denied"
+                        else f"{self._verifier_latch.reason}, "
+                        f"{self._verifier_latch.no_verdict_failures} verdict "
+                        "call(s) with no successful verdict since",
+                        self._verifier_latch.skips,
                         reprobe_turns, continuation,
                         self._max_continuations, tool_round,
                     )
@@ -5677,14 +6068,14 @@ class ChatSession:
                         # reason is always set before the latch, and guessing
                         # "hard" here would file a capability claim we never saw.
                         self._turn_cost.verifier_failure = (
-                            f"latched_{self._verifier_latch_reason}"
+                            f"latched_{self._verifier_latch.reason}"
                         )
                     break
                 logger.info(
                     "completion-verifier re-probing after %d skipped verifications",
-                    self._verifier_latch_skips,
+                    self._verifier_latch.skips,
                 )
-                self._verifier_latch_skips = 0
+                self._verifier_latch.skips = 0
 
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation (ENG-716). The
@@ -5692,7 +6083,14 @@ class ChatSession:
             verifier_system, verify_messages = _build_verify_request(
                 self._history, user_message
             )
-            verdict = None
+            # Still latched here means this is the LLM re-probe: only an LLM verdict can clear it.
+            jev_result = None if self._verifier_latch.latched else await self._jev_verdict(user_message)
+            jev_decided = self._jev_decides(jev_result)
+            verdict = (
+                _VerifierVerdict(status=jev_result.status, reason=f"Decided by Jev (p={jev_result.p_status:.2f}).")
+                if jev_decided
+                else None
+            )
             # Which class of no-verdict failure this was. Everything except a
             # typed transient counts toward the latch; the class is kept so the
             # books can name it (ENG-1155/ENG-1858).
@@ -5701,7 +6099,8 @@ class ChatSession:
             # its TYPE on the turn books below (ENG-1858). `except ... as exc`
             # unbinds `exc` at the end of each clause, hence the copy.
             verdict_exc: BaseException | None = None
-            for attempt, budget in enumerate(_VERIFIER_TOKEN_BUDGETS):
+            # Skipped when Jev decided; otherwise exactly the LLM verifier as before.
+            for attempt, budget in enumerate(() if jev_decided else _VERIFIER_TOKEN_BUDGETS):
                 try:
                     verdict = await self._llm.generate_object_code(
                         _VerifierVerdict,
@@ -5791,14 +6190,19 @@ class ChatSession:
                     )
                     break
 
+            if jev_result is not None:
+                llm_status = verdict.status if verdict is not None and not jev_decided else None
+                self._record_jev(jev_result, jev_decided, llm_status)
+
             if verdict is not None:
-                # A working verdict clears the latch: whatever was failing
+                # A working LLM verdict clears the latch: whatever was failing
                 # (transient provider error, a model the user has since changed)
-                # is no longer failing.
-                self._verifier_no_verdict_failures = 0
-                self._verifier_latched = False
-                self._verifier_latch_reason = ""
-                self._verifier_last_no_verdict = ""
+                # is no longer failing. A Jev verdict says nothing about the LLM.
+                if not jev_decided:
+                    self._verifier_latch.no_verdict_failures = 0
+                    self._verifier_latch.latched = False
+                    self._verifier_latch.reason = ""
+                    self._verifier_latch.last_no_verdict = ""
                 status = verdict.status
                 reason = verdict.reason.strip()
             else:
@@ -5826,16 +6230,13 @@ class ChatSession:
                     # latched, so adding credits self-heals within
                     # _VERIFIER_LATCH_REPROBE_TURNS turns.
                     #
-                    # Scope note: the latch is ChatSession state, and Cowork
-                    # rebuilds the session PER MESSAGE — there it only spans
-                    # one message's continuations, the steady-state cost of a
-                    # persistent denial is one silent verdict call per
-                    # message, and top-up recovery is simply the next message.
-                    # The re-probe window above is long-session (CLI)
-                    # behaviour. The cross-message fix is server-side model
-                    # resolution (cowork-server, same ticket); this branch is
-                    # the guarantee the user is never told the turn failed.
-                    self._verifier_latched = True
+                    # Scope note: the latch lives as long as its owner. A
+                    # session-owned latch in a host that rebuilds the session
+                    # per message spans one message, so a top-up recovers on
+                    # the next one. A latch the host shares spans messages, so
+                    # a top-up recovers at the re-probe. Either way this branch
+                    # is the guarantee the user is never told the turn failed.
+                    self._verifier_latch.latched = True
                     # Through the same accumulator as every other class, but
                     # WITHOUT touching the counter: this branch latches on call
                     # one, so the threshold never applies to it.
@@ -5853,17 +6254,17 @@ class ChatSession:
                         self._turn_cost.verification_skipped = True
                     break
                 if verdict_failure in _LATCHING_VERDICT_FAILURES:
-                    self._verifier_no_verdict_failures += 1
+                    self._verifier_latch.no_verdict_failures += 1
                     # Before the latched check, so a failed re-probe joins the
                     # evidence rather than leaving the books naming only
                     # whichever class happened to latch first.
                     self._note_latch_class(verdict_failure)
-                    if self._verifier_latched:
+                    if self._verifier_latch.latched:
                         # A failed re-probe: the cause is still there. Stay
                         # latched with its own log line — re-announcing "latched
                         # after N failures" with an ever-growing N would read as
                         # a new event each cycle. No re-diagnosis (one per
-                        # session, ENG-1155).
+                        # latch).
                         logger.warning(
                             "completion-verifier re-probe failed — staying latched"
                         )
@@ -5871,18 +6272,22 @@ class ChatSession:
                         if self._turn_cost is not None:
                             self._turn_cost.verification_skipped = True
                         break
-                    if self._verifier_no_verdict_failures >= _VERIFIER_LATCH_THRESHOLD:
+                    if self._verifier_latch.no_verdict_failures >= _VERIFIER_LATCH_THRESHOLD:
                         # Threshold reached: the cause is established, so latch
                         # and skip the diagnosis on this turn too — a second
                         # "checking in" message plus a second full-history call
                         # buys nothing once the cause is known to recur. One
-                        # diagnosis per session (ENG-1155).
+                        # diagnosis per latch.
                         #
                         # Counted: a provider that rejects the call itself
                         # (ENG-1095's 400 on forced `tool_choice`) and a ladder
                         # exhausted by a narrating model. Not counted: anything
                         # in `_TRANSIENT_VERDICT_ERRORS`; a deterministic denial
-                        # latched on its own branch above.
+                        # latched on its own branch above. Also counted: any
+                        # untyped error, some of which depend on the conversation
+                        # (a content filter 400). On a host-shared latch, two of
+                        # those skip verification for every conversation on the
+                        # endpoint and model until the re-probe.
                         #
                         # Not strictly "consecutive": the counter is reset only
                         # by a *successful* verdict, since only a real verdict
@@ -5891,15 +6296,15 @@ class ChatSession:
                         # The reason carries the class, so the books can tell
                         # latched_hard from latched_truncated rather than
                         # mislabelling one as the other.
-                        self._verifier_latched = True
+                        self._verifier_latch.latched = True
                         logger.warning(
                             "completion-verifier latched after %d verdict calls that "
                             "produced no verdict (%s) with no successful verdict "
                             "between them — skipping verification until the next "
                             "re-probe, in %d turns",
-                            self._verifier_no_verdict_failures,
-                            self._verifier_latch_reason,
-                            _reprobe_turns_for(self._verifier_last_no_verdict),
+                            self._verifier_latch.no_verdict_failures,
+                            self._verifier_latch.reason,
+                            _reprobe_turns_for(self._verifier_latch.last_no_verdict),
                         )
                         # Unverified turn — see the latched-skip stamp above.
                         if self._turn_cost is not None:

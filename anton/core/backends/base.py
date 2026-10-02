@@ -172,8 +172,9 @@ class ScratchpadRuntime(ABC):
             parts.append(f"```python\n{cell.code}\n```\n")
 
             if cell.error:
-                last_line = cell.error.strip().split("\n")[-1]
-                parts.append(f"**Error:** `{last_line}`")
+                from anton.core.utils.scratchpad import cell_error_headline
+
+                parts.append(f"**Error:** `{cell_error_headline(cell.error)}`")
                 if cell.stdout:
                     truncated = self._truncate_output(cell.stdout.rstrip("\n"))
                     parts.append(f"**Partial output:**\n```\n{truncated}\n```\n")
