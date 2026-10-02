@@ -552,3 +552,19 @@ response after it, the scratchpad cell that writes into that catalogued folder
 and verifies the result. For a new report, call create_artifact in your first
 response. Re-read a file only when the snapshot omits its content.
 """
+
+
+# Product experiment P3: same-round artifact writes
+ARTIFACTS_PROMPT += """
+SAME-RESPONSE CREATE AND WRITE
+Tool calls in one response run in order. Scratchpad code can call the builtin
+artifact_dir(slug_or_name), which returns a registered artifact's folder at
+execution time (LookupError if none). When the inputs are already in the
+PROJECT FILE SNAPSHOT, a new report needs no separate preparation round: in
+your first response stream the short plan sentence, call create_artifact, then
+in the SAME response call one scratchpad cell that reads the source from disk,
+computes, writes analysis.json and the report into
+artifact_dir("<exact name passed to create_artifact>"), re-reads both, runs the
+required checks and prints a compact receipt. Only claim checks that ran. If a
+call fails, inspect the error and fix it in the next round.
+"""

@@ -425,6 +425,48 @@ if _session_load_note:
     _session_notes.append(_session_load_note)
 namespace["_anton_explainability_queries"] = []
 
+# --- artifact_dir(): resolve a registered artifact folder at execution time ---
+# Installed as a builtin (not a namespace variable) so it is never pickled into
+# the session snapshot and survives namespace resets.
+_ANTON_PROJECT_ROOT = os.getcwd()
+
+
+def _anton_artifact_dir(slug_or_name):
+    """Absolute folder of a registered artifact in this project.
+
+    Accepts a slug or the exact name passed to create_artifact. An exact slug
+    wins; among artifacts sharing a name the most recently created is used.
+    Raises LookupError when nothing is registered under that slug or name.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    key = str(slug_or_name).strip()
+    base = _Path(_ANTON_PROJECT_ROOT) / ".anton" / "artifacts"
+    by_slug, by_name = [], []
+    for meta in base.glob("*/metadata.json"):
+        try:
+            data = _json.loads(meta.read_text())
+        except Exception:
+            continue
+        if key in (meta.parent.name, data.get("slug")):
+            by_slug.append(meta.parent)
+        elif key == data.get("name"):
+            by_name.append((str(data.get("createdAt") or ""), str(meta.parent)))
+    if by_slug:
+        return str(by_slug[0])
+    if by_name:
+        return max(by_name)[1]
+    raise LookupError(
+        f"No registered artifact with slug or name {key!r}; call create_artifact "
+        "or open_artifact before this cell."
+    )
+
+
+import builtins as _anton_builtins
+
+_anton_builtins.artifact_dir = _anton_artifact_dir
+
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
 if _scratchpad_model:
