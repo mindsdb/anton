@@ -292,7 +292,12 @@ def lint_artifact_files(store, slug: str, budget_seconds: float | None = None) -
             if deadline is not None and time.monotonic() >= deadline:
                 messages.append(f"{slug}/{path.name} — not checked: lint time budget ran out")
                 continue
-            file_messages = _lint_and_remember(linter, path, fingerprint)
+            try:
+                file_messages = _lint_and_remember(linter, path, fingerprint)
+            except Exception:
+                _log.warning("artifact lint checker failed for %s/%s", slug, path.name, exc_info=True)
+                messages.append(f"{slug}/{path.name} — not checked: checker error")
+                continue
         if not file_messages:
             # None (couldn't check) or [] (checked, clean) — either way,
             # nothing worth telling the agent about this file.

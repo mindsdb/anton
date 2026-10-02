@@ -138,7 +138,32 @@ async def test_raising_checker_does_not_fail_open(session, root, monkeypatch):
     outcome = await handle_open_artifact(session, {"slug": slug})
 
     assert outcome.ok is True
-    assert json.loads(outcome.content)["slug"] == slug
+    descriptor, lint_text = outcome.content.split(_LINT_HEADER, 1)
+    assert json.loads(descriptor)["slug"] == slug
+    assert lint_text == f"{slug}/index.html — not checked: checker error"
+
+
+async def test_raising_checker_keeps_other_files_findings(session, root, monkeypatch):
+    slug, folder = _create(root)
+    (folder / "index.html").write_text("<p>hi</p>")
+    _write_workbook(
+        folder / "forecast.xlsx",
+        {"Actuals": {"E6": "100"}, "Assumptions": {"E6": "SLOPE(E6:J6,{1,2,3,4,5,6})"}},
+    )
+    real_linters = th._artifact_linters()
+
+    def _boom(_path: Path) -> list[str]:
+        raise RuntimeError("checker crashed")
+
+    monkeypatch.setattr(
+        th, "_artifact_linters", lambda: {".html": _boom, ".xlsx": real_linters[".xlsx"]}
+    )
+
+    outcome = await handle_open_artifact(session, {"slug": slug})
+
+    lint_text = outcome.content.split(_LINT_HEADER, 1)[1]
+    assert f"{slug}/index.html — not checked: checker error" in lint_text
+    assert f"{slug}/forecast.xlsx" in lint_text
 
 
 async def test_lint_on_open_runs_off_the_event_loop(session, root, monkeypatch):
