@@ -72,6 +72,19 @@ def _error_body(exc: "openai.APIStatusError") -> object:
     return raw
 
 
+def _rejects_reasoning_summary(exc: "openai.BadRequestError") -> bool:
+    """True when a 400 refuses ``reasoning.summary`` itself (e.g. an account
+    that must verify its organisation before it may request summaries)."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    if err.get("param") == "reasoning.summary":
+        return True
+    message = str(err.get("message") or "").lower()
+    return "summar" in message and ("reasoning" in message or "verif" in message)
+
+
 def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     """Classify the 400s we can name. Returns when we cannot, so the caller
     re-raises the SDK error exactly as it does today.
@@ -957,6 +970,9 @@ class OpenAIProvider(LLMProvider):
         # chat.completions path and as ``reasoning={"effort": ...}`` on the
         # Responses API path. None = the model's default.
         self._reasoning_effort = reasoning_effort
+        # Responses only: ask for a reasoning summary until the account refuses
+        # one (see _create_response), then stop asking for this provider's life.
+        self._reasoning_summary = True
         # Whether to attach langfuse-style headers (Langfuse-Session-Id,
         # Langfuse-Tags, Langfuse-Metadata) to outbound requests. Default-on
         # only for the MindsHub-backed deployment, which is the curated
@@ -1566,7 +1582,9 @@ class OpenAIProvider(LLMProvider):
             # all. Safe to always pair with effort: only sent when effort
             # is already set, which is itself gated to reasoning-capable
             # models by the caller (see AntonSettings.planning_reasoning_effort).
-            kwargs["reasoning"] = {"effort": self._reasoning_effort, "summary": "auto"}
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            if self._reasoning_summary:
+                kwargs["reasoning"]["summary"] = "auto"
 
         merged_tools: list[dict] = []
         if tools:
@@ -1587,6 +1605,25 @@ class OpenAIProvider(LLMProvider):
         # call cache hits. Retention then follows the key owner's OpenAI
         # organisation settings.
         return kwargs
+
+    async def _create_response(self, kwargs: dict):
+        """``responses.create``, retried once without the reasoning summary when
+        the account may not request one.
+
+        chat.completions never asks for a summary, so on that transport such an
+        account works; here the same account would get a 400 on every call. The
+        refusal happens before any output, so the retry is a clean re-issue.
+        """
+        try:
+            return await self._client.responses.create(**kwargs)
+        except openai.BadRequestError as exc:
+            reasoning = kwargs.get("reasoning") or {}
+            if "summary" not in reasoning or not _rejects_reasoning_summary(exc):
+                raise
+            logger.warning("reasoning summaries refused for this account; continuing without them")
+            self._reasoning_summary = False
+            retry = dict(kwargs, reasoning={k: v for k, v in reasoning.items() if k != "summary"})
+            return await self._client.responses.create(**retry)
 
     async def _complete_via_responses(
         self,
@@ -1610,7 +1647,7 @@ class OpenAIProvider(LLMProvider):
         )
 
         try:
-            response = await self._client.responses.create(**kwargs)
+            response = await self._create_response(kwargs)
         except openai.BadRequestError as exc:
             _raise_for_bad_request(exc)
             raise
@@ -1668,7 +1705,7 @@ class OpenAIProvider(LLMProvider):
 
         stream = None
         try:
-            stream = await self._client.responses.create(**kwargs)
+            stream = await self._create_response(kwargs)
             stream_started = True
             async for event in stream:
                 etype = getattr(event, "type", "")
