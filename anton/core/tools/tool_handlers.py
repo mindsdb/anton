@@ -241,15 +241,19 @@ def _folder_fingerprint(entries: list[tuple[Path, os.stat_result]]) -> int:
     return hash(tuple(sorted((str(p), st.st_size, st.st_mtime_ns) for p, st in entries)))
 
 
-def _lint_file_cached(
-    linter: Callable[[Path], list[str] | None], path: Path, folder_fingerprint: int
-) -> list[str] | None:
+def _cached_lint(path: Path, folder_fingerprint: int) -> list[str] | None:
     key = (str(path), folder_fingerprint)
     with _lint_cache_lock:
         cached = _lint_cache.get(key)
         if cached is not None:
             _lint_cache.move_to_end(key)
-            return cached
+        return cached
+
+
+def _lint_and_remember(
+    linter: Callable[[Path], list[str] | None], path: Path, folder_fingerprint: int
+) -> list[str] | None:
+    key = (str(path), folder_fingerprint)
     file_messages = linter(path)
     if file_messages is None:
         # Could not check (no office, no browser): retry next time instead
@@ -283,10 +287,12 @@ def lint_artifact_files(store, slug: str, budget_seconds: float | None = None) -
         linter = linters.get(path.suffix.lower())
         if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
             continue
-        if deadline is not None and time.monotonic() >= deadline:
-            messages.append(f"{slug}/{path.name} — not checked: lint time budget ran out")
-            continue
-        file_messages = _lint_file_cached(linter, path, fingerprint)
+        file_messages = _cached_lint(path, fingerprint)
+        if file_messages is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                messages.append(f"{slug}/{path.name} — not checked: lint time budget ran out")
+                continue
+            file_messages = _lint_and_remember(linter, path, fingerprint)
         if not file_messages:
             # None (couldn't check) or [] (checked, clean) — either way,
             # nothing worth telling the agent about this file.

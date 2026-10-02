@@ -180,3 +180,19 @@ def test_files_past_the_budget_are_named_as_not_checked(root, monkeypatch):
     skipped = [m for m in messages if "not checked" in m]
     assert len(skipped) == 1
     assert checked[0] not in skipped[0]
+
+
+def test_remembered_results_are_reported_even_with_no_budget_left(root, monkeypatch):
+    slug, folder = _create(root)
+    (folder / "a.html").write_text("a")
+    (folder / "b.html").write_text("b")
+    monkeypatch.setattr(th, "_artifact_linters", lambda: {".html": lambda p: ["console error"]})
+    store = SimpleNamespace(root=root)
+    lint_artifact_files(store, slug)
+
+    messages = lint_artifact_files(store, slug, budget_seconds=0.0)
+
+    assert sorted(messages) == [
+        f"{slug}/a.html — console error",
+        f"{slug}/b.html — console error",
+    ]
