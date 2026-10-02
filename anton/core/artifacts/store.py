@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,50 +35,59 @@ from anton.core.artifacts.models import (
     ProvenanceEntry,
     TurnEntry,
 )
-from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
+# BACKEND_LOG_FILENAME is re-exported for backend_launcher and generate_artifact.
+from anton.core.artifacts.internal_files import (
+    BACKEND_LOG_FILENAME,
+    GENERATION_INPUT_FILES,
+    HOUSEKEEPING_DIRS,
+    HOUSEKEEPING_FILES,
+    METADATA_FILENAME,
+    NON_CONTENT_NAMES,
+    README_FILENAME,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-METADATA_FILENAME = "metadata.json"
-README_FILENAME = "README.md"
-PUBLISHED_FILENAME = ".published.json"
-BACKEND_LOG_FILENAME = "backend.log"
+# `_reconcile` matches these file names against the whole relative path and
+# `HOUSEKEEPING_DIRS` against its first component. The only difference from
+# `iter_content_files` is a top-level directory named like a housekeeping file.
+_EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
 
-# Files the store owns, hold publish-state, or belong to a running backend —
-# not artifact content the agent authored. Mirrors cowork-server's
-# artifacts-service housekeeping set (`cowork/services/artifacts.py:132`) so the
-# agent's view and the UI agree on what counts as an artifact file; this is the
-# one definition — `anton/publish_access.py` and `publisher._FULLSTACK_EXCLUDED`
-# import it.
-# `backend.log` is here for that agreement: it is the launched backend's runtime
-# log, written into the artifact folder by `launch_artifact_backend`, and every
-# other copy of this set already excluded it.
-# The `.anton_state.db*` trio is the local STATE driver's SQLite database (the
-# -wal/-shm side files carry the freshest writes) and
-# `.state_manifest.published.json` is the publisher's schema snapshot — all
-# runtime/publish bookkeeping of a stateful backend, never authored content.
-# `state_manifest.json` itself is NOT here: it is a deliverable the publisher
-# bundles. NOTE: cowork-server's copy of this set does not know these names yet.
-_HOUSEKEEPING_FILES = {
-    METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME, BACKEND_LOG_FILENAME,
-    ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
-    ".state_manifest.published.json",
-}
 
-# Kept separate from the housekeeping set rather than merged into it: these are
-# authored by the generation tools, not owned by the store, and the set above
-# mirrors cowork-server's — folding these in would quietly make that claim
-# false. Both are excluded from `files[]`; only the reason differs.
-_EXCLUDED_FROM_FILES = _HOUSEKEEPING_FILES | set(GENERATION_INPUT_FILES)
+def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Yield (path, lstat) for each regular file that is artifact content.
 
-# Reserved DIRECTORIES, matched on the artifact-relative path's first component
-# rather than by exact name (`.revisions` is the private revision journal).
-# Separate from the sets above because those are matched whole-path: a
-# directory name folded in there would only ever match a file literally called
-# `.revisions`.
-_HOUSEKEEPING_DIRS = {".revisions"}
+    Top-level `NON_CONTENT_NAMES` are pruned without descending and symlinks
+    are never followed. An entry or directory that errors is skipped on its
+    own; a missing `folder` yields nothing. Order is unspecified.
+
+    Directories are told apart by the scan's own entry type, so only files
+    cost a stat call (none at all on Windows, where the scan carries it).
+    """
+    stack = [(os.fspath(folder), True)]
+    while stack:
+        current, is_root = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            if is_root and entry.name in NON_CONTENT_NAMES:
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append((entry.path, False))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            yield Path(entry.path), st
+
 
 # Same character whitelist projects_store uses — keeps slug shapes
 # consistent across antontron's project names AND artifact slugs.
@@ -444,16 +455,16 @@ class ArtifactStore:
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
             rel = p.relative_to(folder).as_posix()
-            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
+            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in HOUSEKEEPING_DIRS:
                 continue
             try:
-                stat = p.stat()
+                st = p.stat()
             except OSError:
                 continue
             mtime_iso = datetime.fromtimestamp(
-                stat.st_mtime, timezone.utc
+                st.st_mtime, timezone.utc
             ).isoformat(timespec="seconds")
-            entries.append(FileEntry(path=rel, bytes=stat.st_size, modifiedAt=mtime_iso))
+            entries.append(FileEntry(path=rel, bytes=st.st_size, modifiedAt=mtime_iso))
 
         def _fingerprint(files: list[FileEntry]) -> list[tuple]:
             return sorted((f.path, f.bytes, f.modifiedAt) for f in files)
