@@ -67,7 +67,7 @@ class StatePublishBlocked(Exception):
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 
-# Async publish (ENG-1580). The server answers 202 for a fullstack upload
+# Async publish. The server answers 202 for a fullstack upload
 # when asked; the client then polls. 180s: pandas-class installs finish in
 # 1–2 minutes; anything longer is reported with the job id so the artifact
 # can still be found (the server keeps building).
@@ -98,7 +98,8 @@ class PublishJobTimeout(RuntimeError):
     """The client's wait budget ran out while the job was still queued/running.
 
     The server keeps working: the artifact may well publish a minute later
-    under `report_id`. Nothing local records that — see design §7.
+    under `report_id`. Nothing local records that: the caller gets the ids
+    in this exception and decides what to tell the user.
     """
 
     def __init__(self, *, job_id: str, report_id: str | None, waited_s: float):
@@ -579,7 +580,7 @@ def publish(
         payload_dict["artifact_id"] = artifact.id
         payload_dict["secrets"] = secrets
         payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
-        # Ask the server to build in the background (ENG-1580): pip install
+        # Ask the server to build in the background: pip install
         # for heavy dependencies exceeds API Gateway's 29s limit. Static
         # reports stay synchronous — one request, sub-second. An older server
         # ignores the flag and answers 200, handled below.

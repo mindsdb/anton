@@ -1,4 +1,4 @@
-"""handle_publish_or_preview retry semantics (ENG-1580).
+"""handle_publish_or_preview retry semantics.
 
 Before: any publish error with a known report_id triggered a second publish
 without report_id. With async publishes a 3-minute PublishJobTimeout — or a

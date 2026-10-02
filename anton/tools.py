@@ -38,7 +38,7 @@ def _report_missing_error(exc: Exception) -> bool:
     a 5xx, a failed or timed-out async job, and a 404 from the job status poll
     (the record expired or publish_url is wrong while the job may still be
     finishing) — must not: a second POST would create a duplicate artifact
-    and double the wait (ENG-1580). PublishJobFailed is therefore never a
+    and double the wait. PublishJobFailed is therefore never a
     retry trigger, whatever its status_code.
     """
     return isinstance(exc, urllib.error.HTTPError) and exc.code == 404

@@ -1,4 +1,4 @@
-"""anton.publisher against the async /upload contract (ENG-1580).
+"""anton.publisher against the async /upload contract.
 
 The server may answer POST /upload with 202 {job_id, report_id, ...} when the
 client sends "async": true; publish() then polls GET /upload/jobs/{job_id} and

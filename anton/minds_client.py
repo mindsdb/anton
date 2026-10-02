@@ -57,7 +57,7 @@ def minds_v1_base(base_url: str) -> str:
 
 
 # urllib timeout on every Minds API call, including POST /upload. cowork-server
-# imports it to size its lock TTL around a publish (ENG-1580).
+# imports it to size its lock TTL around a publish.
 DEFAULT_REQUEST_TIMEOUT_S = 30
 
 
