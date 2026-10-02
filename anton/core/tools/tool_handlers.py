@@ -310,7 +310,7 @@ def lint_artifact_files(store, slug: str, budget_seconds: float | None = None) -
 def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
     """Run `lint_artifact_files` on artifact folders this cell edited
     (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list().
+    tool-result text right away, not only via a later open().
     """
     after = snapshot_existing_artifact_mtimes(store)
     messages: list[str] = []
