@@ -29,7 +29,7 @@ summary{cursor:pointer;font-weight:600}.wrap{overflow-x:auto}table{border-collap
 caption{text-align:left;color:var(--muted);padding:4px 0}th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:600}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}code{font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
 label{font-weight:600;margin-right:8px}select{font:inherit;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)}
-svg{width:100%;height:auto}svg text{fill:currentColor;font:14px system-ui,sans-serif}.muted{color:var(--muted)}
+svg{width:100%;height:auto}svg text{fill:currentColor;font:14px system-ui,sans-serif}.muted{color:var(--muted)}a{color:var(--accent)}
 @media(max-width:600px){main{padding:16px 12px}section,details{padding:14px}h1{font-size:24px}}
 """
 
@@ -47,11 +47,15 @@ class Html(str):
 
 
 def link(href, text) -> Html:
-    """Safe anchor for p/ul/table cells, e.g. link(rel_link(out, 'source.json'), 'source.json')."""
+    """Safe anchor for p/ul/table cells, e.g. link(rel_link(out, 'source.json'), 'source.json').
+
+    The anchor takes the surrounding text colour (underlined), so it stays legible
+    in any page theme, including existing pages whose styles define no link colour.
+    """
     href = str(href)
     if _re.match(r'^\s*(javascript|vbscript|data):', href, _re.I):
         raise ValueError('unsafe link scheme')
-    return Html(f'<a href="{_html.escape(href, quote=True)}">{esc(text)}</a>')
+    return Html(f'<a href="{_html.escape(href, quote=True)}" style="color:inherit;text-decoration:underline">{esc(text)}</a>')
 
 
 def inline(*parts) -> Html:
@@ -594,8 +598,8 @@ def md_check(path, metrics=None, *, text=(), audit_header=('Metric', 'Value')) -
 _VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr'}
 
 
-def _id_spans(raw: str, wanted: set) -> dict:
-    """Inner-HTML offsets (start, end) for elements whose id is in ``wanted``."""
+def _id_spans(raw: str, wanted: set, tags: dict | None = None) -> dict:
+    """Inner-HTML offsets (start, end) for elements whose id is in ``wanted`` (tag names into ``tags``)."""
     from html.parser import HTMLParser
     starts = [0] + [i + 1 for i, ch in enumerate(raw) if ch == '\n']   # HTMLParser counts lines by \n only
 
@@ -624,6 +628,8 @@ def _id_spans(raw: str, wanted: set) -> dict:
                     o[2] -= 1
                     if o[2] == 0:
                         self.spans[o[0]] = (o[3], self._off())
+                        if tags is not None:
+                            tags[o[0]] = o[1]
                         self.open.remove(o)
 
     parser = P()
@@ -634,6 +640,67 @@ def _id_spans(raw: str, wanted: set) -> dict:
     return parser.spans
 
 
+def _same_tag_inner(fragment: str, tag: str, ident: str):
+    """Inner HTML when ``fragment`` is exactly one <tag> element without another id, else None.
+
+    A replacement built with a wrapper helper (k.section(...) for a <section id=...>) then
+    replaces the element's content instead of nesting a second box inside it.
+    """
+    from html.parser import HTMLParser
+    s = fragment.strip()
+    starts = [0] + [i + 1 for i, ch in enumerate(s) if ch == '\n']
+
+    class P(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=False)
+            self.depth, self.roots, self.root, self.inner, self.end, self.stray = 0, 0, None, None, None, False
+
+        def _off(self):
+            line, col = self.getpos()
+            return starts[line - 1] + col
+
+        def handle_starttag(self, t, attrs):
+            if self.depth == 0:
+                self.roots += 1
+                if self.roots == 1:
+                    self.root = (t, dict(attrs).get('id'))
+                    self.inner = self._off() + len(self.get_starttag_text())
+            if t not in _VOID:
+                self.depth += 1
+            elif self.depth == 0:
+                self.end = self._off() + len(self.get_starttag_text())
+
+        def handle_startendtag(self, t, attrs):
+            if self.depth == 0:
+                self.roots += 1
+
+        def handle_endtag(self, t):
+            if t in _VOID:
+                return
+            self.depth -= 1
+            if self.depth == 0 and self.roots == 1:
+                self.end = self._off()
+
+        def handle_data(self, d):
+            if self.depth == 0 and d.strip():
+                self.stray = True
+
+    p = P()
+    try:
+        p.feed(s)
+        p.close()
+    except Exception:
+        return None
+    if p.roots != 1 or p.stray or p.depth != 0 or p.root is None or p.end is None:
+        return None
+    t, rid = p.root
+    if t != tag or rid not in (None, ident) or t in _VOID:
+        return None
+    if not s.endswith(f'</{t}>'):
+        return None
+    return s[p.inner:p.end]
+
+
 def update_html(path, replacements: dict) -> dict:
     """Replace the inner HTML of elements by id in a saved report; every other byte stays identical.
 
@@ -642,19 +709,27 @@ def update_html(path, replacements: dict) -> dict:
     block pass the new data as a dict/list and it is serialised safely. Raises ValueError for a missing id, a void element
     or an unclosed element, so nothing is half-written. Use it to refresh an existing report
     while keeping its theme, layout and wording; then run k.find_values and k.check.
+    A fragment that is one element of the same tag (e.g. k.section(...) for a <section id=...>)
+    replaces that element's content, keeping the existing id and attributes, instead of nesting.
     """
     path = _Path(path)
     if path.is_symlink():
         raise ValueError('refusing to write through a symlink')
     raw = path.read_bytes().decode('utf-8')   # bytes: keep CRLF and every other byte exactly
     wanted = {str(k) for k in replacements}
-    spans = _id_spans(raw, wanted)
+    tags = {}
+    spans = _id_spans(raw, wanted, tags)
     missing = sorted(wanted - set(spans))
     if missing:
         raise ValueError(f'ids not found in {path.name}: {missing}')
     for ident, (a, b) in sorted(spans.items(), key=lambda kv: -kv[1][0]):
         value = replacements[ident]
-        raw = raw[:a] + (value if isinstance(value, str) else _json_text(value)) + raw[b:]
+        if isinstance(value, str):
+            inner = _same_tag_inner(value, tags.get(ident, ''), ident)
+            value = inner if inner is not None else value
+        else:
+            value = _json_text(value)
+        raw = raw[:a] + value + raw[b:]
     tmp = path.with_name(path.name + '.tmp')
     tmp.write_bytes(raw.encode('utf-8'))
     tmp.replace(path)
