@@ -1315,6 +1315,12 @@ class ChatSessionConfig:
     system_prompt_context: SystemPromptContext = field(default_factory=SystemPromptContext)
     workspace: Workspace | None = None
     data_vault: DataVault | None = None
+    # Agent-facing usage notes per connector engine (engine -> markdown),
+    # rendered by build_datasource_context for connected engines only. None
+    # means the host sent none (the CLI, or an older cowork-server), so notes
+    # come from anton's datasources.md registry. A dict, even an empty one, is
+    # the only source; see anton.utils.datasources._resolve_usage_notes.
+    connector_usage_notes: dict[str, str] | None = None
     workspace_env_overlay: dict[str, str] | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
@@ -1530,6 +1536,7 @@ class ChatSession:
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
+        self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
@@ -2256,7 +2263,11 @@ class ChatSession:
             md_context = self._workspace.build_anton_md_context()
 
         # Inject connected datasource context without credentials
-        ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
+        ds_ctx = build_datasource_context(
+            self._data_vault,
+            active_only=self._active_datasource,
+            usage_notes=self._connector_usage_notes,
+        )
 
         # Turn-start workspace discovery (ENG-578): volatile, so it rides the
         # tail — never the cache-stable prefix. Best-effort; a failure here

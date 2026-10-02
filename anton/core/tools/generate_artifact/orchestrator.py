@@ -13,6 +13,7 @@ import re
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from anton.core.artifacts.internal_files import (
     API_SPEC_FILENAME,
@@ -42,6 +43,9 @@ from .state import (
     RequiredData,
     VerifyResult,
 )
+
+if TYPE_CHECKING:
+    from anton.utils.datasources import DatasourceCatalog
 
 
 # Sentinel returned by a generation node that stopped because the turn ran
@@ -362,17 +366,21 @@ def _list_connections(vault) -> list[dict]:
         return []
 
 
-def _datasource_context(session) -> str:
-    """The `## Connected Data Sources` section (DS_* names, no values), or ""."""
+def _datasource_catalog(session) -> DatasourceCatalog | None:
+    """The session's connections as a `DatasourceCatalog` (DS_* names, no
+    values), or None when there are none."""
     try:
         vault = _vault(session)
         if not _list_connections(vault):
-            return ""
-        from anton.utils.datasources import build_datasource_context
+            return None
+        from anton.utils.datasources import collect_datasource_catalog
 
-        return build_datasource_context(vault) or ""
+        # Same notes as the chat prompt: the backend generator writes its own
+        # API calls, so it hits the same API traps.
+        notes = getattr(session, "_connector_usage_notes", None)
+        return collect_datasource_catalog(vault, usage_notes=notes)
     except Exception:  # noqa: BLE001
-        return ""
+        return None
 
 
 _PUBLIC_SOURCES_SKILL = "public-data-sources"
@@ -525,7 +533,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
     system = prompts.build_backend_system_prompt(
         state.artifact_path,
         stateless=stateless,
-        datasource_context=state.datasource_context,
+        datasources=state.datasource_catalog,
         declared_sources=state.declared_sources,
         data_notes=state.data_notes,
     )

@@ -322,7 +322,7 @@ async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, mon
 
     monkeypatch.setattr(orchestrator, "run", fake_run)
     monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
-    monkeypatch.setattr(orchestrator, "_datasource_context", lambda session: "")
+    monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda session: None)
     session = AsyncMock()
     session._workspace = SimpleNamespace(base=tmp_path)
     secret = tmp_path / ".anton" / ".env"
@@ -354,7 +354,7 @@ async def test_generate_without_a_workspace_refuses_plain_files(tmp_path: Path, 
 
     monkeypatch.setattr(orchestrator, "run", fake_run)
     monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
-    monkeypatch.setattr(orchestrator, "_datasource_context", lambda session: "")
+    monkeypatch.setattr(orchestrator, "_datasource_catalog", lambda session: None)
     await engine.generate(
         session=AsyncMock(), slug="a", artifact_path=art, artifact_type="html-app",
         user_request="r", agent_understanding="u", attachments=[str(csv)],

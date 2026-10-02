@@ -1332,3 +1332,23 @@ def test_no_mcp_sessions_means_no_cleanup_call_on_construction_failure(tmp_path,
 
     with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
         build_cloud_chat_session(request)
+
+
+def test_connectors_block_becomes_the_session_usage_notes(tmp_path, monkeypatch):
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        connectors={
+            "google_drive": {"usage_notes": "DRIVE-NOTE"},
+            "blank": {"usage_notes": "   "},
+            "not_a_block": "DRIVE-NOTE",
+            "no_notes": {},
+        },
+    )
+    assert cfg.connector_usage_notes == {"google_drive": "DRIVE-NOTE"}
+
+
+def test_a_turn_without_connectors_never_falls_back_to_the_anton_registry(tmp_path, monkeypatch):
+    """{} rather than None: anton's datasources.md shares engine ids with
+    cowork-server's connectors, and a web turn must not render its notes."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.connector_usage_notes == {}

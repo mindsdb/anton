@@ -662,6 +662,21 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
 )
 
 
+def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
+    """engine -> usage notes from the turn's `connectors` block.
+
+    Always a dict, never None: None would make build_datasource_context fall
+    back to anton's datasources.md registry, whose engine ids collide with
+    cowork-server's connectors (see ChatSessionConfig.connector_usage_notes).
+    """
+    notes: dict[str, str] = {}
+    for engine, block in (connectors or {}).items():
+        text = block.get("usage_notes") if isinstance(block, dict) else None
+        if isinstance(engine, str) and isinstance(text, str) and text.strip():
+            notes[engine] = text
+    return notes
+
+
 def build_cloud_chat_session(
     request: TurnRequestV1, elicitor: "Elicitor | None" = None
 ) -> "ChatSession":
@@ -848,6 +863,7 @@ def build_cloud_chat_session(
         episodic=None,
         self_awareness=None,
         data_vault=data_vault,              # connectors ON iff request.oauth is set
+        connector_usage_notes=_connector_usage_notes(request.connectors),
         history_store=None,                 # disk history OFF (DB authoritative)
         tools=mcp_tool_defs,                 # ENG-1816: this turn's MCP connections, if any
         # Static CLOUD_TOOL_ALLOWLIST plus this turn's own discovered MCP
