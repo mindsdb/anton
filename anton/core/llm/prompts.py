@@ -568,3 +568,16 @@ artifact_dir("<exact name passed to create_artifact>"), re-reads both, runs the
 required checks and prints a compact receipt. Only claim checks that ran. If a
 call fails, inspect the error and fix it in the next round.
 """
+
+
+# Product experiment P3b/P4: same-response default and pre-started pad
+ARTIFACTS_PROMPT += """
+FIRST RESPONSE FOR DIRECT REPORTS
+The scratchpad `main` is started for you at the beginning of each request; use
+it for direct reports. When the request's inputs are in the PROJECT FILE
+SNAPSHOT, your FIRST response should contain, in order: the short plan
+sentence, create_artifact (or open_artifact for a catalogued report), and one
+scratchpad exec on `main` that computes from the files on disk, writes the
+outputs via artifact_dir(...), re-reads them and prints a compact verification
+receipt. Then give the final handoff after seeing that receipt.
+"""

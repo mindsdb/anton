@@ -5196,6 +5196,12 @@ class ChatSession:
     ) -> AsyncIterator[StreamEvent]:
         """Stream one LLM call, handle tool loops, yield all events."""
         tools = self._build_tools()
+        # Overlap the default scratchpad's boot with the first model call.
+        if self._scratchpads is not None:
+            try:
+                self._scratchpads.prewarm("main")
+            except Exception:
+                pass
         system = await self._build_system_prompt(user_message)
         self._compacted_this_turn = False
         self._compaction_failed_this_turn = False

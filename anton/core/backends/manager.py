@@ -189,6 +189,19 @@ class ScratchpadManager:
         self, name: str, *, ds_env_override: dict[str, str] | None = None
     ) -> ScratchpadRuntime:
         """Return existing pad or create one; ds_env_override overrides its DS_* env for the next restart."""
+        starting = getattr(self, "_starting", None)
+        if starting is None:
+            starting = self._starting = {}
+        import asyncio as _asyncio
+
+        inflight = starting.get(name)
+        if name not in self._pads and inflight is not None and inflight is not _asyncio.current_task():
+            # A pre-warm is already booting this pad: share that start rather
+            # than booting a second process.
+            try:
+                await _asyncio.shield(inflight)
+            except Exception:
+                pass  # fall through and start it normally below
         if name not in self._pads:
             pad = self._runtime_factory(
                 name=name,
@@ -215,6 +228,29 @@ class ScratchpadManager:
         if ds_env_override is not None:
             self._pads[name].set_scratchpad_ds_env(ds_env_override)
         return self._pads[name]
+
+    def prewarm(self, name: str = "main"):
+        """Start `name` in the background; returns the task or None."""
+        import asyncio as _asyncio
+
+        starting = getattr(self, "_starting", None)
+        if starting is None:
+            starting = self._starting = {}
+        if name in self._pads or name in starting:
+            return None
+
+        async def _boot():
+            try:
+                await self.get_or_create(name)
+            finally:
+                starting.pop(name, None)
+
+        task = _asyncio.ensure_future(_boot())
+        starting[name] = task
+        # Retrieve any failure so it is never reported as unhandled; the
+        # exec path simply starts the pad itself.
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        return task
 
     async def remove(self, name: str) -> str:
         """Kill and fully delete a scratchpad (including its persistent venv)."""

@@ -874,3 +874,11 @@ GENERATE_ARTIFACT_TOOL.prompt = (
     "ARTIFACT ROUTING: generate_artifact performs discovery, brief confirmation, "
     "requirements, specification, generation and verification for fullstack or "
     "underspecified work. Specified local reports use the direct path in the ARTIFACTS section.")
+
+
+# Product experiment P3b: same-response create and write
+CREATE_ARTIFACT_TOOL.description += (
+    "\n\nDIRECT REPORTS: when the inputs are already in the PROJECT FILE SNAPSHOT, "
+    "do not wait a round for this tool's result. In the SAME response, follow "
+    "this call with the scratchpad exec (pad `main`) that writes into "
+    "artifact_dir(\"<the exact name passed here>\") and verifies the files.")
