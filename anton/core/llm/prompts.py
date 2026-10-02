@@ -534,7 +534,7 @@ ARTIFACTS_PROMPT += "\nBATCH INDEPENDENT PREPARATION\nFor the direct local repor
 
 
 # Rolling product experiment E017-sol61-file-route-compact-early
-ARTIFACTS_PROMPT += '\nCOMPACT COMPLETE REPORTS\nFor direct local reports, use compact HTML, inline CSS and code with a clear\nsummary, required detail, audit, source disclosure and assumptions. Reuse the\nexisting layout for updates. Avoid decorative markup, unnecessary copy and\nrepeated explanations. Every requested row, control, chart and evidence link\nmust still be present and verified. Keep the final handoff concise, normally\nunder100 words: name the saved artifact, give the decision or changed values,\nand state the actual verification and material unknowns. Put supporting detail\nin the artifact rather than repeating the whole report in chat. Never omit a\nrequested requirement or verification to shorten the output.\n\nEARLY USEFUL RESPONSE\nFor an authorised direct local report request, start your first response with\none short, task-specific sentence saying what you will read or change and what\nyou will check. Stream this user-visible sentence before your tool calls in\nthe SAME response, then perform the work. This is a plan, not a completion\nclaim: do not assert results, file contents or successful checks before seeing\nevidence. Avoid generic acknowledgements and lengthy narration. Do not make a\nseparate model or tool call merely to acknowledge the request. A plan alone\ndoes not complete the task; finish the requested artifact and verification.\n'
+ARTIFACTS_PROMPT += '\nCOMPACT COMPLETE REPORTS\nFor direct local reports, use compact HTML, inline CSS and code with a clear\nsummary, required detail, audit, source disclosure and assumptions. Reuse the\nexisting layout for updates. Avoid decorative markup, unnecessary copy and\nrepeated explanations. Every requested row, control, chart and evidence link\nmust still be present and verified. Keep the final handoff concise, normally\nunder100 words: name the saved artifact, give the decision or changed values,\nand state the actual verification and material unknowns. Put supporting detail\nin the artifact rather than repeating the whole report in chat. Never omit a\nrequested requirement or verification to shorten the output.\n\nEARLY USEFUL RESPONSE\nFor every request that needs tool work, including follow-up refreshes, edits,\nrefinements and verification requests later in a conversation, start your first\nresponse with one short, task-specific sentence saying what you will read or change and what\nyou will check. Stream this user-visible sentence before your tool calls in\nthe SAME response, then perform the work. This is a plan, not a completion\nclaim: do not assert results, file contents or successful checks before seeing\nevidence. Avoid generic acknowledgements and lengthy narration. Do not make a\nseparate model or tool call merely to acknowledge the request. A plan alone\ndoes not complete the task; finish the requested artifact and verification.\n'
 
 
 # Product experiment P2: project file snapshot
@@ -610,6 +610,39 @@ sentence from the current source.
 In the same cell, save, run k.check and compare k.filter_preview with your
 expected results; no separate JavaScript harness round is needed for kit
 filters. These are not browser checks; say so. Custom JavaScript you write
-yourself still needs its own test. Markdown reports and edits of existing
-reports keep their own format; edit those precisely.
+yourself still needs its own test.
+For Markdown files: k.md_table(columns, rows) and k.md_audit(metrics) give
+well-formed tables with escaped cells; k.rel_link(from_file, target) gives a
+working relative link from an artifact file to a project file; then run
+k.md_check(path, metrics, text=()) on the saved file. k.check and k.md_check
+also fail on local links that do not resolve. Existing reports keep their own
+format; see UPDATING EXISTING REPORTS.
+"""
+
+
+# Product experiment P7: follow-up requests
+ARTIFACTS_PROMPT += """
+CHANGES SINCE THE PREVIOUS REQUEST
+The PROJECT FILE SNAPSHOT labels each included file CHANGED, unchanged, NEW or
+DELETED since the end of the previous agent request in this project (also
+after a restart or in another conversation) and shows what changed. These
+notes are computed by the system: use them to explain what changed in the
+inputs, and do not decide that from earlier turns, remembered values or
+hashes. Checking that you did not modify a source file is preservation, not
+change detection. When no artifact file is named, the snapshot includes the
+most recently updated artifact, which follow-up requests usually refer to.
+
+UPDATING EXISTING REPORTS
+Scratchpad variables do not survive between requests. For a follow-up on a
+catalogued report whose content is in the snapshot, your FIRST response is the
+short plan sentence, open_artifact(slug) and, in the same response, one
+scratchpad cell that re-reads the current files, makes the change, writes into
+artifact_dir(slug), re-reads the saved outputs and prints a compact receipt.
+Keep the artifact, its title, layout, wording and theme unless the request
+changes them. After a data change, recompute every derived value from the
+current files: headline, tables, charts, embedded data, citations and notes.
+Regenerating the page from the data is usually simplest; make sure no
+superseded value remains anywhere. For presentation-only or format-only
+requests, edit precisely and confirm every number, row, citation and file the
+request says to preserve is unchanged.
 """

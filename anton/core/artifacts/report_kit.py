@@ -15,7 +15,8 @@ import re as _re
 from pathlib import Path as _Path
 
 __all__ = ["esc", "p", "ul", "table", "audit", "section", "details", "data", "bar_chart",
-           "filter_table", "filter_preview", "page", "save", "check"]
+           "filter_table", "filter_preview", "page", "save", "check",
+           "rel_link", "md_table", "md_audit", "md_check"]
 
 _CSS = """
 :root{--bg:#f6f8fb;--panel:#fff;--ink:#17202c;--muted:#4f5d6e;--line:#d6dde6;--accent:#2a62b8;--hot:#b4371f}
@@ -296,6 +297,7 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
         def __init__(self):
             super().__init__(convert_charrefs=True)
             self.ids, self.ext, self.json_ok, self.texts = set(), [], True, []
+            self.local = []
             self.in_script = None
             self.rows, self.cur, self.cell, self.in_audit = [], None, None, False
             self.depth = 0
@@ -312,6 +314,8 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
             for attr in ('src', 'href'):
                 if _re.match(r'^(https?:)?//', a.get(attr) or ''):
                     self.ext.append(a[attr])
+                elif a.get(attr):
+                    self.local.append(a[attr])
             if tag == 'script':
                 self.in_script = a.get('type', '')
                 self.buf = ''
@@ -357,6 +361,9 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
         problems.append(f'external assets: {parser.ext[:3]}')
     if not parser.json_ok:
         problems.append('invalid JSON script block')
+    broken = _broken_links(path, parser.local, parser.ids)
+    if broken:
+        problems.append(f'broken local links: {broken[:5]}')
     shown = {r[0]: r[1] for r in parser.rows if len(r) == 2}
     for k, v in metrics.items():
         if k not in shown:
@@ -377,4 +384,157 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
     if problems:
         raise AssertionError('; '.join(problems))
     return {'path': str(path), 'audit_metrics': sorted(metrics), 'ids': sorted(ids), 'text_checked': len(text),
-            'self_contained': True, 'browser_check': 'not performed'}
+            'local_links_checked': len(parser.local), 'self_contained': True, 'browser_check': 'not performed'}
+
+
+# --- links and Markdown -----------------------------------------------------
+
+def rel_link(from_file, target) -> str:
+    """URL-encoded relative link from the folder of ``from_file`` to ``target``.
+
+    Use for evidence links from an artifact to project files so the link
+    resolves wherever the folder tree is opened (e.g. ../../../source.json).
+    """
+    import os as _os
+    from urllib.parse import quote as _quote
+    rel = _os.path.relpath(_Path(target).resolve(), _Path(from_file).resolve().parent)
+    return _quote(_Path(rel).as_posix(), safe='/._-~')
+
+
+def _broken_links(path, targets, ids=()):
+    """Relative link targets that do not resolve to an existing file/anchor."""
+    from urllib.parse import unquote as _unquote, urlsplit as _urlsplit
+    base = _Path(path).resolve().parent
+    broken = []
+    for t in targets:
+        t = t.strip().strip('<>')
+        if not t or _re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*:', t):  # data:, mailto:, javascript:, http: ...
+            continue
+        if t.startswith('#'):
+            if ids is not None and t[1:] and t[1:] not in ids:
+                broken.append(t)
+            continue
+        target = _unquote(_urlsplit(t).path)
+        if target and not (base / target).exists():
+            broken.append(t)
+    return broken
+
+
+def _md_cell(value) -> str:
+    if isinstance(value, (dict, list, bool)) or value is None:
+        value = _json.dumps(value, ensure_ascii=False)
+    text = _num_text(value)
+    return _re.sub(r'\s*\n\s*', ' ', text).replace('\\', '\\\\').replace('|', '\\|')
+
+
+def md_table(columns, rows) -> str:
+    """GitHub-flavoured Markdown table: one header, a delimiter row with the
+    same cell count, escaped pipes, no line breaks inside cells; numeric
+    columns right-aligned. Rows are lists or dicts keyed by column name."""
+    cols = [str(c) for c in columns]
+    body = _rows(cols, rows)
+    num = [bool(body) and all(_is_num(r[i]) for r in body) for i in range(len(cols))]
+    out = ['| ' + ' | '.join(_md_cell(c) for c in cols) + ' |',
+           '| ' + ' | '.join('---:' if n else '---' for n in num) + ' |']
+    out += ['| ' + ' | '.join(_md_cell(v) for v in r) + ' |' for r in body]
+    return '\n'.join(out) + '\n'
+
+
+def md_audit(metrics: dict) -> str:
+    """Markdown Metric/Value table showing each metric's exact JSON value."""
+    return md_table(['Metric', 'Value'], [[k, _json.dumps(v, ensure_ascii=False)] for k, v in metrics.items()])
+
+
+_MD_DELIM = _re.compile(r'^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$')
+
+
+def _md_cells(line):
+    """Split a table row on unescaped pipes; unescape \\| and \\\\ as a renderer does."""
+    s = line.strip()
+    if s.startswith('|'):
+        s = s[1:]
+    cells, cur, i, closed = [], '', 0, False
+    while i < len(s):
+        ch = s[i]
+        if ch == '\\' and i + 1 < len(s) and s[i + 1] in '\\|':
+            cur += s[i + 1]; i += 2; closed = False; continue
+        if ch == '|':
+            cells.append(cur.strip()); cur = ''; i += 1; closed = True; continue
+        cur += ch; i += 1
+        if not ch.isspace():
+            closed = False
+    if cur.strip() or not closed:
+        cells.append(cur.strip())
+    return cells
+
+
+def md_check(path, metrics=None, *, text=(), audit_header=('Metric', 'Value')) -> dict:
+    """Re-read a saved Markdown file and verify its structure.
+
+    Raises AssertionError listing every problem; returns a receipt otherwise.
+    Checks: every table's delimiter row and body rows have the header's cell
+    count; with ``metrics``, a Metric/Value table shows each metric's exact
+    JSON value; relative links and images resolve to existing files; no
+    external images; required text fragments are present. Not a renderer.
+    """
+    raw = _Path(path).read_text(encoding='utf-8')
+    lines = raw.splitlines()
+    problems, tables, fence = [], [], False
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.lstrip().startswith(('```', '~~~')):
+            fence = not fence
+        if not fence and i + 1 < len(lines) and '|' in ln and _MD_DELIM.match(lines[i + 1]):
+            header = _md_cells(ln)
+            delim = _md_cells(lines[i + 1])
+            if len(delim) != len(header):
+                problems.append(f'table at line {i + 1}: delimiter has {len(delim)} cells, header has {len(header)}')
+            body, j = [], i + 2
+            while j < len(lines) and lines[j].strip() and '|' in lines[j]:
+                cells = _md_cells(lines[j])
+                if len(cells) != len(header):
+                    problems.append(f'table at line {i + 1}: row {j + 1} has {len(cells)} cells, header has {len(header)}')
+                body.append(cells)
+                j += 1
+            tables.append((header, body))
+            i = j
+            continue
+        if not fence and _MD_DELIM.match(ln) and '|' in ln and (i == 0 or '|' not in lines[i - 1]):
+            problems.append(f'delimiter row without a header at line {i + 1}')
+        i += 1
+    if metrics:
+        strip = lambda c: c.strip().strip('`').strip()
+        audit_rows = {}
+        for header, body in tables:
+            if [strip(h).lower() for h in header[:2]] == [h.lower() for h in audit_header]:
+                audit_rows.update({strip(r[0]): strip(r[1]) for r in body if len(r) >= 2})
+        if not audit_rows:
+            problems.append('no Metric/Value audit table')
+        for k, v in metrics.items():
+            if k not in audit_rows:
+                problems.append(f'audit row missing: {k}')
+                continue
+            try:
+                got = _json.loads(audit_rows[k])
+                if got != v or type(got) is not type(v) and not (_is_num(v) and _is_num(got)):
+                    problems.append(f'audit value mismatch for {k}: {audit_rows[k]}')
+            except ValueError:
+                problems.append(f'audit value not JSON for {k}: {audit_rows[k]}')
+    prose = _re.sub(r'```.*?```', '', raw, flags=_re.S)
+    links = _re.findall(r'(!?)\[[^\]]*\]\(\s*(<[^>]*>|[^)\s]+)', prose)
+    external_images = [t for bang, t in links if bang and _re.match(r'^(https?:)?//', t.strip('<>'))]
+    if external_images:
+        problems.append(f'external images: {external_images[:3]}')
+    anchors = None  # Markdown heading anchors vary by renderer; not checked
+    broken = _broken_links(path, [t for _, t in links], anchors)
+    if broken:
+        problems.append(f'broken local links: {broken[:5]}')
+    flat = _re.sub(r'\s+', ' ', raw)
+    absent = [t for t in text if _re.sub(r'\s+', ' ', t) not in flat]
+    if absent:
+        problems.append(f'missing text: {absent}')
+    if problems:
+        raise AssertionError('; '.join(problems))
+    return {'path': str(path), 'tables': len(tables), 'audit_metrics': sorted(metrics or {}),
+            'links_checked': len(links), 'text_checked': len(text), 'renderer_check': 'not performed'}

@@ -4464,6 +4464,21 @@ class ChatSession:
         finally:
             await inner.aclose()
             self.emitter = None
+            self._record_request_end_state()
+
+    def _record_request_end_state(self) -> None:
+        """Product experiment P7: remember project file state at the end of
+        this request so the next request's snapshot can say what changed in
+        between (also after a restart or in another conversation). Best-effort."""
+        if self._scratchpads is None:
+            return
+        try:
+            from anton.core.tools.tool_handlers import resolve_artifact_store
+            from anton.core.utils.project_snapshot import record_request_end
+
+            record_request_end(getattr(self._scratchpads, "workspace_path", None), resolve_artifact_store(self))
+        except Exception:
+            pass
 
     async def _turn_stream_inner(
         self,
