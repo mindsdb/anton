@@ -229,17 +229,22 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     }
 
 
-# A file's findings while its size and mtime are unchanged, so an open right
-# after the exec that wrote it does not rerun multi-second checkers.
+# A file's findings while its artifact folder is unchanged, so an open right
+# after the exec that wrote it does not rerun multi-second checkers. Keyed on
+# the whole folder: a page's result depends on the scripts and assets next to it.
 _LINT_CACHE_MAX_ENTRIES = 512
-_lint_cache: OrderedDict[tuple[str, int, int], list[str]] = OrderedDict()
+_lint_cache: OrderedDict[tuple[str, int], list[str]] = OrderedDict()
 _lint_cache_lock = threading.Lock()
 
 
+def _folder_fingerprint(entries: list[tuple[Path, os.stat_result]]) -> int:
+    return hash(tuple(sorted((str(p), st.st_size, st.st_mtime_ns) for p, st in entries)))
+
+
 def _lint_file_cached(
-    linter: Callable[[Path], list[str] | None], path: Path, st: os.stat_result
+    linter: Callable[[Path], list[str] | None], path: Path, folder_fingerprint: int
 ) -> list[str] | None:
-    key = (str(path), st.st_size, st.st_mtime_ns)
+    key = (str(path), folder_fingerprint)
     with _lint_cache_lock:
         cached = _lint_cache.get(key)
         if cached is not None:
@@ -271,15 +276,17 @@ def lint_artifact_files(store, slug: str, budget_seconds: float | None = None) -
     if not linters:
         return []
     deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
+    entries = list(iter_content_files(store.root / slug))
+    fingerprint = _folder_fingerprint(entries)
     messages: list[str] = []
-    for path, st in iter_content_files(store.root / slug):
+    for path, st in entries:
         linter = linters.get(path.suffix.lower())
         if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
             continue
         if deadline is not None and time.monotonic() >= deadline:
             messages.append(f"{slug}/{path.name} — not checked: lint time budget ran out")
             continue
-        file_messages = _lint_file_cached(linter, path, st)
+        file_messages = _lint_file_cached(linter, path, fingerprint)
         if not file_messages:
             # None (couldn't check) or [] (checked, clean) — either way,
             # nothing worth telling the agent about this file.

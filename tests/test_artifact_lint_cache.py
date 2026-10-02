@@ -1,8 +1,9 @@
-"""Per-file lint results are reused while the file is unchanged.
+"""Per-file lint results are reused while the artifact folder is unchanged.
 
 The checkers can run LibreOffice or a headless browser, so a second lint of
-the same bytes (exec, then open) must not run them again. A file that
-changed, or a checker that could not run at all, is checked again.
+the same folder (exec, then open) must not run them again. A change to any
+file in the folder, or a checker that could not run at all, means a re-check:
+a page's result depends on the scripts and assets next to it.
 """
 
 from __future__ import annotations
@@ -78,6 +79,42 @@ def test_rewritten_file_is_checked_again(store: _FakeStore, monkeypatch):
     th.lint_artifact_files(store, "page-abc12345")
 
     assert len(calls) == 2
+
+
+def _page_needs_app_js(monkeypatch) -> None:
+    def _lint(path: Path) -> list[str]:
+        if (path.parent / "app.js").exists():
+            return []
+        return ["failed_request: app.js"]
+
+    monkeypatch.setattr(th, "_artifact_linters", lambda: {".html": _lint})
+
+
+def test_adding_a_missing_sibling_asset_clears_the_finding(store: _FakeStore, monkeypatch):
+    folder = store.root / "page-abc12345"
+    (folder / "index.html").write_text('<script src="app.js"></script>')
+    _page_needs_app_js(monkeypatch)
+
+    assert th.lint_artifact_files(store, "page-abc12345") == [
+        "page-abc12345/index.html — failed_request: app.js"
+    ]
+    (folder / "app.js").write_text("console.log(1)")
+
+    assert th.lint_artifact_files(store, "page-abc12345") == []
+
+
+def test_deleting_a_sibling_asset_brings_the_finding_back(store: _FakeStore, monkeypatch):
+    folder = store.root / "page-abc12345"
+    (folder / "index.html").write_text('<script src="app.js"></script>')
+    (folder / "app.js").write_text("console.log(1)")
+    _page_needs_app_js(monkeypatch)
+
+    assert th.lint_artifact_files(store, "page-abc12345") == []
+    (folder / "app.js").unlink()
+
+    assert th.lint_artifact_files(store, "page-abc12345") == [
+        "page-abc12345/index.html — failed_request: app.js"
+    ]
 
 
 def test_could_not_check_is_retried(store: _FakeStore, monkeypatch):
