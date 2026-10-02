@@ -897,6 +897,29 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
+_CLIP_SNAP_WINDOW = 48
+
+
+def _clip_tok(ch: str) -> bool:
+    return ch.isalnum() or ch in "_.-"
+
+
+def _clip_snap_back(text: str, i: int) -> int:
+    """Move a head cut back so it does not split a number, identifier or word."""
+    j = i
+    while j > 0 and i - j < _CLIP_SNAP_WINDOW and _clip_tok(text[j - 1]) and _clip_tok(text[j]):
+        j -= 1
+    return j if j > 0 and not (_clip_tok(text[j - 1]) and _clip_tok(text[j])) else i
+
+
+def _clip_snap_fwd(text: str, i: int) -> int:
+    """Move a tail start forward so it does not begin mid-token."""
+    j = i
+    while j < len(text) and j - i < _CLIP_SNAP_WINDOW and _clip_tok(text[j - 1]) and _clip_tok(text[j]):
+        j += 1
+    return j if j < len(text) and not (_clip_tok(text[j - 1]) and _clip_tok(text[j])) else i
+
+
 def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
 
@@ -915,12 +938,14 @@ def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     if len(text) <= cap:
         return text
     if keep == "head":
-        marker = f" [... {len(text) - cap} chars elided ...]"
+        cut = _clip_snap_back(text, cap)
+        marker = f" [... {len(text) - cut} chars elided ...]"
         if len(text) <= cap + len(marker):
             return text
-        return f"{text[:cap]}{marker}"
-    head = cap // 3
-    tail = cap - head
+        return f"{text[:cut]}{marker}"
+    head = _clip_snap_back(text, cap // 3)
+    start = _clip_snap_fwd(text, len(text) - (cap - cap // 3))
+    tail = len(text) - start
     elided = len(text) - head - tail
     marker = f"\n[... {elided} chars elided ...]\n"
     # Near-threshold inputs: when the marker costs at least what it removes,
@@ -930,7 +955,7 @@ def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     # "clipping never returns more characters than it was given" (#305 review).
     if len(text) <= cap + len(marker):
         return text
-    return f"{text[:head]}{marker}{text[-tail:]}"
+    return f"{text[:head]}{marker}{text[start:]}"
 
 
 # 2-4x what the prompt asks for (~1500 words — ~2000 tokens of English, should
