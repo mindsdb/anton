@@ -198,13 +198,15 @@ class TestRequestShape:
             reset_trace_context(token)
         assert "extra_headers" not in client.responses.create.call_args.kwargs
 
-    async def test_responses_are_not_stored_server_side(self):
+    async def test_store_is_left_at_the_provider_default(self):
+        # store=False made later prompt-cache hits measurably slower; see
+        # _build_responses_kwargs before changing this.
         _, client = await _stream([
             SimpleNamespace(type="response.output_text.delta", delta="hi"),
             SimpleNamespace(type="response.completed",
                             response=SimpleNamespace(status="completed", usage=_usage())),
         ])
-        assert client.responses.create.call_args.kwargs["store"] is False
+        assert "store" not in client.responses.create.call_args.kwargs
 
 
 def test_hosts_can_detect_the_ready_responses_transport():

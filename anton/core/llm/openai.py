@@ -1618,12 +1618,12 @@ class OpenAIProvider(LLMProvider):
         trace_headers = self._build_trace_headers()
         if trace_headers:
             kwargs["extra_headers"] = trace_headers
-        # Responses stores every response server-side unless told not to;
-        # chat.completions does not. Anton resends the full input each call
-        # (no previous_response_id), so nothing needs the stored copy, and a
-        # BYOK conversation should not be retained on the provider just
-        # because the transport changed.
-        kwargs["store"] = False
+        # `store` is left at the provider default on purpose. store=False was
+        # measured to slow every later prompt-cache hit on the prefix it
+        # wrote (gpt-6.1-sol, 2026-10-02: time to first text 2.5-2.8 s vs
+        # 1.75-1.9 s on identical prefixes), and this path depends on cross-
+        # call cache hits. Retention then follows the key owner's OpenAI
+        # organisation settings.
         return kwargs
 
     async def _complete_via_responses(
