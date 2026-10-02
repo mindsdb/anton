@@ -112,7 +112,7 @@ def table(columns, rows, *, caption=None, id=None) -> str:
     body = ''.join('<tr>' + ''.join(f'<td{" class=n" if numeric[i] else ""}>{esc(v)}</td>' for i, v in enumerate(r)) + '</tr>' for r in rows)
     ident = f' id="{esc(id)}"' if id else ''
     cap = f'<caption>{esc(caption)}</caption>' if caption else ''
-    return f'<div class="wrap"><table{ident}>{cap}<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+    return f'<div class="wrap" style="overflow-x:auto;max-width:100%"><table{ident}>{cap}<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
 def audit(metrics: dict, *, id='metric-audit', caption=None) -> str:
@@ -120,7 +120,7 @@ def audit(metrics: dict, *, id='metric-audit', caption=None) -> str:
     body = ''.join(f'<tr><th scope="row">{esc(k)}</th><td><code>{_html.escape(_json.dumps(v, ensure_ascii=False))}</code></td></tr>'
                    for k, v in metrics.items())
     cap = f'<caption>{esc(caption)}</caption>' if caption else ''
-    return (f'<div class="wrap"><table id="{esc(id)}">{cap}<thead><tr><th scope="col">Metric</th><th scope="col">Value</th>'
+    return (f'<div class="wrap" style="overflow-x:auto;max-width:100%"><table id="{esc(id)}">{cap}<thead><tr><th scope="col">Metric</th><th scope="col">Value</th>'
             f'</tr></thead><tbody>{body}</tbody></table></div>')
 
 
@@ -173,7 +173,7 @@ def bar_chart(labels, values=None, *, name, threshold=None, value_label='Value',
         x = left + width * threshold / top
         parts.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="14" y2="{h - 24}" stroke="currentColor" stroke-dasharray="5 4"/>'
                      f'<text x="{x:.2f}" y="{h - 6}" text-anchor="middle">{esc(value_label)} threshold: {esc(threshold)}</text>')
-    return (f'<svg id="{esc(id)}" role="img" aria-label="{esc(name)}" viewBox="0 0 740 {h}"><title>{esc(name)}</title>'
+    return (f'<svg id="{esc(id)}" role="img" aria-label="{esc(name)}" viewBox="0 0 740 {h}" style="max-width:100%;height:auto"><title>{esc(name)}</title>'
             + ''.join(parts) + '</svg>')
 
 
