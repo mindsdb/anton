@@ -179,6 +179,10 @@ class TurnRequestV1:
     #: from the pod's own clock, so the prompt says a three week old
     #: conversation started today and changes at every midnight.
     started_at: str | None = None
+    #: Per-engine connector data cowork-server resolved for this turn:
+    #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
+    #: vault connects. Absent when no connected engine has notes.
+    connectors: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -207,5 +211,9 @@ class TurnRequestV1:
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(
                 d.get("started_at") if isinstance(d.get("started_at"), str) else None
+            ),
+            # Same defensive isinstance check as oauth/trace.
+            connectors=(
+                d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
         )

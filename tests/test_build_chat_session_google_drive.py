@@ -108,3 +108,25 @@ async def test_explicit_system_prompt_suffix_still_appended(workspace_path):
     prompt = await session._build_system_prompt()
 
     assert "Host-specific note: reply in French." in prompt
+
+
+async def test_connector_usage_notes_reach_the_real_system_prompt(tmp_path, make_session):
+    """A host's per-engine notes reach the assembled prompt for a connected
+    engine and stay out of it for an unconnected one."""
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    vault = LocalDataVault(tmp_path / "vault")
+    vault.save("google_drive", "work", {"auth_type": "oauth", "access_token": "t"})
+
+    session = make_session(
+        data_vault=vault,
+        connector_usage_notes={
+            "google_drive": "Never pass corpora='allDrives'.",
+            "langfuse": "LANGFUSE-NOTE",
+        },
+    )
+    prompt = await session._build_system_prompt()
+
+    assert "### Usage notes: " in prompt
+    assert "Never pass corpora='allDrives'." in prompt
+    assert "LANGFUSE-NOTE" not in prompt
