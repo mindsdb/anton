@@ -534,7 +534,7 @@ ARTIFACTS_PROMPT += "\nBATCH INDEPENDENT PREPARATION\nFor the direct local repor
 
 
 # Rolling product experiment E017-sol61-file-route-compact-early
-ARTIFACTS_PROMPT += '\nCOMPACT COMPLETE REPORTS\nFor direct local reports, use compact HTML, inline CSS and code with a clear\nsummary, required detail, audit, source disclosure and assumptions. Reuse the\nexisting layout for updates. Avoid decorative markup, unnecessary copy and\nrepeated explanations. Every requested row, control, chart and evidence link\nmust still be present and verified. Keep the final handoff concise, normally\nunder100 words: name the saved artifact, give the decision or changed values,\nand state the actual verification and material unknowns. Put supporting detail\nin the artifact rather than repeating the whole report in chat. Never omit a\nrequested requirement or verification to shorten the output.\n\nEARLY USEFUL RESPONSE\nFor every request that needs tool work, including follow-up refreshes, edits,\nrefinements and verification requests later in a conversation, start your first\nresponse with one short, task-specific sentence saying what you will read or change and what\nyou will check. Stream this user-visible sentence before your tool calls in\nthe SAME response, then perform the work. This is a plan, not a completion\nclaim: do not assert results, file contents or successful checks before seeing\nevidence. Avoid generic acknowledgements and lengthy narration. Do not make a\nseparate model or tool call merely to acknowledge the request. A plan alone\ndoes not complete the task; finish the requested artifact and verification.\n'
+ARTIFACTS_PROMPT += '\nCOMPACT COMPLETE REPORTS\nFor direct local reports, use compact HTML, inline CSS and code with a clear\nsummary, required detail, audit, source disclosure and assumptions. Reuse the\nexisting layout for updates. Avoid decorative markup, unnecessary copy and\nrepeated explanations. Every requested row, control, chart and evidence link\nmust still be present and verified. Keep the final handoff concise, normally\nunder100 words: name the saved artifact, give the decision or changed values,\nand state the actual verification and material unknowns. Put supporting detail\nin the artifact rather than repeating the whole report in chat. Never omit a\nrequested requirement or verification to shorten the output.\n\nEARLY USEFUL RESPONSE\nFor an authorised direct local report request, and equally for every later\nrefresh, edit, refinement or verification request in the conversation, start\nyour first response with one short, task-specific sentence saying what you will read or change and what\nyou will check. Stream this user-visible sentence before your tool calls in\nthe SAME response, then perform the work. This is a plan, not a completion\nclaim: do not assert results, file contents or successful checks before seeing\nevidence. Avoid generic acknowledgements and lengthy narration. Do not make a\nseparate model or tool call merely to acknowledge the request. A plan alone\ndoes not complete the task; finish the requested artifact and verification.\n'
 
 
 # Product experiment P2: project file snapshot
@@ -605,6 +605,9 @@ sentence from the current source.
   k.filter_preview(rows, columns=, key=, value=, positive_only=True, selection=None)
       -> per-option {"rows", "total"} (or one result for selection={column: option}),
       same logic as the filter JavaScript; rows keep your shape
+  k.link(href, text), k.inline(*parts) -> markup for p/ul/table cells, e.g.
+      k.p(k.inline("Source: ", k.link(k.rel_link(out, "source.json"), "source.json")))
+      Kit functions escape plain strings: never pass hand-written HTML strings to them.
   k.data(id, value) -> inert JSON block  k.save(path, html)
   k.check(path, metrics, ids=(), text=()) -> raises AssertionError on problems
 In the same cell, save, run k.check and compare k.filter_preview with your
@@ -615,7 +618,8 @@ For Markdown files: k.md_table(columns, rows) and k.md_audit(metrics) give
 well-formed tables with escaped cells; k.rel_link(from_file, target) gives a
 working relative link from an artifact file to a project file; then run
 k.md_check(path, metrics, text=()) on the saved file. k.check and k.md_check
-also fail on local links that do not resolve. Existing reports keep their own
+also fail on local links that do not resolve; k.check also fails when escaped
+HTML markup would be visible as text. Existing reports keep their own
 format; see UPDATING EXISTING REPORTS.
 """
 

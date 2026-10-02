@@ -16,7 +16,7 @@ from pathlib import Path as _Path
 
 __all__ = ["esc", "p", "ul", "table", "audit", "section", "details", "data", "bar_chart",
            "filter_table", "filter_preview", "page", "save", "check",
-           "rel_link", "md_table", "md_audit", "md_check"]
+           "rel_link", "md_table", "md_audit", "md_check", "link", "inline", "Html"]
 
 _CSS = """
 :root{--bg:#f6f8fb;--panel:#fff;--ink:#17202c;--muted:#4f5d6e;--line:#d6dde6;--accent:#2a62b8;--hot:#b4371f}
@@ -41,8 +41,27 @@ def _num_text(value):
     return str(value)
 
 
+class Html(str):
+    """Markup produced by kit helpers (link, inline); passed through unescaped."""
+
+
+def link(href, text) -> Html:
+    """Safe anchor for p/ul/table cells, e.g. link(rel_link(out, 'source.json'), 'source.json')."""
+    href = str(href)
+    if _re.match(r'^\s*(javascript|vbscript|data):', href, _re.I):
+        raise ValueError('unsafe link scheme')
+    return Html(f'<a href="{_html.escape(href, quote=True)}">{esc(text)}</a>')
+
+
+def inline(*parts) -> Html:
+    """One run of escaped text and kit markup: p(inline('Source: ', link(...), ' (read-only)'))."""
+    return Html(''.join(esc(x) for x in parts))
+
+
 def esc(value) -> str:
-    """Escape a value for HTML text/attributes; dict/list/bool/None render as JSON."""
+    """Escape a value for HTML text/attributes; dict/list/bool/None render as JSON; kit Html passes through."""
+    if isinstance(value, Html):
+        return str(value)
     if isinstance(value, (dict, list, bool)) or value is None:
         value = _json.dumps(value, ensure_ascii=False)
     return _html.escape(_num_text(value), quote=True)
@@ -297,7 +316,7 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
         def __init__(self):
             super().__init__(convert_charrefs=True)
             self.ids, self.ext, self.json_ok, self.texts = set(), [], True, []
-            self.local = []
+            self.local, self.plain, self.code = [], [], 0
             self.in_script = None
             self.rows, self.cur, self.cell, self.in_audit = [], None, None, False
             self.depth = 0
@@ -316,6 +335,8 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
                     self.ext.append(a[attr])
                 elif a.get(attr):
                     self.local.append(a[attr])
+            if tag in ('code', 'pre'):
+                self.code += 1
             if tag == 'script':
                 self.in_script = a.get('type', '')
                 self.buf = ''
@@ -327,6 +348,8 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
                 self.cell = ''
 
         def handle_endtag(self, tag):
+            if tag in ('code', 'pre') and self.code:
+                self.code -= 1
             if tag == 'script':
                 if self.in_script == 'application/json':
                     try:
@@ -350,6 +373,8 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
             if self.cell is not None:
                 self.cell += d
             self.texts.append(d)
+            if not self.code:
+                self.plain.append(d)
 
     parser = P()
     parser.feed(raw)
@@ -361,6 +386,10 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
         problems.append(f'external assets: {parser.ext[:3]}')
     if not parser.json_ok:
         problems.append('invalid JSON script block')
+    shown_markup = _re.findall(r'<\s*/?\s*(?:a|p|div|span|br|table|tr|td|th|ul|ol|li|strong|em|b|i|section|details|summary|h[1-6]|img)\b[^<>]{0,80}>',
+                               ' '.join(parser.plain), _re.I)
+    if shown_markup:
+        problems.append(f'escaped HTML markup is visible as text (pass kit markup such as link()/inline(), not HTML strings): {shown_markup[:3]}')
     broken = _broken_links(path, parser.local, parser.ids)
     if broken:
         problems.append(f'broken local links: {broken[:5]}')
