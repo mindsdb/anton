@@ -1,8 +1,11 @@
 """`python -m anton.cloud_turn` - the sandbox-pod turn entrypoint.
 
 Contract (matches scratchpad-controller + cowork-server):
-  stdin : ONE newline-terminated TurnRequestV1 JSON line (controller closes stdin)
-  stdout: JSONL events - `delta` / `turn_completed` / `turn_failed`, nothing else
+  stdin : the TurnRequestV1 JSON line; then, for an interactive turn only, one
+          answer line per user answer (see contract.py). The live-pod exec
+          never closes stdin.
+  stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
+          then exactly one terminal
   stderr: diagnostic logs + full tracebacks
   exit  : 0 (the controller detects the terminal from the event, not the code)
 
@@ -16,14 +19,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
 import logging
 import os
 import sys
 import time
+from typing import BinaryIO
 
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.elicitor import (
+    CloudElicitor,
+    ask_user_answered_event,
+    ask_user_event,
+)
 from anton.cloud_turn.history_rows import split_turn_into_rows
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
@@ -32,6 +42,7 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
     drain_pending_skills,
 )
+from anton.cloud_turn.stdin import start_answer_reader
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +163,9 @@ async def _settle_memory(session) -> None:
         logger.warning("memory settle failed (non-fatal)", exc_info=True)
 
 
-async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
+async def stream_turn(
+    raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
+) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
@@ -168,6 +181,8 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     """
     from anton.core.llm.provider import (
         MindsHubBillingStop,
+        StreamAskUser,
+        StreamAskUserAnswered,
         StreamComplete,
         StreamContextCompacted,
         StreamTaskProgress,
@@ -195,13 +210,21 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     # a terminal event in `finally` — else the turn dies with no terminal and
     # the controller reports a silent "unexpected error".
     terminal_emitted = False
+    elicitor = None
     try:
         req = TurnRequestV1.from_json(raw_line)
+        build = functools.partial(builder, req)
+        if req.interactive and stdin is not None:
+            # Before the build: the build is what registers `ask_user`, and a
+            # question must never be asked with nothing reading its answer.
+            elicitor = CloudElicitor(emit)
+            start_answer_reader(stdin, asyncio.get_running_loop(), elicitor.deliver)
+            build = functools.partial(builder, req, elicitor=elicitor)
         # build_cloud_chat_session() can block synchronously for several
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
-        session = await asyncio.get_running_loop().run_in_executor(None, builder, req)
+        session = await asyncio.get_running_loop().run_in_executor(None, build)
         # Length of the seeded history — everything anton appends past this
         # index belongs to this turn. Captured BEFORE turn_stream, so the
         # current turn's user input lands inside the slice and is trimmed off
@@ -300,6 +323,12 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                 logger.info("context compacted: %s", event.message)
                 compacted = True
                 emit({"kind": "compacted", "message": event.message})
+            elif isinstance(event, StreamAskUser):
+                logger.info("ask_user question: %s", event.id)
+                emit(ask_user_event(event))
+            elif isinstance(event, StreamAskUserAnswered):
+                logger.info("ask_user closed: %s status=%s", event.id, event.answer.status)
+                emit(ask_user_answered_event(event, elicitor))
             elif isinstance(event, StreamComplete):
                 logger.info("model response complete")
                 # Round boundary: cowork's formatter separates rounds with a
@@ -392,10 +421,16 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     with _isolated_protocol_stdout() as emit:
-        # One bounded line (the controller writes a single JSON line + \n, then
-        # closes stdin). ``readline`` returns on the newline without blocking.
-        raw_line = sys.stdin.readline(MAX_REQUEST_BYTES + 1)
-        asyncio.run(stream_turn(raw_line, emit))
+        # A private reader over a dup of fd 0, never `sys.stdin` (why: see the
+        # cloud_turn/stdin.py docstring).
+        stdin = open(os.dup(0), "rb")
+        # Then point fd 0 itself at /dev/null, so no child process spawned
+        # during the turn inherits the answer pipe and swallows an answer line.
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(devnull, 0)
+        os.close(devnull)
+        raw_line = stdin.readline(MAX_REQUEST_BYTES + 1).decode("utf-8", errors="replace")
+        asyncio.run(stream_turn(raw_line, emit, stdin=stdin))
     return 0
 
 
