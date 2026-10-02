@@ -2,7 +2,11 @@
 
 Matches what the controller sends (`scratchpad_controller.anton_turn.request_line`)
 and what cowork-server consumes off the reply stream. Intentionally minimal and
-data-only: the entrypoint reads ONE newline-terminated JSON line on stdin.
+data-only: the entrypoint reads the request as the first newline-terminated JSON
+line on stdin. An interactive turn keeps stdin open and reads one answer line
+per user answer after it (see below); the controller never closes stdin on the
+live-pod path, and its dev subprocess runner closes it only for
+non-interactive turns.
 
 Events written back on stdout (JSONL):
   {"kind": "delta", "text": "..."}   - streamed assistant text, one per chunk
@@ -46,6 +50,16 @@ Events written back on stdout (JSONL):
       Mutually exclusive with `history` above, which the same compaction
       suppresses. Omitted on failure too: the next turn re-seeds the same
       history and compacts it again.
+  {"kind": "ask_user", "id", "prompt", "options": [{"value", "label",
+      "detail"}], "select", "allow_custom", "timeout_s"}  - interactive turns
+      only: a question the turn is now blocked on. Never rate limited.
+  {"kind": "ask_user_answered", "id", "status", "values", "text",
+      "answer_id"}  - retires that question. `answer_id` names the stdin answer
+      that closed it (a Skip too, with status "cancelled"); null on timeout or
+      error.
+  {"kind": "ask_user_answer_rejected", "id", "answer_id", "reason"}  - a stdin
+      answer that did not close its question; reason is invalid_option |
+      not_found | already_answered. The question stays open on invalid_option.
   {"kind": "turn_completed"}          - terminal success (no payload)
   {"kind": "turn_failed", "error": "..."}  - terminal failure (scrubbed string)
       `error` is "TypeName: message", so a consumer reads the failure's kind
@@ -56,6 +70,11 @@ Events written back on stdout (JSONL):
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
 `round_end`. A `heartbeat` only resets the controller's stall timer.
+
+Answer lines on stdin (interactive turns only), one JSON object per line,
+at most 64 KB:
+  {"kind": "answer", "question_id", "answer_id", "values": [...], "text": "...",
+   "skipped": false}
 """
 
 from __future__ import annotations
@@ -179,6 +198,15 @@ class TurnRequestV1:
     #: from the pod's own clock, so the prompt says a three week old
     #: conversation started today and changes at every midnight.
     started_at: str | None = None
+    #: Whether cowork-server can answer `ask_user` questions mid-turn (web UI
+    #: turns). Only then does the pod register `ask_user` and keep reading
+    #: answer lines from stdin. Anything but a JSON `true` reads as False, so a
+    #: controller that does not know the field leaves every turn non-interactive.
+    interactive: bool = False
+    #: Per-engine connector data cowork-server resolved for this turn:
+    #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
+    #: vault connects. Absent when no connected engine has notes.
+    connectors: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -207,5 +235,10 @@ class TurnRequestV1:
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(
                 d.get("started_at") if isinstance(d.get("started_at"), str) else None
+            ),
+            interactive=d.get("interactive") is True,
+            # Same defensive isinstance check as oauth/trace.
+            connectors=(
+                d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
         )

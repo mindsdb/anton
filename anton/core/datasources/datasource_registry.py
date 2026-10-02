@@ -39,6 +39,12 @@ class DatasourceEngine:
     popular: bool = False
     # True for engines defined in ~/.anton/datasources.md
     custom: bool = False
+    # Agent-facing notes on using this engine's API once connected (traps,
+    # efficient endpoints, auth quirks). Used only when the host sends none,
+    # i.e. the CLI; see ChatSessionConfig.connector_usage_notes.
+    # Writing rules: English, imperative, no #/##/### headings outside code
+    # fences, per-method differences by field name, never where credentials live.
+    usage_notes: str = ""
 
 
 # Matches a level-2 heading followed by a ```yaml fenced block.
@@ -114,6 +120,9 @@ def _parse_file(
             test_snippet=str(data.get("test_snippet", "")),
             popular=bool(data.get("popular", False)),
             custom=custom,
+            usage_notes=(
+                data["usage_notes"] if isinstance(data.get("usage_notes"), str) else ""
+            ),
         )
         if custom:
             for field in engine.fields:

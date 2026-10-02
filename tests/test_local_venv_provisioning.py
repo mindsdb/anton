@@ -113,6 +113,24 @@ def test_create_venv_surfaces_uvs_stderr_on_failure(tmp_path, monkeypatch):
         pad._create_venv()
 
 
+def test_create_venv_does_not_seed_pip(tmp_path, monkeypatch):
+    # Installs always go through `uv pip install --python <venv>`, so a seeded
+    # pip was never used; on cloud it cost ~15s writing onto EFS per venv.
+    import subprocess
+
+    pad = make_pad(tmp_path)
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/fake/uv"))
+    run = MagicMock()
+    monkeypatch.setattr(subprocess, "run", run)
+
+    pad._create_venv()
+
+    args = run.call_args.args[0]
+    assert args[:2] == ["/fake/uv", "venv"]
+    assert "--system-site-packages" in args
+    assert "--seed" not in args
+
+
 def _write_fake_python(tmp_path, *, exit_code, stderr_text):
     """A fake venv "python" that fails a specific way when invoked as
     ``<path> -c "..."`` — stands in for a real dyld crash without needing one."""
@@ -186,6 +204,34 @@ def test_ensure_venv_failure_message_includes_the_verify_detail(tmp_path, monkey
 
     with pytest.raises(RuntimeError, match="dyld: Library not loaded"):
         pad._ensure_venv()
+
+
+@pytest.mark.parametrize(
+    "uv_path, expected_method",
+    [
+        ("/opt/homebrew/bin/uv", "uv venv (/opt/homebrew/bin/uv)"),
+        (None, "stdlib venv (uv not found)"),
+    ],
+)
+def test_ensure_venv_failure_message_states_facts_without_fix_hints(
+    tmp_path, monkeypatch, uv_path, expected_method
+):
+    # The model relays this message to the user; a generic hint such as
+    # "run python3 -c ..." was repeated as a diagnosis of the user's system
+    # Python, which the scratchpad venv is not built from.
+    pad = make_pad(tmp_path)
+    monkeypatch.setattr(pad, "_create_venv", lambda: None)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: False)
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: uv_path))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pad._ensure_venv()
+
+    message = str(exc_info.value)
+    assert str(tmp_path / "probe") in message
+    assert sys.executable in message
+    assert expected_method in message
+    assert "python3 -c" not in message
 
 
 def test_find_uv_checks_scoop_on_windows(monkeypatch):

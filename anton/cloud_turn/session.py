@@ -38,6 +38,7 @@ from anton.core.tools.skill_format import SKILL_FILE
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
+    from anton.core.interaction.elicit import Elicitor
     from anton.core.session import ChatSession
 
 logger = logging.getLogger(__name__)
@@ -661,11 +662,29 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
 )
 
 
-def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
+def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
+    """engine -> usage notes from the turn's `connectors` block.
+
+    Always a dict, never None: None would make build_datasource_context fall
+    back to anton's datasources.md registry, whose engine ids collide with
+    cowork-server's connectors (see ChatSessionConfig.connector_usage_notes).
+    """
+    notes: dict[str, str] = {}
+    for engine, block in (connectors or {}).items():
+        text = block.get("usage_notes") if isinstance(block, dict) else None
+        if isinstance(engine, str) and isinstance(text, str) and text.strip():
+            notes[engine] = text
+    return notes
+
+
+def build_cloud_chat_session(
+    request: TurnRequestV1, elicitor: "Elicitor | None" = None
+) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
 
     History is DB-authoritative (from the request). The workspace path is the
-    trusted pod mount, NOT ``request.workspace_path``.
+    trusted pod mount, NOT ``request.workspace_path``. *elicitor* is given only
+    for an interactive turn; it is what makes ``ask_user`` available.
     """
     from anton.config.settings import AntonSettings
     from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -790,6 +809,14 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
                 request.started_at, request.conversation_id,
             )
 
+    # `ask_user` only with an elicitor: core registers the tool only then, and
+    # an allowlist name that matches no registered tool is fatal.
+    tool_allowlist = (
+        CLOUD_TOOL_ALLOWLIST
+        | {td.name for td in mcp_tool_defs}
+        | ({"ask_user"} if elicitor is not None else set())
+    )
+
     config = ChatSessionConfig(
         llm_client=llm_client,
         settings=settings,
@@ -831,17 +858,19 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
         # DB-authoritative history; the pod never loads its own.
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
+        elicitor=elicitor,                  # interactive turns only; None = no ask_user
         cortex=cortex,                      # org memory; writes are reported, not stored
         episodic=None,
         self_awareness=None,
         data_vault=data_vault,              # connectors ON iff request.oauth is set
+        connector_usage_notes=_connector_usage_notes(request.connectors),
         history_store=None,                 # disk history OFF (DB authoritative)
         tools=mcp_tool_defs,                 # ENG-1816: this turn's MCP connections, if any
         # Static CLOUD_TOOL_ALLOWLIST plus this turn's own discovered MCP
         # tool names — _build_tools() re-enforces the allowlist on every
         # call (not just the first), so an MCP tool left out of it would
         # survive exactly one round then vanish on the turn's next rebuild.
-        tool_allowlist=CLOUD_TOOL_ALLOWLIST | {td.name for td in mcp_tool_defs},
+        tool_allowlist=tool_allowlist,
         mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
         background_memory=False,            # one turn per pod: no end-of-turn LLM passes
         runtime_factory=local_scratchpad_runtime_factory,
@@ -873,6 +902,6 @@ def build_cloud_chat_session(request: TurnRequestV1) -> "ChatSession":
     session._skill_drafts_before = _snapshot_skill_drafts(settings.skill_drafts_root)
     logger.info(
         "cloud session built conversation=%s workspace=%s tools=%s",
-        request.conversation_id, base, sorted(CLOUD_TOOL_ALLOWLIST),
+        request.conversation_id, base, sorted(tool_allowlist),
     )
     return session

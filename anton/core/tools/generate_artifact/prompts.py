@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from anton.utils.datasources import DATASOURCES_HEADER
 
 from .discovery.notes import EXEC_OUTPUT_MAX
 
@@ -26,6 +29,9 @@ from .sub_tools import FILE_BEGIN_MARKER as BEGIN, FILE_END_MARKER as END
 # can compare against what it is about to write. Derived from the output budget
 # in state.py; quoted from the constant so the two cannot drift.
 from .state import REPLY_BODY_CHARS
+
+if TYPE_CHECKING:
+    from anton.utils.datasources import CatalogConnection, DatasourceCatalog
 
 
 # ---------------------------------------------------------------------------
@@ -940,15 +946,17 @@ and costs a regeneration:
 """
 
 
-_NO_DATASOURCES_NOTE = """\
-## Connected Data Sources
-None are used by this artifact: leave `SECRETS` empty and read no `DS_*`
-variable.\
-"""
+_NO_DATASOURCES_NOTE = (
+    f"{DATASOURCES_HEADER}\n"
+    "None are used by this artifact: leave `SECRETS` empty and read no `DS_*`\n"
+    "variable."
+)
 
 
 def _datasource_section(
-    catalog: str, declared_sources: list[str] | tuple[str, ...], data_notes: str
+    catalog: "DatasourceCatalog | None",
+    declared_sources: list[str] | tuple[str, ...],
+    data_notes: str,
 ) -> str:
     """The `## Connected Data Sources` section for the backend prompt.
 
@@ -959,55 +967,43 @@ def _datasource_section(
     uses (`data_sources` → `state.declared_sources`), so:
     - no declared source and no `DS_*` in the gathered data → a one-line note
       instead of the catalog;
-    - declared sources naming (by slug, label or engine) some of the
-      connections → only those connections;
+    - declared sources naming (by slug, label, engine id or engine name) some
+      of the connections → the catalog rendered for only those connections,
+      with only their engines' usage notes;
     - declared sources matching nothing → the full catalog, since the names
       are free text ("orders table") and a wrong drop would cost a
       regeneration that the full catalog never does.
     """
-    catalog = catalog.strip()
-    if not catalog:
+    if catalog is None or not catalog.connections:
         return ""
-    declared = [d.lower() for d in declared_sources if str(d).strip()]
+    declared = [str(d).lower() for d in declared_sources if str(d).strip()]
     if not declared:
         # Gathered cells that read a `DS_*` variable are evidence of a source
         # the model forgot to declare: keep the catalog then.
-        return catalog if "DS_" in data_notes else _NO_DATASOURCES_NOTE
-    header, sep, rest = catalog.partition("\n### Slug: `")
-    if not sep:
-        return catalog
-    blocks = ["### Slug: `" + b for b in rest.split("\n### Slug: `")]
-    kept = []
-    for block in blocks:
-        first = block.splitlines()[0].lower()
-        engine_line = next((l for l in block.splitlines() if l.lower().startswith("engine:")), "")
-        needles = [first, engine_line.lower()]
-        if any(any(n and (n in d or any(tok in d for tok in _slug_tokens(n))) for n in needles) for d in declared):
-            kept.append(block)
-    if not kept:
-        return catalog
-    return header + "\n" + "\n".join(kept)
+        return catalog.render().strip() if "DS_" in data_notes else _NO_DATASOURCES_NOTE
+    kept = [c.slug for c in catalog.connections if _is_declared(c, declared)]
+    return catalog.render(kept or None).strip()
 
 
-def _slug_tokens(line: str) -> list[str]:
-    """Searchable names from a catalog line: the slug, its label, the engine."""
-    import re
-
-    tokens = re.findall(r"`([^`]+)`", line)  # the slug in backticks
-    m = re.search(r"label:\s*(.+)$", line)
-    if m and m.group(1).strip() != "(none)":
-        tokens.append(m.group(1).strip().strip("\"'"))
-    m = re.match(r"engine:\s*(.+)$", line)
-    if m:
-        tokens.append(m.group(1).strip())
-    return [t.lower() for t in tokens if len(t) >= 3]
+def _is_declared(connection: "CatalogConnection", declared: list[str]) -> bool:
+    """Whether a lowercased declared source names `connection`: its slug,
+    label, engine id or engine name occurs in it."""
+    names = (
+        connection.slug,
+        connection.label.strip("\"'"),
+        connection.engine,
+        connection.engine_name,
+    )
+    # Shorter names would match inside unrelated words.
+    tokens = [n.lower() for n in names if len(n) >= 3]
+    return any(tok in d for d in declared for tok in tokens)
 
 
 def build_backend_system_prompt(
     artifact_path: Path,
     *,
     stateless: bool = False,
-    datasource_context: str = "",
+    datasources: "DatasourceCatalog | None" = None,
     declared_sources: list[str] | tuple[str, ...] = (),
     data_notes: str = "",
 ) -> str:
@@ -1029,7 +1025,7 @@ def build_backend_system_prompt(
         "## Backend rules\n" + _BACKEND_RULES,
         "## State rules\n" + (_STATELESS_RULES if stateless else _STATEFUL_RULES),
     ]
-    section = _datasource_section(datasource_context, declared_sources, data_notes)
+    section = _datasource_section(datasources, declared_sources, data_notes)
     if section:
         parts.append(section)
     parts.append(_GEN_TOOLS)

@@ -904,6 +904,7 @@ class OpenAIProvider(LLMProvider):
         # whose subprocess/env boundary cannot carry a callable. The main-process
         # async OpenAI client can ask the supplier for a fresh bearer per request.
         self._api_key = api_key
+        self._api_key_provider = api_key_provider
         self._base_url = base_url
         self._ssl_verify = ssl_verify
         self._api_version = api_version
@@ -987,6 +988,10 @@ class OpenAIProvider(LLMProvider):
             ssl_verify=self._ssl_verify,
             api_version=self._api_version,
         )
+
+    async def current_api_key(self) -> str | None:
+        """The key for the next request: the live supplier's, since a refresh makes the stored one stale."""
+        return await self._api_key_provider() if self._api_key_provider else self._api_key
 
     def native_web_tools(self) -> set[str]:
         # BYOK OpenAI exposes web_search via Responses API (which covers fetch

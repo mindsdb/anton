@@ -37,7 +37,7 @@ class _FakeSession:
     only inspect the captured ChatSessionConfig, never the session."""
 
 
-def _build(tmp_path, monkeypatch, **req_overrides):
+def _build(tmp_path, monkeypatch, elicitor=None, **req_overrides):
     captured: dict = {}
 
     def fake_chat_session(config):
@@ -53,8 +53,23 @@ def _build(tmp_path, monkeypatch, **req_overrides):
 
     body = dict(protocol_version=1, conversation_id="conv_1", input="hello")
     body.update(req_overrides)
-    session = build_cloud_chat_session(TurnRequestV1(**body))
+    session = build_cloud_chat_session(TurnRequestV1(**body), elicitor=elicitor)
     return session, captured["config"]
+
+
+def test_no_elicitor_means_no_ask_user(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.elicitor is None
+    assert "ask_user" not in cfg.tool_allowlist
+
+
+def test_an_elicitor_enables_ask_user(tmp_path, monkeypatch):
+    elicitor = object()
+    _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
+    assert cfg.elicitor is elicitor
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"ask_user"}
+    # A console would let anton fall back to its terminal elicitor.
+    assert cfg.console is None
 
 
 # ── config-level safety ──────────────────────────────────────────────────────
@@ -1317,3 +1332,23 @@ def test_no_mcp_sessions_means_no_cleanup_call_on_construction_failure(tmp_path,
 
     with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
         build_cloud_chat_session(request)
+
+
+def test_connectors_block_becomes_the_session_usage_notes(tmp_path, monkeypatch):
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        connectors={
+            "google_drive": {"usage_notes": "DRIVE-NOTE"},
+            "blank": {"usage_notes": "   "},
+            "not_a_block": "DRIVE-NOTE",
+            "no_notes": {},
+        },
+    )
+    assert cfg.connector_usage_notes == {"google_drive": "DRIVE-NOTE"}
+
+
+def test_a_turn_without_connectors_never_falls_back_to_the_anton_registry(tmp_path, monkeypatch):
+    """{} rather than None: anton's datasources.md shares engine ids with
+    cowork-server's connectors, and a web turn must not render its notes."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.connector_usage_notes == {}
