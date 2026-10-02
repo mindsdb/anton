@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
@@ -150,6 +152,9 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 
 # Bounded: never lint a huge file inline on the agent's turn.
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
+# Checked between files, so one open can still run up to one checker
+# timeout past it.
+_OPEN_LINT_BUDGET_SECONDS = 10.0
 
 
 def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
@@ -252,20 +257,27 @@ def _lint_file_cached(
     return file_messages
 
 
-def lint_artifact_files(store, slug: str) -> list[str]:
+def lint_artifact_files(store, slug: str, budget_seconds: float | None = None) -> list[str]:
     """Run the format-appropriate checker on every content file of `slug`,
     with no mtime gating: the caller decides when the artifact is worth
     checking.
+
+    With `budget_seconds`, no new file is started once it is spent; those
+    files are named as not checked, so the result never reads as clean.
     """
     from anton.core.artifacts.store import iter_content_files
 
     linters = _artifact_linters()
     if not linters:
         return []
+    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
     messages: list[str] = []
     for path, st in iter_content_files(store.root / slug):
         linter = linters.get(path.suffix.lower())
         if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            messages.append(f"{slug}/{path.name} — not checked: lint time budget ran out")
             continue
         file_messages = _lint_file_cached(linter, path, st)
         if not file_messages:
@@ -924,8 +936,7 @@ async def handle_open_artifact(
     # rather than at write time because the writes themselves happen in
     # scratchpad cells the tool layer never sees.
     _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
-    # Tier 1: the artifact was opened and its descriptor returned.
-    return ToolOutcome(content=json.dumps({
+    content = json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
         "name": artifact.name,
@@ -933,7 +944,20 @@ async def handle_open_artifact(
         "description": artifact.description,
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
-    }, indent=2), ok=True)
+    }, indent=2)
+    # Re-checked on every open: the exec-time finding is shown once, and an
+    # agent that did not act on it then would never see it again.
+    try:
+        lint_messages = await asyncio.to_thread(
+            lint_artifact_files, store, artifact.slug, _OPEN_LINT_BUDGET_SECONDS,
+        )
+    except Exception:
+        _log.warning("artifact lint failed on open for %s", artifact.slug, exc_info=True)
+        lint_messages = []
+    if lint_messages:
+        content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
+    # Tier 1: the artifact was opened and its descriptor returned.
+    return ToolOutcome(content=content, ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
