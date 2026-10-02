@@ -697,9 +697,16 @@ def _translate_assistant_blocks_to_responses(blocks: list[dict]) -> list[dict]:
 def _translate_user_blocks_to_responses(
     blocks: list[dict], supports_vision: bool = True
 ) -> list[dict]:
-    """Convert user content blocks (text, tool_result, image) to Responses API items."""
+    """Convert user content blocks (text, tool_result, image) to Responses API items.
+
+    Images a tool returned are not dropped: like the chat.completions path,
+    they are deferred to one user message after ALL ``function_call_output``
+    items, so the outputs for a multi-call round stay contiguous and each
+    output stays a plain string.
+    """
     result: list[dict] = []
     content_parts: list[dict] = []
+    deferred_img_parts: list[dict] = []
 
     for block in blocks:
         if block.get("type") == "tool_result":
@@ -709,9 +716,21 @@ def _translate_user_blocks_to_responses(
                 content_parts = []
             tool_content = block.get("content", "")
             if isinstance(tool_content, list):
-                tool_content = "\n".join(
-                    b.get("text", "") for b in tool_content if b.get("type") == "text"
-                )
+                texts = [b.get("text", "") for b in tool_content if b.get("type") == "text"]
+                images = [
+                    part for part in map(_responses_image_part, tool_content) if part
+                ] if supports_vision else []
+                if images and not deferred_img_parts:
+                    deferred_img_parts.append(
+                        {"type": "input_text", "text": "Image(s) returned by previous tool call:"}
+                    )
+                deferred_img_parts.extend(images)
+                if texts:
+                    tool_content = "\n".join(texts)
+                elif images:
+                    tool_content = "Image attached in next user message."
+                else:
+                    tool_content = ""
             result.append(
                 {
                     "type": "function_call_output",
@@ -721,22 +740,40 @@ def _translate_user_blocks_to_responses(
             )
         elif block.get("type") == "text":
             content_parts.append({"type": "input_text", "text": block.get("text", "")})
-        elif block.get("type") == "image" and supports_vision:
-            source = block.get("source", {})
-            if source.get("type") == "base64":
-                media_type = source.get("media_type", "image/png")
-                data = source.get("data", "")
-                content_parts.append(
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{media_type};base64,{data}",
-                    }
-                )
+        elif supports_vision and (part := _responses_image_part(block)):
+            content_parts.append(part)
+
+    # Flush deferred images after all function_call_output items.
+    if deferred_img_parts:
+        result.append(_user_message_from_parts(deferred_img_parts))
 
     if content_parts:
         result.append(_user_message_from_parts(content_parts))
 
     return result
+
+
+def _responses_image_part(block: dict) -> dict | None:
+    """An Anthropic ``image`` or OpenAI ``image_url`` block as an ``input_image`` part.
+
+    ``image_url`` blocks come from scratchpad code that built the message in
+    OpenAI shape; the chat.completions path passes them through, so they must
+    reach the model here too.
+    """
+    if block.get("type") == "image":
+        source = block.get("source", {})
+        if source.get("type") != "base64":
+            return None
+        media_type = source.get("media_type", "image/png")
+        url = f"data:{media_type};base64,{source.get('data', '')}"
+    elif block.get("type") == "image_url":
+        image_url = block.get("image_url")
+        url = image_url.get("url", "") if isinstance(image_url, dict) else (image_url or "")
+        if not url:
+            return None
+    else:
+        return None
+    return {"type": "input_image", "image_url": url, "detail": "auto"}
 
 
 def _user_message_from_parts(parts: list[dict]) -> dict:
@@ -880,6 +917,11 @@ class OpenAIProvider(LLMProvider):
     FLAVOR_OPENAI = "openai"  # Direct OpenAI BYOK — uses Responses API.
     FLAVOR_MINDS_PASSTHROUGH = "minds-passthrough"  # mdb.ai — chat.completions w/ native tools.
     FLAVOR_OPENAI_COMPATIBLE_GENERIC = "openai-compatible-generic"  # third-party.
+    # The Responses transport (FLAVOR_OPENAI) reports truncation and failures,
+    # forwards tool_result images and attaches trace headers. Hosts that pin
+    # anton to a branch check this before moving direct OpenAI onto it; older
+    # builds lacked those and should stay on chat.completions.
+    RESPONSES_TRANSPORT_READY = True
 
     async def aclose(self) -> None:
         client = getattr(self, "_client", None)
@@ -1534,6 +1576,16 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice_to_responses(tool_choice)
+        # Same trace headers as the chat.completions path.
+        trace_headers = self._build_trace_headers()
+        if trace_headers:
+            kwargs["extra_headers"] = trace_headers
+        # `store` is left at the provider default on purpose. store=False was
+        # measured to slow every later prompt-cache hit on the prefix it
+        # wrote (gpt-6.1-sol, 2026-10-02: time to first text 2.5-2.8 s vs
+        # 1.75-1.9 s on identical prefixes), and this path depends on cross-
+        # call cache hits. Retention then follows the key owner's OpenAI
+        # organisation settings.
         return kwargs
 
     async def _complete_via_responses(
@@ -1701,11 +1753,11 @@ class OpenAIProvider(LLMProvider):
                     if info["started"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
-                # Final completion event carries the resolved Response object
-                # with usage/stop_reason. We trust the structured parse here in
-                # case the streamed deltas missed something (e.g. server-tool
-                # calls produce text we already streamed but no function call).
-                elif etype == "response.completed":
+                # Terminal event carries the resolved Response object with
+                # usage/stop_reason. `incomplete` is the token-budget cut: it
+                # must report usage and "length" like `completed` reports
+                # its stop, or truncation recovery never sees it.
+                elif etype in ("response.completed", "response.incomplete"):
                     final_response = getattr(event, "response", None)
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
@@ -1716,8 +1768,21 @@ class OpenAIProvider(LLMProvider):
                                 cache_creation_tokens,
                             ) = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
-                        stop_reason = getattr(final_response, "status", None)
+                        stop_reason = _responses_stop_reason(final_response)
                         served_model = getattr(final_response, "model", None) or served_model
+
+                # A failed response and a stream `error` event both arrive as
+                # ordinary events (the SDK only raises on a top-level `error`
+                # key). Unhandled, the stream just ended and the failure looked
+                # like an empty answer. Raised as the bare APIError the SDK
+                # raises for a mid-stream SSE error, so the handler below
+                # classifies it the same way (billing stop, transient, or
+                # stream_error with backoff).
+                elif etype in ("response.failed", "error"):
+                    error = (getattr(getattr(event, "response", None), "error", None)
+                             if etype == "response.failed" else event)
+                    body = _responses_error_body(error)
+                    raise openai.APIError(body["message"], _stream_request(stream), body=body)
         except openai.BadRequestError as exc:
             _raise_for_bad_request(exc)
             raise
@@ -1779,6 +1844,22 @@ class OpenAIProvider(LLMProvider):
         finally:
             await _aclose_stream(stream)
 
+        # Same rule as the chat.completions reader (ENG-673): a stream that
+        # ended with no terminal event and produced nothing was cut, and must
+        # fail fast rather than hand back an empty answer.
+        if stop_reason is None:
+            if content_text or tool_calls:
+                logger.warning("responses stream ended with no terminal event but produced "
+                               "output — passing through")
+            else:
+                logger.warning("responses stream ended empty with no terminal event — "
+                               "treating as truncated")
+                raise TransientProviderError(
+                    "The model provider ended the response early — try again in a moment.",
+                    provider="The model provider", code="truncated_stream",
+                    session_backoff=False, model=model,
+                )
+
         yield StreamComplete(
             response=LLMResponse(
                 content=content_text,
@@ -1796,6 +1877,42 @@ class OpenAIProvider(LLMProvider):
                 model=served_model,
             )
         )
+
+
+def _stream_request(stream):
+    """The httpx request behind an SDK stream, or None (fakes, odd transports)."""
+    try:
+        return stream.response.request
+    except Exception:
+        return None
+
+
+def _responses_stop_reason(response) -> str | None:
+    """The Responses API ``status`` as the stop reason the session reads.
+
+    A response cut at ``max_output_tokens`` comes back ``incomplete``; it is
+    reported as ``"length"`` (the chat.completions word) so ``looks_truncated``
+    and the session's truncation recovery fire on this transport too. Other
+    incomplete reasons (``content_filter``, ...) pass through by name.
+    """
+    status = getattr(response, "status", None)
+    if status != "incomplete":
+        return status
+    reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+    return "length" if reason in (None, "max_output_tokens") else reason
+
+
+def _responses_error_body(error) -> dict:
+    """``{"code", "message"}`` from a Responses ``error`` (object, dict or None).
+
+    No ``type`` key: the classifier reads ``type`` before ``code``, and the
+    Responses error event's ``type`` is the literal ``"error"``.
+    """
+    if isinstance(error, dict):
+        code, message = error.get("code"), error.get("message")
+    else:
+        code, message = getattr(error, "code", None), getattr(error, "message", None)
+    return {"code": code, "message": message or "The model provider failed the response."}
 
 
 def _parse_response_object(response, model: str) -> LLMResponse:
@@ -1839,7 +1956,16 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
-    status = getattr(response, "status", None)
+    if getattr(response, "status", None) == "failed":
+        body = _responses_error_body(getattr(response, "error", None))
+        raise classify_transient(
+            None, body, provider="The model provider", model=model,
+        ) or TransientProviderError(
+            "The model provider failed the response — try again in a moment.",
+            provider="The model provider", code=body["code"] or "response_failed",
+            session_backoff=False, model=model,
+        )
+    status = _responses_stop_reason(response)
     raise_on_empty_response(
         content=content_text, tool_calls=tool_calls, stop_reason=status, model=model,
     )
