@@ -57,11 +57,11 @@ def _capture_publish(tmp_path: Path, **publish_kwargs) -> dict:
 
     def fake_request(url, api_key, *, method="POST", payload=None, verify=True, timeout=30):
         captured["payload"] = json.loads(payload.decode())
-        return json.dumps(
+        return 200, json.dumps(
             {"user_prefix": "u", "report_id": "r", "md5": "m", "view_url": "url", "version": 1, "files": []}
-        )
+        ).encode()
 
-    with mock.patch.object(publisher, "minds_request", fake_request):
+    with mock.patch.object(publisher, "minds_request_with_status", fake_request):
         publish(f, api_key="k", **publish_kwargs)
     return captured["payload"]
 
