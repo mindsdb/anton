@@ -861,21 +861,34 @@ ASK_USER_TOOL = ToolDef(
 )
 
 
-# Fully specified local reports skip the generator (DIRECT LOCAL REPORTS in
-# the ARTIFACTS section). Staging's AFTER REGISTERING guidance is kept verbatim.
-_pick = CREATE_ARTIFACT_TOOL.description.index("Pick `type`")
+# Same routing as the ARTIFACTS section, stated once and criterion first
+# (see prompts.py); the generator passages name the work they are for.
+_after = CREATE_ARTIFACT_TOOL.description.index("AFTER REGISTERING")
+_pick = CREATE_ARTIFACT_TOOL.description.index("Pick `type`", _after)
 CREATE_ARTIFACT_TOOL.description = (
-    CREATE_ARTIFACT_TOOL.description[:_pick].rstrip()
-    + "\n\nException: a fully specified local HTML or Markdown report uses the direct "
-      "read/build/verify path (DIRECT LOCAL REPORTS) instead of generate_artifact.\n\n"
+    CREATE_ARTIFACT_TOOL.description[:_after]
+    + "AFTER REGISTERING: a fully specified local HTML or Markdown report follows "
+      "DIRECT LOCAL REPORTS: write the files yourself into the returned path. Any other "
+      "web artifact (html-app, fullstack-stateless-app, fullstack-stateful-app) goes to "
+      "`generate_artifact(slug, user_request, agent_understanding, ...)`, which agrees the "
+      "requirements with the user, writes every file and verifies its own output. For "
+      "`document`, `dataset`, `image` and `mixed` there is no generator: write the files "
+      "yourself into the returned path.\n\n"
+      "When you build or edit a generator-made artifact BY HAND (editing one it produced, "
+      "or `generate_artifact` failed and the user asked you to continue), call "
+      "`recall_skill(\"build-html-dashboard\")` for an html-app or "
+      "`recall_skill(\"build-fullstack-backend\")` for a fullstack app before writing anything.\n\n"
     + CREATE_ARTIFACT_TOOL.description[_pick:])
 GENERATE_ARTIFACT_TOOL.description = GENERATE_ARTIFACT_TOOL.description.replace(
     "Use INSTEAD OF writing files yourself in the scratchpad.",
-    "Use INSTEAD OF writing files yourself in the scratchpad, except for fully "
-    "specified local reports, which use the direct path (DIRECT LOCAL REPORTS).")
-GENERATE_ARTIFACT_TOOL.prompt = (GENERATE_ARTIFACT_TOOL.prompt or "") + (
-    "\nARTIFACT ROUTING: fully specified local HTML or Markdown reports use the direct "
-    "path in the ARTIFACTS section; generate_artifact is for fullstack or underspecified work.")
+    "Use it for fullstack apps and HTML that still needs requirements, instead of writing "
+    "those files yourself; a fully specified local report uses DIRECT LOCAL REPORTS.")
+GENERATE_ARTIFACT_TOOL.prompt = (GENERATE_ARTIFACT_TOOL.prompt or "").replace(
+    "ARTIFACT GENERATION:\n",
+    "ARTIFACT GENERATION (fullstack apps and HTML that still needs requirements; a fully "
+    "specified local report uses DIRECT LOCAL REPORTS instead):\n").replace(
+    "Use it INSTEAD of writing artifact files yourself in the scratchpad.",
+    "For that work, use it instead of writing the files yourself in the scratchpad.")
 
 
 # Product experiment P3b: same-response create and write
