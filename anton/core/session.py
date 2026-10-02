@@ -1373,6 +1373,12 @@ class ChatSessionConfig:
     # Keep the vocabularies apart. A value that answers "where" belongs in
     # `surface`; if a third question ever needs answering, it gets a third field.
     harness: str | None = None
+    # Start the default scratchpad in the background when a turn's first model
+    # call begins, so its boot overlaps the call instead of following it. Off by
+    # default: it spawns a real process, which only a host that will run code
+    # in most turns (Cowork) should pay for, and which that host must reap by
+    # closing the session's scratchpads.
+    prewarm_scratchpad: bool = False
     # WHERE the user was, as opposed to which agent ran: one of
     # `anton.core.llm.tracing.VALID_SURFACES` (`desktop` / `web` / `cli`), or
     # None when the host did not say. Surfaced on langfuse traces as the
@@ -1611,6 +1617,7 @@ class ChatSession:
         self._history_store = config.history_store
         self._session_id = config.session_id
         self._harness = config.harness
+        self._prewarm_scratchpad = bool(getattr(config, "prewarm_scratchpad", False))
         self._surface = _validated_surface(config.surface)
         self.live_tool_peek = config.live_tool_peek
         self._user_id = _validated_account_id(config.user_id)
@@ -5237,7 +5244,7 @@ class ChatSession:
         """Stream one LLM call, handle tool loops, yield all events."""
         tools = self._build_tools()
         # Overlap the default scratchpad's boot with the first model call.
-        if self._scratchpads is not None:
+        if self._prewarm_scratchpad and self._scratchpads is not None:
             try:
                 self._scratchpads.prewarm("main")
             except Exception:

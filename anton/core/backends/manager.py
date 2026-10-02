@@ -223,7 +223,17 @@ class ScratchpadManager:
                     else {}
                 ),
             )
-            await pad.start()
+            try:
+                await pad.start()
+            except BaseException:
+                # A start that is cancelled (close_all stopping a pre-warm) or
+                # fails half-way is not registered, so close it here or its
+                # process would outlive the session.
+                try:
+                    await pad.close()
+                except Exception:
+                    pass
+                raise
             self._pads[name] = pad
         if ds_env_override is not None:
             self._pads[name].set_scratchpad_ds_env(ds_env_override)
@@ -264,7 +274,17 @@ class ScratchpadManager:
         return list(self._pads.keys())
 
     async def close_all(self) -> None:
-        """Cleanup all scratchpads on session end."""
+        """Cleanup all scratchpads on session end, including one a pre-warm is still booting."""
+        import asyncio as _asyncio
+
+        starting = getattr(self, "_starting", None) or {}
+        pending = [task for task in starting.values() if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            # Wait for the cancellations so a boot cannot register a pad after
+            # the loop below has closed the others.
+            await _asyncio.gather(*pending, return_exceptions=True)
         for pad in self._pads.values():
             await pad.close()
         self._pads.clear()
