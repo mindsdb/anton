@@ -321,6 +321,8 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
         primary=primary if isinstance(primary, str) else None,
     )
     folder = store.folder_for(artifact.slug)
+    from anton.core.artifacts.report_renderer import install
+    install(folder, artifact.type)
     _track_artifact(session, store, artifact.slug, summary=f"Created artifact: {name}")
     return SideEffectResult(
         success=True,
@@ -882,6 +884,10 @@ async def handle_open_artifact(
         # Needs its own decision, not a side effect of this pass.
         return f"Error: no artifact found for slug `{slug}`."
     folder = store.folder_for(artifact.slug)
+    from anton.core.artifacts.report_editor import install
+    install(folder, artifact.type)
+    from anton.core.artifacts.report_renderer import install
+    install(folder, artifact.type)
     # Opening is how the agent gets an artifact's path in order to write to
     # it, so this is the turn's declaration of intent to modify. Tracked here
     # rather than at write time because the writes themselves happen in

@@ -119,3 +119,11 @@ def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
     _fail_stat_for(monkeypatch, _touch(tmp_path / "gone.html"))
 
     assert _artifact_content_mtime(tmp_path) == 1000.0
+
+
+def test_bundled_report_helpers_are_not_user_content(tmp_path):
+    from anton.core.artifacts.internal_files import REPORT_RENDERER_FILENAME, REPORT_EDITOR_FILENAME
+    for name in (REPORT_RENDERER_FILENAME, REPORT_EDITOR_FILENAME):
+        (tmp_path / name).write_text("# trusted installed helper")
+    (tmp_path / "report.html").write_text("<html>Current report</html>")
+    assert {p.name for p, _ in iter_content_files(tmp_path)} == {"report.html"}

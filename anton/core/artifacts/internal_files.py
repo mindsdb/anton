@@ -47,6 +47,8 @@ METADATA_FILENAME = "metadata.json"
 README_FILENAME = "README.md"
 PUBLISHED_FILENAME = ".published.json"
 BACKEND_LOG_FILENAME = "backend.log"
+REPORT_RENDERER_FILENAME = "_report_renderer.py"
+REPORT_EDITOR_FILENAME = "_report_editor.py"
 # The local STATE driver's SQLite database; -wal/-shm carry the freshest writes.
 STATE_DB_FILENAME = ".anton_state.db"
 STATE_SNAPSHOT_FILENAME = ".state_manifest.published.json"
@@ -60,6 +62,8 @@ HOUSEKEEPING_FILES = frozenset({
     README_FILENAME,
     PUBLISHED_FILENAME,
     BACKEND_LOG_FILENAME,
+    REPORT_RENDERER_FILENAME,
+    REPORT_EDITOR_FILENAME,
     STATE_DB_FILENAME,
     f"{STATE_DB_FILENAME}-wal",
     f"{STATE_DB_FILENAME}-shm",

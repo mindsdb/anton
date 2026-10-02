@@ -496,6 +496,7 @@ def test_housekeeping_files_contract():
         "metadata.json", "README.md", "backend.log", ".published.json",
         ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
         ".state_manifest.published.json",
+        "_report_renderer.py", "_report_editor.py",
     })
 
 
