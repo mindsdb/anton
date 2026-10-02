@@ -222,36 +222,43 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     }
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
-    """Run the format-appropriate checker on artifact folders this cell
-    edited (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list().
+def lint_artifact_files(store, slug: str) -> list[str]:
+    """Run the format-appropriate checker on every content file of `slug`,
+    with no mtime gating: the caller decides when the artifact is worth
+    checking.
     """
     from anton.core.artifacts.store import iter_content_files
 
     linters = _artifact_linters()
     if not linters:
         return []
+    messages: list[str] = []
+    for path, st in iter_content_files(store.root / slug):
+        linter = linters.get(path.suffix.lower())
+        if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
+            continue
+        file_messages = linter(path)
+        if not file_messages:
+            # None (couldn't check) or [] (checked, clean) — either way,
+            # nothing worth telling the agent about this file.
+            continue
+        for message in file_messages:
+            messages.append(f"{slug}/{path.name} — {message}")
+    return messages
+
+
+def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
+    """Run `lint_artifact_files` on artifact folders this cell edited
+    (mtime moved since `before`), so findings reach the agent as
+    tool-result text right away, not only via a later open()/list().
+    """
     after = snapshot_existing_artifact_mtimes(store)
     messages: list[str] = []
     for slug, prev_mtime in before.items():
         current = after.get(slug)
         if current is None or current <= prev_mtime:
             continue
-
-        artifact_dir = store.root / slug
-        for path, st in iter_content_files(artifact_dir):
-            linter = linters.get(path.suffix.lower())
-            if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
-                continue
-            file_messages = linter(path)
-            if not file_messages:
-                # None (couldn't check) or [] (checked, clean) — either way,
-                # nothing worth telling the agent about this file.
-                continue
-            for message in file_messages:
-                messages.append(f"{slug}/{path.name} — {message}")
-
+        messages.extend(lint_artifact_files(store, slug))
     return messages
 
 
