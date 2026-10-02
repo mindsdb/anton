@@ -609,7 +609,8 @@ sentence from the current source.
       k.p(k.inline("Source: ", k.link(k.rel_link(out, "source.json"), "source.json")))
       Kit functions escape plain strings: never pass hand-written HTML strings to them.
   k.update_html(path, {id: fragment or json}) -> replace only those elements' content in an
-      existing page; everything else stays byte-identical (fails safely on a missing id)
+      existing page; everything else stays byte-identical (fails safely on a missing id).
+      Each element keeps its own heading unless the fragment starts with one; do not re-add it
   k.find_values(path, values) -> {value: contexts} for superseded figures still present ({} if none);
       a figure may legitimately reappear as a different quantity, so judge the contexts
   k.data(id, value) -> inert JSON block  k.save(path, html)

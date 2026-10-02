@@ -407,6 +407,13 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
     broken = _broken_links(path, parser.local, parser.ids)
     if broken:
         problems.append(f'broken local links: {broken[:5]}')
+    dup = [_html.unescape(_re.sub(r'<[^>]+>', '', m.group(2))).strip()
+           for m in _re.finditer(r'<(h[1-6])\b[^>]*>(.*?)</\1\s*>\s*<\1\b[^>]*>\2</\1\s*>', raw, _re.S | _re.I)]
+    if dup:
+        problems.append(f'duplicated headings (the same heading twice in a row): {dup[:3]}')
+    dark_links = _dark_default_links(raw)
+    if dark_links:
+        problems.append(f'{dark_links} link(s) would show in the browser default blue on a dark background; use k.link() or add an a{{color:...}} rule')
     # The audit table: the element with audit_id itself, else the first table
     # inside it, else the first table headed Metric | Value (pages not built
     # with the kit often put the id on an enclosing section).
@@ -638,6 +645,35 @@ def _id_spans(raw: str, wanted: set, tags: dict | None = None) -> dict:
     if parser.open:
         raise ValueError(f'could not find the end tag of {["#" + o[0] for o in parser.open]}; rebuild the page instead')
     return parser.spans
+
+
+def _css_luminance(value: str):
+    """Relative luminance of a CSS colour given as #rgb, #rrggbb or rgb(); None otherwise."""
+    v = value.strip().lower()
+    m = _re.match(r'#([0-9a-f]{3}|[0-9a-f]{6})\b', v)
+    if m:
+        h = m.group(1); h = ''.join(c * 2 for c in h) if len(h) == 3 else h
+        rgb = [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+    else:
+        m = _re.match(r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', v)
+        if not m:
+            return None
+        rgb = [int(x) for x in m.groups()]
+    lin = [(c / 255) / 12.92 if c / 255 <= 0.03928 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def _dark_default_links(raw: str) -> int:
+    """Anchors that would render in the browser's default blue on a dark page background."""
+    styles = ' '.join(_re.findall(r'<style[^>]*>(.*?)</style>', raw, _re.S | _re.I))
+    m = _re.search(r'(?:^|[}\s,])(?:html|body)\b[^{]*\{[^}]*?background(?:-color)?\s*:\s*([^;}]+)', styles, _re.I)
+    lum = _css_luminance(m.group(1)) if m else None
+    if lum is None or lum >= 0.2:
+        return 0
+    if _re.search(r'(?:^|[}\s,])a(?::link|:visited)?\s*[,{][^}]*?(?<![-\w])color\s*:', styles, _re.I):
+        return 0
+    return sum(1 for a in _re.findall(r'<a\b[^>]*>', raw, _re.I)
+               if 'href' in a.lower() and not _re.search(r'style\s*=\s*"[^"]*(?<![-\w])color\s*:', a, _re.I))
 
 
 def _same_tag_inner(fragment: str, tag: str, ident: str):
