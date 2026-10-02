@@ -871,6 +871,9 @@ async def _aclose_stream(stream: object) -> None:
             pass
 
 
+TURN_START_NOTE = 'TURN START (developer instruction about the latest user request): If this request needs tool work, begin your first response with one short, specific sentence describing the intended work, then make the tool calls in that same response. Do not make a separate acknowledgement call, emit generic filler, or claim results or successful checks before seeing evidence. Complete the requested work and normal verification. For work on an existing artifact, first resolve its actual location from the supplied context or artifact registry if necessary. Once the target is known, inspect its saved content, relevant source files and companion analysis together in one scratchpad invocation when feasible; do not spend separate model round trips on independent local reads. Retain the original bytes needed for preservation checks. Then group calculation, targeted writes and normal saved-output verification when feasible. Do not skip reading actual evidence, required checks, permissions or the final handoff. Keep artifact editing programs compact: use existing helpers, parameterized transformations and standard serializers instead of retyping whole templates or duplicating data literals. Preserve content outside the requested change. Compute reference values from the actual source and verify the saved result against them. Return a concise check summary instead of printing entire HTML documents; keep all required detail in the saved deliverable.'
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -1509,6 +1512,35 @@ class OpenAIProvider(LLMProvider):
         responses_input = _translate_messages_to_responses_input(
             messages, supports_vision=self._supports_vision
         )
+        # Explicit boundary before project/conversation content allows reuse of
+        # the same trusted policy across sessions. Preserve all dynamic context.
+        # Unsupported models or ambiguous boundaries keep the original request.
+        from .prompt_builder import SESSION_CONTEXT_MARKER
+
+        if (self._flavor == self.FLAVOR_OPENAI
+                and model.startswith(("gpt-6", "gpt-5.6"))
+                and system.count(SESSION_CONTEXT_MARKER) == 1):
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            responses_input = [
+                {"role": "developer", "type": "message", "content": [
+                    {"type": "input_text", "text": static,
+                     "prompt_cache_breakpoint": {"mode": "explicit"}},
+                ]},
+                {"role": "developer", "type": "message",
+                 "content": SESSION_CONTEXT_MARKER + session},
+                *responses_input,
+            ]
+            system = ""
+        # Keep this reminder adjacent to the new user request on each call.
+        # Work on translated input only; never mutate persisted conversation.
+        # Forced internal tool calls keep their existing response contract.
+        if not tool_choice and (tools or native_web_tools):
+            last_user = next((i for i in range(len(responses_input) - 1, -1, -1)
+                if responses_input[i].get("role") == "user"), None)
+            if last_user is not None:
+                responses_input.insert(last_user + 1, {
+                    "role": "developer", "type": "message", "content": TURN_START_NOTE,
+                })
         kwargs: dict = {
             "model": model,
             "input": responses_input,

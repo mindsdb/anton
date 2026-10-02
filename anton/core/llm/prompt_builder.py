@@ -20,6 +20,13 @@ if TYPE_CHECKING:
     from anton.core.tools.tool_defs import ToolDef
 
 
+# Boundary between the cross-session static prompt and the per-project /
+# per-conversation tail. The Responses transport sends the static part as
+# a developer message and the tail as another developer message so the static
+# prefix is byte-identical (and provider-cacheable) across projects.
+SESSION_CONTEXT_MARKER = "\n\n# SESSION CONTEXT (this project and conversation)\n"
+
+
 @dataclass(frozen=True)
 class SystemPromptContext:
     """Bundled prompt-injection points for the system prompt.
@@ -186,23 +193,6 @@ class ChatSystemPromptBuilder:
         if tool_prompts:
             prompt += tool_prompts
 
-        # Stable, per-session content goes before the volatile tail so the
-        # prefix stays cache-stable across turns.
-        if project_context:
-            prompt += project_context
-        if self_awareness_context:
-            prompt += self_awareness_context
-        if datasource_context:
-            prompt += datasource_context
-
-        procedural_memory = self._build_procedural_memory_section(skill_store)
-        if procedural_memory:
-            prompt += procedural_memory
-
-        suffix = system_prompt_context.suffix.strip()
-        if suffix:
-            prompt += f"\n\n{suffix}"
-
         # Static note (cache-stable): the current time is no longer in the
         # system prompt — each message carries its send time as a bracketed
         # prefix, so the model reads "now" from the latest message. Keeping the
@@ -212,16 +202,39 @@ class ChatSystemPromptBuilder:
             "bracketed timestamp is metadata, not part of the message text.)"
         )
 
+        # Saved skills change rarely (built-ins plus the user's own), so they
+        # stay in the shared prefix ahead of per-project content.
+        procedural_memory = self._build_procedural_memory_section(skill_store)
+        if procedural_memory:
+            prompt += procedural_memory
+
+        # Everything below depends on the project or conversation. Stable
+        # per-session content first, volatile tail last, so within a session
+        # the prefix still stays cache-stable across turns.
+        session = ""
+        if project_context:
+            session += project_context
+        if self_awareness_context:
+            session += self_awareness_context
+        if datasource_context:
+            session += datasource_context
+
+        suffix = system_prompt_context.suffix.strip()
+        if suffix:
+            session += f"\n\n{suffix}"
+
         # Volatile tail — LAST so everything above can be cached. Only the
         # relevance-filtered memory snapshot remains here; it changes every turn.
         if memory_context:
-            prompt += memory_context
+            session += memory_context
         # Workspace discovery (ENG-578) is volatile too — pads and files
         # change between turns, so it must never sit in the cached prefix.
         if workspace_context:
-            prompt += workspace_context
+            session += workspace_context
 
+        if session.strip():
+            prompt += SESSION_CONTEXT_MARKER + session.lstrip("\n")
         return prompt
 
 
-__all__ = ["ChatSystemPromptBuilder", "SystemPromptContext"]
+__all__ = ["ChatSystemPromptBuilder", "SystemPromptContext", "SESSION_CONTEXT_MARKER"]
