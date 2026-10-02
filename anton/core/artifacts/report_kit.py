@@ -664,7 +664,8 @@ def update_html(path, replacements: dict) -> dict:
 def find_values(path, values) -> dict:
     """Where each value still appears in a saved HTML/Markdown file, as whole tokens.
 
-    Returns {value: [short context, ...]} covering visible text and embedded JSON
+    Returns {value: [short context, ...]} only for values that still appear ({} when
+    none do, so ``assert not k.find_values(...)`` works), covering visible text and embedded JSON
     (``80`` does not match ``1860`` or ``80.5``). After a data refresh, pass the
     superseded figures from the snapshot's change notes and update any occurrence that
     still describes the current state (a "previous value" note may legitimately keep it).
@@ -678,5 +679,7 @@ def find_values(path, values) -> dict:
     for v in values:
         needle = v if isinstance(v, str) else _json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list, bool)) or v is None else _num_text(v)
         pat = _re.compile(r'(?<![\w.])' + _re.escape(needle) + r'(?![\w]|\.\d)')
-        out[needle] = [text[max(0, m.start() - 40):m.end() + 40].strip() for m in pat.finditer(text)][:10]
+        hits = [text[max(0, m.start() - 40):m.end() + 40].strip() for m in pat.finditer(text)][:10]
+        if hits:
+            out[needle] = hits
     return out

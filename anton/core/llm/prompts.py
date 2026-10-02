@@ -610,7 +610,8 @@ sentence from the current source.
       Kit functions escape plain strings: never pass hand-written HTML strings to them.
   k.update_html(path, {id: fragment or json}) -> replace only those elements' content in an
       existing page; everything else stays byte-identical (fails safely on a missing id)
-  k.find_values(path, values) -> where superseded figures still appear (text and embedded JSON)
+  k.find_values(path, values) -> {value: contexts} for superseded figures still present ({} if none);
+      a figure may legitimately reappear as a different quantity, so judge the contexts
   k.data(id, value) -> inert JSON block  k.save(path, html)
   k.check(path, metrics, ids=(), text=()) -> raises AssertionError on problems
 In the same cell, save, run k.check and compare k.filter_preview with your
