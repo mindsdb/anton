@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -222,6 +224,34 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     }
 
 
+# A file's findings while its size and mtime are unchanged, so an open right
+# after the exec that wrote it does not rerun multi-second checkers.
+_LINT_CACHE_MAX_ENTRIES = 512
+_lint_cache: OrderedDict[tuple[str, int, int], list[str]] = OrderedDict()
+_lint_cache_lock = threading.Lock()
+
+
+def _lint_file_cached(
+    linter: Callable[[Path], list[str] | None], path: Path, st: os.stat_result
+) -> list[str] | None:
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    with _lint_cache_lock:
+        cached = _lint_cache.get(key)
+        if cached is not None:
+            _lint_cache.move_to_end(key)
+            return cached
+    file_messages = linter(path)
+    if file_messages is None:
+        # Could not check (no office, no browser): retry next time instead
+        # of remembering an answer that was never given.
+        return None
+    with _lint_cache_lock:
+        _lint_cache[key] = file_messages
+        if len(_lint_cache) > _LINT_CACHE_MAX_ENTRIES:
+            _lint_cache.popitem(last=False)
+    return file_messages
+
+
 def lint_artifact_files(store, slug: str) -> list[str]:
     """Run the format-appropriate checker on every content file of `slug`,
     with no mtime gating: the caller decides when the artifact is worth
@@ -237,7 +267,7 @@ def lint_artifact_files(store, slug: str) -> list[str]:
         linter = linters.get(path.suffix.lower())
         if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
             continue
-        file_messages = linter(path)
+        file_messages = _lint_file_cached(linter, path, st)
         if not file_messages:
             # None (couldn't check) or [] (checked, clean) — either way,
             # nothing worth telling the agent about this file.
