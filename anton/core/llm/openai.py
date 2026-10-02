@@ -1509,6 +1509,19 @@ class OpenAIProvider(LLMProvider):
         responses_input = _translate_messages_to_responses_input(
             messages, supports_vision=self._supports_vision
         )
+        # Cross-session cache stability: keep the static prompt in
+        # `instructions` and carry the per-project tail as a leading developer
+        # message (see SESSION_CONTEXT_MARKER).
+        from .prompt_builder import SESSION_CONTEXT_MARKER
+
+        if system and SESSION_CONTEXT_MARKER in system:
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            system = static
+            responses_input = [
+                {"role": "developer", "type": "message",
+                 "content": SESSION_CONTEXT_MARKER.strip() + "\n" + session},
+                *responses_input,
+            ]
         kwargs: dict = {
             "model": model,
             "input": responses_input,
