@@ -581,3 +581,31 @@ scratchpad exec on `main` that computes from the files on disk, writes the
 outputs via artifact_dir(...), re-reads them and prints a compact verification
 receipt. Then give the final handoff after seeing that receipt.
 """
+
+
+# Product experiment P6: report kit
+ARTIFACTS_PROMPT += """
+REPORT KIT
+Scratchpad cells have the builtin report_kit (k = report_kit): tested, escaped,
+offline HTML parts. Use it for new direct HTML reports instead of writing CSS,
+table loops or filter JavaScript yourself; you still compute every value and
+write every sentence from the current source.
+  k.page(title, *parts, theme="light") -> full document (lang, viewport, CSS)
+  k.section(heading, *parts, id=None)  k.details(summary, *parts)  k.p(*texts)  k.ul(items)
+  k.table(columns, rows, caption=None, id=None)
+  k.audit(metrics) -> Metric/Value table with each metric's exact JSON
+  k.bar_chart(labels, values, name=..., threshold=None, value_label="Value")
+      -> SVG with role img and accessible name `name`; add k.table for exact values
+  k.filter_table(label=, rows=, columns=, key=, value=, results_name=,
+      total_label=, positive_only=True, empty_text=...) -> labelled select
+      (All + each key value) and a region named results_name showing the rows
+      and "total_label: N"; key/value are column names
+  k.filter_preview(rows, columns=, key=, value=, positive_only=True)
+      -> {option: {"rows": [...], "total": n}}, identical logic to its JavaScript
+  k.data(id, value) -> inert JSON block  k.save(path, html)
+  k.check(path, metrics, ids=(), text=()) -> raises AssertionError on problems
+In the same cell, save, then run k.check and compare k.filter_preview with
+your expected per-option results; no separate JavaScript harness round is
+needed. These are not browser checks; say so. Markdown reports and edits of
+existing reports keep their own format; edit those precisely.
+"""

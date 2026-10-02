@@ -467,6 +467,14 @@ import builtins as _anton_builtins
 
 _anton_builtins.artifact_dir = _anton_artifact_dir
 
+# --- report_kit: tested offline HTML report building blocks -----------------
+try:
+    import anton.core.artifacts.report_kit as _anton_report_kit
+
+    _anton_builtins.report_kit = _anton_report_kit
+except Exception:  # never block the scratchpad on an optional helper
+    pass
+
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
 if _scratchpad_model:
