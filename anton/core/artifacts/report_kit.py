@@ -32,11 +32,19 @@ svg{width:100%;height:auto}svg text{fill:currentColor;font:14px system-ui,sans-s
 """
 
 
+def _num_text(value):
+    # Same text as JavaScript String(): integral floats drop ".0", so the
+    # pre-rendered (no-JavaScript) view matches the live view exactly.
+    if type(value) is float and _math.isfinite(value) and value.is_integer() and abs(value) < 1e16:
+        return str(int(value))
+    return str(value)
+
+
 def esc(value) -> str:
     """Escape a value for HTML text/attributes; dict/list/bool/None render as JSON."""
     if isinstance(value, (dict, list, bool)) or value is None:
         value = _json.dumps(value, ensure_ascii=False)
-    return _html.escape(str(value), quote=True)
+    return _html.escape(_num_text(value), quote=True)
 
 
 def p(*texts, cls=None) -> str:
@@ -150,61 +158,99 @@ def _col(cols, name, role):
     return cols.index(name)
 
 
-def filter_preview(rows, *, columns, key, value, positive_only=True, all_label='All') -> dict:
-    """What filter_table shows for each option: {option: {'rows': [...], 'total': n}}."""
+def _keys(cols, key):
+    keys = [key] if isinstance(key, str) else list(key)
+    if not keys:
+        raise ValueError('key must name at least one column')
+    return keys, [_col(cols, k, 'key') for k in keys]
+
+
+def _select(rows, kidx, v, selection, positive_only, all_label):
+    return [i for i, r in enumerate(rows)
+            if all(selection.get(n, all_label) == all_label or str(r[ki]) == str(selection.get(n)) for n, ki in kidx)
+            and (not positive_only or r[v] > 0)]
+
+
+def filter_preview(rows, *, columns, key, value, positive_only=True, all_label='All', selection=None) -> dict:
+    """What filter_table shows, computed with the same rules as its JavaScript.
+
+    key is one column name or a list of names (one select per key, combined
+    with AND). With selection={column: option, ...} returns {'rows', 'total'}
+    for that combination (unspecified keys = all_label). Otherwise, for a
+    single key returns {option: {'rows', 'total'}}; for several keys returns
+    {key: {option: {'rows', 'total'}}} with the other selects at all_label.
+    Rows come back in the caller's shape (dicts stay dicts).
+    """
     cols = list(columns)
-    k, v = _col(cols, key, 'key'), _col(cols, value, 'value')
+    keys, kix = _keys(cols, key)
+    v = _col(cols, value, 'value')
     original = list(rows)
     rows = _rows(cols, original)
     bad = [i for i, r in enumerate(rows) if not _is_num(r[v])]
     if bad:
         raise ValueError(f'value column {value!r} must be numbers; rows {bad[:3]} have {[rows[i][v] for i in bad[:3]]}')
-    options = [all_label] + sorted({str(r[k]) for r in rows})
-    out = {}
-    for opt in options:
-        idx = [i for i, r in enumerate(rows) if (opt == all_label or str(r[k]) == opt) and (not positive_only or r[v] > 0)]
+    kidx = list(zip(keys, kix))
+
+    def result(sel):
+        idx = _select(rows, kidx, v, sel, positive_only, all_label)
         total = sum(rows[i][v] for i in idx)
-        # Rows come back in the caller's shape (dicts stay dicts, lists stay lists).
-        sel = [dict(original[i]) if isinstance(original[i], dict) else list(rows[i]) for i in idx]
-        out[opt] = {'rows': sel, 'total': round(total, 10) if isinstance(total, float) else total}
-    return out
+        return {'rows': [dict(original[i]) if isinstance(original[i], dict) else list(rows[i]) for i in idx],
+                'total': round(total, 10) if isinstance(total, float) else total}
+
+    if selection is not None:
+        unknown = [n for n in selection if n not in keys]
+        if unknown:
+            raise ValueError(f'selection keys {unknown} are not filter keys {keys}')
+        return result(selection)
+    per_key = {n: {o: result({n: o}) for o in [all_label] + sorted({str(r[ki]) for r in rows})} for n, ki in kidx}
+    return per_key[keys[0]] if isinstance(key, str) else per_key
 
 
 _FILTER_JS = """(function(){var root=document.getElementById(%(id)s);if(!root)return;
-var cfg=JSON.parse(document.getElementById(%(data)s).textContent),sel=document.getElementById(%(sel)s),
+var cfg=JSON.parse(document.getElementById(%(data)s).textContent),sels=cfg.selects.map(function(i){return document.getElementById(i);}),
 body=root.querySelector('tbody'),total=document.getElementById(%(total)s),empty=document.getElementById(%(empty)s);
 function cell(v){var td=document.createElement('td');td.textContent=(v!==null&&typeof v==='object')?JSON.stringify(v):String(v);
 if(typeof v==='number')td.className='n';return td;}
-function render(){var o=sel.value,rows=cfg.rows.filter(function(r){return(o===cfg.all||String(r[cfg.key])===o)&&(!cfg.positive||r[cfg.value]>0);});
+function render(){var rows=cfg.rows.filter(function(r){return sels.every(function(s,j){return s.value===cfg.all||String(r[cfg.keys[j]])===s.value;})&&(!cfg.positive||r[cfg.value]>0);});
 body.replaceChildren();rows.forEach(function(r){var tr=document.createElement('tr');r.forEach(function(v){tr.appendChild(cell(v));});body.appendChild(tr);});
 var t=rows.reduce(function(s,r){return s+r[cfg.value];},0);total.textContent=cfg.label+': '+String(Math.round(t*1e10)/1e10);
 empty.hidden=rows.length>0;}
-sel.addEventListener('change',render);render();})();"""
+sels.forEach(function(s){s.addEventListener('change',render);});render();})();"""
 
 
 def filter_table(*, label, rows, columns, key, value, results_name, total_label, positive_only=True,
-                 all_label='All', empty_text='No matching results for this selection.', id='filter') -> str:
-    """Labelled select plus an accessible results region with a live total.
+                 all_label='All', empty_text='No rows match this selection.', id='filter') -> str:
+    """Labelled select(s) plus an accessible results region with a live total.
 
-    ``key`` and ``value`` are column names in ``columns``. Options are
-    ``all_label`` and every distinct key value (sorted). The default
-    (``all_label``) view is pre-rendered so the page is usable without
-    JavaScript; JavaScript re-renders rows, the total and the empty state on
-    change. Use filter_preview() with the same arguments to verify each option.
+    key: one column name, or a list of names for several selects combined with
+    AND; label: one label or a list matching key. value: numeric column to
+    total. Options are all_label plus each distinct value (sorted). The
+    all_label view is pre-rendered so the page works without JavaScript;
+    JavaScript re-renders rows, the total and the empty state on change. Use
+    filter_preview() with the same arguments to verify each option.
     """
     cols = list(columns)
-    k, v = _col(cols, key, 'key'), _col(cols, value, 'value')
+    keys, kix = _keys(cols, key)
+    labels = [label] if isinstance(label, str) else list(label)
+    if len(labels) != len(keys):
+        raise ValueError(f'label needs one entry per key ({len(keys)}), got {len(labels)}')
+    v = _col(cols, value, 'value')
     rows = _rows(cols, rows)
     bad = [i for i, r in enumerate(rows) if not _is_num(r[v])]
     if bad:
         raise ValueError(f'value column {value!r} must be numbers; rows {bad[:3]} have {[rows[i][v] for i in bad[:3]]}')
-    prev = filter_preview(rows, columns=cols, key=key, value=value, positive_only=positive_only, all_label=all_label)
-    first = prev[all_label]
-    ids = {k2: f'{id}-{k2}' for k2 in ('select', 'total', 'empty', 'data', 'region')}
-    opts = ''.join(f'<option value="{esc(o)}">{esc(o)}</option>' for o in prev)
-    cfg = {'rows': rows, 'key': k, 'value': v, 'positive': bool(positive_only), 'all': all_label, 'label': total_label}
-    js = _FILTER_JS % {n: _json.dumps(ids[n2]) for n, n2 in (('id', 'region'), ('data', 'data'), ('sel', 'select'), ('total', 'total'), ('empty', 'empty'))}
-    return (f'<div class="filter"><label for="{ids["select"]}">{esc(label)}</label><select id="{ids["select"]}">{opts}</select></div>'
+    first = filter_preview(rows, columns=cols, key=keys, value=value, positive_only=positive_only,
+                           all_label=all_label, selection={})
+    ids = {k2: f'{id}-{k2}' for k2 in ('total', 'empty', 'data', 'region')}
+    sel_ids = [f'{id}-select' if len(keys) == 1 else f'{id}-select-{j}' for j in range(len(keys))]
+    controls = ''
+    for lab, sid, ki in zip(labels, sel_ids, kix):
+        opts = ''.join(f'<option value="{esc(o)}">{esc(o)}</option>' for o in [all_label] + sorted({str(r[ki]) for r in rows}))
+        controls += f'<label for="{sid}">{esc(lab)}</label><select id="{sid}">{opts}</select> '
+    cfg = {'rows': rows, 'keys': kix, 'selects': sel_ids, 'value': v, 'positive': bool(positive_only),
+           'all': all_label, 'label': total_label}
+    js = _FILTER_JS % {n: _json.dumps(ids[n2]) for n, n2 in (('id', 'region'), ('data', 'data'), ('total', 'total'), ('empty', 'empty'))}
+    return (f'<div class="filter">{controls}</div>'
             f'<section id="{ids["region"]}" role="region" aria-label="{esc(results_name)}"><h2>{esc(results_name)}</h2>'
             f'<p id="{ids["total"]}" aria-live="polite"><strong>{esc(total_label)}: {esc(first["total"])}</strong></p>'
             + table(cols, first['rows']) +

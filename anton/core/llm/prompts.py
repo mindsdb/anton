@@ -587,25 +587,29 @@ receipt. Then give the final handoff after seeing that receipt.
 ARTIFACTS_PROMPT += """
 REPORT KIT
 Scratchpad cells have the builtin report_kit (k = report_kit): tested, escaped,
-offline HTML parts. Use it for new direct HTML reports instead of writing CSS,
-table loops or filter JavaScript yourself; you still compute every value and
-write every sentence from the current source.
+offline HTML parts. Use its components where they fit a new HTML report and
+write your own HTML/CSS/JS for anything they do not cover (other chart types,
+custom layouts or interactions). You still compute every value and write every
+sentence from the current source.
   k.page(title, *parts, theme="light") -> full document (lang, viewport, CSS)
   k.section(heading, *parts, id=None)  k.details(summary, *parts)  k.p(*texts)  k.ul(items)
   k.table(columns, rows, caption=None, id=None)   rows: lists, or dicts keyed by column name
   k.audit(metrics) -> Metric/Value table with each metric's exact JSON
   k.bar_chart(labels, values, name=..., threshold=None, value_label="Value")
-      -> SVG with role img and accessible name `name`; add k.table for exact values
-  k.filter_table(label=, rows=, columns=, key=, value=, results_name=,
-      total_label=, positive_only=True, empty_text=...) -> labelled select
-      (All + each key value) and a region named results_name showing the rows
-      and "total_label: N"; key/value are column names
-  k.filter_preview(rows, columns=, key=, value=, positive_only=True)
-      -> {option: {"rows": [...], "total": n}}, identical logic to its JavaScript
+      -> horizontal SVG bars, role img, accessible name `name`; add k.table for exact values
+  k.filter_table(label=, rows=, columns=, key=, value=, results_name=, total_label=,
+      positive_only=True, empty_text=...) -> labelled select per key (key: a column
+      name or a list of names, combined with AND; label: one per key), options All
+      plus each value, and a region named results_name with the rows and
+      "total_label: N"; the All view is pre-rendered for no-JavaScript use
+  k.filter_preview(rows, columns=, key=, value=, positive_only=True, selection=None)
+      -> per-option {"rows", "total"} (or one result for selection={column: option}),
+      same logic as the filter JavaScript; rows keep your shape
   k.data(id, value) -> inert JSON block  k.save(path, html)
   k.check(path, metrics, ids=(), text=()) -> raises AssertionError on problems
-In the same cell, save, then run k.check and compare k.filter_preview with
-your expected per-option results; no separate JavaScript harness round is
-needed. These are not browser checks; say so. Markdown reports and edits of
-existing reports keep their own format; edit those precisely.
+In the same cell, save, run k.check and compare k.filter_preview with your
+expected results; no separate JavaScript harness round is needed for kit
+filters. These are not browser checks; say so. Custom JavaScript you write
+yourself still needs its own test. Markdown reports and edits of existing
+reports keep their own format; edit those precisely.
 """
