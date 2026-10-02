@@ -701,6 +701,18 @@ def _same_tag_inner(fragment: str, tag: str, ident: str):
     return s[p.inner:p.end]
 
 
+_LEAD_RE = _re.compile(r'\s*<(h[1-6]|summary)\b[^>]*>.*?</\1\s*>', _re.S | _re.I)
+_STARTS_LABEL_RE = _re.compile(r'\s*<(h[1-6]|summary)\b', _re.I)
+
+
+def _keep_label(old_inner: str, new_inner: str) -> str:
+    """Keep the element's leading heading (or <details> summary) unless the new content brings its own."""
+    m = _LEAD_RE.match(old_inner)
+    if m and not _STARTS_LABEL_RE.match(new_inner):
+        return old_inner[:m.end()] + new_inner
+    return new_inner
+
+
 def update_html(path, replacements: dict) -> dict:
     """Replace the inner HTML of elements by id in a saved report; every other byte stays identical.
 
@@ -711,6 +723,8 @@ def update_html(path, replacements: dict) -> dict:
     while keeping its theme, layout and wording; then run k.find_values and k.check.
     A fragment that is one element of the same tag (e.g. k.section(...) for a <section id=...>)
     replaces that element's content, keeping the existing id and attributes, instead of nesting.
+    The element's leading heading (or a <details> summary) is kept unless the new content
+    starts with its own, so k.p(...)/k.table(...) for a titled section keeps its title.
     """
     path = _Path(path)
     if path.is_symlink():
@@ -726,7 +740,7 @@ def update_html(path, replacements: dict) -> dict:
         value = replacements[ident]
         if isinstance(value, str):
             inner = _same_tag_inner(value, tags.get(ident, ''), ident)
-            value = inner if inner is not None else value
+            value = _keep_label(raw[a:b], inner if inner is not None else value)
         else:
             value = _json_text(value)
         raw = raw[:a] + value + raw[b:]
