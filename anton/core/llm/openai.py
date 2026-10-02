@@ -16,6 +16,7 @@ from anton.utils.datasources import scrub_credentials
 
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
+    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMProvider,
@@ -1636,6 +1637,7 @@ class OpenAIProvider(LLMProvider):
         cache_read_tokens = 0
         cache_creation_tokens = 0
         stop_reason: str | None = None
+        terminal_seen = False
         served_model: str | None = None  # from the final Response object (ENG-1638)
 
         # Map output_index → in-flight function-call state. Responses API uses
@@ -1733,23 +1735,50 @@ class OpenAIProvider(LLMProvider):
                     if info["started"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
-                # Final completion event carries the resolved Response object
-                # with usage/stop_reason. We trust the structured parse here in
-                # case the streamed deltas missed something (e.g. server-tool
-                # calls produce text we already streamed but no function call).
-                elif etype == "response.completed":
+                # The terminal object is authoritative: deltas can be missing
+                # even when the final output contains a complete tool call.
+                elif etype in ("response.completed", "response.incomplete", "response.failed"):
                     final_response = getattr(event, "response", None)
-                    if final_response is not None:
-                        usage = getattr(final_response, "usage", None)
-                        if usage is not None:
-                            (
-                                input_tokens,
-                                cache_read_tokens,
-                                cache_creation_tokens,
-                            ) = _split_cached_input(usage)
-                            output_tokens = getattr(usage, "output_tokens", 0) or 0
-                        stop_reason = getattr(final_response, "status", None)
-                        served_model = getattr(final_response, "model", None) or served_model
+                    if final_response is None:
+                        continue
+                    terminal_seen = True
+                    stop_reason = _response_stop_reason(final_response, model)
+                    served_model = getattr(final_response, "model", None) or served_model
+                    if hasattr(final_response, "output"):
+                        parsed = _parse_response_object(final_response, model)
+                        if parsed.content.startswith(content_text):
+                            remaining = parsed.content[len(content_text):]
+                            if remaining:
+                                yield StreamTextDelta(text=remaining)
+                        content_text = parsed.content
+                        ended = {call.id for call in tool_calls}
+                        started = {info["call_id"] for info in fc_state.values() if info["started"]}
+                        arguments = {
+                            getattr(item, "call_id", "") or getattr(item, "id", ""):
+                            getattr(item, "arguments", "") or ""
+                            for item in final_response.output or []
+                            if getattr(item, "type", "") == "function_call"
+                        }
+                        for call in parsed.tool_calls:
+                            if call.id not in ended:
+                                if call.id not in started:
+                                    yield StreamToolUseStart(id=call.id, name=call.name)
+                                streamed_arguments = next((
+                                    "".join(info["args_parts"]) for info in fc_state.values()
+                                    if info["call_id"] == call.id
+                                ), "")
+                                final_arguments = arguments.get(call.id, "")
+                                if final_arguments.startswith(streamed_arguments):
+                                    remaining = final_arguments[len(streamed_arguments):]
+                                    if remaining:
+                                        yield StreamToolUseDelta(id=call.id, json_delta=remaining)
+                                yield StreamToolUseEnd(id=call.id)
+                        tool_calls = parsed.tool_calls
+                    usage = getattr(final_response, "usage", None)
+                    if usage is not None:
+                        input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
+                        output_tokens = getattr(usage, "output_tokens", 0) or 0
+                    break
         except openai.BadRequestError as exc:
             _raise_for_bad_request(exc)
             raise
@@ -1811,6 +1840,13 @@ class OpenAIProvider(LLMProvider):
         finally:
             await _aclose_stream(stream)
 
+        if not terminal_seen:
+            raise TransientProviderError(
+                "The model response ended before its completion was confirmed.",
+                provider="The model provider", code="truncated_stream",
+                session_backoff=True, model=model,
+            )
+
         yield StreamComplete(
             response=LLMResponse(
                 content=content_text,
@@ -1828,6 +1864,27 @@ class OpenAIProvider(LLMProvider):
                 model=served_model,
             )
         )
+
+
+def _response_stop_reason(response, model: str) -> str | None:
+    """Translate native terminal status without treating incomplete work as done."""
+    status = getattr(response, "status", None)
+    if status == "incomplete":
+        reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+        if reason == "max_output_tokens":
+            return "max_tokens"
+        if reason == "content_filter":
+            raise ContentValidationError(
+                "The model provider could not complete this response because of its content policy.",
+                code="content_filter",
+            )
+    if status in ("failed", "incomplete"):
+        raise TransientProviderError(
+            "The model provider did not complete this response.",
+            provider="The model provider", code="incomplete_response",
+            session_backoff=True, model=model,
+        )
+    return status
 
 
 def _parse_response_object(response, model: str) -> LLMResponse:
@@ -1871,7 +1928,7 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
-    status = getattr(response, "status", None)
+    status = _response_stop_reason(response, model)
     raise_on_empty_response(
         content=content_text, tool_calls=tool_calls, stop_reason=status, model=model,
     )
