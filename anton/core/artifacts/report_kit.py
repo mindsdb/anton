@@ -16,7 +16,8 @@ from pathlib import Path as _Path
 
 __all__ = ["esc", "p", "ul", "table", "audit", "section", "details", "data", "bar_chart",
            "filter_table", "filter_preview", "page", "save", "check",
-           "rel_link", "md_table", "md_audit", "md_check", "link", "inline", "Html"]
+           "rel_link", "md_table", "md_audit", "md_check", "link", "inline", "Html",
+           "update_html", "find_values"]
 
 _CSS = """
 :root{--bg:#f6f8fb;--panel:#fff;--ink:#17202c;--muted:#4f5d6e;--line:#d6dde6;--accent:#2a62b8;--hot:#b4371f}
@@ -567,3 +568,96 @@ def md_check(path, metrics=None, *, text=(), audit_header=('Metric', 'Value')) -
         raise AssertionError('; '.join(problems))
     return {'path': str(path), 'tables': len(tables), 'audit_metrics': sorted(metrics or {}),
             'links_checked': len(links), 'text_checked': len(text), 'renderer_check': 'not performed'}
+
+
+# --- editing existing reports ---------------------------------------------------
+
+_VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr'}
+
+
+def _id_spans(raw: str, wanted: set) -> dict:
+    """Inner-HTML offsets (start, end) for elements whose id is in ``wanted``."""
+    from html.parser import HTMLParser
+    starts = [0] + [i + 1 for i, ch in enumerate(raw) if ch == '\n']   # HTMLParser counts lines by \n only
+
+    class P(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=False)
+            self.spans, self.open = {}, []   # open: [id, tag, depth, inner_start]
+
+        def _off(self):
+            line, col = self.getpos()
+            return starts[line - 1] + col
+
+        def handle_starttag(self, tag, attrs):
+            for o in self.open:
+                if o[1] == tag:
+                    o[2] += 1
+            ident = dict(attrs).get('id')
+            if ident in wanted and ident not in self.spans and tag not in _VOID:
+                self.open.append([ident, tag, 1, self._off() + len(self.get_starttag_text())])
+            elif ident in wanted and tag in _VOID:
+                raise ValueError(f'#{ident} is a void <{tag}> element with no content to replace')
+
+        def handle_endtag(self, tag):
+            for o in list(self.open):
+                if o[1] == tag:
+                    o[2] -= 1
+                    if o[2] == 0:
+                        self.spans[o[0]] = (o[3], self._off())
+                        self.open.remove(o)
+
+    parser = P()
+    parser.feed(raw)
+    parser.close()
+    if parser.open:
+        raise ValueError(f'could not find the end tag of {["#" + o[0] for o in parser.open]}; rebuild the page instead')
+    return parser.spans
+
+
+def update_html(path, replacements: dict) -> dict:
+    """Replace the inner HTML of elements by id in a saved report; every other byte stays identical.
+
+    ``replacements`` maps an element id to an HTML fragment (e.g. from k.table, k.p, k.audit
+    rows, or k.esc(text) for plain text); for an embedded <script type="application/json">
+    block pass the new data as a dict/list and it is serialised safely. Raises ValueError for a missing id, a void element
+    or an unclosed element, so nothing is half-written. Use it to refresh an existing report
+    while keeping its theme, layout and wording; then run k.find_values and k.check.
+    """
+    path = _Path(path)
+    if path.is_symlink():
+        raise ValueError('refusing to write through a symlink')
+    raw = path.read_bytes().decode('utf-8')   # bytes: keep CRLF and every other byte exactly
+    wanted = {str(k) for k in replacements}
+    spans = _id_spans(raw, wanted)
+    missing = sorted(wanted - set(spans))
+    if missing:
+        raise ValueError(f'ids not found in {path.name}: {missing}')
+    for ident, (a, b) in sorted(spans.items(), key=lambda kv: -kv[1][0]):
+        value = replacements[ident]
+        raw = raw[:a] + (value if isinstance(value, str) else _json_text(value)) + raw[b:]
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_bytes(raw.encode('utf-8'))
+    tmp.replace(path)
+    return {'path': str(path), 'replaced': sorted(spans), 'bytes': path.stat().st_size}
+
+
+def find_values(path, values) -> dict:
+    """Where each value still appears in a saved HTML/Markdown file, as whole tokens.
+
+    Returns {value: [short context, ...]} covering visible text and embedded JSON
+    (``80`` does not match ``1860`` or ``80.5``). After a data refresh, pass the
+    superseded figures from the snapshot's change notes and update any occurrence that
+    still describes the current state (a "previous value" note may legitimately keep it).
+    """
+    raw = _Path(path).read_bytes().decode('utf-8')
+    text = _re.sub(r'<style.*?</style>', ' ', raw, flags=_re.S | _re.I)
+    text = _re.sub(r'<script(?![^>]*application/json)[^>]*>.*?</script>', ' ', text, flags=_re.S | _re.I)
+    text = _html.unescape(_re.sub(r'<[^>]+>', ' ', text))
+    text = _re.sub(r'\s+', ' ', text)
+    out = {}
+    for v in values:
+        needle = v if isinstance(v, str) else _json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list, bool)) or v is None else _num_text(v)
+        pat = _re.compile(r'(?<![\w.])' + _re.escape(needle) + r'(?![\w]|\.\d)')
+        out[needle] = [text[max(0, m.start() - 40):m.end() + 40].strip() for m in pat.finditer(text)][:10]
+    return out

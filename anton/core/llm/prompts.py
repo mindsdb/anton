@@ -608,6 +608,9 @@ sentence from the current source.
   k.link(href, text), k.inline(*parts) -> markup for p/ul/table cells, e.g.
       k.p(k.inline("Source: ", k.link(k.rel_link(out, "source.json"), "source.json")))
       Kit functions escape plain strings: never pass hand-written HTML strings to them.
+  k.update_html(path, {id: fragment or json}) -> replace only those elements' content in an
+      existing page; everything else stays byte-identical (fails safely on a missing id)
+  k.find_values(path, values) -> where superseded figures still appear (text and embedded JSON)
   k.data(id, value) -> inert JSON block  k.save(path, html)
   k.check(path, metrics, ids=(), text=()) -> raises AssertionError on problems
 In the same cell, save, run k.check and compare k.filter_preview with your
@@ -645,8 +648,10 @@ artifact_dir(slug), re-reads the saved outputs and prints a compact receipt.
 Keep the artifact, its title, layout, wording and theme unless the request
 changes them. After a data change, recompute every derived value from the
 current files: headline, tables, charts, embedded data, citations and notes.
-Regenerating the page from the data is usually simplest; make sure no
-superseded value remains anywhere. For presentation-only or format-only
+Regenerate a page you built with the kit; for an existing page whose sections
+have ids, replace just the affected sections with k.update_html instead of
+retyping the whole page. Either way, run k.find_values with the superseded
+figures from the change notes and k.check, so no stale value remains. For presentation-only or format-only
 requests, edit precisely and confirm every number, row, citation and file the
 request says to preserve is unchanged.
 """
