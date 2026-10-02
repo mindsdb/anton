@@ -1484,6 +1484,8 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
+        # Memory section by user message, reused within one turn. None outside a turn.
+        self._turn_memory: dict[str, str] | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
         # nothing reads this to change behaviour. The control that will
         # (ENG-1531) is deliberately unbuilt until this has reported real
@@ -2250,7 +2252,14 @@ class ChatSession:
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
         if self._cortex is not None:
-            memory_section = await self._cortex.build_memory_context(user_message)
+            # Once per turn: a retry must not repeat the rule filter model calls.
+            turn_memory = self._turn_memory
+            if turn_memory is not None and user_message in turn_memory:
+                memory_section = turn_memory[user_message]
+            else:
+                memory_section = await self._cortex.build_memory_context(user_message)
+                if turn_memory is not None:
+                    turn_memory[user_message] = memory_section
 
         sa_section = ""
         if self._self_awareness is not None and self._cortex is None:
@@ -4495,6 +4504,7 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
+        self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
@@ -4987,6 +4997,7 @@ class ChatSession:
             _turn_exc = _e
             raise
         finally:
+            self._turn_memory = None
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
