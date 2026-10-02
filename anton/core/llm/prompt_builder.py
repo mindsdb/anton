@@ -202,12 +202,6 @@ class ChatSystemPromptBuilder:
             "bracketed timestamp is metadata, not part of the message text.)"
         )
 
-        # Saved skills change rarely (built-ins plus the user's own), so they
-        # stay in the shared prefix ahead of per-project content.
-        procedural_memory = self._build_procedural_memory_section(skill_store)
-        if procedural_memory:
-            prompt += procedural_memory
-
         # Everything below depends on the project or conversation. Stable
         # per-session content first, volatile tail last, so within a session
         # the prefix still stays cache-stable across turns.
@@ -218,6 +212,12 @@ class ChatSystemPromptBuilder:
             session += self_awareness_context
         if datasource_context:
             session += datasource_context
+
+        # The skill index follows the context it navigates (user skills differ
+        # per user, so it does not belong in the cross-project prefix either).
+        procedural_memory = self._build_procedural_memory_section(skill_store)
+        if procedural_memory:
+            session += procedural_memory
 
         suffix = system_prompt_context.suffix.strip()
         if suffix:
