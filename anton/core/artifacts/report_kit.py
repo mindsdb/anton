@@ -307,6 +307,8 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
     """Re-read a saved HTML report and verify structure and exact audit values.
 
     Raises AssertionError listing every problem; returns a receipt otherwise.
+    Links that would show in the browser default blue on a dark page are repaired
+    in place (they take the text colour, underlined) and listed under 'repaired'.
     Checks: lang + viewport, no external http(s) assets, every metric shown in
     the audit table with its exact JSON value, every required element id, every
     required text fragment in visible text, and parseable JSON script blocks.
@@ -411,9 +413,15 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
            for m in _re.finditer(r'<(h[1-6])\b[^>]*>(.*?)</\1\s*>\s*<\1\b[^>]*>\2</\1\s*>', raw, _re.S | _re.I)]
     if dup:
         problems.append(f'duplicated headings (the same heading twice in a row): {dup[:3]}')
+    repaired = []
     dark_links = _dark_default_links(raw)
     if dark_links:
-        problems.append(f'{dark_links} link(s) would show in the browser default blue on a dark background; use k.link() or add an a{{color:...}} rule')
+        # Mechanical and safe to fix here: the links take the surrounding (light) text colour,
+        # underlined, so an existing dark page stays legible without another editing round.
+        raw = _add_link_rule(raw)
+        _Path(path).write_text(raw, encoding='utf-8')
+        repaired.append(f'{dark_links} link(s) would have shown in the browser default blue on a dark background; '
+                        f'added {_LINK_RULE} to the page style')
     # The audit table: the element with audit_id itself, else the first table
     # inside it, else the first table headed Metric | Value (pages not built
     # with the kit often put the id on an enclosing section).
@@ -442,9 +450,10 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
     if absent:
         problems.append(f'missing text: {absent}')
     if problems:
-        raise AssertionError('; '.join(problems))
+        raise AssertionError('; '.join(problems + [f'(already repaired: {r})' for r in repaired]))
     return {'path': str(path), 'audit_metrics': sorted(metrics), 'ids': sorted(ids), 'text_checked': len(text),
-            'local_links_checked': len(parser.local), 'self_contained': True, 'browser_check': 'not performed'}
+            'local_links_checked': len(parser.local), 'self_contained': True, 'browser_check': 'not performed',
+            **({'repaired': repaired} if repaired else {})}
 
 
 # --- links and Markdown -----------------------------------------------------
@@ -661,6 +670,19 @@ def _css_luminance(value: str):
         rgb = [int(x) for x in m.groups()]
     lin = [(c / 255) / 12.92 if c / 255 <= 0.03928 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
     return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+_LINK_RULE = 'a{color:inherit;text-decoration:underline}'
+
+
+def _add_link_rule(raw: str) -> str:
+    """``raw`` with the legible-link rule added to its first <style> (or a new one in <head>)."""
+    m = _re.search(r'</style\s*>', raw, _re.I)
+    if m:
+        return raw[:m.start()] + '\n' + _LINK_RULE + '\n' + raw[m.start():]
+    m = _re.search(r'</head\s*>', raw, _re.I)
+    at = m.start() if m else 0
+    return raw[:at] + '<style>' + _LINK_RULE + '</style>' + raw[at:]
 
 
 def _dark_default_links(raw: str) -> int:
