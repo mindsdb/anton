@@ -146,6 +146,17 @@ def _key_path(path: str, key) -> str:
     return f"{path}.{key}" if isinstance(key, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) else f"{path}[{json.dumps(key, ensure_ascii=False)}]"
 
 
+def _identity(row):
+    """Record identity used to pair list items: a list row's first scalar, or a dict's id-like field."""
+    if isinstance(row, list) and row and not isinstance(row[0], (dict, list)):
+        return ("first", row[0])
+    if isinstance(row, dict):
+        for key in ("id", "key", "name", "code"):
+            if key in row and not isinstance(row[key], (dict, list)):
+                return (key, row[key])
+    return None
+
+
 def _json_changes(a, b, path: str, out: list[str]) -> None:
     if len(out) > MAX_JSON_CHANGES:
         return
@@ -167,7 +178,13 @@ def _json_changes(a, b, path: str, out: list[str]) -> None:
                 continue
             if op == "replace" and i2 - i1 == j2 - j1:
                 for i, j in zip(range(i1, i2), range(j1, j2)):
-                    if len(sa[i]) <= 160 and len(sb[j]) <= 160 or not isinstance(a[i], (dict, list)):
+                    ia, ib = _identity(a[i]), _identity(b[j])
+                    if ia is not None and ib is not None and ia != ib:
+                        # Different records at the same position: say so instead of
+                        # describing one record as having turned into another.
+                        out.append(f"removed {path}[{i}] (previous index): {_short(a[i])}")
+                        out.append(f"added {path}[{j}] (current index): {_short(b[j])}")
+                    elif len(sa[i]) <= 160 and len(sb[j]) <= 160 or not isinstance(a[i], (dict, list)):
                         out.append(f"changed {path}[{i}]: {_short(a[i])} -> {_short(b[j])}")
                     else:
                         _json_changes(a[i], b[j], f"{path}[{i}]", out)

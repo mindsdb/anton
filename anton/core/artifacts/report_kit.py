@@ -319,8 +319,8 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
             self.ids, self.ext, self.json_ok, self.texts = set(), [], True, []
             self.local, self.plain, self.code = [], [], 0
             self.in_script = None
-            self.rows, self.cur, self.cell, self.in_audit = [], None, None, False
-            self.depth = 0
+            self.tables, self.stack, self.cur, self.cell = [], [], None, None
+            self.audit_ctx = None   # [tag, depth] while inside the element with id=audit_id
             self.lang = self.viewport = False
 
         def handle_starttag(self, tag, attrs):
@@ -341,11 +341,16 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
             if tag == 'script':
                 self.in_script = a.get('type', '')
                 self.buf = ''
-            if tag == 'table' and a.get('id') == audit_id:
-                self.in_audit = True
-            if self.in_audit and tag == 'tr':
+            if self.audit_ctx is not None and tag == self.audit_ctx[0]:
+                self.audit_ctx[1] += 1
+            elif a.get('id') == audit_id and tag != 'table' and self.audit_ctx is None:
+                self.audit_ctx = [tag, 1]
+            if tag == 'table':
+                self.tables.append({'rows': [], 'own_id': a.get('id') == audit_id, 'inside': self.audit_ctx is not None})
+                self.stack.append(len(self.tables) - 1)
+            if self.stack and tag == 'tr':
                 self.cur = []
-            if self.in_audit and tag in ('td', 'th') and self.cur is not None:
+            if self.stack and tag in ('td', 'th') and self.cur is not None:
                 self.cell = ''
 
         def handle_endtag(self, tag):
@@ -358,14 +363,18 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
                     except ValueError:
                         self.json_ok = False
                 self.in_script = None
-            if self.in_audit and tag in ('td', 'th') and self.cell is not None:
+            if self.stack and tag in ('td', 'th') and self.cell is not None:
                 self.cur.append(self.cell.strip())
                 self.cell = None
-            if self.in_audit and tag == 'tr' and self.cur is not None:
-                self.rows.append(self.cur)
+            if self.stack and tag == 'tr' and self.cur is not None:
+                self.tables[self.stack[-1]]['rows'].append(self.cur)
                 self.cur = None
-            if tag == 'table' and self.in_audit:
-                self.in_audit = False
+            if tag == 'table' and self.stack:
+                self.stack.pop()
+            if self.audit_ctx is not None and tag == self.audit_ctx[0]:
+                self.audit_ctx[1] -= 1
+                if self.audit_ctx[1] == 0:
+                    self.audit_ctx = None
 
         def handle_data(self, d):
             if self.in_script is not None:
@@ -394,8 +403,18 @@ def check(path, metrics: dict, *, ids=(), text=(), audit_id='metric-audit') -> d
     broken = _broken_links(path, parser.local, parser.ids)
     if broken:
         problems.append(f'broken local links: {broken[:5]}')
-    shown = {r[0]: r[1] for r in parser.rows if len(r) == 2}
+    # The audit table: the element with audit_id itself, else the first table
+    # inside it, else the first table headed Metric | Value (pages not built
+    # with the kit often put the id on an enclosing section).
+    audit = (next((t for t in parser.tables if t['own_id']), None)
+             or next((t for t in parser.tables if t['inside']), None)
+             or next((t for t in parser.tables if t['rows'] and [c.strip().lower() for c in t['rows'][0][:2]] == ['metric', 'value']), None))
+    shown = {r[0]: r[1] for r in (audit or {'rows': []})['rows'] if len(r) == 2}
+    if metrics and audit is None:
+        problems.append(f'no Metric/Value audit table found (#{audit_id}, a table inside it, or a table headed Metric | Value)')
     for k, v in metrics.items():
+        if audit is None:
+            break
         if k not in shown:
             problems.append(f'audit row missing: {k}')
             continue
