@@ -329,7 +329,11 @@ OPEN_ARTIFACT_TOOL = ToolDef(
     name="open_artifact",
     description=(
         "Load an existing artifact by slug. Returns the folder path plus the "
-        "list of files so you can decide what to edit. Combine with the "
+        "list of files so you can decide what to edit. Its folder is also "
+        "available in scratchpad code as artifact_dir(slug): when the current "
+        "content is already in the PROJECT FILE SNAPSHOT, call open_artifact "
+        "and, in the same response, the scratchpad cell that edits and "
+        "verifies the files. Combine with the "
         "scratchpad to read existing files (`open(path).read()`) or write "
         "updates back into the folder. Provenance is updated automatically — "
         "every turn that modifies a file in the folder is appended to the "

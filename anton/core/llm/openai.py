@@ -871,6 +871,16 @@ async def _aclose_stream(stream: object) -> None:
             pass
 
 
+# Product experiment P8: turn-start note placed after the latest user message.
+TURN_START_NOTE = (
+    "TURN START (system note about the latest user message; not user content): if it needs "
+    "tool work, begin your first response with one short, specific sentence saying what you "
+    "will do, then make the tool calls in that same response. To change a catalogued "
+    "artifact whose content is in the PROJECT FILE SNAPSHOT, call open_artifact and, in the "
+    "same response, the scratchpad cell that writes via artifact_dir(slug) and verifies."
+)
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -1528,6 +1538,15 @@ class OpenAIProvider(LLMProvider):
                  "content": SESSION_CONTEXT_MARKER.strip() + "\n" + session},
                 *responses_input,
             ]
+            # Product experiment P8: a short turn-start note right after the
+            # latest user message (the decision point). Computed per request,
+            # never stored in history; same position for every call of a turn.
+            if not tool_choice:
+                last_user = max((i for i, item in enumerate(responses_input)
+                                 if isinstance(item, dict) and item.get("role") == "user"), default=None)
+                if last_user is not None:
+                    responses_input.insert(last_user + 1, {
+                        "role": "developer", "type": "message", "content": TURN_START_NOTE})
         kwargs: dict = {
             "model": model,
             "input": responses_input,
