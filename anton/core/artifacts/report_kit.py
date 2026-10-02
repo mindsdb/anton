@@ -52,12 +52,28 @@ def _is_num(v):
     return type(v) in (int, float) and _math.isfinite(v)
 
 
-def table(columns, rows, *, caption=None, id=None) -> str:
-    """Accessible table; numeric cells right-aligned. Cells are escaped."""
+def _rows(columns, rows, where='rows'):
+    """Accept rows as sequences (one cell per column) or dicts keyed by column name."""
     cols = list(columns)
-    rows = [list(r) for r in rows]
-    if any(len(r) != len(cols) for r in rows):
-        raise ValueError('every row must have one cell per column')
+    out = []
+    for i, r in enumerate(rows):
+        if isinstance(r, dict):
+            missing = [c for c in cols if c not in r]
+            if missing:
+                raise ValueError(f'{where}[{i}] is a dict without column(s) {missing}; keys are {list(r)}')
+            out.append([r[c] for c in cols])
+        else:
+            r = list(r)
+            if len(r) != len(cols):
+                raise ValueError(f'{where}[{i}] has {len(r)} cells but columns has {len(cols)}: {cols}')
+            out.append(r)
+    return out
+
+
+def table(columns, rows, *, caption=None, id=None) -> str:
+    """Accessible table; rows are lists or dicts keyed by column name; numbers right-aligned; cells escaped."""
+    cols = list(columns)
+    rows = _rows(cols, rows)
     numeric = [bool(rows) and all(_is_num(r[i]) for r in rows) for i in range(len(cols))]
     head = ''.join(f'<th scope="col"{" class=n" if numeric[i] else ""}>{esc(c)}</th>' for i, c in enumerate(cols))
     body = ''.join('<tr>' + ''.join(f'<td{" class=n" if numeric[i] else ""}>{esc(v)}</td>' for i, v in enumerate(r)) + '</tr>' for r in rows)
@@ -95,15 +111,20 @@ def data(id, value) -> str:
     return f'<script type="application/json" id="{esc(id)}">{_json_text(value)}</script>'
 
 
-def bar_chart(labels, values, *, name, threshold=None, value_label='Value', id='chart') -> str:
+def bar_chart(labels, values=None, *, name, threshold=None, value_label='Value', id='chart') -> str:
     """Offline accessible horizontal bar chart (role=img, accessible name = name).
 
     Bars at or above ``threshold`` use the highlight colour; a dashed line marks
     the threshold. Add a data table separately for exact values.
     """
-    labels, values = [str(x) for x in labels], list(values)
-    if len(labels) != len(values) or not labels or not all(_is_num(v) and v >= 0 for v in values):
-        raise ValueError('labels and non-negative finite values must match')
+    if values is None and isinstance(labels, dict):
+        labels, values = list(labels), list(labels.values())
+    labels, values = [str(x) for x in labels], list(values if values is not None else [])
+    if len(labels) != len(values) or not labels:
+        raise ValueError(f'bar_chart needs matching labels and values (got {len(labels)} labels, {len(values)} values)')
+    bad = [(l, v) for l, v in zip(labels, values) if not (_is_num(v) and v >= 0)]
+    if bad:
+        raise ValueError(f'bar_chart values must be non-negative finite numbers; bad: {bad[:3]}')
     top = max([*values, threshold or 0, 1])
     left, width, row = 130, 520, 44
     h = 30 + row * len(labels) + (30 if threshold is not None else 10)
@@ -123,10 +144,20 @@ def bar_chart(labels, values, *, name, threshold=None, value_label='Value', id='
             + ''.join(parts) + '</svg>')
 
 
+def _col(cols, name, role):
+    if name not in cols:
+        raise ValueError(f'{role}={name!r} is not one of columns {cols}')
+    return cols.index(name)
+
+
 def filter_preview(rows, *, columns, key, value, positive_only=True, all_label='All') -> dict:
     """What filter_table shows for each option: {option: {'rows': [...], 'total': n}}."""
     cols = list(columns)
-    k, v = cols.index(key), cols.index(value)
+    k, v = _col(cols, key, 'key'), _col(cols, value, 'value')
+    rows = _rows(cols, rows)
+    bad = [i for i, r in enumerate(rows) if not _is_num(r[v])]
+    if bad:
+        raise ValueError(f'value column {value!r} must be numbers; rows {bad[:3]} have {[rows[i][v] for i in bad[:3]]}')
     options = [all_label] + sorted({str(r[k]) for r in rows})
     out = {}
     for opt in options:
@@ -159,10 +190,11 @@ def filter_table(*, label, rows, columns, key, value, results_name, total_label,
     change. Use filter_preview() with the same arguments to verify each option.
     """
     cols = list(columns)
-    k, v = cols.index(key), cols.index(value)
-    rows = [list(r) for r in rows]
-    if not all(_is_num(r[v]) for r in rows):
-        raise ValueError('value column must be numeric')
+    k, v = _col(cols, key, 'key'), _col(cols, value, 'value')
+    rows = _rows(cols, rows)
+    bad = [i for i, r in enumerate(rows) if not _is_num(r[v])]
+    if bad:
+        raise ValueError(f'value column {value!r} must be numbers; rows {bad[:3]} have {[rows[i][v] for i in bad[:3]]}')
     prev = filter_preview(rows, columns=cols, key=key, value=value, positive_only=positive_only, all_label=all_label)
     first = prev[all_label]
     ids = {k2: f'{id}-{k2}' for k2 in ('select', 'total', 'empty', 'data', 'region')}

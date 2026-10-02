@@ -592,7 +592,7 @@ table loops or filter JavaScript yourself; you still compute every value and
 write every sentence from the current source.
   k.page(title, *parts, theme="light") -> full document (lang, viewport, CSS)
   k.section(heading, *parts, id=None)  k.details(summary, *parts)  k.p(*texts)  k.ul(items)
-  k.table(columns, rows, caption=None, id=None)
+  k.table(columns, rows, caption=None, id=None)   rows: lists, or dicts keyed by column name
   k.audit(metrics) -> Metric/Value table with each metric's exact JSON
   k.bar_chart(labels, values, name=..., threshold=None, value_label="Value")
       -> SVG with role img and accessible name `name`; add k.table for exact values
