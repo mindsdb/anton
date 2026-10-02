@@ -432,7 +432,7 @@ _ANTON_PROJECT_ROOT = os.getcwd()
 
 
 def _anton_artifact_dir(slug_or_name):
-    """Absolute folder of a registered artifact in this project.
+    """Absolute folder (pathlib.Path) of a registered artifact in this project.
 
     Accepts a slug or the exact name passed to create_artifact. An exact slug
     wins; among artifacts sharing a name the most recently created is used.
@@ -454,9 +454,9 @@ def _anton_artifact_dir(slug_or_name):
         elif key == data.get("name"):
             by_name.append((str(data.get("createdAt") or ""), str(meta.parent)))
     if by_slug:
-        return str(by_slug[0])
+        return _Path(by_slug[0])
     if by_name:
-        return max(by_name)[1]
+        return _Path(max(by_name)[1])
     raise LookupError(
         f"No registered artifact with slug or name {key!r}; call create_artifact "
         "or open_artifact before this cell."

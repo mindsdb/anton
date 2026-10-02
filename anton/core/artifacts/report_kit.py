@@ -154,15 +154,18 @@ def filter_preview(rows, *, columns, key, value, positive_only=True, all_label='
     """What filter_table shows for each option: {option: {'rows': [...], 'total': n}}."""
     cols = list(columns)
     k, v = _col(cols, key, 'key'), _col(cols, value, 'value')
-    rows = _rows(cols, rows)
+    original = list(rows)
+    rows = _rows(cols, original)
     bad = [i for i, r in enumerate(rows) if not _is_num(r[v])]
     if bad:
         raise ValueError(f'value column {value!r} must be numbers; rows {bad[:3]} have {[rows[i][v] for i in bad[:3]]}')
     options = [all_label] + sorted({str(r[k]) for r in rows})
     out = {}
     for opt in options:
-        sel = [list(r) for r in rows if (opt == all_label or str(r[k]) == opt) and (not positive_only or r[v] > 0)]
-        total = sum(r[v] for r in sel)
+        idx = [i for i, r in enumerate(rows) if (opt == all_label or str(r[k]) == opt) and (not positive_only or r[v] > 0)]
+        total = sum(rows[i][v] for i in idx)
+        # Rows come back in the caller's shape (dicts stay dicts, lists stay lists).
+        sel = [dict(original[i]) if isinstance(original[i], dict) else list(rows[i]) for i in idx]
         out[opt] = {'rows': sel, 'total': round(total, 10) if isinstance(total, float) else total}
     return out
 

@@ -558,8 +558,8 @@ response. Re-read a file only when the snapshot omits its content.
 ARTIFACTS_PROMPT += """
 SAME-RESPONSE CREATE AND WRITE
 Tool calls in one response run in order. Scratchpad code can call the builtin
-artifact_dir(slug_or_name), which returns a registered artifact's folder at
-execution time (LookupError if none). When the inputs are already in the
+artifact_dir(slug_or_name), which returns a registered artifact's folder as a
+pathlib.Path at execution time (LookupError if none). When the inputs are already in the
 PROJECT FILE SNAPSHOT, a new report needs no separate preparation round: in
 your first response stream the short plan sentence, call create_artifact, then
 in the SAME response call one scratchpad cell that reads the source from disk,
