@@ -1746,19 +1746,40 @@ class OpenAIProvider(LLMProvider):
                     served_model = getattr(final_response, "model", None) or served_model
                     if hasattr(final_response, "output"):
                         parsed = _parse_response_object(final_response, model)
-                        if parsed.content.startswith(content_text):
-                            remaining = parsed.content[len(content_text):]
-                            if remaining:
-                                yield StreamTextDelta(text=remaining)
-                        content_text = parsed.content
-                        ended = {call.id for call in tool_calls}
-                        started = {info["call_id"] for info in fc_state.values() if info["started"]}
+                        final_calls = {call.id: call for call in parsed.tool_calls}
                         arguments = {
                             getattr(item, "call_id", "") or getattr(item, "id", ""):
                             getattr(item, "arguments", "") or ""
                             for item in final_response.output or []
                             if getattr(item, "type", "") == "function_call"
                         }
+                        consistent = parsed.content.startswith(content_text) and len(final_calls) == len(parsed.tool_calls)
+                        for info in fc_state.values():
+                            if info["call_id"]:
+                                final_call = final_calls.get(info["call_id"])
+                                consistent = consistent and final_call is not None
+                                consistent = consistent and arguments.get(info["call_id"], "").startswith(
+                                    "".join(info["args_parts"])
+                                )
+                                if info["started"]:
+                                    consistent = consistent and final_call is not None and final_call.name == info["name"]
+                        for call in tool_calls:
+                            final_call = final_calls.get(call.id)
+                            consistent = consistent and final_call is not None and (
+                                call.parse_error or call.input == final_call.input
+                            )
+                        if not consistent:
+                            raise TransientProviderError(
+                                "The final model response differs from the response already received.",
+                                provider="The model provider", code="truncated_stream",
+                                session_backoff=True, model=model,
+                            )
+                        remaining = parsed.content[len(content_text):]
+                        if remaining:
+                            yield StreamTextDelta(text=remaining)
+                        content_text = parsed.content
+                        ended = {call.id for call in tool_calls}
+                        started = {info["call_id"] for info in fc_state.values() if info["started"]}
                         for call in parsed.tool_calls:
                             if call.id not in ended:
                                 if call.id not in started:

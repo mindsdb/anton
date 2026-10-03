@@ -113,3 +113,28 @@ async def test_complete_response_usage_is_retained_with_cached_tokens():
     assert complete.usage.input_tokens==20
     assert complete.usage.cache_read_tokens==100
     assert complete.usage.output_tokens==8
+
+@pytest.mark.asyncio
+async def test_final_text_cannot_silently_replace_text_already_shown():
+    with pytest.raises(TransientProviderError):
+        await consume([NS(type='response.output_text.delta',delta='The result is 7.'),
+                       NS(type='response.completed',response=response(output=[text('The result is 8.')]))])
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change',['arguments','name','missing'])
+async def test_terminal_cannot_change_an_announced_or_finished_tool(change):
+    final=tool()
+    if change=='arguments': final.arguments='{"action":"exec","code":"print(8)"}'
+    if change=='name': final.name='different_tool'
+    output=[final] if change!='missing' else [text('Done.')]
+    with pytest.raises(TransientProviderError):
+        await consume([NS(type='response.output_item.added',output_index=0,item=tool()),
+                       NS(type='response.function_call_arguments.done',output_index=0,arguments=tool().arguments),
+                       NS(type='response.completed',response=response(output=output))])
+
+@pytest.mark.asyncio
+async def test_terminal_arguments_must_extend_the_streamed_prefix():
+    with pytest.raises(TransientProviderError):
+        await consume([NS(type='response.output_item.added',output_index=0,item=tool()),
+                       NS(type='response.function_call_arguments.delta',output_index=0,delta='{"action":"wrong'),
+                       NS(type='response.completed',response=response(output=[tool()]))])
