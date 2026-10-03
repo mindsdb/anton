@@ -1,7 +1,8 @@
 """Jev as the completion verifier on MindsHub, with the LLM verifier as fallback.
 
 Jev settles only a confident COMPLETE or WAITING. Everything else, every Jev
-failure, and every non-MindsHub (BYOK) route uses the LLM verifier as before.
+failure, and non-MindsHub (BYOK) routes without explicit TypeSafe credentials
+use the LLM verifier as before.
 """
 
 from __future__ import annotations
@@ -31,12 +32,14 @@ def workspace():
 
 
 def _answer(choice="COMPLETE", p_complete=0.97, status_code=200, body=None):
+    probabilities = {"COMPLETE": p_complete, "WAITING": 0.01, "INCOMPLETE": 0.01, "STUCK": 0.01}
+    if choice in probabilities and choice != "COMPLETE":
+        probabilities[choice] = 1 - p_complete - 0.02
     payload = body if body is not None else {
         "model": "jev-1.13.0",
         "answers": {
             "status": {"type": "choice", "choice": choice, "confidence": 0.9,
-                       "probabilities": {"COMPLETE": p_complete, "WAITING": 0.01,
-                                         "INCOMPLETE": 0.01, "STUCK": 0.01}},
+                       "probabilities": probabilities},
             "close_to_done": {"type": "noul", "noul": 0.1},
         },
         "usage": {"input_tokens": 1700, "output_tokens": 0},
@@ -72,7 +75,9 @@ async def test_classify_reads_the_verdict_and_sends_the_request():
         return _answer("INCOMPLETE", p_complete=0.12)
 
     result = await _classify(handler)
-    assert (result.status, result.p_status, result.p_complete, result.error) == ("INCOMPLETE", 0.01, 0.12, "")
+    assert result.status == "INCOMPLETE" and result.error == ""
+    assert result.p_status == pytest.approx(0.86)
+    assert result.p_complete == 0.12
     assert seen == {"url": "https://api.example/v1/decisions", "auth": "Bearer k"}
 
 
@@ -134,7 +139,7 @@ class _Stream:
         return self._items.pop(0)
 
 
-def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v1", llm_status="COMPLETE", ssl_verify=None):
+def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v1", llm_status="COMPLETE", ssl_verify=None, direct_api_key=None):
     from anton.core.tools.registry import ToolOutcome
 
     llm = make_mock_llm()
@@ -151,7 +156,7 @@ def _session(workspace, *, jev_setting="on", base_url="https://api.mindshub.ai/v
     llm.plan_stream = lambda **kwargs: _Stream([StreamComplete(response=next(calls))])
     session = ChatSession(ChatSessionConfig(
         llm_client=llm, workspace=workspace, session_id="conv-jev",
-        settings=CoreSettings(verifier_jev=jev_setting),
+        settings=CoreSettings(verifier_jev=jev_setting, verifier_jev_direct_api_key=direct_api_key),
     ))
     session.tool_registry.dispatch_tool = AsyncMock(return_value=ToolOutcome(content="1", ok=True))
     return session, llm

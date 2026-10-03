@@ -1,4 +1,4 @@
-"""Completion verdicts from TypeSafe's Jev, via MindsHub's ``/v1/decisions``.
+"""Completion verdicts from Jev, through MindsHub or an explicit TypeSafe connection.
 
 Failures come back as an error class, never raised, so the caller can fall back.
 """
@@ -25,6 +25,9 @@ class JevVerdict:
     ms: int = 0
     model: str = ""
     error: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    request_attempted: bool = False
 
 
 def build_questions(status_description: str, rubric: str, close_to_done_description: str) -> dict:
@@ -57,6 +60,7 @@ async def classify(
     questions: dict,
     timeout_s: float,
     client=None,
+    api_path: str = "decisions",
 ) -> JevVerdict:
     """POST one decision request. Never raises; failures come back in ``error``."""
     import httpx2 as httpx
@@ -73,34 +77,49 @@ async def classify(
         # trickling response could otherwise outlive it.
         async with asyncio.timeout(timeout_s):
             response = await client.post(
-                f"{base_url.rstrip('/')}/decisions",
+                f"{base_url.rstrip('/')}/{api_path}",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={"model": model, "state": state, "questions": questions},
             )
     except TimeoutError:
-        return JevVerdict(ms=elapsed(), error="timeout")
+        return JevVerdict(ms=elapsed(), error="timeout", request_attempted=True)
     except httpx.HTTPError:
-        return JevVerdict(ms=elapsed(), error="transport")
+        return JevVerdict(ms=elapsed(), error="transport", request_attempted=True)
     except Exception as exc:  # the shadow must never raise into the turn
-        return JevVerdict(ms=elapsed(), error=type(exc).__name__)
+        return JevVerdict(ms=elapsed(), error=type(exc).__name__, request_attempted=True)
     finally:
         if owned:
             await client.aclose()
 
     ms = elapsed()
     if response.status_code != 200:
-        return JevVerdict(ms=ms, error=f"http_{response.status_code}")
+        return JevVerdict(ms=ms, error=f"http_{response.status_code}", request_attempted=True)
     try:
         body = response.json()
+        usage = body.get("usage") or {}
+        tokens = [usage.get("input_tokens"), usage.get("output_tokens")] if isinstance(usage, dict) else []
+        known_usage = len(tokens) == 2 and all(type(n) is int and n >= 0 for n in tokens)
+        token_fields = {"input_tokens": tokens[0], "output_tokens": tokens[1]} if known_usage else {}
+    except Exception:
+        return JevVerdict(ms=ms, error="malformed", request_attempted=True)
+    try:
         answer = body["answers"]["status"]
         status = answer["choice"]
         if status not in STATUSES:
             raise ValueError("unknown status")
         probabilities = answer["probabilities"]
-        p_status = _probability(probabilities[status])
-        p_complete = _probability(probabilities["COMPLETE"])
+        if set(probabilities) != set(STATUSES):
+            raise ValueError("incomplete status distribution")
+        distribution = {label: _probability(probabilities[label]) for label in STATUSES}
+        if not math.isclose(sum(distribution.values()), 1.0, abs_tol=0.001):
+            raise ValueError("status probabilities do not sum to one")
+        p_status = distribution[status]
+        p_complete = distribution["COMPLETE"]
+        if p_status < max(distribution.values()):
+            raise ValueError("choice disagrees with probabilities")
     except Exception:  # any shape problem is one error class
-        return JevVerdict(ms=ms, error="malformed")
+        return JevVerdict(ms=ms, error="malformed", request_attempted=True, **token_fields)
     return JevVerdict(
-        status=status, p_status=p_status, p_complete=p_complete, ms=ms, model=str(body.get("model") or "")
+        status=status, p_status=p_status, p_complete=p_complete, ms=ms, model=str(body.get("model") or ""),
+        request_attempted=True, **token_fields,
     )

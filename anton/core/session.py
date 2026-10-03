@@ -1471,6 +1471,8 @@ class ChatSession:
         self._jev_model = getattr(s, "verifier_jev_model", "jev-1.13.0")
         self._jev_timeout_s = getattr(s, "verifier_jev_timeout_s", 2.0)
         self._jev_min_p = getattr(s, "verifier_jev_min_p", 0.8)
+        direct_key = getattr(s, "verifier_jev_direct_api_key", None)
+        self._jev_direct_api_key = direct_key.get_secret_value() if direct_key else None
         # Created on first use and reused, so later checks skip the TLS handshake.
         self._jev_http: httpx.AsyncClient | None = None
         # Per-turn raw-token ceiling (ENG-1286). getattr so a host passing an
@@ -3351,6 +3353,10 @@ class ChatSession:
                 "jev_errors": str(tc.jev_errors),
                 "jev_last_status": tc.jev_last_status,
                 "jev_last_ms": str(tc.jev_last_ms),
+                "jev_input_tokens": str(tc.jev_input_tokens),
+                "jev_output_tokens": str(tc.jev_output_tokens),
+                "jev_unknown_usage_calls": str(tc.jev_unknown_usage_calls),
+                "jev_request_attempts": str(tc.jev_request_attempts),
                 **(
                     {"jev_last_p_complete": f"{tc.jev_last_p_complete:.3f}"}
                     if tc.jev_last_p_complete is not None
@@ -3911,24 +3917,29 @@ class ChatSession:
         )
 
     async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
-        """Ask Jev for the verdict; None when it is off or the verifier isn't on MindsHub."""
+        """Use an explicit TypeSafe connection, or the existing MindsHub route."""
         if not self._jev_enabled:
             return None
-        provider = self._llm.coding_provider
-        info = provider.export_connection_info()
-        base_url = info.base_url or ""
-        # BYOK and every other non-MindsHub route keep the LLM verifier.
-        if classify_base_url(base_url) != ENDPOINT_MINDSHUB or not hasattr(provider, "current_api_key"):
-            return None
-        try:
-            api_key = await provider.current_api_key()
-        except Exception:
-            return _jev.JevVerdict(error="credentials")
+        if self._jev_direct_api_key:
+            base_url = "https://api.typesafe.ai/v1"
+            api_key = self._jev_direct_api_key
+            ssl_verify = True
+        else:
+            provider = self._llm.coding_provider
+            info = provider.export_connection_info()
+            base_url = info.base_url or ""
+            if classify_base_url(base_url) != ENDPOINT_MINDSHUB or not hasattr(provider, "current_api_key"):
+                return None
+            try:
+                api_key = await provider.current_api_key()
+            except Exception:
+                return _jev.JevVerdict(error="credentials")
+            ssl_verify = info.ssl_verify is not False
         if not api_key:
             return None
         if self._jev_http is None:
-            # Same TLS setting as the provider, e.g. behind an intercepting proxy.
-            self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
+            # The MindsHub route retains provider TLS settings; TypeSafe verifies TLS.
+            self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=ssl_verify)
         return await _jev.classify(
             base_url=base_url,
             api_key=api_key,
@@ -3940,6 +3951,7 @@ class ChatSession:
             questions=_jev_questions(),
             timeout_s=self._jev_timeout_s,
             client=self._jev_http,
+            **({"api_path": "systemone"} if self._jev_direct_api_key else {}),
         )
 
     def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
@@ -3964,6 +3976,13 @@ class ChatSession:
                 tc.jev_last_status = result.status or result.error
                 tc.jev_last_p_complete = result.p_complete
                 tc.jev_last_ms = result.ms
+                if result.request_attempted:
+                    tc.jev_request_attempts += 1
+                    if result.input_tokens is None or result.output_tokens is None:
+                        tc.jev_unknown_usage_calls += 1
+                    else:
+                        tc.jev_input_tokens += result.input_tokens
+                        tc.jev_output_tokens += result.output_tokens
             logger.info(
                 "completion-verifier jev status=%s p=%s decided=%s llm=%s ms=%d model=%s error=%s",
                 result.status or "-",

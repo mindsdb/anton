@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -25,12 +26,16 @@ class CoreSettings(BaseSettings):
     # verdict logs confirm they're rarely INCOMPLETE (ENG-716).
     verify_min_tool_rounds: int = 1
     # Jev settles confident COMPLETE/WAITING verdicts on MindsHub; everything else,
-    # and every BYOK setup, uses the LLM verifier as before. "off" is the kill switch.
+    # and BYOK without an explicit TypeSafe connection, uses the LLM verifier.
+    # "off" is the kill switch for both routes.
     verifier_jev: Literal["on", "off"] = "on"
     verifier_jev_model: str = "jev-1.13.0"
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
+    # Explicit optional TypeSafe connection, independent of the coding provider.
+    # Without it, non-MindsHub/BYOK connections retain the LLM verifier.
+    verifier_jev_direct_api_key: SecretStr | None = None
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
     # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #

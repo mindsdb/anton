@@ -168,6 +168,12 @@ class TurnCost:
     jev_last_status: str = ""
     jev_last_p_complete: float | None = None
     jev_last_ms: int = 0
+    # Separate from coding-model usage: Jev has a different pricing schedule.
+    # Missing usage is counted explicitly, never treated as a free call.
+    jev_input_tokens: int = 0
+    jev_output_tokens: int = 0
+    jev_unknown_usage_calls: int = 0
+    jev_request_attempts: int = 0
     # WHY the retry flow terminated, when a turn ended after retrying (ENG-1361).
     # Named for TERMINATION, not exhaustion: `rate_limit_wait_too_long` is a
     # terminal where nothing ran out — the server named an interval past our cap
