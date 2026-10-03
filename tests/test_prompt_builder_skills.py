@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext, SESSION_CONTEXT_MARKER
 from anton.core.memory.skills import Skill, SkillStore
 
 
@@ -79,7 +79,7 @@ class TestProceduralMemorySection:
         # The section instructs the LLM how to use them
         assert "recall_skill" in prompt
 
-    def test_section_appears_after_other_contexts(
+    def test_static_skill_index_precedes_volatile_session_contexts(
         self, populated_store: SkillStore
     ):
         builder = ChatSystemPromptBuilder()
@@ -89,15 +89,17 @@ class TestProceduralMemorySection:
             datasource_context="\n\n## Datasources\nDS HERE",
             skill_store=populated_store,
         )
-        # Procedural memory should appear AFTER datasource_context
+        # The reusable skill index belongs in the cacheable prefix; project
+        # datasource and memory context remain in the volatile tail.
         memory_pos = prompt.find("MEMORY HERE")
         ds_pos = prompt.find("DS HERE")
         proc_pos = prompt.find("## Procedural memory")
         assert memory_pos != -1
         assert ds_pos != -1
         assert proc_pos != -1
-        assert proc_pos > ds_pos
-        assert proc_pos < memory_pos
+        boundary = prompt.index(SESSION_CONTEXT_MARKER)
+        assert proc_pos < boundary < ds_pos < memory_pos
+        assert prompt.count("## Procedural memory") == 1
 
     def test_section_is_compact(self, populated_store: SkillStore):
         """Sanity check: ~50 tokens per skill or less.

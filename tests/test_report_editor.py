@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import pytest
 
 from anton.core.artifacts.report_editor import update
+from anton.core.artifacts import report_editor
 from anton.core.tools.tool_handlers import handle_create_artifact, handle_open_artifact
 
 
@@ -41,6 +42,46 @@ def test_refresh_retains_unedited_structure_and_exact_json(tmp_path):
     assert {tr.find_all('td')[0].text: json.loads(tr.find_all('td')[1].text) for tr in saved.select('#audit tbody tr')} == analysis
     assert receipt['saved_values']['#detail'] == [['North', '31'], ['West', '0']]
     assert receipt['before_sha256'] != receipt['after_sha256']
+    assert receipt['preservation']['verified'] is True
+    assert receipt['preservation']['before_sha256'] == receipt['preservation']['after_sha256']
+
+
+def test_preservation_receipt_keeps_unrelated_semantics_and_target_attributes(tmp_path):
+    p = report(tmp_path)
+    p.write_text(DOCUMENT.replace('<p id="source-note">', '<!-- retained note -->\n<p title="A &amp; B" id="source-note">'))
+    before = BeautifulSoup(p.read_text(), 'html.parser')
+    receipt = update(p, texts={'#source-note': 'A < B & C'},
+                     tables={'#detail': {'columns': ['Place', 'Quantity'], 'rows': [['East', 17]]}},
+                     json_scripts={'#input': {'note': 'new </script> value'}})
+    after = BeautifulSoup(p.read_text(), 'html.parser')
+    for selector in ['#audit', '#summary', '#region', 'label', 'style', 'script:not([type])', '#calculation', 'a']:
+        assert str(after.select_one(selector)) == str(before.select_one(selector))
+    assert after.select_one('#source-note')['title'] == 'A & B'
+    assert after.select_one('#source-note').get_text() == 'A < B & C'
+    assert after.select_one('#detail caption').get_text() == 'Regional data'
+    assert '<!-- retained note -->' in p.read_text()
+    assert receipt['preservation']['before_sha256'] == receipt['preservation']['after_sha256']
+    assert receipt['preservation']['scope'] == 'DOM outside explicitly selected contents'
+
+
+def test_unselected_serialization_change_is_rejected_before_write(tmp_path, monkeypatch):
+    p = report(tmp_path)
+    original = p.read_bytes()
+    parser = report_editor.BeautifulSoup
+    calls = 0
+
+    def damaged_serialization(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        parsed = parser(*args, **kwargs)
+        if calls == 3:  # The reparsed edited document, before any file write.
+            parsed.select_one('a')['href'] = 'unintended-evidence.json'
+        return parsed
+
+    monkeypatch.setattr(report_editor, 'BeautifulSoup', damaged_serialization)
+    with pytest.raises(ValueError, match='Unselected report structure changed'):
+        update(p, texts={'#source-note': 'Current snapshot'})
+    assert p.read_bytes() == original
 
 
 @pytest.mark.parametrize('kwargs', [

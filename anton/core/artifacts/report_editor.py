@@ -12,6 +12,18 @@ import tempfile
 from bs4 import BeautifulSoup
 
 
+def _outside_targets(soup, selectors):
+    """Canonical DOM with only explicitly selected contents masked."""
+    masked = BeautifulSoup(str(soup), 'html.parser')
+    for selector in selectors:
+        matches = masked.select(selector)
+        if len(matches) != 1:
+            raise ValueError('An edit changed selector identity')
+        matches[0].clear()
+        matches[0].string = '[selected contents]'
+    return str(masked).encode('utf-8')
+
+
 def install(folder, artifact_type):
     from anton.core.artifacts.internal_files import REPORT_EDITOR_FILENAME
 
@@ -35,7 +47,10 @@ def update(path, *, texts=None, sections=None, tables=None, json_scripts=None):
     json_scripts: {selector: JSON_serializable_object}
     Cells are converted with str; use json.dumps for exact JSON audit cells.
     Only this report is written; root analysis and sources remain caller-owned.
-    Returns saved semantic values and changed selectors, not a task grade.
+    Returns saved semantic values, changed selectors and a checked preservation
+    signature for the DOM outside selected contents, not a task grade.
+    Serialization may normalize whitespace or attributes; this is not a claim
+    that unselected HTML bytes are identical.
     """
     path = Path(path).absolute()
     if path.suffix.lower() not in {'.html', '.htm'} or not path.is_file():
@@ -86,6 +101,8 @@ def update(path, *, texts=None, sections=None, tables=None, json_scripts=None):
             operations.append((kind, selector, node, value))
     if not operations:
         raise ValueError('At least one explicit edit is required')
+    selectors = [selector for _, selector, _, _ in operations]
+    outside_before = _outside_targets(soup, selectors)
     for kind, selector, node, value in operations:
         caption = node.find('caption', recursive=False) if kind == 'table' else None
         caption = caption.extract() if caption else None
@@ -114,6 +131,9 @@ def update(path, *, texts=None, sections=None, tables=None, json_scripts=None):
             node.append(body)
     rendered = str(soup)
     checked = BeautifulSoup(rendered, 'html.parser')
+    outside_after = _outside_targets(checked, selectors)
+    if outside_after != outside_before:
+        raise ValueError('Unselected report structure changed; no write performed')
     receipts = {}
     for kind, selector, _, value in operations:
         matches = checked.select(selector)
@@ -147,7 +167,11 @@ def update(path, *, texts=None, sections=None, tables=None, json_scripts=None):
             temporary.unlink()
     if path.read_text() != rendered:
         raise ValueError('Saved report differs from verified rendered content')
-    return {'changed_selectors': [selector for _, selector, _, _ in operations],
+    return {'changed_selectors': selectors,
             'saved_values': receipts,
+            'preservation': {'scope': 'DOM outside explicitly selected contents',
+                             'verified': True,
+                             'before_sha256': hashlib.sha256(outside_before).hexdigest(),
+                             'after_sha256': hashlib.sha256(outside_after).hexdigest()},
             'before_sha256': hashlib.sha256(original).hexdigest(),
             'after_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}

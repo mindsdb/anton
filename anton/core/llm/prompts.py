@@ -567,3 +567,18 @@ BASE_VISUALIZATIONS_PROMPT = 'VISUALIZATIONS (charts, plots, maps, dashboards, r
 
 
 ARTIFACTS_PROMPT += "\nSTRUCTURED EDITS FOR EXISTING HTML REPORTS\nopen_artifact supplies a trusted _report_editor.py in the actual artifact\nfolder for existing html-app reports. It provides generic DOM operations,\nnever calculations or answers. After reading the actual current source and\nsaved report, prefer this interface for supported data refreshes rather than\ngenerating repeated table-building and DOM mutation code:\n  update = runpy.run_path(str(folder / '_report_editor.py'))['update']\n  receipt = update(report_path, texts=..., sections=..., tables=...,\n                   json_scripts=...)\nEvery mapping key is a CSS selector from the report you actually inspected;\nit must match exactly one node, and edit targets may not overlap.\ntexts maps plain-text leaf selectors to strings. sections maps a section/div/\narticle selector to {'heading': str, 'paragraphs': [str, ...]}; it rejects\nsections containing evidence links, tables, scripts or controls. tables maps\ntable selectors to {'columns': [str, ...], 'rows': [[cell, ...], ...]}; captions\nand table attributes are retained. Use json.dumps(value) for exact JSON audit\ncells, including string quotes and booleans. json_scripts maps existing\napplication/json script selectors to actual current objects. All text is data,\nnot executable markup; the helper preserves all unselected DOM elements.\nIt only writes the selected report, so root analysis remains your responsibility.\nThe receipt contains selected saved semantic values and file hashes; it is\nnot business verification. Calculate all requested values yourself from the\nactual source; replace every affected summary, detail, audit, assumption and\nembedded snapshot, and verify the actual saved outputs reconcile with the\nsource and root analysis. Required controls, evidence, unknowns and native\ncompletion verification remain required. Unsupported shapes use a targeted\nmanual edit after inspection. Presentation-only edits continue preserving\nall protected bytes, content and identity; do not use a data refresh for them.\nUse the documented helper directly without reading its implementation unless\nan actual defect needs inspection. Preserve the genuine opening task sentence.\n"
+
+ARTIFACTS_PROMPT += """
+REPORT EDIT PRESERVATION RECEIPTS
+For supported _report_editor.py edits, update also returns preservation with
+verified=true and equal before/after hashes of the DOM outside selected
+contents. It checks that signature before writing and rejects unrelated
+structure changes. Use this checked receipt for preservation of unselected
+HTML rather than rebuilding a comparison based on serialized line numbers.
+HTML serialization can normalize whitespace and attributes: the receipt is
+about DOM structure, not identical original HTML bytes. Independently check
+protected source/analysis files, every requested calculation, changed values,
+explanation and required behavior against the current source. Edits requiring
+literal HTML byte preservation or unsupported interactions need appropriate
+manual checks. Retain normal completion verification and disclose limitations.
+"""
