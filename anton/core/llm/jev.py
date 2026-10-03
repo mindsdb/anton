@@ -6,10 +6,15 @@ Failures come back as an error class, never raised, so the caller can fall back.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import math
 import re
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import asdict, dataclass
+
+logger = logging.getLogger(__name__)
 
 STATUSES = ("COMPLETE", "WAITING", "INCOMPLETE", "STUCK")
 
@@ -70,8 +75,17 @@ async def classify(
     def elapsed() -> int:
         return round((time.monotonic() - started) * 1000)
 
+    receipt = {"call_id": uuid.uuid4().hex, "requested_model": model, "api_path": api_path}
+
+    def finish(verdict: JevVerdict) -> JevVerdict:
+        # Billing evidence must survive an uncertain verdict, fallback or cancelled turn.
+        # Neither the credential nor the submitted conversation belongs in this record.
+        logger.info("jev request_receipt=%s", json.dumps({**receipt, **asdict(verdict)}))
+        return verdict
+
     owned = client is None
     client = client or httpx.AsyncClient(timeout=timeout_s)
+    logger.info("jev request_start=%s", json.dumps(receipt))
     try:
         # A hard wall-clock bound: httpx's own timeout is per phase, so a
         # trickling response could otherwise outlive it.
@@ -81,19 +95,22 @@ async def classify(
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={"model": model, "state": state, "questions": questions},
             )
+    except asyncio.CancelledError:
+        finish(JevVerdict(ms=elapsed(), error="cancelled", request_attempted=True))
+        raise
     except TimeoutError:
-        return JevVerdict(ms=elapsed(), error="timeout", request_attempted=True)
+        return finish(JevVerdict(ms=elapsed(), error="timeout", request_attempted=True))
     except httpx.HTTPError:
-        return JevVerdict(ms=elapsed(), error="transport", request_attempted=True)
+        return finish(JevVerdict(ms=elapsed(), error="transport", request_attempted=True))
     except Exception as exc:  # the shadow must never raise into the turn
-        return JevVerdict(ms=elapsed(), error=type(exc).__name__, request_attempted=True)
+        return finish(JevVerdict(ms=elapsed(), error=type(exc).__name__, request_attempted=True))
     finally:
         if owned:
             await client.aclose()
 
     ms = elapsed()
     if response.status_code != 200:
-        return JevVerdict(ms=ms, error=f"http_{response.status_code}", request_attempted=True)
+        return finish(JevVerdict(ms=ms, error=f"http_{response.status_code}", request_attempted=True))
     try:
         body = response.json()
         usage = body.get("usage") or {}
@@ -101,7 +118,7 @@ async def classify(
         known_usage = len(tokens) == 2 and all(type(n) is int and n >= 0 for n in tokens)
         token_fields = {"input_tokens": tokens[0], "output_tokens": tokens[1]} if known_usage else {}
     except Exception:
-        return JevVerdict(ms=ms, error="malformed", request_attempted=True)
+        return finish(JevVerdict(ms=ms, error="malformed", request_attempted=True))
     try:
         answer = body["answers"]["status"]
         status = answer["choice"]
@@ -118,8 +135,8 @@ async def classify(
         if p_status < max(distribution.values()):
             raise ValueError("choice disagrees with probabilities")
     except Exception:  # any shape problem is one error class
-        return JevVerdict(ms=ms, error="malformed", request_attempted=True, **token_fields)
-    return JevVerdict(
+        return finish(JevVerdict(ms=ms, error="malformed", request_attempted=True, **token_fields))
+    return finish(JevVerdict(
         status=status, p_status=p_status, p_complete=p_complete, ms=ms, model=str(body.get("model") or ""),
         request_attempted=True, **token_fields,
-    )
+    ))

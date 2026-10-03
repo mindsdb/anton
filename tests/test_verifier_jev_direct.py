@@ -1,5 +1,6 @@
 """Opt-in TypeSafe connection controls, with no network or real credentials."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -131,3 +132,35 @@ async def test_credentials_failure_is_not_a_submitted_billable_call(workspace):
     classify.assert_not_called()
     assert event["jev_request_attempts"] == "0"
     assert event["jev_unknown_usage_calls"] == "0"
+
+
+@pytest.mark.parametrize("outcome", ["success", "http_error", "cancelled"])
+async def test_each_submitted_call_has_content_free_usage_receipts(caplog, outcome):
+    caplog.set_level("INFO", logger="anton.core.llm.jev")
+
+    def handler(request):
+        if outcome == "cancelled":
+            raise asyncio.CancelledError()
+        return _answer() if outcome == "success" else httpx.Response(429)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        call = jev.classify(
+            base_url="https://api.typesafe.ai/v1", api_key="private-control-key", api_path="systemone",
+            model="jev-1.13.0", state={"transcript": "private-control-transcript"},
+            questions=_jev_questions(), timeout_s=2, client=client,
+        )
+        if outcome == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        else:
+            await call
+    starts = [json.loads(r.message.split("request_start=", 1)[1]) for r in caplog.records if "request_start=" in r.message]
+    receipts = [json.loads(r.message.split("request_receipt=", 1)[1]) for r in caplog.records if "request_receipt=" in r.message]
+    assert len(starts) == len(receipts) == 1
+    assert starts[0]["call_id"] == receipts[0]["call_id"]
+    assert starts[0]["requested_model"] == "jev-1.13.0"
+    assert receipts[0]["request_attempted"] is True
+    assert receipts[0]["input_tokens"] == (1700 if outcome == "success" else None)
+    assert receipts[0]["error"] == {"success": "", "http_error": "http_429", "cancelled": "cancelled"}[outcome]
+    assert "private-control-key" not in caplog.text
+    assert "private-control-transcript" not in caplog.text
