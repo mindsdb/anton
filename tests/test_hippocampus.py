@@ -193,6 +193,22 @@ class TestEncodeLesson:
         assert lesson_path.exists()
         assert "CoinGecko limits at 50/min" in lesson_path.read_text()
 
+    def test_round_trips_provenance_metadata(self, hc, mem_dir):
+        from anton.core.memory.base import Engram
+
+        entry = Engram(
+            text="Rate limit is 50 requests per minute.",
+            kind="lesson",
+            source="consolidation",
+            producer="scratchpad-consolidator",
+            source_cells=(1, 3),
+        )
+        hc._encode_with_lock(mem_dir / "lessons.md", hc._lessons_to_text([entry]), mode="write")
+
+        restored = hc.get_lessons()[0]
+        assert restored.producer == "scratchpad-consolidator"
+        assert restored.source_cells == (1, 3)
+
     def test_skips_duplicate(self, hc, mem_dir):
         hc.encode_lesson("Fact one")
         hc.encode_lesson("Fact one")
