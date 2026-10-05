@@ -306,6 +306,27 @@ def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):
     assert messages == ["art/index.html — bad index.html"]
 
 
+def test_exec_lint_names_a_file_whose_checker_raised(tmp_path, monkeypatch):
+    import anton.core.tools.tool_handlers as th
+
+    class Store:
+        root = tmp_path
+
+    folder = tmp_path / "art"
+    folder.mkdir()
+    (folder / "metadata.json").write_text("{}")
+    (folder / "index.html").write_text("<html></html>")
+
+    def _boom(_path):
+        raise RuntimeError("checker crashed")
+
+    monkeypatch.setattr(th, "_artifact_linters", lambda: {".html": _boom})
+
+    messages = lint_changed_artifact_files(Store(), {"art": 0.0})
+
+    assert messages == ["art/index.html — not checked: checker error"]
+
+
 async def test_edit_without_reopening_stamps_provenance_too(session, root):
     slug = await _create(session)
     session._artifacts_touched.clear()

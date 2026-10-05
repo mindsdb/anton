@@ -75,7 +75,7 @@ def test_rewritten_file_is_checked_again(store: _FakeStore, monkeypatch):
     calls = _counting_linter(monkeypatch, th._LintResult([]))
 
     th.lint_artifact_files(store, "page-abc12345")
-    page.write_text("<p>hello again</p>")
+    page.write_text("<p>yo</p>")  # same size: only the mtime tells it apart
     st = page.stat()
     os.utime(page, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     th.lint_artifact_files(store, "page-abc12345")

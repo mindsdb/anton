@@ -145,6 +145,21 @@ async def test_raising_checker_does_not_fail_open(session, root, monkeypatch):
     assert lint_text == f"{slug}/index.html — not checked: checker error"
 
 
+async def test_failing_checker_setup_does_not_fail_open(session, root, monkeypatch):
+    slug, folder = _create(root)
+    (folder / "index.html").write_text("<p>hi</p>")
+
+    def _no_linters():
+        raise ImportError("checker module missing")
+
+    monkeypatch.setattr(th, "_artifact_linters", _no_linters)
+
+    outcome = await handle_open_artifact(session, {"slug": slug})
+
+    assert outcome.ok is True
+    assert json.loads(outcome.content)["slug"] == slug
+
+
 async def test_raising_checker_keeps_other_files_findings(session, root, monkeypatch):
     slug, folder = _create(root)
     (folder / "index.html").write_text("<p>hi</p>")
