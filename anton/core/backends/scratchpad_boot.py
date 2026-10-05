@@ -474,9 +474,18 @@ if _scratchpad_model:
             _llm_provider_kwargs["flavor"] = _ProviderClass.resolve_web_flavor(
                 _scratchpad_provider_name, _llm_base_url
             )
-            _llm_provider = _ProviderClass(**_llm_provider_kwargs)
         else:
-            _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
+            _llm_provider_kwargs = {}  # Anthropic doesn't need ssl_verify
+
+        def _new_llm_provider():
+            """Build a provider from the pad's model settings. The only place one is built."""
+            return _ProviderClass(**_llm_provider_kwargs)
+
+        # Built at boot so a bad setting fails here, leaving the helpers
+        # undefined, and so web_search() can ask native_web_tools() without a
+        # loop. It never sends a request: every model call gets its own
+        # provider from _with_fresh_provider.
+        _llm_provider = _new_llm_provider()
         _llm_model = _scratchpad_model
 
         _LLM_HEARTBEAT_INTERVAL = 10  # seconds between heartbeats during LLM calls
@@ -515,6 +524,29 @@ if _scratchpad_model:
                 except _llm_asyncio.CancelledError:
                     pass
 
+        async def _with_fresh_provider(call):
+            """Await ``call(provider)`` on a provider built for this call, then close it.
+
+            A provider's HTTP pool keeps each connection bound to the event
+            loop that opened it, and every sync helper runs on its own
+            ``asyncio.run`` loop, closed on return. A provider kept across
+            calls hands the next call a connection on a closed loop: "Event
+            loop is closed", or a silent resend on SDKs that retry any error.
+            Closing in ``finally``, on the loop that used the client, also
+            keeps the SDK's finalizer from closing it later on another loop.
+            ``aclose()`` closes this provider only; ``close_live_providers()``
+            would also close the providers of calls still running beside this
+            one, under ``asyncio.gather`` or on other threads.
+            """
+            provider = _new_llm_provider()
+            try:
+                return await _run_with_heartbeat(call(provider))
+            finally:
+                try:
+                    await provider.aclose()
+                except Exception:
+                    pass  # a cleanup-only failure must not replace the call's answer or error
+
         class _ScratchpadLLM:
             """Sync LLM wrapper for scratchpad use. Mirrors SkillLLM interface."""
 
@@ -532,8 +564,8 @@ if _scratchpad_model:
                 cell-level heartbeat thread).
                 """
                 return _llm_asyncio.run(
-                    _run_with_heartbeat(
-                        _llm_provider.complete(
+                    _with_fresh_provider(
+                        lambda provider: provider.complete(
                             model=_llm_model,
                             system=system,
                             messages=messages,
@@ -552,8 +584,8 @@ if _scratchpad_model:
                 Use this inside async code (e.g. asyncio.gather) for concurrent
                 LLM calls.  Emits heartbeats automatically like complete().
                 """
-                return await _run_with_heartbeat(
-                    _llm_provider.complete(
+                return await _with_fresh_provider(
+                    lambda provider: provider.complete(
                         model=_llm_model,
                         system=system,
                         messages=messages,
@@ -749,8 +781,8 @@ if _scratchpad_model:
                     "and Minds Cloud (mdb.ai)."
                 )
             response = _llm_asyncio.run(
-                _run_with_heartbeat(
-                    _llm_provider.complete(
+                _with_fresh_provider(
+                    lambda provider: provider.complete(
                         model=_llm_model,
                         system=_WEB_SEARCH_SYSTEM,
                         messages=[{"role": "user", "content": query}],
