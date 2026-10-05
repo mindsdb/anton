@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import threading
+import time
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -148,13 +153,24 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 
 # Bounded: never lint a huge file inline on the agent's turn.
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
+# Checked between files, so one open can still run up to one checker
+# timeout past it.
+_OPEN_LINT_BUDGET_SECONDS = 10.0
 
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+@dataclass(frozen=True)
+class _LintResult:
+    messages: list[str]
+    # False when part of the check could not run (e.g. LibreOffice timed
+    # out): the messages are still reported, but never remembered.
+    complete: bool = True
+
+
+def _artifact_linters() -> dict[str, Callable[[Path], _LintResult | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
-    headless browser); `[]` means it ran and found nothing; a non-empty
-    list is real findings — only that last case is ever appended to the
-    agent-facing message list.
+    headless browser); empty `messages` means it ran and found nothing;
+    non-empty `messages` are real findings — only that last case is ever
+    appended to the agent-facing message list.
 
     Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
     `.docx` are registered — every other extension is silently unchecked,
@@ -166,7 +182,7 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
-    def _xlsx_linter(path: Path) -> list[str] | None:
+    def _xlsx_linter(path: Path) -> _LintResult | None:
         # Both always run — LibreOffice recalculates and catches any
         # formula error; the structural lint runs regardless (not only as
         # a fallback), because it names the actual fix ("missing cross-
@@ -190,27 +206,29 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             f.message() for f in (office_findings or [])
             if (f.sheet, f.cell) not in structural_cells
         ]
-        return messages
+        complete = office_findings is not None and structural_findings is not None
+        return _LintResult(messages, complete=complete)
 
-    def _html_linter(path: Path) -> list[str] | None:
+    def _html_linter(path: Path) -> _LintResult | None:
         findings = lint_html(path)
         if findings is not None:
-            return [f.message() for f in findings]
+            return _LintResult([f.message() for f in findings])
         return None
 
-    def _ooxml_linter(kind: str) -> Callable[[Path], list[str] | None]:
-        def _lint(path: Path) -> list[str] | None:
+    def _ooxml_linter(kind: str) -> Callable[[Path], _LintResult | None]:
+        def _lint(path: Path) -> _LintResult | None:
             # Structure first (ENG-2175): a truncated or hand-rolled package
             # is named without any Office install. Only a package that is
             # structurally sound goes on to LibreOffice, since a 30-second
             # export of a file already known to be broken adds nothing.
             structural_findings = lint_ooxml(path, kind)
             if structural_findings:
-                return [f.message() for f in structural_findings]
+                return _LintResult([f.message() for f in structural_findings])
             office_findings = check_opens_via_office(path)
             if structural_findings is None and office_findings is None:
                 return None
-            return [f.message() for f in (office_findings or [])]
+            complete = structural_findings is not None and office_findings is not None
+            return _LintResult([f.message() for f in (office_findings or [])], complete=complete)
 
         return _lint
 
@@ -222,36 +240,96 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     }
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
-    """Run the format-appropriate checker on artifact folders this cell
-    edited (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list().
+# A file's findings while its artifact folder is unchanged, so an open right
+# after the exec that wrote it does not rerun multi-second checkers. Keyed on
+# the whole folder: a page's result depends on the scripts and assets next to it.
+_LINT_CACHE_MAX_ENTRIES = 512
+_lint_cache: OrderedDict[tuple[str, int], list[str]] = OrderedDict()
+_lint_cache_lock = threading.Lock()
+
+
+def _folder_fingerprint(entries: list[tuple[Path, os.stat_result]]) -> int:
+    return hash(tuple(sorted((str(p), st.st_size, st.st_mtime_ns) for p, st in entries)))
+
+
+def _cached_lint(path: Path, folder_fingerprint: int) -> list[str] | None:
+    key = (str(path), folder_fingerprint)
+    with _lint_cache_lock:
+        cached = _lint_cache.get(key)
+        if cached is not None:
+            _lint_cache.move_to_end(key)
+        return cached
+
+
+def _lint_and_remember(
+    linter: Callable[[Path], _LintResult | None], path: Path, folder_fingerprint: int
+) -> list[str] | None:
+    result = linter(path)
+    # A check that did not fully run is retried next time instead of
+    # remembering an answer that was never given.
+    if result is None or not result.complete:
+        return None if result is None else result.messages
+    key = (str(path), folder_fingerprint)
+    with _lint_cache_lock:
+        _lint_cache[key] = result.messages
+        if len(_lint_cache) > _LINT_CACHE_MAX_ENTRIES:
+            _lint_cache.popitem(last=False)
+    return result.messages
+
+
+def lint_artifact_files(store, slug: str, budget_seconds: float | None = None) -> list[str]:
+    """Run the format-appropriate checker on every content file of `slug`,
+    with no mtime gating: the caller decides when the artifact is worth
+    checking.
+
+    With `budget_seconds`, no new file is started once it is spent; those
+    files are named as not checked, so the result never reads as clean.
     """
     from anton.core.artifacts.store import iter_content_files
 
     linters = _artifact_linters()
     if not linters:
         return []
+    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
+    entries = list(iter_content_files(store.root / slug))
+    fingerprint = _folder_fingerprint(entries)
+    messages: list[str] = []
+    for path, st in entries:
+        linter = linters.get(path.suffix.lower())
+        if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
+            continue
+        file_messages = _cached_lint(path, fingerprint)
+        if file_messages is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                messages.append(f"{slug}/{path.name} — not checked: lint time budget ran out")
+                continue
+            try:
+                file_messages = _lint_and_remember(linter, path, fingerprint)
+            except Exception:
+                _log.warning("artifact lint checker failed for %s/%s", slug, path.name, exc_info=True)
+                messages.append(f"{slug}/{path.name} — not checked: checker error")
+                continue
+        if not file_messages:
+            # None (couldn't check) or [] (checked, clean) — either way,
+            # nothing worth telling the agent about this file.
+            continue
+        for message in file_messages:
+            messages.append(f"{slug}/{path.name} — {message}")
+    return messages
+
+
+def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
+    """Run `lint_artifact_files` on artifact folders this cell edited
+    (mtime moved since `before`), so findings reach the agent as
+    tool-result text right away, not only via a later open().
+    """
     after = snapshot_existing_artifact_mtimes(store)
     messages: list[str] = []
     for slug, prev_mtime in before.items():
         current = after.get(slug)
         if current is None or current <= prev_mtime:
             continue
-
-        artifact_dir = store.root / slug
-        for path, st in iter_content_files(artifact_dir):
-            linter = linters.get(path.suffix.lower())
-            if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
-                continue
-            file_messages = linter(path)
-            if not file_messages:
-                # None (couldn't check) or [] (checked, clean) — either way,
-                # nothing worth telling the agent about this file.
-                continue
-            for message in file_messages:
-                messages.append(f"{slug}/{path.name} — {message}")
-
+        messages.extend(lint_artifact_files(store, slug))
     return messages
 
 
@@ -887,8 +965,7 @@ async def handle_open_artifact(
     # rather than at write time because the writes themselves happen in
     # scratchpad cells the tool layer never sees.
     _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
-    # Tier 1: the artifact was opened and its descriptor returned.
-    return ToolOutcome(content=json.dumps({
+    content = json.dumps({
         "id": artifact.id,
         "slug": artifact.slug,
         "name": artifact.name,
@@ -896,7 +973,20 @@ async def handle_open_artifact(
         "description": artifact.description,
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
-    }, indent=2), ok=True)
+    }, indent=2)
+    # Re-checked on every open: the exec-time finding is shown once, and an
+    # agent that did not act on it then would never see it again.
+    try:
+        lint_messages = await asyncio.to_thread(
+            lint_artifact_files, store, artifact.slug, _OPEN_LINT_BUDGET_SECONDS,
+        )
+    except Exception:
+        _log.warning("artifact lint failed on open for %s", artifact.slug, exc_info=True)
+        lint_messages = []
+    if lint_messages:
+        content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
+    # Tier 1: the artifact was opened and its descriptor returned.
+    return ToolOutcome(content=content, ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
