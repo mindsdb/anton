@@ -81,10 +81,13 @@ def _rejects_reasoning_summary(exc: "openai.BadRequestError") -> bool:
     err = body.get("error", body) if isinstance(body, dict) else {}
     if not isinstance(err, dict):
         return False
-    if err.get("param") == "reasoning.summary":
-        return True
-    message = str(err.get("message") or "").lower()
-    return "summar" in message and ("reasoning" in message or "verif" in message)
+    param = err.get("param")
+    if param:
+        return param == "reasoning.summary"
+    message = str(err.get("message") or "").strip().lower()
+    return message.startswith(
+        "your organization must be verified to generate reasoning summaries."
+    )
 
 
 def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
