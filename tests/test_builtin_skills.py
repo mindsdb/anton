@@ -342,6 +342,7 @@ class TestNoTextPromisesABriefAgreement:
         "read and accept",
         "the user agreed to",
         "agreed requirements",
+        "reviewed and accepted",
     )
 
     def _texts(self) -> dict[str, str]:
@@ -349,6 +350,7 @@ class TestNoTextPromisesABriefAgreement:
 
         from anton.core.llm import prompts
         from anton.core.tools import tool_defs
+        from anton.core.tools.generate_artifact import prompts as gen_prompts
         from anton.core.tools.generate_artifact.discovery.prd import _WRITE_PRD_INSTRUCTION
         from anton.core.tools.generate_artifact.discovery.prompts import build_pipeline_system_prompt
         from anton.core.tools.generate_artifact.progress import STEP_LABELS
@@ -368,6 +370,8 @@ class TestNoTextPromisesABriefAgreement:
             texts[f"{td.name}.description"] = td.description
             texts[f"{td.name}.prompt"] = td.prompt or ""
         texts["pipeline_system"] = build_pipeline_system_prompt(state)
+        texts["prd_section_header"] = gen_prompts.PRD_SECTION_HEADER
+        texts["gen_html_inputs"] = gen_prompts._GEN_HTML_INPUTS
         texts["write_prd"] = _WRITE_PRD_INSTRUCTION
         texts["step_labels"] = "\n".join(STEP_LABELS.values())
         return texts

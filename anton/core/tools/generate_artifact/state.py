@@ -171,7 +171,7 @@ class GenState:
     primary: str | None = None
     # Body of `prd.md` when a previous run left one in the artifact folder.
     # This — not `brief` — is the requirements source on the normal path: it
-    # is the document the user actually reviewed and accepted, while `brief`
+    # is the document written from the latest brief, while `brief`
     # is assembled by the calling agent. Empty when there is no PRD, and every
     # reader treats empty as "fall back to brief".
     prd: str = ""
