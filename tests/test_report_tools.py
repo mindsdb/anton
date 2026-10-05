@@ -313,3 +313,24 @@ def test_importable_without_side_effects_from_a_plain_interpreter(tmp_path):
     """The scratchpad imports it from the installed package; nothing is copied into folders."""
     assert Path(rt.__file__).name == "report_tools.py"
     assert not list(tmp_path.iterdir())
+
+
+def test_update_with_a_whole_table_or_section_replaces_content_instead_of_nesting(tmp_path):
+    out = tmp_path / "legacy.html"
+    original = ('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width"></head><body>'
+                '<section id="conclusion" class="card"><h2>Conclusion</h2><p>Old.</p></section>'
+                '<h2>Metric audit</h2><table id="audit" class="grid"><tr><td>old</td><td>1</td></tr></table>'
+                '</body></html>')
+    out.write_text(original)
+    rt.update(out, {"audit": rt.table(["Metric", "Value"], [["total", 90]]),
+                    "conclusion": rt.section("Conclusion", rt.para("New."))})
+    text = out.read_text()
+    assert text.count("<table") == 1 and "table-wrap" not in text
+    assert '<table id="audit" class="grid"><thead>' in text
+    assert '<section id="conclusion" class="card"><h2>Conclusion</h2><p>New.</p></section>' in text
+    seen = rt.check(out)
+    assert seen["tables"] == [{"id": "audit", "columns": ["Metric", "Value"], "rows": [["total", "90"]]}]
+    assert seen["text"].count("Conclusion") == 1
+    # Other content, or two elements, is still placed inside as before.
+    rt.update(out, {"conclusion": rt.para("A.") + rt.section("Note", rt.para("B."))})
+    assert '<section id="conclusion" class="card"><h2>Conclusion</h2><p>A.</p><section' in out.read_text()

@@ -394,7 +394,7 @@ class _Locator(HTMLParser):
         self._lines = [0]
         for line in text.splitlines(keepends=True):
             self._lines.append(self._lines[-1] + len(line))
-        self._stack, self.spans, self.outer = [], {}, {}
+        self._stack, self.spans, self.outer, self.tags = [], {}, {}, {}
 
     def _offset(self):
         line, col = self.getpos()
@@ -417,9 +417,56 @@ class _Locator(HTMLParser):
                 del self._stack[i:]
                 if id_ is not None:
                     end = self._offset()
+                    self.tags[id_] = tag
                     self.spans.setdefault(id_, []).append((start, end))
                     self.outer.setdefault(id_, []).append((outer_start, self._text.index(">", end) + 1))
                 return
+
+
+class _TopLevel(HTMLParser):
+    """Counts the top-level elements and text of a fragment."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.depth, self.elements, self.text = 0, 0, False
+
+    def handle_starttag(self, tag, attrs):
+        self.elements += self.depth == 0
+        self.depth += tag not in _VOID
+
+    def handle_startendtag(self, tag, attrs):
+        self.elements += self.depth == 0
+
+    def handle_endtag(self, tag):
+        self.depth = max(0, self.depth - 1)
+
+    def handle_data(self, data):
+        self.text = self.text or (self.depth == 0 and bool(data.strip()))
+
+
+def _inner_of_same_kind(new: str, tag: str | None) -> str | None:
+    """The content of ``new`` when it is one whole element of kind ``tag``, else None.
+
+    Lets ``update(path, {"detail": table(...)})`` refresh an existing table's
+    rows (and ``section(...)`` a section's content) instead of nesting a second
+    table or section inside the first. ``table``'s scrolling wrapper is dropped.
+    """
+    if not tag:
+        return None
+    body = new.strip()
+    if tag == "table":
+        wrap = re.fullmatch(r'<div class="table-wrap">(.*)</div>', body, re.S)
+        body = wrap.group(1).strip() if wrap else body
+    start = re.match(rf"<{tag}\b[^>]*>", body, re.I)
+    ends = list(re.finditer(rf"</{tag}\s*>", body, re.I))
+    if not start or not ends or ends[-1].end() != len(body):
+        return None
+    top = _TopLevel()
+    top.feed(body)
+    top.close()
+    if top.elements != 1 or top.text:
+        return None
+    return body[start.end():ends[-1].start()]
 
 
 _LEADING_HEADING = re.compile(r"\s*<h([1-6])\b[^>]*>.*?</h\1\s*>", re.I | re.S)
@@ -481,8 +528,11 @@ def update(path, changes: dict) -> dict:
     page missing a lang attribute or viewport tag gets them (see ``added``).
     ``changes`` maps an element id to new content: markup from these helpers,
     plain text (escaped), or, for a ``script type="application/json"`` block,
-    any JSON value. A heading at the start of the element (a section's title)
-    is kept unless the new content starts with a heading of its own. Each id
+    any JSON value. Given one whole element of its own kind, such as
+    ``table(...)`` for a table or ``section(...)`` for a section, the element
+    keeps its own tag and attributes and takes that element's content. A
+    heading at the start of the element (a section's title) is kept unless the
+    new content starts with a heading of its own. Each id
     must match exactly one element. Returns a receipt of the ids changed and
     the old and new file sizes.
     """
@@ -494,6 +544,8 @@ def update(path, changes: dict) -> dict:
         start, end = _one(locator.spans, id_)
         if isinstance(content, str):
             new = _esc(content)
+            inner = _inner_of_same_kind(new, locator.tags.get(id_))
+            new = new if inner is None else inner
             heading = _LEADING_HEADING.match(text, start, end)
             if heading and not re.match(r"\s*<h[1-6]\b", new, re.I):
                 new = heading.group(0) + new
