@@ -406,6 +406,54 @@ async def test_nested_question_sentinels_do_not_unmute_early():
     assert lines == ["Designing the API"]
 
 
+async def test_a_message_line_becomes_a_message_marker_in_place():
+    import asyncio
+
+    from anton.core.tools.generate_artifact.progress import MESSAGE_PREFIX
+    from anton.core.tools.tool_handlers import _drain_progress
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for item in (
+        "Preparing a short brief for you",
+        MESSAGE_PREFIX + "## Brief\nline two",
+        "Writing down the requirements",
+        None,
+    ):
+        queue.put_nowait(item)
+
+    markers = [(m.kind, m.text) async for m in _drain_progress(queue)]
+    assert markers == [
+        ("step", "Preparing a short brief for you"),
+        ("message", "## Brief\nline two"),
+        ("step", "Writing down the requirements"),
+    ]
+
+
+async def test_messages_held_by_a_question_come_out_whole_and_in_order():
+    """A step line goes stale while a question is open, a message does not:
+    every message is kept, only the last step line survives."""
+    import asyncio
+
+    from anton.core.tools.generate_artifact.progress import (
+        MESSAGE_PREFIX,
+        QUESTION_CLOSED,
+        QUESTION_OPEN,
+    )
+    from anton.core.tools.tool_handlers import _drain_progress
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for item in (
+        QUESTION_OPEN,
+        "a", MESSAGE_PREFIX + "one", "b", MESSAGE_PREFIX + "two",
+        QUESTION_CLOSED,
+        None,
+    ):
+        queue.put_nowait(item)
+
+    markers = [(m.kind, m.text) async for m in _drain_progress(queue)]
+    assert markers == [("message", "one"), ("message", "two"), ("step", "b")]
+
+
 async def test_the_brief_confirmation_mutes_progress(tmp_path):
     """The longest question of the run goes through `show_and_confirm`, which
     reaches `elicit` on its own path. Wrapping only the `ask_user` sub-tool

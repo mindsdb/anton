@@ -566,9 +566,11 @@ async def _drain_progress(queue):
     Lines produced during that window are not dropped silently: the last one
     is emitted once the answer arrives, so the user still learns where the
     pipeline got to. They are not replayed in full, because by then they
-    describe steps that already finished.
+    describe steps that already finished. A message for the user is content,
+    not status: every one is kept and emitted in order.
     """
     from anton.core.tools.generate_artifact.progress import (
+        MESSAGE_PREFIX,
         PEEK_PREFIX,
         QUESTION_CLOSED,
         QUESTION_OPEN,
@@ -577,6 +579,7 @@ async def _drain_progress(queue):
 
     depth = 0
     pending: str | None = None
+    held_messages: list[str] = []
     while True:
         line = await queue.get()
         if line is None:
@@ -589,6 +592,13 @@ async def _drain_progress(queue):
             if not depth:
                 yield ToolProgress(line[len(PEEK_PREFIX):], kind="peek")
             continue
+        if line.startswith(MESSAGE_PREFIX):
+            text = line[len(MESSAGE_PREFIX):]
+            if depth:
+                held_messages.append(text)
+            else:
+                yield ToolProgress(text, kind="message")
+            continue
         if line == QUESTION_OPEN:
             # A counter, not a flag: `show_and_confirm` wraps a call that
             # wraps itself, so the sentinels arrive nested. A flag would let
@@ -598,9 +608,13 @@ async def _drain_progress(queue):
             continue
         if line == QUESTION_CLOSED:
             depth = max(0, depth - 1)
-            if depth == 0 and pending is not None:
-                yield ToolProgress(pending)
-                pending = None
+            if depth == 0:
+                for text in held_messages:
+                    yield ToolProgress(text, kind="message")
+                held_messages.clear()
+                if pending is not None:
+                    yield ToolProgress(pending)
+                    pending = None
             continue
         if depth:
             pending = line

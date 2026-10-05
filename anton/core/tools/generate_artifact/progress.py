@@ -153,6 +153,11 @@ def label_for(
 QUESTION_OPEN = "\x00question-open"
 QUESTION_CLOSED = "\x00question-closed"
 
+# A message for the user (the brief, when the agent acts first) rides the same
+# queue so it keeps its place among the step lines. The text after the prefix
+# is markdown; the handler relays it as `ToolProgress(kind="message")`.
+MESSAGE_PREFIX = "\x00message:"
+
 # A live tail of the reply being streamed rides on the same queue, prefixed so
 # the handler can tell it from a step line: a step line is printed once and
 # stays, the tail replaces the previous tail in the spinner footer. The text

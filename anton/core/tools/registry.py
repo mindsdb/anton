@@ -4,7 +4,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from anton.core.llm.provider import StreamTaskProgress
+from anton.core.llm.provider import StreamTaskProgress, StreamToolResult
 from anton.core.tools.progress import ToolProgress
 
 if TYPE_CHECKING:
@@ -133,12 +133,27 @@ class ToolRegistry:
         is dropped here, before the wire: a consumer without a footer for it
         would carry a few hundred characters every 0.3s as noise, and spend
         its progress throttle window on them — see cloud_turn/contract.py.
+
+        A ``"message"`` marker is markdown written for the user. It travels as
+        ``StreamToolResult(action="message")`` only to a host that declared
+        ``ChatSessionConfig.tool_messages``; elsewhere it is dropped, and the
+        tool is expected to hand the same content to the agent.
         """
         emitter = getattr(session, "emitter", None)
         peek_wanted = bool(getattr(session, "live_tool_peek", False))
+        messages_wanted = bool(getattr(session, "tool_messages", False))
         result = None
         async for item in self.dispatch_tool_stream(session, tool_name, tc_input):
             if isinstance(item, ToolProgress):
+                if item.kind == "message":
+                    if emitter is not None and messages_wanted:
+                        await emitter.emit(
+                            StreamToolResult(
+                                name=tool_name, action="message",
+                                content=item.text, id=tool_call_id,
+                            )
+                        )
+                    continue
                 is_peek = item.kind == "peek"
                 if emitter is not None and (peek_wanted or not is_peek):
                     await emitter.emit(
