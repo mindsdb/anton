@@ -37,6 +37,8 @@ from .provider import (
     Usage,
     classify_404,
     classify_content_rejection,
+    classify_request_refusal,
+    classify_responses_failure,
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
@@ -109,13 +111,27 @@ def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
         raise ContextOverflowError(str(exc)) from exc
 
     parsed = ProviderErrorBody.parse(_error_body(exc))
+    message = parsed.envelope.message or parsed.top.message
+    param = parsed.envelope.param or parsed.top.param
     content = classify_content_rejection(
         error_type=parsed.envelope.type or parsed.top.type,
-        message=parsed.envelope.message or parsed.top.message,
-        param=parsed.envelope.param or parsed.top.param,
+        message=message,
+        param=param,
     )
     if content is not None:
         raise content from exc
+
+    # A request the provider refuses outright: a refused reasoning effort, such
+    # as function tools on chat.completions for a model that reasons by
+    # default, or a prompt its policy blocks. Re-sending the identical request
+    # cannot pass, so it fails the turn instead of being re-sent and then
+    # ending as prose with no error shown. Last, so the rungs above keep their
+    # recoveries.
+    refusal = classify_request_refusal(
+        status_code=exc.status_code, code=parsed.code, message=message, param=param,
+    )
+    if refusal is not None:
+        raise refusal from exc
 
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
@@ -600,6 +616,11 @@ def _translate_tools_to_responses(tools: list[dict]) -> list[dict]:
     The Responses API uses a flat shape (``{"type": "function", "name": ...,
     "description": ..., "parameters": ...}``) rather than the chat.completions
     nested shape under a ``function`` key.
+
+    ``strict`` is sent as False on every tool. chat.completions reads an
+    omitted ``strict`` as non-strict, while the Responses API normalizes an
+    omitted one into strict mode, which can change what the model sends for
+    optional fields. False keeps both transports on the same schema rules.
     """
     result: list[dict] = []
     for tool in tools:
@@ -609,6 +630,7 @@ def _translate_tools_to_responses(tools: list[dict]) -> list[dict]:
                 "name": tool["name"],
                 "description": tool.get("description", ""),
                 "parameters": tool.get("input_schema", {}),
+                "strict": False,
             }
         )
     return result
@@ -1813,8 +1835,8 @@ class OpenAIProvider(LLMProvider):
                 # key). Unhandled, the stream just ended and the failure looked
                 # like an empty answer. Raised as the bare APIError the SDK
                 # raises for a mid-stream SSE error, so the handler below
-                # classifies it the same way (billing stop, transient, or
-                # stream_error with backoff).
+                # classifies it the same way (billing stop, a code that names
+                # its cause, transient, or stream_error with backoff).
                 elif etype in ("response.failed", "error"):
                     error = (getattr(getattr(event, "response", None), "error", None)
                              if etype == "response.failed" else event)
@@ -1862,6 +1884,15 @@ class OpenAIProvider(LLMProvider):
             )
             if billing_stop is not None:
                 raise billing_stop from exc
+            # A code that names its cause gets that cause's handling instead of
+            # the incident backoff: compaction, the count-based retry for a rate
+            # limit, the image repair, or a visible refusal. Covers both the
+            # event raised above and an `error` event the SDK raised itself.
+            named = classify_responses_failure(
+                getattr(exc, "body", None), provider="The model provider", model=model,
+            )
+            if named is not None:
+                raise named from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1995,6 +2026,9 @@ def _parse_response_object(response, model: str) -> LLMResponse:
 
     if getattr(response, "status", None) == "failed":
         body = _responses_error_body(getattr(response, "error", None))
+        named = classify_responses_failure(body, provider="The model provider", model=model)
+        if named is not None:
+            raise named
         raise classify_transient(
             None, body, provider="The model provider", model=model,
         ) or TransientProviderError(
