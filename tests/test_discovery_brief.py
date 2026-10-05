@@ -382,3 +382,21 @@ async def test_redraw_brief_keeps_the_lists_a_call_does_not_mention(tmp_path):
     await brief.redraw_brief(state)
     assert state.assumptions == ["old assumption"]
     assert state.open_points == ["old question"]
+
+
+def test_act_first_brief_has_one_assumptions_section_and_no_question():
+    text = brief.draft_brief_instruction(act_first=True)
+    assert "- Assumptions — one line per `assumption` and per `open_point`" in text
+    assert "- Proposals —" not in text
+    assert "- Questions —" not in text
+    assert "if the user continues" not in text.lower()
+    assert "Do NOT ask the user anything" in text
+    # The shared rules survive.
+    lowered = text.lower()
+    for marker in ("lead-in", "same language as the user request", "hex", "not used", "redo"):
+        assert marker in lowered, marker
+
+
+def test_the_confirm_brief_is_unchanged_by_default():
+    assert brief.draft_brief_instruction() == brief._DRAFT_BRIEF_INSTRUCTION
+    assert "- Proposals — one line per `assumption`" in brief._DRAFT_BRIEF_INSTRUCTION

@@ -268,3 +268,9 @@ def test_write_prd_instruction_asks_for_brevity_without_a_line_count():
     assert "Write in the language of the user request" in text
     assert "as short as the requirements allow" in text
     assert "lines" not in text.lower()
+
+
+def test_write_prd_turns_assumptions_into_requirements():
+    """The act-first brief has an Assumptions section instead of Proposals
+    and Questions; without this rule `write_prd` could drop what the user saw."""
+    assert "Its Assumptions are decisions" in prd._WRITE_PRD_INSTRUCTION

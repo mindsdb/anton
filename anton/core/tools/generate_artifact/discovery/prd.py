@@ -28,6 +28,8 @@ _WRITE_PRD_INSTRUCTION = (
     "marking them as proposals.\n"
     "- For each Question, the stated default is the decision. Record it as a "
     "requirement.\n"
+    "- Its Assumptions are decisions: write them as plain requirements, "
+    "without marking them as assumptions.\n"
     "Do not add requirements the brief does not contain. Where the brief is "
     "silent, the build step decides, not this document.\n\n"
     "## Sections\n"

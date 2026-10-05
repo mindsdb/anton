@@ -232,17 +232,34 @@ def _gathering_instruction(act_first: bool) -> str:
 
 _GATHERING_INSTRUCTION = _gathering_instruction(False)
 
-_REDRAW_SUFFIX = (
+_REDRAW_CORRECTION = (
     "\n\nThe user has already seen a brief and asked for a change; the "
     "correction is in this call's updated understanding. Redraw the brief "
     "with the correction applied. A correction can accept or reject a "
     "proposal or answer a question: whatever it settles leaves Proposals "
     "or Questions and, if kept, becomes a requirement.\n\n"
+)
+
+_REDRAW_RESTATE = (
     "Then call `finish_gathering` to re-state the artifact type and the data "
     "sources the corrected artifact needs. This is REQUIRED: if the "
     "correction introduces a source nobody has fetched yet, that call is the "
     "only thing that will cause it to be fetched."
 )
+
+_REDRAW_SUFFIX = _REDRAW_CORRECTION + _REDRAW_RESTATE
+
+_REDRAW_CORRECTION_ACT_FIRST = (
+    "\n\nThe user has seen the brief or the finished artifact and asked for "
+    "a change; the correction is in this call's updated understanding. "
+    "Redraw the brief with the correction applied. A correction can accept "
+    "or reject an assumption: whatever it settles leaves Assumptions and, if "
+    "kept, becomes a requirement.\n\n"
+)
+
+
+def _redraw_suffix(act_first: bool) -> str:
+    return (_REDRAW_CORRECTION_ACT_FIRST if act_first else _REDRAW_CORRECTION) + _REDRAW_RESTATE
 
 
 def _step_instructions(act_first: bool = False) -> dict[str, str]:
@@ -250,14 +267,14 @@ def _step_instructions(act_first: bool = False) -> dict[str, str]:
     them — brief.py and prd.py — rather than being copied here. `act_first`
     picks the variants for the no-confirmation flow; they live in step
     messages, so the cached prefix is the same in both modes."""
-    from .brief import _DRAFT_BRIEF_INSTRUCTION
+    from .brief import draft_brief_instruction
     from .prd import _WRITE_PRD_INSTRUCTION
     from . import sub_tools
 
     return {
         sub_tools.STEP_GATHERING: _gathering_instruction(act_first),
-        sub_tools.STEP_DRAFT_BRIEF: _DRAFT_BRIEF_INSTRUCTION,
-        sub_tools.STEP_REDRAW_BRIEF: _DRAFT_BRIEF_INSTRUCTION + _REDRAW_SUFFIX,
+        sub_tools.STEP_DRAFT_BRIEF: draft_brief_instruction(act_first),
+        sub_tools.STEP_REDRAW_BRIEF: draft_brief_instruction(act_first) + _redraw_suffix(act_first),
         sub_tools.STEP_WRITE_PRD: _WRITE_PRD_INSTRUCTION,
     }
 

@@ -285,3 +285,19 @@ def test_act_first_gives_gathering_the_questions_reserved_for_the_brief():
     assert gathering_question_budget(session, act_first=True) == 8
     message = step_message(sub_tools.STEP_GATHERING, _state(act_first=True))
     assert "Questions you may still ask the user: 8" in message
+
+
+def test_brief_steps_use_the_act_first_variants():
+    state = _state(act_first=True)
+    draft = step_message(sub_tools.STEP_DRAFT_BRIEF, state)
+    redraw = step_message(sub_tools.STEP_REDRAW_BRIEF, state)
+    assert "- Assumptions — one line per" in draft
+    assert "seen the brief or the finished artifact" in redraw
+    assert "leaves Assumptions" in redraw
+    assert "finish_gathering" in redraw
+
+
+def test_brief_steps_keep_the_confirm_variants_by_default():
+    state = _state()
+    assert "- Proposals — one line per" in step_message(sub_tools.STEP_DRAFT_BRIEF, state)
+    assert "has already seen a brief" in step_message(sub_tools.STEP_REDRAW_BRIEF, state)
