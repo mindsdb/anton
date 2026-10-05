@@ -14,7 +14,7 @@ def _direct_reports_block() -> str:
 def test_every_documented_helper_exists_with_the_documented_parameters():
     block = _direct_reports_block()
     assert "from anton.core.artifacts import report_tools as rt" in block
-    documented = dict(re.findall(r"`rt\.(\w+)\(([^`]*)\)`", block))
+    documented = dict(re.findall(r"`rt\.(\w+)\(([^`]*)\)`", block.replace("\n", " ")))
     assert documented
     for name, args in documented.items():
         assert name in report_tools.__all__, name
