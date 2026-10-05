@@ -807,7 +807,7 @@ async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(tmp_p
             text("## Goal\nAn analog clock, full."),  # write_prd
         ])),
         question_count=0, elicitor=None, emit=AsyncMock(),
-        _act_first=True, tool_messages=True,
+        _act_first=True, tool_messages=True, emitter=object(),
     )
 
     async def skipped(state, *args, **kwargs):

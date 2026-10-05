@@ -238,7 +238,9 @@ async def test_revise_loop_has_a_defensive_cap_and_ends_unconfirmed(tmp_path, mo
 
 
 def _act_first_state(tmp_path: Path, *, renders: bool = True, **over) -> PrdState:
-    session = SimpleNamespace(_llm=SimpleNamespace(), question_count=0, elicitor=None, emit=AsyncMock())
+    session = SimpleNamespace(
+        _llm=SimpleNamespace(), question_count=0, elicitor=None, emit=AsyncMock(), emitter=object(),
+    )
     if renders:
         session.tool_messages = True
     state = _make_state(tmp_path, session=session, act_first=True, **over)
@@ -291,6 +293,16 @@ async def test_act_first_without_a_rendering_host_sends_nothing(tmp_path, monkey
     result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
 
     assert result == cp.STAGE_PRD_WRITTEN
+    assert state.brief_shown is False
+    assert _messages(state) == []
+
+
+def test_announce_brief_without_an_emitter_sends_nothing(tmp_path):
+    state = _act_first_state(tmp_path, brief="## Goal\nA clock.")
+    del state.session.emitter
+
+    brief.announce_brief(state)
+
     assert state.brief_shown is False
     assert _messages(state) == []
 

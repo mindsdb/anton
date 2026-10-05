@@ -287,7 +287,7 @@ def _spec_context(state: GenState) -> str:
 
     The brief is NOT sent next to a PRD. Since phase B it is the confirmation
     proposal shown to the user — "here is what I suggest, continue or say
-    what to change" — with questions the accepted PRD has already settled;
+    what to change" — with questions the PRD has already settled;
     the PRD supersedes it on every point. Measured 2026-09-16: 1 KB of every
     generation round, and a second voice the generator had to reconcile.
     """
@@ -1262,7 +1262,7 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
             # the work stopped short.
             if state.winding_down():
                 return _stopped_over_budget(
-                    state, "budget reached while agreeing the brief"
+                    state, "budget reached at the brief"
                 )
             return _needs_confirmation(state)
         _invalidate_specs(state)

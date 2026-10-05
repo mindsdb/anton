@@ -210,6 +210,12 @@ def test_restored_context_carries_assumptions_and_open_points():
     assert "count cancelled orders?" in text
 
 
+def test_restored_context_labels_the_brief_as_shown_not_agreed():
+    text = restored_context(_state(brief="## Goal\nA clock."))
+    assert "## Brief shown earlier" in text
+    assert "agreed" not in text
+
+
 def test_restored_context_omits_empty_assumption_sections():
     text = restored_context(_state())
     assert "Assumptions recorded earlier" not in text

@@ -295,7 +295,7 @@ class TestNoPathStillNamesASeparatePrdStep:
     `generate_prd` was a separate tool with no `ToolDef.prompt` of its own, so
     these always-on blocks were the only place the model could learn the step
     existed — which is why an ordering lock was worth having. There is one
-    tool now and it agrees the requirements itself, so a block still naming a
+    tool now and it settles the requirements itself, so a block still naming a
     PRD step would be sending the agent to call something that does not exist.
     """
 

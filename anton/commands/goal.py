@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from anton.chat_ui import is_displayed_tool_result
 from anton.core.llm.provider import (
     StreamContextCompacted,
     StreamTaskProgress,
@@ -17,7 +18,6 @@ from anton.core.llm.provider import (
     StreamToolUseStart,
 )
 from anton.core.tools.tool_defs import ToolDef
-from anton.chat_ui import is_displayed_tool_result
 from anton.prompts import GOAL_CONTINUATION_PROMPT
 
 if TYPE_CHECKING:

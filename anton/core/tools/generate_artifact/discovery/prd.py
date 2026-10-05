@@ -1,7 +1,7 @@
-"""Phase C: expand the confirmed brief into `prd.md` and save it.
+"""Phase C: expand the brief into `prd.md` and save it.
 
 The document stays on disk as the human-readable record of what the user
-agreed to, and `prd_section` hands it verbatim to the spec and generation
+written for, and `prd_section` hands it verbatim to the spec and generation
 nodes as the authoritative requirements source. What shrank is its mandate,
 not its reach: connection code and source material travel through
 `data_notes` / `web_notes`, and the tech spec is told not to restate it.
@@ -79,7 +79,7 @@ async def write_prd(state: PrdState) -> str:
     expand the brief into the full PRD, save it, and update the artifact's
     `type` in metadata.json if it changed. The in-memory state follows the
     same change (`GenState.settle_artifact_type`), so the rest of this call
-    builds the type that was agreed, not the one that was registered.
+    builds the type that was settled, not the one that was registered.
     Returns the full PRD markdown."""
     # The type is settled BEFORE the step runs, not after: the step's own
     # progress line is the first one that carries `step N of M`, and `M`

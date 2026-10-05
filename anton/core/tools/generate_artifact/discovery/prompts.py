@@ -134,7 +134,7 @@ def restored_context(state: PrdState) -> str:
     """
     parts = [build_call_kickoff(state)]
     if state.brief.strip():
-        parts.append(f"## Brief agreed earlier\n{state.brief.strip()}")
+        parts.append(f"## Brief shown earlier\n{state.brief.strip()}")
     if state.declared_sources:
         parts.append(
             "## Data sources declared earlier\n"

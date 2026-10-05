@@ -219,7 +219,7 @@ class GenState:
     peek: LivePeek | None = None
 
     # ── Discovery phases (A-C) ───────────────────────────────────────────
-    # The tool's own inputs. `brief` above holds the confirmed brief markdown
+    # The tool's own inputs. `brief` above holds the brief markdown
     # once phase B has run; before that it is empty.
     user_request: str = ""
     agent_understanding: str = ""
@@ -327,7 +327,7 @@ class GenState:
         checkpoint is not enough: `is_fullstack`, the `stateless` switches in
         the spec and kickoff prompts and `verify_backend` all read THIS
         object, and a run whose state still says `html-app` skips the API
-        spec and the backend of the fullstack app it just agreed to build
+        spec and the backend of the fullstack app it just decided to build
         (I-40). The step plan is rebuilt too — the counter was created at the
         first `gathering` line, before the type was known — while the
         numbers already handed out stay as they are.
