@@ -292,8 +292,9 @@ each value of column `key`, filtering the rows shown in a region named \
 `rt.save(path, html)`, `rt.check(path)` (structure, local links, and the \
 tables and text as shown), `rt.update(path, {element_id: new_content})` \
 (replaces those elements' content in any page; a section keeps its heading) \
-and `rt.insert(path, new_content, before=element_id)` (or `after=`). Write \
-your own HTML for anything they do not cover.
+and `rt.insert(path, new_content, before=element_id)` (or `after=`). Any \
+plain string you pass is shown as text; wrap markup you write yourself in \
+`rt.Html(...)`, and join parts with `+` or `rt.inline(...)`.
 - To change an existing report, edit only what the request asks and keep the \
 rest, including the artifact itself, its look and any file the user asked you \
 not to change. Change the saved page in place with rt.update and rt.insert, \

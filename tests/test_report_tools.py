@@ -169,7 +169,7 @@ def test_insert_adds_new_parts_to_a_page_not_made_with_these_helpers(tmp_path):
     receipt = rt.insert(out, summary, before="detail")
     rt.insert(out, rt.para("Checked."), after="audit")
     assert receipt["inserted"] == "before detail"
-    assert out.read_text() == original.replace('<section id="detail">', summary + '<section id="detail">').replace(
+    assert out.read_text() == original.replace('<section id="detail">', str(summary) + '<section id="detail">').replace(
         '<h2>Audit</h2></section>', '<h2>Audit</h2></section><p>Checked.</p>')
     assert "Cover 30 &lt;units&gt;." in out.read_text()
     assert [s for s in rt.check(out)["text"].split() if s in ("Decision", "Detail", "Audit")] == ["Decision", "Detail", "Audit"]
@@ -182,6 +182,27 @@ def test_insert_needs_exactly_one_existing_anchor(tmp_path):
         with pytest.raises(ValueError):
             rt.insert(out, rt.para("x"), **kwargs)
     assert out.read_text() == before
+
+
+def test_adding_markup_keeps_it_markup_and_escapes_plain_text(tmp_path):
+    combined = rt.para("Summary.") + rt.bullets(["a < b"])
+    assert isinstance(combined, rt.Html)
+    assert combined == "<p>Summary.</p><ul><li>a &lt; b</li></ul>"
+    assert rt.para("x") + "<b>" == "<p>x</p>&lt;b&gt;"
+    assert "<i>" + rt.para("x") == "&lt;i&gt;<p>x</p>"
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Notes", rt.para("old"), id="notes")))
+    rt.update(out, {"notes": rt.para("New.") + rt.bullets(["One", "Two"])})
+    assert "<ul><li>One</li><li>Two</li></ul>" in out.read_text()
+    rt.check(out)
+
+
+def test_caller_markup_wrapped_in_html_is_kept(tmp_path):
+    out = tmp_path / "legacy.html"
+    out.write_text('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width">'
+                   '</head><body><table id="audit"><tr><td>old</td></tr></table></body></html>')
+    rt.update(out, {"audit": rt.Html("<tr><th>Metric</th><td>90</td></tr>")})
+    assert '<table id="audit"><tr><th>Metric</th><td>90</td></tr></table>' in out.read_text()
+    rt.check(out)
 
 
 class _Rows(HTMLParser):

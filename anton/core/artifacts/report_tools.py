@@ -32,7 +32,18 @@ __all__ = [
 
 
 class Html(str):
-    """Markup produced by these helpers. Plain strings passed in are escaped."""
+    """Markup produced by these helpers, or wrapped by the caller as trusted.
+
+    Plain strings passed to the helpers are escaped. Adding Html together keeps
+    it Html, and a plain string added to Html is escaped, so
+    ``rt.para(a) + rt.bullets(b)`` stays markup and text stays text.
+    """
+
+    def __add__(self, other):
+        return Html(str.__add__(self, _esc(other)))
+
+    def __radd__(self, other):
+        return Html(_esc(other) + str(self))
 
 
 def _esc(value) -> str:
