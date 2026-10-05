@@ -134,8 +134,33 @@ def test_update_works_on_pages_not_made_with_these_helpers(tmp_path):
     original = ('<!DOCTYPE html>\n<html lang="en">\n<body>\n  <h1 id="title">Old</h1>\n'
                 '  <div id="total" class="big">10</div><br>\n  <img src="a.png">\n</body>\n</html>\n')
     out.write_text(original)
-    rt.update(out, {"title": "Planner handoff", "total": "12"})
-    assert out.read_text() == original.replace(">Old<", ">Planner handoff<").replace(">10<", ">12<")
+    receipt = rt.update(out, {"title": "Planner handoff", "total": "12"})
+    viewport = '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    assert out.read_text() == original.replace(">Old<", ">Planner handoff<").replace(">10<", ">12<").replace(
+        '<html lang="en">', '<html lang="en">' + viewport)
+    assert receipt["added"] == ["viewport"]
+
+
+def test_edits_add_a_missing_lang_and_viewport_and_nothing_else(tmp_path):
+    out = tmp_path / "legacy.html"
+    original = ('<!doctype html><html><head><meta charset="utf-8"><title>R</title></head>'
+                '<body><section id="s"><h2>S</h2><p>old</p></section></body></html>')
+    out.write_text(original)
+    receipt = rt.update(out, {"s": rt.para("new")})
+    assert receipt["added"] == ["viewport", "lang"]
+    assert out.read_text() == original.replace("<html>", '<html lang="en">').replace(
+        "<head>", '<head><meta name="viewport" content="width=device-width,initial-scale=1">').replace(
+        "<p>old</p>", "<p>new</p>")
+    rt.check(out)
+    second = rt.insert(out, rt.para("more"), after="s")
+    assert "added" not in second
+    assert out.read_text().count('name="viewport"') == 1 and out.read_text().count("lang=") == 1
+    kept = tmp_path / "fr.html"
+    kept.write_text('<html lang="fr"><head><meta content="width=600" name="viewport"></head>'
+                    '<body><p id="p">x</p></body></html>')
+    assert "added" not in rt.update(kept, {"p": "y"})
+    assert kept.read_text() == ('<html lang="fr"><head><meta content="width=600" name="viewport"></head>'
+                                '<body><p id="p">y</p></body></html>')
 
 
 def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path):

@@ -432,6 +432,41 @@ def _locate(text: str) -> _Locator:
     return locator
 
 
+_HTML_TAG = re.compile(r"<html\b[^>]*>", re.I)
+_HEAD_TAG = re.compile(r"<head\b[^>]*>", re.I)
+_VIEWPORT = '<meta name="viewport" content="width=device-width,initial-scale=1">'
+
+
+def _with_basics(text: str) -> tuple[str, list]:
+    """``text`` with a lang attribute and a viewport meta tag added if either is missing.
+
+    Pages made elsewhere often lack them; an edited page should still read well
+    on a phone and pass ``check``. lang defaults to "en", as in ``page``.
+    """
+    reader = _Reader()
+    reader.feed(text)
+    added = []
+    html_tag = _HTML_TAG.search(text)
+    if not reader.viewport:
+        anchor = _HEAD_TAG.search(text) or html_tag
+        if anchor:
+            text = text[:anchor.end()] + _VIEWPORT + text[anchor.end():]
+            added.append("viewport")
+    if not reader.lang and html_tag:
+        text = text[:html_tag.start() + 5] + ' lang="en"' + text[html_tag.start() + 5:]
+        added.append("lang")
+    return text, added
+
+
+def _write_edit(path: Path, before: str, out: str, receipt: dict) -> dict:
+    out, added = _with_basics(out)
+    save(path, out)
+    receipt.update(bytes_before=len(before.encode()), bytes_after=len(out.encode()))
+    if added:
+        receipt["added"] = added
+    return receipt
+
+
 def _one(found: dict, id_: str) -> tuple[int, int]:
     spans = found.get(id_, [])
     if len(spans) != 1:
@@ -442,7 +477,8 @@ def _one(found: dict, id_: str) -> tuple[int, int]:
 def update(path, changes: dict) -> dict:
     """Replace the content of elements by id, leaving every other byte unchanged.
 
-    Works on any saved page, including ones not made with these helpers.
+    Works on any saved page, including ones not made with these helpers; a
+    page missing a lang attribute or viewport tag gets them (see ``added``).
     ``changes`` maps an element id to new content: markup from these helpers,
     plain text (escaped), or, for a ``script type="application/json"`` block,
     any JSON value. A heading at the start of the element (a section's title)
@@ -471,8 +507,7 @@ def update(path, changes: dict) -> dict:
     out = text
     for start, end, new in reversed(edits):
         out = out[:start] + new + out[end:]
-    save(path, out)
-    return {"changed": sorted(changes), "bytes_before": len(text.encode()), "bytes_after": len(out.encode())}
+    return _write_edit(path, text, out, {"changed": sorted(changes)})
 
 
 def insert(path, content, *, before: str | None = None, after: str | None = None) -> dict:
@@ -481,7 +516,8 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
     For new parts of an existing page, e.g. a decision summary above the
     detail: ``rt.insert(path, rt.section("Decision summary", rt.para(...)),
     before="detail-section")``. Every other byte is unchanged. Plain text is
-    escaped, as elsewhere. Returns a receipt like ``update``.
+    escaped, as elsewhere. Adds a missing lang or viewport, and returns a
+    receipt, like ``update``.
     """
     if (before is None) == (after is None):
         raise ValueError("give exactly one of before= or after=")
@@ -490,6 +526,4 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
     start, end = _one(_locate(text).outer, before or after)
     at = start if before is not None else end
     out = text[:at] + _esc(content) + text[at:]
-    save(path, out)
-    return {"inserted": "before " + before if before is not None else "after " + after,
-            "bytes_before": len(text.encode()), "bytes_after": len(out.encode())}
+    return _write_edit(path, text, out, {"inserted": "before " + before if before is not None else "after " + after})
