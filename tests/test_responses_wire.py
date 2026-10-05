@@ -9,14 +9,24 @@ from __future__ import annotations
 
 import json
 import threading
+import typing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import openai
 import pytest
+from openai.types.responses import ResponseError
 
+from anton.core.llm import provider as provider_mod
 from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.provider import (
-    StreamComplete, StreamToolUseEnd, StreamToolUseStart, TransientProviderError,
+    ContentTooLargeError,
+    ContentValidationError,
+    ContextOverflowError,
+    RequestRefusedError,
+    StreamComplete,
+    StreamToolUseEnd,
+    StreamToolUseStart,
+    TransientProviderError,
     provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated
@@ -134,8 +144,11 @@ async def test_failed_response_raises_a_backoff_transient(endpoint):
 
 
 async def test_error_event_raises_instead_of_ending_quietly(endpoint):
+    # An unmapped code, so the stream_error backoff applies. The codes that name
+    # their cause have their own tests below.
     endpoint.replies.append((200, "sse", _sse(*_text_events(""), {
-        "type": "error", "code": "rate_limit_exceeded", "message": "Slow down", "param": None})))
+        "type": "error", "code": "vector_store_timeout", "message": "The vector store timed out",
+        "param": None})))
     with pytest.raises(TransientProviderError) as info:
         await _stream(endpoint.provider())
     assert info.value.code == "stream_error" and info.value.session_backoff is True
@@ -233,3 +246,135 @@ async def test_wire_body_defers_tool_images_and_carries_trace_headers(endpoint, 
     assert req["body"]["input"][-1]["content"][1] == {"type": "input_image", "image_url": "data:image/png;base64,QUJD", "detail": "auto"}
     assert "store" not in req["body"]
     assert req["headers"].get("langfuse-session-id") == "sess-1"
+
+
+def _failed(code, message):
+    """A stream that fails in-band with a `response.failed` naming its cause."""
+    return _sse(*_text_events(""), {
+        "type": "response.failed", "response": _response("failed", error={"code": code, "message": message})})
+
+
+async def test_failed_context_length_exceeded_raises_context_overflow(endpoint):
+    """The session compacts the history on this type and re-sends, as it does
+    for the request-time 400."""
+    endpoint.replies.append((200, "sse", _failed(
+        "context_length_exceeded", "Your input exceeds the context window of this model.")))
+    with pytest.raises(ContextOverflowError):
+        await _stream(endpoint.provider())
+
+
+async def test_rate_limit_error_event_takes_the_rate_limit_path(endpoint):
+    """`rate_limited` on the count path, as an unconfirmed 429 gets, not the
+    incident backoff: the code does not say whether a per-minute or a per-day
+    limit was hit, so it earns no session wait. No HTTP status, because the
+    stream itself was a 200."""
+    endpoint.replies.append((200, "sse", _sse(*_text_events(""), {
+        "type": "error", "code": "rate_limit_exceeded", "message": "Slow down", "param": None})))
+    with pytest.raises(TransientProviderError) as info:
+        await _stream(endpoint.provider())
+    assert (info.value.code, info.value.session_backoff, info.value.status_code) == ("rate_limited", False, None)
+    assert info.value.retry_after is None
+
+
+async def test_failed_invalid_prompt_raises_the_refusal(endpoint):
+    endpoint.replies.append((200, "sse", _failed(
+        "invalid_prompt", "Invalid prompt: your prompt was flagged as potentially violating our usage policy.")))
+    with pytest.raises(RequestRefusedError) as info:
+        await _stream(endpoint.provider())
+    assert (info.value.code, info.value.status_code) == ("invalid_prompt", None)
+    assert "flagged as potentially violating our usage policy" in str(info.value)
+
+
+async def test_failed_prompt_content_filter_raises_the_refusal(endpoint):
+    endpoint.replies.append((200, "sse", _failed(
+        "content_filter", "The prompt was filtered due to triggering the content management policy.")))
+    with pytest.raises(RequestRefusedError) as info:
+        await _stream(endpoint.provider())
+    assert info.value.code == "content_filter"
+
+
+# The SDK's in-band image codes, written out here rather than imported, so a
+# code dropped from the classifier fails its own test. The size codes also ask
+# the user for a smaller copy.
+_IMAGE_TOO_LARGE_CODES = ["image_too_large", "image_file_too_large"]
+_IMAGE_REJECTED_CODES = [
+    "invalid_image", "invalid_image_format", "invalid_base64_image", "invalid_image_url",
+    "invalid_image_mode", "image_too_small", "image_parse_error",
+    "image_content_policy_violation", "unsupported_image_media_type", "empty_image_file",
+    "failed_to_download_image", "image_file_not_found",
+]
+
+
+def test_the_image_codes_are_the_sdks_own():
+    """A misspelled code never matches a real failure. Both the lists above and
+    the classifier's are checked against the SDK's `ResponseError.code`."""
+    sdk_codes = set(typing.get_args(ResponseError.model_fields["code"].annotation))
+    assert set(_IMAGE_TOO_LARGE_CODES + _IMAGE_REJECTED_CODES) <= sdk_codes
+    mapped = provider_mod._RESPONSES_IMAGE_TOO_LARGE_CODES + provider_mod._RESPONSES_IMAGE_REJECTED_CODES
+    assert set(mapped) <= sdk_codes
+
+
+@pytest.mark.parametrize("code", _IMAGE_TOO_LARGE_CODES)
+async def test_failed_image_size_code_raises_content_too_large(endpoint, code):
+    endpoint.replies.append((200, "sse", _failed(code, "The image is larger than the 20 MB limit.")))
+    with pytest.raises(ContentTooLargeError) as info:
+        await _stream(endpoint.provider())
+    assert "The image is larger than the 20 MB limit." in str(info.value)
+
+
+@pytest.mark.parametrize("code", _IMAGE_REJECTED_CODES)
+async def test_failed_image_code_raises_content_validation(endpoint, code):
+    endpoint.replies.append((200, "sse", _failed(code, "The image could not be used.")))
+    with pytest.raises(ContentValidationError) as info:
+        await _stream(endpoint.provider())
+    assert not isinstance(info.value, ContentTooLargeError)
+
+
+async def test_a_filtered_output_still_ends_as_a_stop_reason(endpoint):
+    """A filtered PROMPT fails the turn (above); a filtered OUTPUT does not. The
+    Responses API documents it as `response.incomplete`, which stays an answer
+    that stops early. Not yet observed on Azure."""
+    endpoint.replies.append((200, "sse", _sse(*_text_events("Part of"), {
+        "type": "response.incomplete",
+        "response": _response("incomplete", incomplete_details={"reason": "content_filter"})})))
+    _, r = await _stream(endpoint.provider())
+    assert (r.content, r.stop_reason) == ("Part of", "content_filter")
+
+
+async def test_a_nested_error_event_is_mapped_after_the_sdk_raises_it(endpoint):
+    """An `error` event that nests its error object is raised by the SDK itself,
+    before the reader sees the event, so the mapping must cover that path too."""
+    endpoint.replies.append((200, "sse", _sse(*_text_events(""), {
+        "type": "error", "error": {"type": "invalid_request_error", "code": "context_length_exceeded",
+                                   "message": "Your input exceeds the context window of this model."}})))
+    with pytest.raises(ContextOverflowError):
+        await _stream(endpoint.provider())
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("context_length_exceeded", ContextOverflowError),
+    ("rate_limit_exceeded", TransientProviderError),
+    ("invalid_prompt", RequestRefusedError),
+    ("image_too_large", ContentTooLargeError),
+])
+async def test_a_failed_non_streamed_response_maps_the_same_codes(endpoint, code, expected):
+    endpoint.replies.append((200, "json", _response("failed", error={"code": code, "message": "Refused."})))
+    with pytest.raises(expected) as info:
+        await endpoint.provider().complete(
+            model="gpt-test", system="s", messages=[{"role": "user", "content": "hi"}], max_tokens=16)
+    if expected is TransientProviderError:
+        assert (info.value.code, info.value.session_backoff) == ("rate_limited", False)
+
+
+async def test_function_tools_are_sent_non_strict(endpoint):
+    """chat.completions reads an omitted `strict` as non-strict, while the
+    Responses API normalizes an omitted one into strict mode. Sending False
+    keeps both transports on the same schema rules. A hosted tool takes none."""
+    endpoint.replies.append((200, "sse", _sse(*_text_events("ok"), {
+        "type": "response.completed", "response": _response("completed")})))
+    await _stream(endpoint.provider(), tools=TOOLS, native_web_tools={"web_search"})
+    assert endpoint.requests[0]["body"]["tools"] == [
+        {"type": "function", "name": "get_stock", "description": "Stock for a part.",
+         "parameters": TOOLS[0]["input_schema"], "strict": False},
+        {"type": "web_search"},
+    ]
