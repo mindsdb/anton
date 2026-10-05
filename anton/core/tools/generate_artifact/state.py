@@ -97,16 +97,18 @@ REPLY_BODY_CHARS: int = 30_000
 PHASE2_RESERVED_QUESTIONS = 3
 
 
-def gathering_question_budget(session: "ChatSession | Any") -> int:
+def gathering_question_budget(session: "ChatSession | Any", *, act_first: bool = False) -> int:
     """How many `ask_user` calls the gathering phase may make this time.
 
     Recomputed on every call rather than cached on the state, because
-    `session.question_count` keeps changing as questions are asked.
+    `session.question_count` keeps changing as questions are asked. In
+    act-first mode the brief is not confirmed, so nothing is reserved for it.
     """
     from anton.core.interaction.elicit import MAX_QUESTIONS_PER_TURN
 
     remaining = MAX_QUESTIONS_PER_TURN - getattr(session, "question_count", 0)
-    return max(0, remaining - PHASE2_RESERVED_QUESTIONS)
+    reserved = 0 if act_first else PHASE2_RESERVED_QUESTIONS
+    return max(0, remaining - reserved)
 
 
 # ── Verdict schemas for diamond nodes (generate_object) ──────────────────────
@@ -271,6 +273,15 @@ class GenState:
     # `call_fingerprint`; decides whether the brief is redrawn or reused
     # verbatim. An optimization, never a confirmation signal.
     call_changed: bool = False
+    # The session's "act first, ask later" setting, read once by the entry
+    # point. True: ask only what blocks the build and show the brief without
+    # waiting for confirmation. False — also for a session double without the
+    # attribute — keeps the confirm flow.
+    act_first: bool = False
+    # Set by `announce_brief` once the brief went out as a message the host
+    # renders in THIS call. Not persisted: a call that resumes past discovery
+    # shows nothing itself, and the result reports that case from `entry`.
+    brief_shown: bool = False
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.
