@@ -651,6 +651,11 @@ _STATUS_INSTRUCTIONS = {
         "and `warnings` what the verifier flagged without failing the step: "
         "when either is non-empty, tell the user in one sentence what was "
         "not checked or flagged — never present a skipped check as passed."
+        " When the result carries `brief_shown: true`, the user has already "
+        "seen `brief_summary` as a message: do not repeat it; at most refer "
+        "to its assumptions in one sentence. When it carries `brief_summary` "
+        "without `brief_shown`, the user has not seen it: sum up its "
+        "assumptions in a sentence or two."
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "
@@ -668,11 +673,13 @@ _STATUS_INSTRUCTIONS = {
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
-        "got and ask whether to continue. When the result carries a "
-        "non-empty `brief_summary`, show it to the user as part of that "
-        "question: the pipeline stopped before they could confirm it, and "
-        "the repeat call is taken as their agreement to that brief. If they "
-        "agree, call this tool again with the SAME `user_request` — it "
+        "got and ask whether to continue. When the result carries "
+        "`brief_shown: true`, the user already saw the brief and was not "
+        "asked to confirm it: do not show it again. Otherwise, when it "
+        "carries a non-empty `brief_summary`, show it to the user as part of "
+        "that question: the pipeline stopped before they could confirm it, "
+        "and the repeat call is taken as their agreement to that brief. If "
+        "they agree, call this tool again with the SAME `user_request` — it "
         "resumes rather than restarting. A requested change goes in "
         "`agent_understanding`, with `user_request` left as it was."
     ),

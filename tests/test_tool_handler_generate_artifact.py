@@ -777,3 +777,63 @@ def test_the_attachments_field_tells_the_agent_what_qualifies():
     assert "outside the workspace" in desc and "`.anton/`" in desc
     assert "Only files the user actually provided" in desc
     assert "`attachments` (optional)" in GENERATE_ARTIFACT_TOOL.description
+
+
+async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(tmp_path, monkeypatch):
+    """The whole chain: the session flag reaches `GenState` in
+    `engine.generate`, the brief goes out as a message marker between the
+    step lines, and the result tells the agent the user saw it."""
+    import json
+
+    from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+    from anton.core.tools.generate_artifact import orchestrator as fsm
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    slug = store.create(name="Clock", description="d", type="html-app").slug
+
+    def text(content):
+        return LLMResponse(content=content, tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1))
+
+    session = SimpleNamespace(
+        _workspace=SimpleNamespace(artifacts_dir=tmp_path / "artifacts"),
+        _llm=SimpleNamespace(plan=AsyncMock(side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="tc1", name="finish_gathering",
+                                     input={"summary": "ok", "artifact_type": "html-app"})],
+                usage=Usage(input_tokens=1, output_tokens=1),
+            ),
+            text("## Goal\nAn analog clock."),       # draft_brief
+            text("## Goal\nAn analog clock, full."),  # write_prd
+        ])),
+        question_count=0, elicitor=None, emit=AsyncMock(),
+        _act_first=True, tool_messages=True,
+    )
+
+    async def skipped(state, *args, **kwargs):
+        return None
+
+    for name in ("_data_phase", "_write_tech_spec", "_gen_verify_frontend"):
+        monkeypatch.setattr(fsm, name, skipped)
+
+    markers, result = [], None
+    async for item in handle_generate_artifact(session, {
+        "slug": slug, "user_request": "a clock", "agent_understanding": "an analog clock",
+    }):
+        if isinstance(item, ToolProgress):
+            markers.append((item.kind, item.text))
+        else:
+            result = item
+
+    kinds = [k for k, _ in markers]
+    assert kinds.count("message") == 1
+    at = kinds.index("message")
+    assert markers[at][1] == "## Goal\nAn analog clock."
+    assert any(t.startswith("Preparing a short brief") for k, t in markers[:at] if k == "step")
+    assert any(t.startswith("Writing down the") for k, t in markers[at + 1:] if k == "step")
+
+    payload = json.loads(result.content)
+    assert payload["status"] == "generated"
+    assert payload["brief_shown"] is True
+    assert payload["brief_summary"] == "## Goal\nAn analog clock."
+    assert "brief_shown" in payload["instruction"]

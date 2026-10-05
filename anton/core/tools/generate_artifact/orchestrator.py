@@ -48,6 +48,9 @@ if TYPE_CHECKING:
     from anton.utils.datasources import DatasourceCatalog
 
 
+# Entries that run discovery (phases A-C) in this call; the rest resume past it.
+_DISCOVERY_ENTRIES = (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION)
+
 # Sentinel returned by a generation node that stopped because the turn ran
 # out of budget. Distinguished from an error string on purpose: the cause is
 # the forbidden retry, not unusable code, and the instruction the outer agent
@@ -1172,9 +1175,35 @@ def _invalidate_specs(state: GenState) -> None:
     state.api_spec = None
 
 
+def _brief_fields(state: GenState) -> dict:
+    """What the calling agent needs to know about the brief.
+
+    When the agent acts first the brief is shown as a message that never
+    reaches the agent's history, so its text travels here; `brief_shown`
+    says whether the user already saw it. A call that resumed past
+    discovery says nothing: the brief belongs to an earlier turn.
+    """
+    fields: dict = {"brief_shown": True} if state.brief_shown else {}
+    if state.act_first and state.brief and state.entry in _DISCOVERY_ENTRIES:
+        fields["brief_summary"] = state.brief
+    return fields
+
+
+def _brief_already_seen(state: GenState) -> bool:
+    """Whether a budget stop may skip showing the brief.
+
+    Ask-first keeps its rule (`brief_summary` is the only way to show it).
+    Acting first, a call that resumed past discovery has no unseen brief:
+    the earlier turn showed it, or the agent relayed it then.
+    """
+    return state.brief_shown or (
+        state.act_first and state.entry not in _DISCOVERY_ENTRIES
+    )
+
+
 def _finish(state: GenState) -> dict:
     _save_checkpoint(state, cp.STAGE_GENERATED)
-    return {"status": "generated", **_result_shell(state)}
+    return {"status": "generated", **_result_shell(state), **_brief_fields(state)}
 
 
 def _cancelled(state: GenState) -> dict:
@@ -1208,6 +1237,7 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
         "status": "stopped_over_budget",
         "detail": detail,
         "brief_summary": state.brief,
+        **({"brief_shown": True} if _brief_already_seen(state) else {}),
         **_result_shell(state),
     }
 
@@ -1215,7 +1245,7 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
 async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     """Walk the whole pipeline from wherever this call is entitled to start."""
     state.entry = entry
-    if entry in (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION):
+    if entry in _DISCOVERY_ENTRIES:
         stage = await run_discovery(state, entry=entry)
         if stage == CANCELLED:
             return _cancelled(state)
