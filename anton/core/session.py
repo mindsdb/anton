@@ -51,6 +51,7 @@ from anton.core.llm.provider import (
     ModelUnavailableError,
     ProviderAuthError,
     ProviderOverloadedError,
+    RequestRefusedError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -4761,6 +4762,20 @@ class ChatSession:
                         )
                         raise
 
+                    # A request the provider refuses outright: a setting the
+                    # model does not accept, or a prompt its policy blocks. The
+                    # re-send below would be identical and fail identically.
+                    # The explain call after the re-sends sends no tools, so
+                    # for a refused effort it can pass, and its prose would
+                    # end the turn as the answer with no error shown. So the
+                    # turn ends here and the host shows the error. After the
+                    # seal, as for the content rejection.
+                    if isinstance(_agent_exc, RequestRefusedError):
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_refused"
+                        )
+                        raise
+
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to
                         # recover. A TransientProviderError reaching here is a
@@ -4951,10 +4966,11 @@ class ChatSession:
                                 # every module that defines one of these.
                                 #
                                 # And propagating is not automatically better.
-                                # Four members currently have NO card on either
+                                # Five members currently have NO card on either
                                 # transport (ContextOverflowError,
                                 # StructuredOutputError, TransientProviderError,
-                                # EndpointConfigurationError): cowork-server
+                                # EndpointConfigurationError,
+                                # RequestRefusedError): cowork-server
                                 # replaces the message with a flat "An unexpected
                                 # error occurred." and the client renders a
                                 # BUTTONLESS alert, so for those the turn trades

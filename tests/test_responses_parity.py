@@ -105,9 +105,11 @@ class TestFailures:
         assert info.value.session_backoff is True  # mid-stream: never SDK-retried
 
     async def test_error_event_raises_instead_of_an_empty_answer(self):
+        # An unmapped code, so the stream_error backoff applies.
         with pytest.raises(TransientProviderError) as info:
             await _stream([
-                SimpleNamespace(type="error", code="rate_limit_exceeded", message="slow down",
+                SimpleNamespace(type="error", code="vector_store_timeout",
+                                message="the vector store timed out",
                                 param=None, sequence_number=1),
             ])
         assert info.value.code == "stream_error"
