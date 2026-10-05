@@ -7,6 +7,7 @@ reports are asserted where they are produced, in the FSM orchestrator.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,6 +20,7 @@ from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief, checkpoint as cp, orchestrator
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from anton.core.tools.generate_artifact.progress import MESSAGE_PREFIX
 
 
 def _text_response(content: str) -> LLMResponse:
@@ -233,3 +235,136 @@ async def test_revise_loop_has_a_defensive_cap_and_ends_unconfirmed(tmp_path, mo
     result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
     assert result == cp.STAGE_AWAITING_CONFIRMATION
     assert (state.artifact_path / "prd.md").exists()
+
+
+def _act_first_state(tmp_path: Path, *, renders: bool = True, **over) -> PrdState:
+    session = SimpleNamespace(_llm=SimpleNamespace(), question_count=0, elicitor=None, emit=AsyncMock())
+    if renders:
+        session.tool_messages = True
+    state = _make_state(tmp_path, session=session, act_first=True, **over)
+    state.progress = asyncio.Queue()
+    return state
+
+
+def _messages(state: PrdState) -> list[str]:
+    out = []
+    while not state.progress.empty():
+        item = state.progress.get_nowait()
+        if isinstance(item, str) and item.startswith(MESSAGE_PREFIX):
+            out.append(item[len(MESSAGE_PREFIX):])
+    return out
+
+
+def _never_ask(monkeypatch):
+    async def fail(session, request):
+        raise AssertionError("act-first must not ask to confirm the brief")
+
+    monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fail)
+
+
+async def test_act_first_shows_the_brief_and_writes_the_prd_without_asking(tmp_path, monkeypatch):
+    state = _act_first_state(tmp_path)
+    state.session._llm.plan = AsyncMock(side_effect=[
+        _tool_response("finish_gathering", {"summary": "ok", "artifact_type": "html-app"}),
+        _text_response("## Goal\nAn analog clock.\n"),
+        _text_response("## Goal\nAn analog clock, in full.\n"),
+    ])
+    _never_ask(monkeypatch)
+
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert (state.artifact_path / PRD_FILENAME).exists()
+    assert state.brief_shown is True
+    assert _messages(state) == ["## Goal\nAn analog clock."]
+
+
+async def test_act_first_without_a_rendering_host_sends_nothing(tmp_path, monkeypatch):
+    state = _act_first_state(tmp_path, renders=False)
+    state.session._llm.plan = AsyncMock(side_effect=[
+        _tool_response("finish_gathering", {"summary": "ok", "artifact_type": "html-app"}),
+        _text_response("## Goal\nAn analog clock.\n"),
+        _text_response("## Goal\nfull\n"),
+    ])
+    _never_ask(monkeypatch)
+
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_FULL)
+
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert state.brief_shown is False
+    assert _messages(state) == []
+
+
+def _spy_steps(monkeypatch):
+    calls: list[str] = []
+
+    async def draft(state):
+        calls.append("draft")
+        state.brief = "drafted"
+
+    async def redraw(state):
+        calls.append("redraw")
+        state.brief = "redrawn"
+
+    async def write(state):
+        calls.append("write_prd")
+
+    monkeypatch.setattr(orchestrator, "draft_brief", draft)
+    monkeypatch.setattr(orchestrator, "redraw_brief", redraw)
+    monkeypatch.setattr(orchestrator, "write_prd", write)
+    return calls
+
+
+@pytest.mark.parametrize("entry", [cp.ENTRY_NEW_ITERATION, cp.ENTRY_CONFIRM])
+async def test_act_first_redraws_a_changed_call(tmp_path, monkeypatch, entry):
+    """The usual repeat call: `agent_understanding` is re-typed every time.
+    Only the redraw step can re-declare sources, so a correction that names a
+    new one still reaches the data loop."""
+    state = _act_first_state(tmp_path)
+    state.call_changed = True
+    calls = _spy_steps(monkeypatch)
+    _never_ask(monkeypatch)
+
+    result = await orchestrator.run_discovery(state, entry=entry)
+
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert calls == ["redraw", "write_prd"]
+    assert _messages(state) == ["redrawn"]
+
+
+async def test_act_first_new_iteration_with_the_same_call_drafts(tmp_path, monkeypatch):
+    state = _act_first_state(tmp_path)
+    calls = _spy_steps(monkeypatch)
+    _never_ask(monkeypatch)
+
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_NEW_ITERATION)
+
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert calls == ["draft", "write_prd"]
+    assert _messages(state) == ["drafted"]
+
+
+async def test_act_first_confirm_with_the_same_call_only_writes_the_prd(tmp_path, monkeypatch):
+    state = _act_first_state(tmp_path)
+    calls = _spy_steps(monkeypatch)
+    _never_ask(monkeypatch)
+
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_CONFIRM)
+
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert calls == ["write_prd"]
+    assert _messages(state) == []
+
+
+async def test_act_first_over_budget_does_not_show_the_brief(tmp_path, monkeypatch):
+    state = _act_first_state(tmp_path)
+    state.spend = SimpleNamespace(should_wind_down=lambda: True)
+    calls = _spy_steps(monkeypatch)
+    _never_ask(monkeypatch)
+
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_NEW_ITERATION)
+
+    assert result == cp.STAGE_AWAITING_CONFIRMATION
+    assert calls == ["draft", "write_prd"]
+    assert state.brief_shown is False
+    assert _messages(state) == []

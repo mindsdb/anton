@@ -143,6 +143,27 @@ async def draft_brief(state: PrdState) -> None:
     state.trace_log.node("draft_brief", "done", detail=state.brief[:200])
 
 
+def announce_brief(state: PrdState) -> None:
+    """Act-first: show the brief as an agent message and do not wait.
+
+    It goes out on the progress channel so it keeps its place among the step
+    lines, and the handler relays it as a message only to a host that
+    declared it renders one (`ChatSessionConfig.tool_messages`). Elsewhere
+    nothing is sent and `brief_shown` stays False, which tells the calling
+    agent to relay the assumptions itself.
+    """
+    from ..progress import MESSAGE_PREFIX
+
+    renders = bool(getattr(state.session, "tool_messages", False))
+    if state.brief.strip() and state.progress is not None and renders:
+        state.progress.put_nowait(MESSAGE_PREFIX + state.brief)
+        state.brief_shown = True
+        outcome = "shown"
+    else:
+        outcome = "not_rendered"
+    state.trace_log.node("announce_brief", outcome, detail=state.brief[:200])
+
+
 async def show_and_confirm(state: PrdState) -> str:
     """Phase 2 step 2: show the brief and ask the user to accept, cancel,
     or comment. Returns one of "accepted", "cancelled", "revise",
