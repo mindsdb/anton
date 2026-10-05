@@ -1544,6 +1544,8 @@ async def _chat_loop(
         surface=SURFACE_CLI,
         # The CLI footer shows a streaming tool's live tail (`tool_peek`).
         live_tool_peek=True,
+        # The CLI prints a tool's message to the user as markdown.
+        tool_messages=True,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
