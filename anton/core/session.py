@@ -3361,6 +3361,9 @@ class ChatSession:
                 "jev_errors": str(tc.jev_errors),
                 "jev_last_status": tc.jev_last_status,
                 "jev_last_ms": str(tc.jev_last_ms),
+                "jev_input_tokens": str(tc.jev_input_tokens),
+                "jev_output_tokens": str(tc.jev_output_tokens),
+                "jev_checks_without_usage": str(tc.jev_checks_without_usage),
                 **(
                     {"jev_last_p_complete": f"{tc.jev_last_p_complete:.3f}"}
                     if tc.jev_last_p_complete is not None
@@ -3974,6 +3977,11 @@ class ChatSession:
                 tc.jev_last_status = result.status or result.error
                 tc.jev_last_p_complete = result.p_complete
                 tc.jev_last_ms = result.ms
+                if result.input_tokens is None or result.output_tokens is None:
+                    tc.jev_checks_without_usage += 1
+                else:
+                    tc.jev_input_tokens += result.input_tokens
+                    tc.jev_output_tokens += result.output_tokens
             logger.info(
                 "completion-verifier jev status=%s p=%s decided=%s llm=%s ms=%d model=%s error=%s",
                 result.status or "-",
