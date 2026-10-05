@@ -23,7 +23,7 @@ STEP_LABELS: dict[str, str] = {
     "gathering": "Gathering what the artifact needs",
     "draft_brief": "Preparing a short brief for you",
     "redraw_brief": "Updating the brief with your changes",
-    "write_prd": "Writing down the agreed requirements",
+    "write_prd": "Writing down the requirements",
     "define_required_data": "Working out what data is still missing",
     "is_possible_to_fetch": "Checking whether the missing data can be obtained",
     "fetch_data_sample": "Fetching a data sample",

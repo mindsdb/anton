@@ -301,3 +301,12 @@ def test_brief_steps_keep_the_confirm_variants_by_default():
     state = _state()
     assert "- Proposals — one line per" in step_message(sub_tools.STEP_DRAFT_BRIEF, state)
     assert "has already seen a brief" in step_message(sub_tools.STEP_REDRAW_BRIEF, state)
+
+
+def test_the_pipeline_prompt_does_not_promise_a_confirmation():
+    """The system prompt is shared by both modes; in act-first nothing is
+    confirmed, so it must not say the brief is."""
+    text = build_pipeline_system_prompt(_state())
+    assert "for confirmation" not in text
+    assert "the user agreed to" not in text
+    assert "`draft_brief` — a short brief shown to the user" in text

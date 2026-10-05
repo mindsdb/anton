@@ -17,7 +17,7 @@ from .state import PrdState
 
 _WRITE_PRD_INSTRUCTION = (
     "## Your task\n"
-    "Write the full PRD: the requirements the user agreed to, as a document "
+    "Write the full PRD: the requirements from the latest brief, as a document "
     "a person will read. Do not call any tool. Reply with the PRD only, as "
     "markdown, no other text.\n\n"
     "The latest brief in this conversation is the source. Earlier briefs and "

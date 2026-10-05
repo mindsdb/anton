@@ -157,7 +157,7 @@ class GenState:
     artifact_type: str
     artifact_path: Path
     slug: str
-    # The brief the user agreed to. Empty until phase B has drafted one —
+    # The brief shown to the user. Empty until phase B has drafted one —
     # which is most of a run's life now that the pipeline starts at gathering
     # rather than at a brief handed in by the caller.
     brief: str = ""

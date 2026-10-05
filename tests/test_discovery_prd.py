@@ -274,3 +274,7 @@ def test_write_prd_turns_assumptions_into_requirements():
     """The act-first brief has an Assumptions section instead of Proposals
     and Questions; without this rule `write_prd` could drop what the user saw."""
     assert "Its Assumptions are decisions" in prd._WRITE_PRD_INSTRUCTION
+
+
+def test_write_prd_does_not_claim_an_agreement():
+    assert "the user agreed to" not in prd._WRITE_PRD_INSTRUCTION
