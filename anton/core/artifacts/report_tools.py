@@ -5,6 +5,7 @@
                    rt.section("Detail", rt.table(["Part", "Units"], rows)))
     rt.save(folder / "report.html", html)
     rt.check(folder / "report.html")   # structure, local links; returns what the page shows
+    rt.update(path, {"summary-section": rt.para("...")})   # an existing page, in place
 
 Every function escapes the text it is given, so values from data files are
 shown as text and never run as markup. The output is one offline HTML file:
@@ -26,7 +27,7 @@ from pathlib import Path
 
 __all__ = [
     "Html", "page", "section", "para", "bullets", "table", "bar_chart", "filter_table",
-    "link", "inline", "rel_link", "data", "save", "check", "update",
+    "link", "inline", "rel_link", "data", "save", "check", "update", "insert",
 ]
 
 
@@ -252,6 +253,11 @@ def save(path, html: str) -> Path:
 
 _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
+# Markup that reaches the reader as text, e.g. "<h2>Summary</h2>" passed as a plain
+# string and escaped. Text inside <code> or <pre> is left alone.
+_SHOWN_TAG = re.compile(r"</?(?:h[1-6]|p|a|div|section|span|table|tr|td|th|ul|ol|li|strong|em|b|i|br)\b[^<>]{0,200}>",
+                        re.I)
+
 
 class _Reader(HTMLParser):
     def __init__(self):
@@ -259,6 +265,7 @@ class _Reader(HTMLParser):
         self.ids, self.links, self.scripts, self.text = [], [], [], []
         self.lang = self.viewport = self.title = None
         self.tables, self._table, self._row, self._cell, self._skip, self._in_title = [], None, None, None, 0, False
+        self.shown_tags, self._code = [], 0
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -274,6 +281,8 @@ class _Reader(HTMLParser):
             self.scripts.append(a.get("src") or a.get("href"))
         elif tag in ("script", "style"):
             self._skip += 1
+        elif tag in ("code", "pre"):
+            self._code += 1
         elif tag == "title" and self.title is None:
             self._in_title = True  # the document title; svg <title>s come later
         elif tag == "table":
@@ -287,6 +296,8 @@ class _Reader(HTMLParser):
     def handle_endtag(self, tag):
         if tag in ("script", "style") and self._skip:
             self._skip -= 1
+        elif tag in ("code", "pre") and self._code:
+            self._code -= 1
         elif tag == "title" and self._in_title:
             self._in_title = False
         elif tag in ("td", "th") and self._cell is not None and self._row is not None:
@@ -310,6 +321,8 @@ class _Reader(HTMLParser):
             return
         if self._cell is not None:
             self._cell.append(text)
+        if not self._code:
+            self.shown_tags.extend(_SHOWN_TAG.findall(text))
         self.text.append(text)
 
 
@@ -317,7 +330,9 @@ def check(path) -> dict:
     """Read a saved page back. Raises ValueError on structural problems.
 
     Checks: lang and viewport present, no external scripts, styles or images,
-    unique element ids, and every local link resolving to an existing file.
+    unique element ids, every local link resolving to an existing file, and no
+    HTML tags shown to the reader as text (markup passed as a plain string is
+    escaped; wrap trusted markup from these helpers, or pass it to ``section``).
     Returns the title, the visible text and each table's columns and rows (as
     shown text), for comparing with the values the page was built from. This
     is not a browser check and says nothing about business correctness.
@@ -345,6 +360,8 @@ def check(path) -> dict:
             broken.append(href)
     if broken:
         problems.append(f"local links that do not resolve: {broken}")
+    if reader.shown_tags:
+        problems.append(f"HTML tags shown as text: {reader.shown_tags[:3]}")
     if problems:
         raise ValueError("; ".join(problems))
     return {
@@ -358,14 +375,15 @@ def check(path) -> dict:
 # --- editing a saved page in place ---------------------------------------------
 
 class _Locator(HTMLParser):
-    """Character offsets of the content of each element with an id."""
+    """Character offsets of each element with an id: its content and the whole element."""
 
     def __init__(self, text):
         super().__init__(convert_charrefs=False)
+        self._text = text
         self._lines = [0]
         for line in text.splitlines(keepends=True):
             self._lines.append(self._lines[-1] + len(line))
-        self._stack, self.spans = [], {}
+        self._stack, self.spans, self.outer = [], {}, {}
 
     def _offset(self):
         line, col = self.getpos()
@@ -375,7 +393,8 @@ class _Locator(HTMLParser):
         if tag in _VOID:
             return
         start_tag = self.get_starttag_text() or ""
-        self._stack.append((tag, dict(attrs).get("id"), self._offset() + len(start_tag)))
+        here = self._offset()
+        self._stack.append((tag, dict(attrs).get("id"), here + len(start_tag), here))
 
     def handle_startendtag(self, tag, attrs):
         pass
@@ -383,33 +402,56 @@ class _Locator(HTMLParser):
     def handle_endtag(self, tag):
         for i in range(len(self._stack) - 1, -1, -1):
             if self._stack[i][0] == tag:
-                _, id_, start = self._stack[i]
+                _, id_, start, outer_start = self._stack[i]
                 del self._stack[i:]
                 if id_ is not None:
-                    self.spans.setdefault(id_, []).append((start, self._offset()))
+                    end = self._offset()
+                    self.spans.setdefault(id_, []).append((start, end))
+                    self.outer.setdefault(id_, []).append((outer_start, self._text.index(">", end) + 1))
                 return
+
+
+_LEADING_HEADING = re.compile(r"\s*<h([1-6])\b[^>]*>.*?</h\1\s*>", re.I | re.S)
+
+
+def _locate(text: str) -> _Locator:
+    locator = _Locator(text)
+    locator.feed(text)
+    locator.close()
+    return locator
+
+
+def _one(found: dict, id_: str) -> tuple[int, int]:
+    spans = found.get(id_, [])
+    if len(spans) != 1:
+        raise ValueError(f"id {id_!r} matches {len(spans)} elements; it must match exactly one")
+    return spans[0]
 
 
 def update(path, changes: dict) -> dict:
     """Replace the content of elements by id, leaving every other byte unchanged.
 
+    Works on any saved page, including ones not made with these helpers.
     ``changes`` maps an element id to new content: markup from these helpers,
     plain text (escaped), or, for a ``script type="application/json"`` block,
-    any JSON value. Each id must match exactly one element. Returns a receipt
-    of the ids changed and the old and new file sizes.
+    any JSON value. A heading at the start of the element (a section's title)
+    is kept unless the new content starts with a heading of its own. Each id
+    must match exactly one element. Returns a receipt of the ids changed and
+    the old and new file sizes.
     """
     path = Path(path)
     text = path.read_text(encoding="utf-8")
-    locator = _Locator(text)
-    locator.feed(text)
-    locator.close()
+    locator = _locate(text)
     edits = []
     for id_, content in changes.items():
-        spans = locator.spans.get(id_, [])
-        if len(spans) != 1:
-            raise ValueError(f"id {id_!r} matches {len(spans)} elements; it must match exactly one")
-        start, end = spans[0]
-        new = _esc(content) if isinstance(content, str) else _json_text(content)
+        start, end = _one(locator.spans, id_)
+        if isinstance(content, str):
+            new = _esc(content)
+            heading = _LEADING_HEADING.match(text, start, end)
+            if heading and not re.match(r"\s*<h[1-6]\b", new, re.I):
+                new = heading.group(0) + new
+        else:
+            new = _json_text(content)
         edits.append((start, end, new))
     edits.sort()
     for (s1, e1, _), (s2, _e2, _) in zip(edits, edits[1:]):
@@ -420,3 +462,23 @@ def update(path, changes: dict) -> dict:
         out = out[:start] + new + out[end:]
     save(path, out)
     return {"changed": sorted(changes), "bytes_before": len(text.encode()), "bytes_after": len(out.encode())}
+
+
+def insert(path, content, *, before: str | None = None, after: str | None = None) -> dict:
+    """Add ``content`` just before or just after the element with that id.
+
+    For new parts of an existing page, e.g. a decision summary above the
+    detail: ``rt.insert(path, rt.section("Decision summary", rt.para(...)),
+    before="detail-section")``. Every other byte is unchanged. Plain text is
+    escaped, as elsewhere. Returns a receipt like ``update``.
+    """
+    if (before is None) == (after is None):
+        raise ValueError("give exactly one of before= or after=")
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    start, end = _one(_locate(text).outer, before or after)
+    at = start if before is not None else end
+    out = text[:at] + _esc(content) + text[at:]
+    save(path, out)
+    return {"inserted": "before " + before if before is not None else "after " + after,
+            "bytes_before": len(text.encode()), "bytes_after": len(out.encode())}

@@ -138,6 +138,52 @@ def test_update_works_on_pages_not_made_with_these_helpers(tmp_path):
     assert out.read_text() == original.replace(">Old<", ">Planner handoff<").replace(">10<", ">12<")
 
 
+def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Conclusion", rt.para("Old."), id="conclusion"),
+                                             rt.section("Detail", rt.para("Rows."), id="detail")))
+    rt.update(out, {"conclusion": rt.para("New."), "detail": rt.inline(rt.Html("<h2>Row detail</h2>"), rt.para("R."))})
+    text = out.read_text()
+    assert '<section id="conclusion"><h2>Conclusion</h2><p>New.</p></section>' in text
+    assert '<section id="detail"><h2>Row detail</h2><p>R.</p></section>' in text
+    assert rt.check(out)["text"].count("Conclusion") == 1
+
+
+def test_check_reports_markup_shown_as_text(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Summary", rt.para("Fine."), id="summary")))
+    rt.update(out, {"summary": rt.inline("<h2>Summary</h2>", rt.para("Escaped by mistake."))})
+    with pytest.raises(ValueError, match="HTML tags shown as text"):
+        rt.check(out)
+    code = rt.save(tmp_path / "code.html", _page(rt.section("Markup", rt.Html("<pre><code>&lt;h2&gt;x&lt;/h2&gt;</code></pre>"))))
+    rt.check(code)  # inside code or pre it is intended
+    plain = rt.save(tmp_path / "plain.html", _page(rt.para("Stock < demand > 0; ids <P1>.")))
+    rt.check(plain)
+
+
+def test_insert_adds_new_parts_to_a_page_not_made_with_these_helpers(tmp_path):
+    out = tmp_path / "legacy.html"
+    original = ('<!DOCTYPE html>\n<html lang="en"><head><meta name="viewport" content="width=device-width">'
+                '</head><body>\n<h1>Planning report</h1>\n<section id="detail"><h2>Detail</h2><table>'
+                '<tr><td>1</td></tr></table></section>\n<section id="audit"><h2>Audit</h2></section>\n</body></html>\n')
+    out.write_text(original)
+    summary = rt.section("Decision summary", rt.para("Cover 30 <units>."), id="decision")
+    receipt = rt.insert(out, summary, before="detail")
+    rt.insert(out, rt.para("Checked."), after="audit")
+    assert receipt["inserted"] == "before detail"
+    assert out.read_text() == original.replace('<section id="detail">', summary + '<section id="detail">').replace(
+        '<h2>Audit</h2></section>', '<h2>Audit</h2></section><p>Checked.</p>')
+    assert "Cover 30 &lt;units&gt;." in out.read_text()
+    assert [s for s in rt.check(out)["text"].split() if s in ("Decision", "Detail", "Audit")] == ["Decision", "Detail", "Audit"]
+
+
+def test_insert_needs_exactly_one_existing_anchor(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("A", id="a")))
+    before = out.read_text()
+    for kwargs in ({}, {"before": "a", "after": "a"}, {"before": "missing"}):
+        with pytest.raises(ValueError):
+            rt.insert(out, rt.para("x"), **kwargs)
+    assert out.read_text() == before
+
+
 class _Rows(HTMLParser):
     """The filter's rows, select options, total and empty-state elements, as data for the JS test."""
 
