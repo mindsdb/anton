@@ -378,3 +378,83 @@ async def test_function_tools_are_sent_non_strict(endpoint):
          "parameters": TOOLS[0]["input_schema"], "strict": False},
         {"type": "web_search"},
     ]
+
+
+# --- The shared prompt is sent with an explicit cache breakpoint ---------------
+
+from anton.core.llm import openai as openai_mod  # noqa: E402
+from anton.core.llm.prompt_builder import SESSION_CONTEXT_MARKER  # noqa: E402
+
+SPLIT_SYSTEM = "shared policy" + SESSION_CONTEXT_MARKER + "project alpha"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_breakpoint_refusals(monkeypatch):
+    monkeypatch.setattr(openai_mod, "_CACHE_BREAKPOINT_REFUSED", set())
+
+
+async def _stream_system(provider, system, **kw):
+    kw.setdefault("messages", [{"role": "user", "content": "hi"}])
+    events = [e async for e in provider.stream(model="gpt-test", system=system, max_tokens=16, **kw)]
+    return [e.response for e in events if isinstance(e, StreamComplete)][-1]
+
+
+def _done():
+    return (200, "sse", _sse(*_text_events("ok"), {"type": "response.completed", "response": _response("completed")}))
+
+
+async def test_shared_prompt_is_its_own_cacheable_message(endpoint):
+    endpoint.replies.append(_done())
+    r = await _stream_system(endpoint.provider(), SPLIT_SYSTEM)
+    assert r.content == "ok"
+    body = endpoint.requests[0]["body"]
+    assert "instructions" not in body
+    shared, session, user = body["input"][:3]
+    assert shared["role"] == session["role"] == "developer"
+    assert shared["content"] == [{"type": "input_text", "text": "shared policy",
+                                  "prompt_cache_breakpoint": {"mode": "explicit"}}]
+    assert session["content"] == SESSION_CONTEXT_MARKER + "project alpha"
+    assert user["role"] == "user"
+
+
+@pytest.mark.parametrize("system", ["no boundary in this prompt",
+                                    "a" + SESSION_CONTEXT_MARKER + "b" + SESSION_CONTEXT_MARKER + "c"])
+async def test_without_one_clear_boundary_the_prompt_stays_in_instructions(endpoint, system):
+    endpoint.replies.append(_done())
+    await _stream_system(endpoint.provider(), system)
+    body = endpoint.requests[0]["body"]
+    assert body["instructions"] == system
+    assert all(item.get("role") != "developer" for item in body["input"])
+
+
+async def test_other_flavors_keep_instructions(endpoint):
+    p = OpenAIProvider(api_key="k", base_url=endpoint.base_url,
+                       flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH)
+    kwargs = p._build_responses_kwargs(model="gpt-test", system=SPLIT_SYSTEM,
+                                       messages=[{"role": "user", "content": "hi"}], tools=None,
+                                       tool_choice=None, max_tokens=16, native_web_tools=None)
+    assert kwargs["instructions"] == SPLIT_SYSTEM
+
+
+async def test_a_refused_breakpoint_is_retried_without_it_and_not_sent_again(endpoint):
+    refusal = {"error": {"message": "Unknown parameter: 'input[0].content[0].prompt_cache_breakpoint'.",
+                         "type": "invalid_request_error",
+                         "param": "input[0].content[0].prompt_cache_breakpoint", "code": "unknown_parameter"}}
+    endpoint.replies += [(400, "json", refusal), _done(), _done()]
+    first = await _stream_system(endpoint.provider(), SPLIT_SYSTEM)
+    second = await _stream_system(endpoint.provider(), SPLIT_SYSTEM)  # a new provider, as Cowork builds per turn
+    assert (first.content, second.content) == ("ok", "ok")
+    retried, later = endpoint.requests[1]["body"], endpoint.requests[2]["body"]
+    for body in (retried, later):
+        assert body["instructions"] == SPLIT_SYSTEM
+        assert body["input"][0]["role"] == "user"
+        assert all(item.get("role") != "developer" for item in body["input"])
+
+
+async def test_an_unrelated_bad_request_is_not_mistaken_for_a_refused_breakpoint(endpoint):
+    endpoint.replies.append((400, "json", {"error": {"message": "Invalid schema for function 'get_stock'.",
+                                                     "type": "invalid_request_error", "param": "tools[0]",
+                                                     "code": None}}))
+    with pytest.raises(openai.BadRequestError):
+        await _stream_system(endpoint.provider(), SPLIT_SYSTEM, tools=TOOLS)
+    assert len(endpoint.requests) == 1
