@@ -34,6 +34,7 @@ from anton.core.llm.provider import (
     ModelUnavailableError,
     ProviderAuthError,
     ProviderOverloadedError,
+    RequestRefusedError,
     StreamTextDelta,
     StructuredOutputError,
     TokenLimitExceeded,
@@ -221,6 +222,50 @@ async def test_the_raise_leaves_no_dangling_system_message_in_history():
     assert "The task has failed" not in json.dumps(s._history)
 
 
+async def test_a_refused_request_is_sealed_then_raised_on_the_first_attempt():
+    """A refused request fails identically on every re-send, and the tool-less
+    explain call after them can pass, as the stub here does, and end the turn
+    as prose with no error shown. So the turn ends on the first refusal, with
+    no recovery note and no explain call. The raise sits after the seal, as the
+    content rejection's does, so an orphan tool_use never reaches the history
+    the next turn replays."""
+    s = _session()
+    attempts: list = []
+
+    async def _tool_use_then_refused(user_msg):
+        attempts.append(user_msg)
+        s._append_history({"role": "assistant", "content": [{
+            "type": "tool_use", "id": "toolu_refused", "name": "scratchpad", "input": {},
+        }]})
+        raise RequestRefusedError("refused", code="parameter_refused", status_code=400)
+        yield  # pragma: no cover
+
+    explained: list = []
+
+    async def _explain(*a, **kw):
+        explained.append(kw)
+        yield StreamTextDelta(text="here is what went wrong")
+
+    s._stream_and_handle_tools = _tool_use_then_refused
+    s._llm.plan_stream = _explain
+
+    with pytest.raises(RequestRefusedError):
+        _ = [e async for e in s.turn_stream("do it")]
+
+    assert len(attempts) == 1, f"expected a single attempt, got {len(attempts)}"
+    assert not explained, "the explain call ran for a refused request"
+    assert "An error interrupted execution" not in json.dumps(s._history)
+    sealed = [
+        b
+        for m in s._history
+        if isinstance(m, dict) and isinstance(m.get("content"), list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+        and b.get("tool_use_id") == "toolu_refused"
+    ]
+    assert sealed, "the orphan tool_use was left unsealed"
+
+
 async def test_a_non_transient_failure_still_summarizes():
     """Fix 1 is scoped to transients. A 400 has no card to route to and the model
     can genuinely explain it, so that path must be unchanged."""
@@ -278,6 +323,9 @@ _CURATED_SAMPLES = {
     ContentValidationError: lambda: ContentValidationError("bad image block"),
     ContentTooLargeError: lambda: ContentTooLargeError("image too big"),
     EndpointConfigurationError: lambda: EndpointConfigurationError("bad base url"),
+    RequestRefusedError: lambda: RequestRefusedError(
+        "refused reasoning effort", code="parameter_refused", status_code=400,
+    ),
 }
 
 
@@ -482,6 +530,7 @@ def test_classify_transient_carries_the_status_it_classified_from(status, body, 
         ("stream_error", "bad_response"),
         ("truncated_stream", "bad_response"),
         ("empty_response", "bad_response"),
+        ("response_failed", "bad_response"),
         ("rate_limited", "rate_limit"),
         ("connection_error", "connection_failure"),
         ("http_500", "http_5xx"),

@@ -185,7 +185,13 @@ class TurnCost:
     #   "rate_limit_wait_limit"     — the rate-limit wait allowance ran out
     #   "rate_limit_wait_too_long"  — Retry-After exceeded our cap; we carded
     #                                 immediately rather than stalling the turn
-    # Empty for every terminal that did not retry.
+    #   "content_rejected"          — the provider refused content already in
+    #                                 the history
+    #   "request_refused"           — the provider refused the request itself:
+    #                                 a setting the model does not accept, or a
+    #                                 prompt its policy blocks
+    # The last two end the turn on the first attempt, without retrying. Empty
+    # for every other terminal that did not retry.
     retry_terminal_reason: str = ""
     # WHAT kind of provider failure ended the turn — a closed vocabulary
     # (`PROVIDER_FAILURE_KINDS`), NOT the raw exception `code` (ENG-1361).

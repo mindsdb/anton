@@ -1280,6 +1280,24 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     return secs
 
 
+def _rate_limited(
+    *, provider: str, model: str, velocity_confirmed: bool,
+    retry_after: float | None, status_code: int | None,
+) -> TransientProviderError:
+    """The rate-limit error, shared by the 429 classifier and the Responses one.
+
+    Only a confirmed velocity limit earns the session wait and keeps the
+    server's interval hint; see :func:`classify_transient`.
+    """
+    return TransientProviderError(
+        f"{provider or 'The model provider'} is rate-limiting requests.",
+        provider=provider, code="rate_limited",
+        session_backoff=velocity_confirmed,
+        retry_after=retry_after if velocity_confirmed else None,
+        model=model, status_code=status_code,
+    )
+
+
 def classify_transient(
     status_code: int | None,
     body: Any,
@@ -1370,12 +1388,9 @@ def classify_transient(
         # minute", we immediately sent more. This is the one failure class
         # where waiting is both necessary and sufficient, so it waits — for the
         # interval the server named, when it named one.
-        return TransientProviderError(
-            f"{provider or 'The model provider'} is rate-limiting requests.",
-            provider=provider, code="rate_limited",
-            session_backoff=velocity_confirmed,
-            retry_after=retry_after if velocity_confirmed else None,
-            model=model, status_code=status_code,
+        return _rate_limited(
+            provider=provider, model=model, velocity_confirmed=velocity_confirmed,
+            retry_after=retry_after, status_code=status_code,
         )
     return None
 
@@ -1515,6 +1530,38 @@ class ContentTooLargeError(ContentValidationError):
         super().__init__(message, code=code)
 
 
+class RequestRefusedError(Exception):
+    """The provider refused the request itself, so the identical request fails
+    identically every time: a setting the model does not accept (function tools
+    with a reasoning effort on chat.completions, or an effort value it does not
+    know), or a prompt its policy blocks (``content_filter`` or
+    ``invalid_prompt``, as a 400 or as an in-band Responses failure).
+
+    A re-send is rebuilt from the same settings and history, so it fails the
+    same way. The session's explain-the-failure call after the re-sends sends
+    no tools. For a refused effort it can pass, and its prose then ends the
+    turn as the answer. For a blocked prompt it is refused too, and the raw
+    provider error ends the turn as prose. Either way the host shows no error.
+    So the session ends the turn on the first refusal, and the host shows this
+    one.
+
+    ``code`` names the refusal: ``parameter_refused`` for a refused setting, or
+    the provider's own code for a refused prompt. ``status_code`` is the HTTP
+    status it was classified from, and ``None`` for a failure inside a 200
+    stream.
+
+    Not a ``ConnectionError``, unlike most types here: callers read that base
+    as a failure a retry may fix (the verifier counts it as transient), and a
+    retry cannot fix this one. The class NAME is what survives a hosted turn
+    (``cloud_turn.__main__._scrub``).
+    """
+
+    def __init__(self, message: str, *, code: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
 # Phrases that identify a permanent, content-SHAPED rejection (ENG-1992) in the
 # two dialects we have actually observed. Matched on the provider's prose
 # because no provider gives this a structured code.
@@ -1573,6 +1620,48 @@ def _quote_provider(message: str) -> str:
     return detail
 
 
+def _provider_said(message: object) -> str:
+    """`` The provider said: <quote>`` to append to curated copy, or ``""``
+    when the provider sent no message to quote."""
+    if not isinstance(message, str) or not message.strip():
+        return ""
+    return f" The provider said: {_quote_provider(message)}"
+
+
+def _image_too_large(message: object) -> ContentTooLargeError:
+    """The size refusal, shared by the 400 classifier and the Responses one."""
+    return ContentTooLargeError(
+        "An image in this conversation is too large for the model to "
+        f"accept.{_provider_said(message)} "
+        "That image will be removed automatically so the conversation can "
+        "continue \u2014 re-attach a smaller or lower-resolution copy if you "
+        "still need it."
+    )
+
+
+def _content_rejected() -> ContentValidationError:
+    """The shape refusal, shared by the 400 classifier and the Responses one."""
+    return ContentValidationError(
+        "The model provider rejected part of this conversation's content "
+        "(an attachment or image in an unsupported format). That content "
+        "will be removed automatically so the conversation can continue."
+    )
+
+
+def _prompt_refused(
+    message: object, *, code: str, status_code: int | None,
+) -> RequestRefusedError:
+    """The prompt refusal, shared by the 400 classifier and the Responses one."""
+    return RequestRefusedError(
+        "The model provider refused this conversation's prompt, so sending it "
+        f"again would fail the same way.{_provider_said(message)} Change the "
+        "request. If the refused content is earlier in the conversation, "
+        "start a new one.",
+        code=code,
+        status_code=status_code,
+    )
+
+
 def classify_content_rejection(
     *, error_type: str | None, message: str | None, param: str | None = None,
 ) -> "ContentValidationError | None":
@@ -1619,13 +1708,7 @@ def classify_content_rejection(
     par = (param or "").lower()
 
     if "image" in low and any(phrase in low for phrase in _CONTENT_SIZE_PHRASES):
-        return ContentTooLargeError(
-            "An image in this conversation is too large for the model to "
-            f"accept. The provider said: {_quote_provider(raw)} "
-            "That image will be removed automatically so the conversation can "
-            "continue \u2014 re-attach a smaller or lower-resolution copy if you "
-            "still need it."
-        )
+        return _image_too_large(raw)
 
     # A param pointing into a content array is evidence on its own.
     _content_param = ".content[" in par or par.endswith(".content")
@@ -1643,12 +1726,111 @@ def classify_content_rejection(
         and _names_a_content_block(low)
     )
     if _content_param or _corroborated_phrase:
-        return ContentValidationError(
-            "The model provider rejected part of this conversation's content "
-            "(an attachment or image in an unsupported format). That content "
-            "will be removed automatically so the conversation can continue."
-        )
+        return _content_rejected()
 
+    return None
+
+
+# The sentence OpenAI and Azure send when chat.completions refuses function
+# tools for a model that reasons by default, whether or not the request set an
+# effort. Azure documents only this sentence, not the body's `param`.
+_TOOLS_WITH_EFFORT_REFUSAL = "function tools with reasoning_effort are not supported"
+
+# Codes that name a prompt the provider's policy blocks: Azure's prompt filter
+# (`content_filter`) and OpenAI's flagged prompt (`invalid_prompt`), sent as a
+# request-time 400 or as an in-band Responses failure. A filtered OUTPUT is
+# documented to end `incomplete` instead, so it stays a stop reason: an answer
+# that stops early, with no error. That is not yet observed on Azure. If Azure
+# ever fails a filtered output in-band with `content_filter`, the turn shows
+# this error instead.
+_PROMPT_REFUSAL_CODES = ("content_filter", "invalid_prompt")
+
+
+def classify_request_refusal(
+    *, status_code: int, code: object, message: object, param: object,
+) -> RequestRefusedError | None:
+    """Classify a 400 that refuses the request outright, else None.
+
+    Two refusals qualify. A refused reasoning effort: ``param`` naming
+    ``reasoning_effort`` (which also covers an effort value the model does not
+    accept), or the tools-with-effort sentence, for a body that names no param.
+    A blocked prompt: ``code`` in ``_PROMPT_REFUSAL_CODES``. Azure's prompt
+    filter sends no ``type``, so no rule keyed on ``invalid_request_error``
+    sees it.
+
+    Narrow on purpose. Every other 400 keeps the session's retry-then-explain
+    path, and a history-shape 400 needs it: an orphan tool call can heal on the
+    re-send once the session seals it. The caller runs this after the
+    context-overflow and content classifiers, so a body that also matches one of
+    those keeps its recovery.
+    """
+    if status_code != 400:
+        return None
+    names_the_refusal = (
+        isinstance(message, str) and _TOOLS_WITH_EFFORT_REFUSAL in message.lower()
+    )
+    if param == "reasoning_effort" or names_the_refusal:
+        return RequestRefusedError(
+            "The model provider refused this request's reasoning effort, so sending "
+            f"it again would fail the same way.{_provider_said(message)} Change the "
+            "model or its reasoning effort in the model settings.",
+            code="parameter_refused",
+            status_code=status_code,
+        )
+    if isinstance(code, str) and code in _PROMPT_REFUSAL_CODES:
+        return _prompt_refused(message, code=code, status_code=status_code)
+    return None
+
+
+# In-band Responses API image codes, by the recovery each one gets. Every
+# image code is about an image already in the history, so each gets the history
+# repair; the size codes also ask the user for a smaller copy.
+_RESPONSES_IMAGE_TOO_LARGE_CODES = ("image_too_large", "image_file_too_large")
+_RESPONSES_IMAGE_REJECTED_CODES = (
+    "invalid_image", "invalid_image_format", "invalid_base64_image",
+    "invalid_image_url", "invalid_image_mode", "image_too_small",
+    "image_parse_error", "image_content_policy_violation",
+    "unsupported_image_media_type", "empty_image_file",
+    "failed_to_download_image", "image_file_not_found",
+)
+
+
+def classify_responses_failure(
+    body: object, *, provider: str, model: str,
+) -> ContextOverflowError | TransientProviderError | RequestRefusedError | ContentValidationError | None:
+    """The typed error for an in-band Responses API failure that names its
+    cause, else None.
+
+    In-band means a ``response.failed`` event, a stream ``error`` event, or a
+    non-streamed response with status ``failed``: all arrive inside a 200. Each
+    named code gets the typed error for its cause, so the session runs that
+    cause's handling: compaction for an overflow, the count-based retry for a
+    rate limit, the history repair for an image, and a visible error for a
+    refused prompt. ``None`` leaves any other code to the caller's transient
+    handling.
+
+    A rate limit gets what an unconfirmed 429 gets, not the session wait. The
+    code does not say whether a per-minute or a per-day limit was hit, and only
+    a confirmed velocity limit earns the wait (see :func:`classify_transient`).
+    """
+    parsed = ProviderErrorBody.parse(body)
+    code = parsed.code
+    if not isinstance(code, str):
+        return None
+    message = parsed.top.message or parsed.envelope.message
+    if code == "context_length_exceeded":
+        return ContextOverflowError(message if isinstance(message, str) else code)
+    if code == "rate_limit_exceeded":
+        return _rate_limited(
+            provider=provider, model=model, velocity_confirmed=False,
+            retry_after=None, status_code=None,
+        )
+    if code in _PROMPT_REFUSAL_CODES:
+        return _prompt_refused(message, code=code, status_code=None)
+    if code in _RESPONSES_IMAGE_TOO_LARGE_CODES:
+        return _image_too_large(message)
+    if code in _RESPONSES_IMAGE_REJECTED_CODES:
+        return _content_rejected()
     return None
 
 
@@ -1782,6 +1964,7 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     # what makes a new type fail at authoring time rather than in prod.
     ContentTooLargeError,
     EndpointConfigurationError,
+    RequestRefusedError,
 )
 
 
@@ -1804,7 +1987,9 @@ PROVIDER_FAILURE_KINDS: frozenset[str] = frozenset({
 # mid-stream error event, a stream that stopped early, or one that never
 # started. Distinct from `overload_signal` because the provider told us
 # nothing about why — claiming overload here would over-report incidents.
-_BAD_RESPONSE_CODES = frozenset({"stream_error", "truncated_stream", "empty_response"})
+_BAD_RESPONSE_CODES = frozenset({
+    "stream_error", "truncated_stream", "empty_response", "response_failed",
+})
 
 
 def provider_failure_kind(code: str | None) -> str:
