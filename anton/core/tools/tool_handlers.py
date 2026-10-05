@@ -896,7 +896,31 @@ async def handle_open_artifact(
         "description": artifact.description,
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
+        **_primary_content(folder, artifact.primary),
     }, indent=2), ok=True)
+
+
+# Opening an artifact is almost always followed by reading its entry file, so a
+# small text one comes back with the descriptor and saves a model round trip.
+OPEN_ARTIFACT_CONTENT_MAX_BYTES = 20_000
+
+
+def _primary_content(folder: Path, primary: str | None) -> dict:
+    """The primary file's text, or why it was left out; {} when there is none."""
+    if not primary:
+        return {}
+    root = Path(folder).resolve()
+    target = (root / primary).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return {}
+    size = target.stat().st_size
+    if size > OPEN_ARTIFACT_CONTENT_MAX_BYTES:
+        return {"primary_content_omitted": f"{primary} is {size} bytes; read it from the scratchpad"}
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return {"primary_content_omitted": f"{primary} is not a text file"}
+    return {"primary_content": text}
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:

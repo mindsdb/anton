@@ -329,8 +329,9 @@ OPEN_ARTIFACT_TOOL = ToolDef(
     name="open_artifact",
     description=(
         "Load an existing artifact by slug. Returns the folder path plus the "
-        "list of files so you can decide what to edit. Combine with the "
-        "scratchpad to read existing files (`open(path).read()`) or write "
+        "list of files so you can decide what to edit, and the primary file's "
+        "current text as `primary_content` when it is a small text file. Combine "
+        "with the scratchpad to read other files (`open(path).read()`) or write "
         "updates back into the folder. Provenance is updated automatically — "
         "every turn that modifies a file in the folder is appended to the "
         "artifact's metadata.json."
