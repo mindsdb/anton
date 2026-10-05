@@ -290,12 +290,14 @@ each value of column `key`, filtering the rows shown in a region named \
 "total_label: N"; `hide_zero` also hides rows whose value is not positive), \
 `rt.link(href, text)`, `rt.inline(*parts)`, `rt.rel_link(from_file, target)`, \
 `rt.save(path, html)`, `rt.check(path)` (structure, local links, and the \
-tables and text as shown) and `rt.update(path, {element_id: new_content})` \
-(changes only those elements, in any page). Write your own HTML for anything \
-they do not cover.
+tables and text as shown), `rt.update(path, {element_id: new_content})` \
+(replaces those elements' content in any page; a section keeps its heading) \
+and `rt.insert(path, new_content, before=element_id)` (or `after=`). Write \
+your own HTML for anything they do not cover.
 - To change an existing report, edit only what the request asks and keep the \
-rest, including the artifact itself and any file the user asked you not to \
-change.
+rest, including the artifact itself, its look and any file the user asked you \
+not to change. Change the saved page in place with rt.update and rt.insert, \
+whether or not report_tools made it, rather than rewriting it.
 - Before you answer, re-read what you saved and compare it with the data. Keep \
 the reply short, since the report holds the detail: the findings, what you \
 checked, and what you did not (for example, that no browser was used).
@@ -382,11 +384,13 @@ requirements with the user itself and writes the dashboard through a verified \
 pipeline and its own output contract — you do NOT recall a skill or write the \
 HTML yourself for this.
 
-Building a generator-made dashboard BY HAND is the exception — editing one, or \
-`generate_artifact` returned an error and the user asked you to continue \
+Building a generator-made dashboard BY HAND is the exception — rewriting its \
+code, or `generate_artifact` returned an error and the user asked you to continue \
 manually. Only then call `recall_skill("build-html-dashboard")` first and follow \
 the loaded output contract (charting library, theme, file layout, large-dataset \
-handling). Never write dashboard HTML by hand from memory of those rules.\
+handling). Never write dashboard HTML by hand from memory of those rules. \
+Changing a report's content or adding sections needs neither: use report_tools \
+(DIRECT REPORTS).\
 """
 
 
@@ -406,8 +410,8 @@ has fully specified follows DIRECT REPORTS in the ARTIFACTS section; otherwise \
 `create_artifact(type="html-app", primary="index.html", ...)`, then \
 `generate_artifact(slug, user_request, agent_understanding, ...)`. If you end \
 up building a generator-made dashboard BY HAND instead \
-(editing one, or the generator failed and the user asked you \
-to continue), call `recall_skill("build-html-dashboard")` first and follow the \
+(rewriting its code, or the generator failed and the user asked you \
+to continue; not for changing a report's content), call `recall_skill("build-html-dashboard")` first and follow the \
 loaded output contract. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\

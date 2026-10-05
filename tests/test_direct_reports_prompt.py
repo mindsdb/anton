@@ -32,4 +32,4 @@ def test_routing_is_stated_once_with_the_criterion_first():
 
 
 def test_the_block_is_short():
-    assert len(_direct_reports_block()) < 2600
+    assert len(_direct_reports_block()) < 2800

@@ -188,7 +188,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "`dataset`, `image` and `mixed` there is no generator: write the "
         "files yourself into the returned path.\n\n"
         "If you do end up building a generator-made artifact BY "
-        "HAND (editing one, or `generate_artifact` failed and "
+        "HAND (rewriting its code, or `generate_artifact` failed and "
         "the user asked you to continue), the output contract lives in a skill: "
         "call `recall_skill(\"build-html-dashboard\")` for an html-app or "
         "`recall_skill(\"build-fullstack-backend\")` for a fullstack app before "
