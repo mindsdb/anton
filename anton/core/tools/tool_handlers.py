@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -157,11 +158,19 @@ _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 _OPEN_LINT_BUDGET_SECONDS = 10.0
 
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+@dataclass(frozen=True)
+class _LintResult:
+    messages: list[str]
+    # False when part of the check could not run (e.g. LibreOffice timed
+    # out): the messages are still reported, but never remembered.
+    complete: bool = True
+
+
+def _artifact_linters() -> dict[str, Callable[[Path], _LintResult | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
-    headless browser); `[]` means it ran and found nothing; a non-empty
-    list is real findings — only that last case is ever appended to the
-    agent-facing message list.
+    headless browser); empty `messages` means it ran and found nothing;
+    non-empty `messages` are real findings — only that last case is ever
+    appended to the agent-facing message list.
 
     Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
     `.docx` are registered — every other extension is silently unchecked,
@@ -173,7 +182,7 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
 
-    def _xlsx_linter(path: Path) -> list[str] | None:
+    def _xlsx_linter(path: Path) -> _LintResult | None:
         # Both always run — LibreOffice recalculates and catches any
         # formula error; the structural lint runs regardless (not only as
         # a fallback), because it names the actual fix ("missing cross-
@@ -197,27 +206,29 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             f.message() for f in (office_findings or [])
             if (f.sheet, f.cell) not in structural_cells
         ]
-        return messages
+        complete = office_findings is not None and structural_findings is not None
+        return _LintResult(messages, complete=complete)
 
-    def _html_linter(path: Path) -> list[str] | None:
+    def _html_linter(path: Path) -> _LintResult | None:
         findings = lint_html(path)
         if findings is not None:
-            return [f.message() for f in findings]
+            return _LintResult([f.message() for f in findings])
         return None
 
-    def _ooxml_linter(kind: str) -> Callable[[Path], list[str] | None]:
-        def _lint(path: Path) -> list[str] | None:
+    def _ooxml_linter(kind: str) -> Callable[[Path], _LintResult | None]:
+        def _lint(path: Path) -> _LintResult | None:
             # Structure first (ENG-2175): a truncated or hand-rolled package
             # is named without any Office install. Only a package that is
             # structurally sound goes on to LibreOffice, since a 30-second
             # export of a file already known to be broken adds nothing.
             structural_findings = lint_ooxml(path, kind)
             if structural_findings:
-                return [f.message() for f in structural_findings]
+                return _LintResult([f.message() for f in structural_findings])
             office_findings = check_opens_via_office(path)
             if structural_findings is None and office_findings is None:
                 return None
-            return [f.message() for f in (office_findings or [])]
+            complete = structural_findings is not None and office_findings is not None
+            return _LintResult([f.message() for f in (office_findings or [])], complete=complete)
 
         return _lint
 
@@ -251,19 +262,19 @@ def _cached_lint(path: Path, folder_fingerprint: int) -> list[str] | None:
 
 
 def _lint_and_remember(
-    linter: Callable[[Path], list[str] | None], path: Path, folder_fingerprint: int
+    linter: Callable[[Path], _LintResult | None], path: Path, folder_fingerprint: int
 ) -> list[str] | None:
+    result = linter(path)
+    # A check that did not fully run is retried next time instead of
+    # remembering an answer that was never given.
+    if result is None or not result.complete:
+        return None if result is None else result.messages
     key = (str(path), folder_fingerprint)
-    file_messages = linter(path)
-    if file_messages is None:
-        # Could not check (no office, no browser): retry next time instead
-        # of remembering an answer that was never given.
-        return None
     with _lint_cache_lock:
-        _lint_cache[key] = file_messages
+        _lint_cache[key] = result.messages
         if len(_lint_cache) > _LINT_CACHE_MAX_ENTRIES:
             _lint_cache.popitem(last=False)
-    return file_messages
+    return result.messages
 
 
 def lint_artifact_files(store, slug: str, budget_seconds: float | None = None) -> list[str]:

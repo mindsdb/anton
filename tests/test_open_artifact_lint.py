@@ -104,7 +104,9 @@ async def test_clean_workbook_returns_the_plain_descriptor(session, root):
 async def test_result_with_findings_still_starts_with_the_descriptor(session, root, monkeypatch):
     slug, folder = _create(root)
     (folder / "index.html").write_text("<p>hi</p>")
-    monkeypatch.setattr(th, "_artifact_linters", lambda: {".html": lambda p: ["console error"]})
+    monkeypatch.setattr(
+        th, "_artifact_linters", lambda: {".html": lambda p: th._LintResult(["console error"])}
+    )
 
     outcome = await handle_open_artifact(session, {"slug": slug})
 
@@ -118,7 +120,7 @@ async def test_html_finding_is_surfaced_on_open(session, root, monkeypatch):
     (folder / "index.html").write_text("<script>boom()</script>")
     monkeypatch.setattr(
         th, "_artifact_linters",
-        lambda: {".html": lambda p: ["console error: ReferenceError: boom is not defined"]},
+        lambda: {".html": lambda p: th._LintResult(["console error: ReferenceError: boom is not defined"])},
     )
 
     outcome = await handle_open_artifact(session, {"slug": slug})
@@ -130,7 +132,7 @@ async def test_raising_checker_does_not_fail_open(session, root, monkeypatch):
     slug, folder = _create(root)
     (folder / "index.html").write_text("<p>hi</p>")
 
-    def _boom(_path: Path) -> list[str]:
+    def _boom(_path: Path) -> th._LintResult:
         raise RuntimeError("checker crashed")
 
     monkeypatch.setattr(th, "_artifact_linters", lambda: {".html": _boom})
@@ -152,7 +154,7 @@ async def test_raising_checker_keeps_other_files_findings(session, root, monkeyp
     )
     real_linters = th._artifact_linters()
 
-    def _boom(_path: Path) -> list[str]:
+    def _boom(_path: Path) -> th._LintResult:
         raise RuntimeError("checker crashed")
 
     monkeypatch.setattr(
@@ -190,9 +192,9 @@ def test_files_past_the_budget_are_named_as_not_checked(root, monkeypatch):
     (folder / "b.html").write_text("b")
     checked: list[str] = []
 
-    def _lint(path: Path) -> list[str]:
+    def _lint(path: Path) -> th._LintResult:
         checked.append(path.name)
-        return ["console error"]
+        return th._LintResult(["console error"])
 
     monkeypatch.setattr(th, "_artifact_linters", lambda: {".html": _lint})
     # deadline computed at 0, first file starts at 0, second at 20
@@ -211,7 +213,9 @@ def test_remembered_results_are_reported_even_with_no_budget_left(root, monkeypa
     slug, folder = _create(root)
     (folder / "a.html").write_text("a")
     (folder / "b.html").write_text("b")
-    monkeypatch.setattr(th, "_artifact_linters", lambda: {".html": lambda p: ["console error"]})
+    monkeypatch.setattr(
+        th, "_artifact_linters", lambda: {".html": lambda p: th._LintResult(["console error"])}
+    )
     store = SimpleNamespace(root=root)
     lint_artifact_files(store, slug)
 
