@@ -1804,7 +1804,9 @@ PROVIDER_FAILURE_KINDS: frozenset[str] = frozenset({
 # mid-stream error event, a stream that stopped early, or one that never
 # started. Distinct from `overload_signal` because the provider told us
 # nothing about why — claiming overload here would over-report incidents.
-_BAD_RESPONSE_CODES = frozenset({"stream_error", "truncated_stream", "empty_response"})
+_BAD_RESPONSE_CODES = frozenset({
+    "stream_error", "truncated_stream", "empty_response", "response_failed",
+})
 
 
 def provider_failure_kind(code: str | None) -> str:

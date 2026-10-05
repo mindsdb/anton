@@ -11,10 +11,14 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import openai
 import pytest
 
 from anton.core.llm.openai import OpenAIProvider
-from anton.core.llm.provider import StreamComplete, StreamToolUseEnd, StreamToolUseStart, TransientProviderError
+from anton.core.llm.provider import (
+    StreamComplete, StreamToolUseEnd, StreamToolUseStart, TransientProviderError,
+    provider_failure_kind,
+)
 from anton.core.llm.structured import looks_truncated
 from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
 
@@ -163,9 +167,10 @@ async def test_non_streaming_incomplete_and_failed(endpoint):
     assert info.value.code == "server_error"
 
 
-async def test_refused_reasoning_summary_is_dropped_and_not_asked_again(endpoint):
+@pytest.mark.parametrize("parameter", [{"param": "reasoning.summary"}, {"param": None}, {"param": ""}, {}])
+async def test_refused_reasoning_summary_is_dropped_and_not_asked_again(endpoint, parameter):
     refusal = {"error": {"message": "Your organization must be verified to generate reasoning summaries.",
-                         "type": "invalid_request_error", "param": "reasoning.summary", "code": "unsupported_value"}}
+                         "type": "invalid_request_error", **parameter, "code": "unsupported_value"}}
     done = {"type": "response.completed", "response": _response("completed")}
     endpoint.replies += [(400, "json", refusal), (200, "sse", _sse(*_text_events("ok"), done)),
                          (200, "sse", _sse(*_text_events("again"), done))]
@@ -177,12 +182,35 @@ async def test_refused_reasoning_summary_is_dropped_and_not_asked_again(endpoint
     assert sent == [{"effort": "low", "summary": "auto"}, {"effort": "low"}, {"effort": "low"}]
 
 
-async def test_other_bad_requests_are_not_retried(endpoint):
-    endpoint.replies.append((400, "json", {"error": {"message": "Invalid schema for function 'get_stock'.",
-                                                     "type": "invalid_request_error", "param": "tools[0]", "code": None}}))
-    with pytest.raises(Exception):
-        await _stream(endpoint.provider(reasoning_effort="low"), tools=TOOLS)
+@pytest.mark.parametrize("message,param", [
+    ("Invalid schema for function 'get_stock'.", "tools[0]"),
+    ("Invalid schema for function 'summarize_reasoning'.", "tools[0]"),
+    ("Invalid schema for function 'summarize_reasoning'.", None),
+    ("Your organization must be verified to generate reasoning summaries.", "tools[0]"),
+])
+async def test_other_bad_requests_are_not_retried(endpoint, message, param):
+    endpoint.replies.append((400, "json", {"error": {"message": message,
+                                                     "type": "invalid_request_error", "param": param, "code": None}}))
+    done = {"type": "response.completed", "response": _response("completed")}
+    endpoint.replies.append((200, "sse", _sse(*_text_events("ok"), done)))
+    p = endpoint.provider(reasoning_effort="low")
+    with pytest.raises(openai.BadRequestError):
+        await _stream(p, tools=TOOLS)
     assert len(endpoint.requests) == 1
+    _, result = await _stream(p, tools=TOOLS)
+    assert result.content == "ok"
+    assert endpoint.requests[-1]["body"]["reasoning"] == {"effort": "low", "summary": "auto"}
+
+
+@pytest.mark.parametrize("error", [None, {"message": "Failed"}, {"code": None, "message": "Failed"}])
+async def test_non_streaming_failure_without_a_code_maps_to_bad_response(endpoint, error):
+    endpoint.replies.append((200, "json", _response("failed", error=error)))
+    with pytest.raises(TransientProviderError) as info:
+        await endpoint.provider().complete(
+            model="gpt-test", system="s", messages=[{"role": "user", "content": "hi"}],
+        )
+    assert info.value.code == "response_failed"
+    assert provider_failure_kind(info.value.code) == "bad_response"
 
 
 async def test_wire_body_defers_tool_images_and_carries_trace_headers(endpoint, monkeypatch):
