@@ -59,6 +59,11 @@ under `<workspace>/.anton/scratchpad-venvs/<name>/` (falling back to
   recorded Python version matches; `requirements.txt` inside the venv dir
   restores the installed-package set across sessions. Installed packages
   survive `reset` (only process state is cleared).
+- **Worker threads**: `start()`, `reset()`, `cleanup()` and `install_packages()`
+  run the venv check, build and removal on a worker thread, so the host's event
+  loop keeps serving other turns. Pads with the same name in one workspace
+  share one venv directory, and creating or deleting it takes a lock per
+  directory, so concurrent first starts build it once.
 - **Execution**: `start()` launches `scratchpad_boot.py` as a subprocess
   (stdin/stdout pipes, own process group). Cells are written to stdin with a
   delimiter; results come back as JSON between result markers, with
