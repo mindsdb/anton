@@ -135,3 +135,15 @@ def test_with_working_folders_the_attachments_text_allows_them(make_session, lay
     assert "outside the workspace and this session's working folders" in text
     assert text.endswith("A file inside one of this session's working folders may be attached.")
     assert GENERATE_ARTIFACT_TOOL == pristine
+
+
+def test_a_working_folder_holding_the_workspace_never_refuses_what_the_workspace_allows(tmp_path):
+    """Working folders only widen: an upload under the workspace's `.anton/uploads`
+    stays accepted when a working folder happens to contain the workspace."""
+    workspace = tmp_path / "proj"
+    upload = workspace / ".anton" / "uploads" / "a.png"
+    upload.parent.mkdir(parents=True)
+    upload.write_bytes(b"x")
+
+    assert refusal_reason(upload.resolve(), workspace, ()) is None
+    assert refusal_reason(upload.resolve(), workspace, (tmp_path.resolve(),)) is None

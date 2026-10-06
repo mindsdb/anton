@@ -114,6 +114,18 @@ def _is_cowork_upload(resolved: Path) -> bool:
     return False
 
 
+def _working_folder_reason(resolved: Path, extra_roots: Sequence[Path]) -> str | None:
+    """The verdict for a file outside the workspace: allowed inside a working
+    folder unless a dot-component in its path below that folder hides it."""
+    for root in extra_roots:
+        try:
+            rel = resolved.relative_to(root)
+        except ValueError:
+            continue
+        return REFUSED_HIDDEN if any(part.startswith(".") for part in rel.parts) else None
+    return REFUSED_OUTSIDE
+
+
 def refusal_reason(
     resolved: Path, workspace: Path | None, extra_roots: Sequence[Path] = ()
 ) -> str | None:
@@ -135,18 +147,14 @@ def refusal_reason(
     """
     if _is_cowork_upload(resolved):
         return None
-    for root in extra_roots:
-        try:
-            rel = resolved.relative_to(root)
-        except ValueError:
-            continue
-        return REFUSED_HIDDEN if any(part.startswith(".") for part in rel.parts) else None
+    # The workspace rules decide first: a working folder only ever widens, so
+    # one that happens to contain the workspace never refuses what they allow.
     if workspace is None:
-        return REFUSED_OUTSIDE
+        return _working_folder_reason(resolved, extra_roots)
     try:
         rel = resolved.relative_to(workspace.resolve())
     except (ValueError, OSError):
-        return REFUSED_OUTSIDE
+        return _working_folder_reason(resolved, extra_roots)
     for root in UPLOAD_ROOTS_IN_WORKSPACE:
         if rel.parts[: len(root)] == root and len(rel.parts) > len(root):
             return None
