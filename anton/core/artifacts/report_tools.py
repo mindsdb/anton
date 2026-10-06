@@ -442,6 +442,13 @@ def _one(found: dict, id_: str) -> tuple[int, int]:
     return spans[0]
 
 
+def _carries_id(markup: str, id_: str) -> bool:
+    count = len(_locate(markup).outer.get(id_, []))
+    if count > 1:
+        raise ValueError(f"new content for {id_!r} has {count} elements with that id")
+    return count == 1
+
+
 def update(path, changes: dict) -> dict:
     """Replace the content of elements by id, leaving every other byte unchanged.
 
@@ -449,22 +456,29 @@ def update(path, changes: dict) -> dict:
     ``changes`` maps an element id to new content: markup from these helpers,
     plain text (escaped), or, for a ``script type="application/json"`` block,
     any JSON value. A heading at the start of the element (a section's title)
-    is kept unless the new content starts with a heading of its own. Each id
-    must match exactly one element. Returns a receipt of the ids changed and
-    the old and new file sizes.
+    is kept unless the new content starts with a heading of its own. Markup
+    that itself carries an element with the same id, such as a whole
+    ``rt.section(..., id=)`` or ``rt.table(..., id=)``, replaces the element
+    rather than its content, so the id is never duplicated. Each id must match
+    exactly one element. Returns a receipt of the ids changed and the old and
+    new file sizes.
     """
     path = Path(path)
     text = _read(path)
     locator = _locate(text)
     edits = []
     for id_, content in changes.items():
-        start, end = _one(locator.spans, id_)
-        if isinstance(content, str):
+        if isinstance(content, Html) and _carries_id(content, id_):
+            start, end = _one(locator.outer, id_)
+            new = str(content)
+        elif isinstance(content, str):
+            start, end = _one(locator.spans, id_)
             new = _esc(content)
             heading = _LEADING_HEADING.match(text, start, end)
             if heading and not re.match(r"\s*<h[1-6]\b", new, re.I):
                 new = heading.group(0) + new
         else:
+            start, end = _one(locator.spans, id_)
             new = _json_text(content)
         edits.append((start, end, new))
     edits.sort()

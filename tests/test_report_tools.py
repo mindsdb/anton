@@ -172,6 +172,27 @@ def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path)
     assert rt.check(out)["text"].count("Conclusion") == 1
 
 
+def test_update_with_a_whole_element_of_the_same_id_replaces_the_element(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Summary", rt.para("Old.")),
+                                             rt.section("Detail", rt.table(COLS, ROWS[:1], id="detail"))))
+    rt.update(out, {"summary-section": rt.section("Summary", rt.para("New.")),
+                    "detail": rt.table(COLS, ROWS, id="detail")})
+    text = out.read_text()
+    assert '<section id="summary-section"><h2>Summary</h2><p>New.</p></section>' in text
+    assert text.count('id="summary-section"') == 1 and "Old." not in text
+    seen = rt.check(out)  # no duplicate ids, no table nested in a table
+    assert [t["rows"] for t in seen["tables"]] == [[[str(c) for c in r] for r in ROWS]]
+
+
+def test_update_refuses_new_content_with_the_id_twice(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Summary", rt.para("Old."), id="s")))
+    before = out.read_text()
+    twice = rt.inline(rt.section("A", id="s"), rt.section("B", id="s"))
+    with pytest.raises(ValueError, match="2 elements"):
+        rt.update(out, {"s": twice})
+    assert out.read_text() == before
+
+
 def test_check_reports_markup_shown_as_text(tmp_path):
     out = rt.save(tmp_path / "r.html", _page(rt.section("Summary", rt.para("Fine."), id="summary")))
     rt.update(out, {"summary": rt.inline("<h2>Summary</h2>", rt.para("Escaped by mistake."))})
