@@ -82,7 +82,12 @@ class ScratchpadRuntime(ABC):
         estimated_time: str = "",
         estimated_seconds: int = 0,
     ):
-        """Execute code and yield progress strings then a final Cell."""
+        """Execute code and yield progress strings then a final Cell.
+
+        A backend may end without a Cell when the task running the cell is
+        cancelled: the local backend kills the cell, records it in ``cells``
+        and re-raises the cancel.
+        """
 
     @abstractmethod
     async def cleanup(self) -> None:
