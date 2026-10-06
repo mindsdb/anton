@@ -97,6 +97,29 @@ async def test_classify_turns_bad_responses_into_an_error_class(response, error)
     assert (result.status, result.error) == ("", error)
 
 
+async def test_classify_reports_the_billed_usage():
+    result = await _classify(lambda request: _answer())
+    assert (result.input_tokens, result.output_tokens) == (1700, 0)
+
+
+async def test_an_unusable_answer_keeps_its_usage():
+    body = {"answers": {}, "usage": {"input_tokens": 1500, "output_tokens": 3}}
+    result = await _classify(lambda request: _answer(body=body))
+    assert (result.error, result.input_tokens, result.output_tokens) == ("malformed", 1500, 3)
+
+
+@pytest.mark.parametrize("usage", [None, {}, {"input_tokens": 10}, {"input_tokens": -1, "output_tokens": 0},
+                                   {"input_tokens": True, "output_tokens": 0}, "1700"])
+async def test_missing_or_malformed_usage_is_reported_as_unknown(usage):
+    body = {"model": "jev-1.13.0", "answers": {"status": {
+        "choice": "COMPLETE", "probabilities": {"COMPLETE": 0.97, "WAITING": 0.01, "INCOMPLETE": 0.01, "STUCK": 0.01}}}}
+    if usage is not None:
+        body["usage"] = usage
+    result = await _classify(lambda request: _answer(body=body))
+    assert result.status == "COMPLETE"
+    assert (result.input_tokens, result.output_tokens) == (None, None)
+
+
 async def test_classify_reports_transport_failures():
     def handler(request):
         raise httpx.ConnectError("refused")
@@ -204,6 +227,19 @@ async def test_everything_else_falls_back_to_the_llm(workspace, result):
     llm.generate_object_code.assert_called_once()  # the LLM verdict (COMPLETE) decided
     assert event["ended_by"] == "completed"
     assert (event["jev_checks"], event["jev_decided"]) == ("1", "0")
+
+
+async def test_the_turn_records_jev_usage_apart_from_the_coding_model(workspace):
+    session, _ = _session(workspace)
+    event, _ = await _run(session, jev.JevVerdict(status="COMPLETE", p_status=0.97, p_complete=0.97,
+                                                  input_tokens=1700, output_tokens=2))
+    assert (event["jev_input_tokens"], event["jev_output_tokens"], event["jev_checks_without_usage"]) == ("1700", "2", "0")
+
+
+async def test_a_check_without_usage_is_counted_not_assumed_free(workspace):
+    session, _ = _session(workspace)
+    event, _ = await _run(session, jev.JevVerdict(error="timeout", ms=2000))
+    assert (event["jev_input_tokens"], event["jev_checks_without_usage"]) == ("0", "1")
 
 
 async def test_a_fallback_records_when_jev_and_the_llm_disagree(workspace):

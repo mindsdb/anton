@@ -90,6 +90,49 @@ def _rejects_reasoning_summary(exc: "openai.BadRequestError") -> bool:
     )
 
 
+def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
+    """True when a 400 refuses the explicit ``prompt_cache_breakpoint`` field,
+    e.g. a model or endpoint that does not support explicit breakpoints."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    text = f"{err.get('param') or ''} {err.get('message') or ''}"
+    return "prompt_cache_breakpoint" in text
+
+
+# (base_url, model) pairs that refused an explicit cache breakpoint. Process-wide
+# because Cowork builds a provider per turn: one refusal is enough.
+_CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
+
+
+def _shared_prompt_input(static: str, session: str) -> list[dict]:
+    """The system prompt as two developer messages, the shared part cacheable."""
+    return [
+        {"role": "developer", "type": "message", "content": [
+            {"type": "input_text", "text": static,
+             "prompt_cache_breakpoint": {"mode": "explicit"}},
+        ]},
+        {"role": "developer", "type": "message", "content": session},
+    ]
+
+
+def _has_cache_breakpoint(kwargs: dict) -> bool:
+    first = (kwargs.get("input") or [None])[0]
+    content = first.get("content") if isinstance(first, dict) else None
+    return (
+        isinstance(content, list) and bool(content)
+        and isinstance(content[0], dict) and "prompt_cache_breakpoint" in content[0]
+    )
+
+
+def _without_cache_breakpoint(kwargs: dict) -> dict:
+    """``kwargs`` with the shared-prompt split undone: back to ``instructions``."""
+    static = kwargs["input"][0]["content"][0]["text"]
+    session = kwargs["input"][1]["content"]
+    return dict(kwargs, instructions=static + session, input=kwargs["input"][2:])
+
+
 def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     """Classify the 400s we can name. Returns when we cannot, so the caller
     re-raises the SDK error exactly as it does today.
@@ -1597,7 +1640,18 @@ class OpenAIProvider(LLMProvider):
             "input": responses_input,
             "max_output_tokens": max_tokens,
         }
-        if system:
+        from .prompt_builder import SESSION_CONTEXT_MARKER
+
+        if (
+            self._flavor == self.FLAVOR_OPENAI
+            and system.count(SESSION_CONTEXT_MARKER) == 1
+            and (self._base_url or "", model) not in _CACHE_BREAKPOINT_REFUSED
+        ):
+            # The shared part ends in an explicit cache breakpoint, so it is read
+            # from cache by every session, not only by later turns of this one.
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            kwargs["input"] = _shared_prompt_input(static, SESSION_CONTEXT_MARKER + session) + responses_input
+        elif system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
             # "summary": "auto" asks the Responses API to also stream a
@@ -1642,6 +1696,11 @@ class OpenAIProvider(LLMProvider):
         try:
             return await self._client.responses.create(**kwargs)
         except openai.BadRequestError as exc:
+            if _has_cache_breakpoint(kwargs) and _rejects_cache_breakpoint(exc):
+                logger.warning("explicit prompt cache breakpoints refused for %s; continuing without them",
+                               kwargs.get("model"))
+                _CACHE_BREAKPOINT_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
+                return await self._create_response(_without_cache_breakpoint(kwargs))
             reasoning = kwargs.get("reasoning") or {}
             if "summary" not in reasoning or not _rejects_reasoning_summary(exc):
                 raise
