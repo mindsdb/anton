@@ -5996,9 +5996,9 @@ class ChatSession:
                         self._compaction_failed_this_turn = True
 
             # --- Completion verification ---
-            # Skip when too few tool rounds were used (pure Q&A always skips at
-            # tool_round==0; raising verify_min_tool_rounds also skips trivial
-            # single-round turns) or when we hit the max-rounds hard stop.
+            # Skip when too few tool rounds were used (pure Q&A and, at the
+            # default of 2, single-round turns) or when we hit the max-rounds
+            # hard stop.
             if tool_round < self._verify_min_tool_rounds or _max_rounds_hit or _spend_ceiling_hit:
                 break
 
