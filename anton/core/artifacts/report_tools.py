@@ -244,9 +244,16 @@ def save(path, html: str) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(str(html), encoding="utf-8")
+    tmp.write_text(str(html), encoding="utf-8", newline="")
     tmp.replace(path)
     return path
+
+
+def _read(path: Path) -> str:
+    # newline="" keeps line endings as they are on disk, so an in-place edit
+    # does not rewrite every "\r\n" (or, on Windows, every "\n").
+    with open(path, encoding="utf-8", newline="") as f:
+        return f.read()
 
 
 # --- reading a saved page back ------------------------------------------------
@@ -339,7 +346,7 @@ def check(path) -> dict:
     """
     path = Path(path)
     reader = _Reader()
-    reader.feed(path.read_text(encoding="utf-8"))
+    reader.feed(_read(path))
     problems = []
     if not reader.lang:
         problems.append("html element has no lang")
@@ -440,7 +447,7 @@ def update(path, changes: dict) -> dict:
     the old and new file sizes.
     """
     path = Path(path)
-    text = path.read_text(encoding="utf-8")
+    text = _read(path)
     locator = _locate(text)
     edits = []
     for id_, content in changes.items():
@@ -475,7 +482,7 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
     if (before is None) == (after is None):
         raise ValueError("give exactly one of before= or after=")
     path = Path(path)
-    text = path.read_text(encoding="utf-8")
+    text = _read(path)
     start, end = _one(_locate(text).outer, before or after)
     at = start if before is not None else end
     out = text[:at] + _esc(content) + text[at:]

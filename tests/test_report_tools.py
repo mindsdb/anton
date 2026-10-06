@@ -151,6 +151,17 @@ def test_update_and_insert_find_elements_after_non_newline_line_breaks(tmp_path,
     assert out.read_text(encoding="utf-8") == expected
 
 
+def test_update_and_insert_keep_line_endings(tmp_path):
+    out = tmp_path / "crlf.html"
+    original = (b'<!DOCTYPE html>\r\n<html lang="en">\r\n<body>\r\n<div id="total">10</div>\r\n'
+                b'<p id="note">x</p>\r\n</body>\r\n</html>\r\n')
+    out.write_bytes(original)
+    receipt = rt.update(out, {"total": "12"})
+    rt.insert(out, rt.para("added"), after="note")
+    assert out.read_bytes() == original.replace(b">10<", b">12<").replace(b"x</p>", b"x</p><p>added</p>")
+    assert receipt["bytes_before"] == len(original)
+
+
 def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path):
     out = rt.save(tmp_path / "r.html", _page(rt.section("Conclusion", rt.para("Old."), id="conclusion"),
                                              rt.section("Detail", rt.para("Rows."), id="detail")))
