@@ -48,13 +48,6 @@ if TYPE_CHECKING:
     from anton.utils.datasources import DatasourceCatalog
 
 
-# Entries that run discovery (phases A-C) in this call; the rest resume past it.
-_DISCOVERY_ENTRIES = (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION)
-# Entries where acting first shows the brief in this call. After any other
-# entry the user saw the brief in an earlier turn (`ENTRY_CONFIRM` follows a
-# budget stop that showed it).
-_ANNOUNCE_ENTRIES = (cp.ENTRY_FULL, cp.ENTRY_NEW_ITERATION)
-
 # Sentinel returned by a generation node that stopped because the turn ran
 # out of budget. Distinguished from an error string on purpose: the cause is
 # the forbidden retry, not unusable code, and the instruction the outer agent
@@ -289,9 +282,9 @@ def _spec_context(state: GenState) -> str:
     """PRD (or the brief when there is none) + gathered data + tech spec —
     the shared context handed to api-spec and generation nodes.
 
-    The brief is NOT sent next to a PRD. Since phase B it is the confirmation
-    proposal shown to the user — "here is what I suggest, continue or say
-    what to change" — with questions the PRD has already settled;
+    The brief is NOT sent next to a PRD. Since phase B it is the short
+    proposal shown to the user, with questions and assumptions the PRD has
+    already settled;
     the PRD supersedes it on every point. Measured 2026-09-16: 1 KB of every
     generation round, and a second voice the generator had to reconcile.
     """
@@ -1180,29 +1173,16 @@ def _invalidate_specs(state: GenState) -> None:
 
 
 def _brief_fields(state: GenState) -> dict:
-    """What the calling agent needs to know about the brief.
+    """What the calling agent needs to know about the brief on success.
 
-    When the agent acts first the brief is shown as a message that never
-    reaches the agent's history, so its text travels here; `brief_shown`
-    says whether the user already saw it. Any other entry says nothing: the
-    brief belongs to an earlier turn.
+    Acting first, the user either saw the brief (`brief_shown`) or its text
+    travels here for the agent to relay. Asking first, the user confirmed it.
     """
-    fields: dict = {"brief_shown": True} if state.brief_shown else {}
-    if state.act_first and state.brief and state.entry in _ANNOUNCE_ENTRIES:
-        fields["brief_summary"] = state.brief
-    return fields
-
-
-def _brief_already_seen(state: GenState) -> bool:
-    """Whether a budget stop may skip showing the brief.
-
-    Ask-first keeps its rule (`brief_summary` is the only way to show it).
-    Acting first, only an entry that shows the brief can leave one unseen;
-    after any other the earlier turn showed it, or the agent relayed it then.
-    """
-    return state.brief_shown or (
-        state.act_first and state.entry not in _ANNOUNCE_ENTRIES
-    )
+    if state.brief_shown:
+        return {"brief_shown": True}
+    if state.act_first and state.brief:
+        return {"brief_summary": state.brief}
+    return {}
 
 
 def _finish(state: GenState) -> dict:
@@ -1234,14 +1214,13 @@ def _needs_confirmation(state: GenState) -> dict:
 
 
 def _stopped_over_budget(state: GenState, detail: str) -> dict:
-    # `brief_summary` travels with every budget stop: the run can end before
-    # the user has seen a brief at all, and then this is the only way to show
-    # them one.
+    # `brief_summary` travels with every budget stop the user has not seen
+    # the brief for: the run can end before any brief was shown, and then
+    # this is the only way to show them one.
     return {
         "status": "stopped_over_budget",
         "detail": detail,
-        "brief_summary": state.brief,
-        **({"brief_shown": True} if _brief_already_seen(state) else {}),
+        **({"brief_shown": True} if state.brief_shown else {"brief_summary": state.brief}),
         **_result_shell(state),
     }
 
@@ -1249,7 +1228,11 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
 async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     """Walk the whole pipeline from wherever this call is entitled to start."""
     state.entry = entry
-    if entry in _DISCOVERY_ENTRIES:
+    if state.act_first and entry not in (cp.ENTRY_FULL, cp.ENTRY_NEW_ITERATION):
+        # A repeat call past the brief: an earlier turn showed it (for
+        # `ENTRY_CONFIRM`, the budget stop that asked to continue).
+        state.brief_shown = True
+    if entry in (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION):
         stage = await run_discovery(state, entry=entry)
         if stage == CANCELLED:
             return _cancelled(state)

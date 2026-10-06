@@ -630,3 +630,19 @@ async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
     assert not [
         e for e in events if isinstance(e, StreamToolResult) and e.id == "tc_ok"
     ], "a non-scratchpad call has no cell to fail"
+
+
+def test_a_discarded_scratchpad_result_keeps_only_a_known_action():
+    """A cut-off call carries whatever the model wrote; `"message"` there
+    would read as a tool's message to the user."""
+    from anton.core.llm.provider import StreamToolResult, ToolCall
+    from anton.core.session import _discarded_tool_call_events
+
+    def action(tc_input):
+        tc = ToolCall(id="t1", name="scratchpad", input=tc_input)
+        [result] = [e for e in _discarded_tool_call_events(tc) if isinstance(e, StreamToolResult)]
+        return result.action
+
+    assert action({"action": "exec", "name": "p"}) == "exec"
+    assert action({"action": "message", "name": "p"}) is None
+    assert action({}) is None

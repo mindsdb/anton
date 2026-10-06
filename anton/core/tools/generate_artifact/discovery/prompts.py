@@ -163,7 +163,7 @@ GATHERING_CONTINUE = (
     "Continue gathering: call `finish_gathering` again once ready."
 )
 
-_GATHERING_BEFORE_RULE = (
+_GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
     "1. Artifact type — confirm or correct the current one.\n"
@@ -191,17 +191,7 @@ _GATHERING_BEFORE_RULE = (
     "- Every decision is recorded once: either as an `assumption` (you "
     "chose) or as an `open_point` (the user chooses, with your default) — "
     "never in both lists.\n"
-)
-
-_WHEN_TO_ASK = (
-    "- When the request leaves something open, either ask the user or write "
-    "your choice as ONE line under `assumptions`. Ask only when the answer "
-    "changes the artifact type or a data source, or the artifact would be "
-    "useless if guessed wrong. Taste and style are never worth a question. "
-    "One question with options beats several.\n"
-)
-
-_GATHERING_AFTER_RULE = (
+    "{when_to_ask}"
     "- A source is verified only if you ran code against it or fetched the "
     "page in this step. A source you name in `data_sources` but did not "
     "touch is fetched before generation starts — naming one is how you "
@@ -212,6 +202,14 @@ _GATHERING_AFTER_RULE = (
     "## When there is no external data\n"
     "Call `finish_gathering` at once: no scratchpad, no web search, no "
     "description of the page."
+)
+
+_WHEN_TO_ASK = (
+    "- When the request leaves something open, either ask the user or write "
+    "your choice as ONE line under `assumptions`. Ask only when the answer "
+    "changes the artifact type or a data source, or the artifact would be "
+    "useless if guessed wrong. Taste and style are never worth a question. "
+    "One question with options beats several.\n"
 )
 
 _WHEN_TO_ASK_ACT_FIRST = (
@@ -226,8 +224,9 @@ _WHEN_TO_ASK_ACT_FIRST = (
 
 
 def _gathering_instruction(act_first: bool) -> str:
-    rule = _WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK
-    return _GATHERING_BEFORE_RULE + rule + _GATHERING_AFTER_RULE
+    return _GATHERING_TEMPLATE.format(
+        when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
+    )
 
 
 _GATHERING_INSTRUCTION = _gathering_instruction(False)
@@ -246,8 +245,6 @@ _REDRAW_RESTATE = (
     "correction introduces a source nobody has fetched yet, that call is the "
     "only thing that will cause it to be fetched."
 )
-
-_REDRAW_SUFFIX = _REDRAW_CORRECTION + _REDRAW_RESTATE
 
 _REDRAW_CORRECTION_ACT_FIRST = (
     "\n\nThe user has seen the brief or the finished artifact and called "

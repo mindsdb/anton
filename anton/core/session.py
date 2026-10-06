@@ -218,6 +218,18 @@ def _discarded_call_reason(tc: ToolCall) -> str:
     return "Discarded: the round it belonged to was cut off"
 
 
+def _known_scratchpad_action(tc: ToolCall) -> str | None:
+    """The call's `action` if it is one the scratchpad schema allows, else None.
+
+    A cut-off call carries whatever the model wrote, and a consumer reads
+    `StreamToolResult.action` as ours: `"message"`, for one, means a tool's
+    message to the user.
+    """
+    action = tc.input.get("action") if isinstance(tc.input, dict) else None
+    allowed = SCRATCHPAD_TOOL.input_schema["properties"]["action"]["enum"]
+    return action if action in allowed else None
+
+
 def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
     """Everything a consumer needs to retire the step of a call we refuse to run.
 
@@ -254,7 +266,7 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         StreamToolResult(
             name="scratchpad",
             content=f"[error] exec failed — {reason}",
-            action=tc.input.get("action") if isinstance(tc.input, dict) else None,
+            action=_known_scratchpad_action(tc),
             id=tc.id,
         ),
     ]

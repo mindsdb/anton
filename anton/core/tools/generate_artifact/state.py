@@ -278,9 +278,9 @@ class GenState:
     # waiting for confirmation. False — also for a session double without the
     # attribute — keeps the confirm flow.
     act_first: bool = False
-    # Set by `announce_brief` once the brief went out as a message the host
-    # renders in THIS call. Not persisted: a call that resumes past discovery
-    # shows nothing itself, and the result reports that case from `entry`.
+    # Whether the user has seen the brief without being asked to confirm it:
+    # `announce_brief` sent it in this call, or (acting first) an earlier turn
+    # showed it — set by `orchestrator.run` from the entry. Not persisted.
     brief_shown: bool = False
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through

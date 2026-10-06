@@ -47,11 +47,9 @@ def _session(tmp_path: Path):
     )
 
 
-def _make_artifact(tmp_path: Path) -> str:
+def _make_artifact(tmp_path: Path, type: str = "fullstack-stateless-app") -> str:
     store = ArtifactStore(tmp_path / "artifacts")
-    return store.create(
-        name="Clock", description="d", type="fullstack-stateless-app"
-    ).slug
+    return store.create(name="Clock", description="d", type=type).slug
 
 
 async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, monkeypatch):
@@ -429,31 +427,6 @@ async def test_a_message_line_becomes_a_message_marker_in_place():
     ]
 
 
-async def test_messages_held_by_a_question_come_out_whole_and_in_order():
-    """A step line goes stale while a question is open, a message does not:
-    every message is kept, only the last step line survives."""
-    import asyncio
-
-    from anton.core.tools.generate_artifact.progress import (
-        MESSAGE_PREFIX,
-        QUESTION_CLOSED,
-        QUESTION_OPEN,
-    )
-    from anton.core.tools.tool_handlers import _drain_progress
-
-    queue: asyncio.Queue = asyncio.Queue()
-    for item in (
-        QUESTION_OPEN,
-        "a", MESSAGE_PREFIX + "one", "b", MESSAGE_PREFIX + "two",
-        QUESTION_CLOSED,
-        None,
-    ):
-        queue.put_nowait(item)
-
-    markers = [(m.kind, m.text) async for m in _drain_progress(queue)]
-    assert markers == [("message", "one"), ("message", "two"), ("step", "b")]
-
-
 async def test_the_brief_confirmation_mutes_progress(tmp_path):
     """The longest question of the run goes through `show_and_confirm`, which
     reaches `elicit` on its own path. Wrapping only the `ask_user` sub-tool
@@ -779,32 +752,27 @@ def test_the_attachments_field_tells_the_agent_what_qualifies():
     assert "`attachments` (optional)" in GENERATE_ARTIFACT_TOOL.description
 
 
-async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(tmp_path, monkeypatch):
+async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(
+    tmp_path, monkeypatch, make_llm_response,
+):
     """The whole chain: the session flag reaches `GenState` in
     `engine.generate`, the brief goes out as a message marker between the
     step lines, and the result tells the agent the user saw it."""
     import json
 
-    from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+    from anton.core.llm.provider import ToolCall
     from anton.core.tools.generate_artifact import orchestrator as fsm
 
-    store = ArtifactStore(tmp_path / "artifacts")
-    slug = store.create(name="Clock", description="d", type="html-app").slug
-
-    def text(content):
-        return LLMResponse(content=content, tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1))
-
-    session = SimpleNamespace(
-        _workspace=SimpleNamespace(artifacts_dir=tmp_path / "artifacts"),
+    slug = _make_artifact(tmp_path, type="html-app")
+    session = _session(tmp_path)
+    session.__dict__.update(
         _llm=SimpleNamespace(plan=AsyncMock(side_effect=[
-            LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="tc1", name="finish_gathering",
-                                     input={"summary": "ok", "artifact_type": "html-app"})],
-                usage=Usage(input_tokens=1, output_tokens=1),
-            ),
-            text("## Goal\nAn analog clock."),       # draft_brief
-            text("## Goal\nAn analog clock, full."),  # write_prd
+            make_llm_response(tool_calls=[ToolCall(
+                id="tc1", name="finish_gathering",
+                input={"summary": "ok", "artifact_type": "html-app"},
+            )]),
+            make_llm_response("## Goal\nAn analog clock."),       # draft_brief
+            make_llm_response("## Goal\nAn analog clock, full."),  # write_prd
         ])),
         question_count=0, elicitor=None, emit=AsyncMock(),
         act_first=True, tool_messages=True, emitter=object(),
@@ -838,5 +806,6 @@ async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(tmp_p
     payload = json.loads(result.content)
     assert payload["status"] == "generated"
     assert payload["brief_shown"] is True
-    assert payload["brief_summary"] == "## Goal\nAn analog clock."
+    # Already shown: the text is not resent into the agent's history.
+    assert "brief_summary" not in payload
     assert "brief_shown" in payload["instruction"]

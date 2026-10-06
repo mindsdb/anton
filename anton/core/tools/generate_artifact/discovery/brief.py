@@ -24,13 +24,12 @@ class FeedbackVerdict(BaseModel):
     reasoning: str
 
 
-_BRIEF_TASK_HEAD = (
+# One template for both modes; the slots are the only places where acting
+# first differs from asking for confirmation.
+_DRAFT_BRIEF_TEMPLATE = (
     "## Your task\n"
     "Turn what the gathering step recorded into a SHORT proposal for the "
-)
-
-_BRIEF_TASK_TAIL = (
-    ". Your input is what the gathering step recorded above "
+    "{audience}. Your input is what the gathering step recorded above "
     "— its `constraints`, `assumptions`, `open_points` and `data_findings` "
     "— or, when this conversation has no such record, the `## Assumptions "
     "recorded earlier` / `## Open points recorded earlier` sections. Do not "
@@ -57,79 +56,65 @@ _BRIEF_TASK_TAIL = (
     "the `constraints`, as plain-language behavior and look. Do NOT add "
     "anything from `assumptions` here. Omit the section if there is nothing "
     "beyond the goal.\n"
-)
-
-_BRIEF_CONFIRM_SECTIONS = (
-    "- Proposals — one line per `assumption`, phrased as a proposal. This "
-    "is where everything decided without the user goes, so they can see it "
-    "and object. Omit only if there are no assumptions.\n"
-    "- Questions — one line per `open_point`, each ending with the default "
-    "that applies if the user simply continues (e.g. \"(default: no)\"). "
-    "Omit if there are none.\n\n"
-)
-
-_BRIEF_SHORTNESS_HEAD = "Every section is short: "
-
-_BRIEF_SHORTNESS_BODY = (
-    ". Sections legitimately end up short or missing when the user "
-    "asked for little — do not pad them. No code, CSS/JS syntax, hex "
-    "colors, exact pixel/unit sizes, or library/framework names; that level "
-    "of detail belongs in the full PRD"
-)
-
-_BRIEF_CONFIRM_CLOSING = (
-    "End with two short lines: one saying that if the user continues, the "
-    "proposals and the defaults above are used as they are; then one "
-    "closing line asking the user to continue or say what to change. Do "
-    "NOT describe how to answer: no key names, no button names, no option "
-    "numbers, and do not invent your own accept/cancel option labels — the "
-    "host renders the actual choices.\n\n"
-)
-
-_BRIEF_LANGUAGE = (
+    "{sections}"
+    "Every section is short: {shortness}. Sections legitimately end up "
+    "short or missing when the user asked for little — do not pad them. No "
+    "code, CSS/JS syntax, hex colors, exact pixel/unit sizes, or "
+    "library/framework names; that level of detail belongs in the full "
+    "PRD{after_prd}.\n\n"
+    "{closing}"
     "Write everything — lead-in, sections, closing line — in the same "
     "language as the user request. Keep the whole reply under about 25 "
     "lines. Reply with the brief only, no other text."
 )
 
-_BRIEF_AUDIENCE = {False: "user to confirm", True: "user to read while it is being built"}
-_BRIEF_SHORTNESS_WHAT = {
-    False: "a summary before confirmation, not the final document",
-    True: "a summary of what is being built, not the final document",
-}
-_BRIEF_SHORTNESS_END = {False: ", after acceptance.\n\n", True: ".\n\n"}
-
-_BRIEF_ACT_FIRST_SECTIONS = (
-    "- Assumptions — one line per `assumption` and per `open_point`, each "
-    "stating the choice being used (for an open point, its default). This "
-    "is where everything decided without the user goes, so they can see it "
-    "and ask for a change later. Omit only if there are none.\n\n"
+_CONFIRM_SLOTS = dict(
+    audience="user to confirm",
+    sections=(
+        "- Proposals — one line per `assumption`, phrased as a proposal. This "
+        "is where everything decided without the user goes, so they can see it "
+        "and object. Omit only if there are no assumptions.\n"
+        "- Questions — one line per `open_point`, each ending with the default "
+        "that applies if the user simply continues (e.g. \"(default: no)\"). "
+        "Omit if there are none.\n\n"
+    ),
+    shortness="a summary before confirmation, not the final document",
+    after_prd=", after acceptance",
+    closing=(
+        "End with two short lines: one saying that if the user continues, the "
+        "proposals and the defaults above are used as they are; then one "
+        "closing line asking the user to continue or say what to change. Do "
+        "NOT describe how to answer: no key names, no button names, no option "
+        "numbers, and do not invent your own accept/cancel option labels — the "
+        "host renders the actual choices.\n\n"
+    ),
 )
-_BRIEF_ACT_FIRST_CLOSING = (
-    "End with one short line saying the artifact is being built with these "
-    "assumptions now and the user can ask for changes once it is ready. Do "
-    "NOT ask the user anything and do NOT ask them to confirm or continue: "
-    "the brief is shown while the build is already running.\n\n"
+
+_ACT_FIRST_SLOTS = dict(
+    audience="user to read while it is being built",
+    sections=(
+        "- Assumptions — one line per `assumption` and per `open_point`, each "
+        "stating the choice being used (for an open point, its default). This "
+        "is where everything decided without the user goes, so they can see it "
+        "and ask for a change later. Omit only if there are none.\n\n"
+    ),
+    shortness="a summary of what is being built, not the final document",
+    after_prd="",
+    closing=(
+        "End with one short line saying the artifact is being built with these "
+        "assumptions now and the user can ask for changes once it is ready. Do "
+        "NOT ask the user anything and do NOT ask them to confirm or continue: "
+        "the brief is shown while the build is already running.\n\n"
+    ),
 )
 
 
 def draft_brief_instruction(act_first: bool = False) -> str:
-    """The brief step's instruction. The act-first variant replaces the
-    confirmation parts — the Proposals/Questions split and the closing
-    question — and keeps every other rule."""
-    sections = _BRIEF_ACT_FIRST_SECTIONS if act_first else _BRIEF_CONFIRM_SECTIONS
-    closing = _BRIEF_ACT_FIRST_CLOSING if act_first else _BRIEF_CONFIRM_CLOSING
-    return (
-        _BRIEF_TASK_HEAD + _BRIEF_AUDIENCE[act_first] + _BRIEF_TASK_TAIL
-        + sections
-        + _BRIEF_SHORTNESS_HEAD + _BRIEF_SHORTNESS_WHAT[act_first]
-        + _BRIEF_SHORTNESS_BODY + _BRIEF_SHORTNESS_END[act_first]
-        + closing + _BRIEF_LANGUAGE
-    )
+    """The brief step's instruction: confirm-first unless acting first."""
+    return _DRAFT_BRIEF_TEMPLATE.format(**(_ACT_FIRST_SLOTS if act_first else _CONFIRM_SLOTS))
 
 
 _DRAFT_BRIEF_INSTRUCTION = draft_brief_instruction(False)
-
 
 
 async def draft_brief(state: PrdState) -> None:

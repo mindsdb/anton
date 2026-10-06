@@ -228,11 +228,9 @@ def is_displayed_tool_result(event) -> bool:
     `message` is written for the user. Every other result is the agent's
     input and stays off the screen.
     """
-    if event.name == "scratchpad":
-        # A scratchpad result carries the model's own `action`, so "message"
-        # there is not a tool's message.
-        return event.action == "dump"
-    return event.action == "message"
+    if event.action == "message":
+        return True
+    return event.name == "scratchpad" and event.action == "dump"
 
 
 class StreamDisplay:

@@ -566,8 +566,7 @@ async def _drain_progress(queue):
     Lines produced during that window are not dropped silently: the last one
     is emitted once the answer arrives, so the user still learns where the
     pipeline got to. They are not replayed in full, because by then they
-    describe steps that already finished. A message for the user is content,
-    not status: every one is kept and emitted in order.
+    describe steps that already finished.
     """
     from anton.core.tools.generate_artifact.progress import (
         MESSAGE_PREFIX,
@@ -579,7 +578,6 @@ async def _drain_progress(queue):
 
     depth = 0
     pending: str | None = None
-    held_messages: list[str] = []
     while True:
         line = await queue.get()
         if line is None:
@@ -593,11 +591,7 @@ async def _drain_progress(queue):
                 yield ToolProgress(line[len(PEEK_PREFIX):], kind="peek")
             continue
         if line.startswith(MESSAGE_PREFIX):
-            text = line[len(MESSAGE_PREFIX):]
-            if depth:
-                held_messages.append(text)
-            else:
-                yield ToolProgress(text, kind="message")
+            yield ToolProgress(line[len(MESSAGE_PREFIX):], kind="message")
             continue
         if line == QUESTION_OPEN:
             # A counter, not a flag: `show_and_confirm` wraps a call that
@@ -608,13 +602,9 @@ async def _drain_progress(queue):
             continue
         if line == QUESTION_CLOSED:
             depth = max(0, depth - 1)
-            if depth == 0:
-                for text in held_messages:
-                    yield ToolProgress(text, kind="message")
-                held_messages.clear()
-                if pending is not None:
-                    yield ToolProgress(pending)
-                    pending = None
+            if depth == 0 and pending is not None:
+                yield ToolProgress(pending)
+                pending = None
             continue
         if depth:
             pending = line
@@ -652,10 +642,8 @@ _STATUS_INSTRUCTIONS = {
         "when either is non-empty, tell the user in one sentence what was "
         "not checked or flagged — never present a skipped check as passed."
         " When the result carries `brief_shown: true`, the user has already "
-        "seen `brief_summary` as a message: do not repeat it; at most refer "
-        "to its assumptions in one sentence. When it carries `brief_summary` "
-        "without `brief_shown`, the user has not seen it: sum up its "
-        "assumptions in a sentence or two."
+        "seen the brief: do not repeat it. When it carries `brief_summary`, "
+        "the user has not seen it: sum up its assumptions in a sentence or two."
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from anton.core.tools.generate_artifact import orchestrator
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import GenState
@@ -15,10 +17,10 @@ def _state(tmp_path, **over) -> GenState:
     )
 
 
-def test_generated_reports_a_shown_brief(tmp_path):
+def test_generated_reports_a_shown_brief_without_resending_it(tmp_path):
     result = orchestrator._finish(_state(tmp_path, act_first=True, brief="## B", brief_shown=True))
     assert result["brief_shown"] is True
-    assert result["brief_summary"] == "## B"
+    assert "brief_summary" not in result
 
 
 def test_generated_hands_over_an_unshown_act_first_brief(tmp_path):
@@ -33,31 +35,45 @@ def test_ask_first_generated_carries_no_brief(tmp_path):
     assert "brief_summary" not in result
 
 
-def test_a_budget_stop_says_the_brief_was_shown(tmp_path):
+def test_a_budget_stop_after_a_shown_brief_does_not_resend_it(tmp_path):
     result = orchestrator._stopped_over_budget(
         _state(tmp_path, act_first=True, brief="## B", brief_shown=True), "x",
     )
     assert result["brief_shown"] is True
-    assert result["brief_summary"] == "## B"
+    assert "brief_summary" not in result
 
 
-def test_a_resumed_act_first_run_does_not_retell_the_brief(tmp_path):
-    """The user saw the brief a turn ago: turn 1 showed it and then stopped
-    over budget (before the PRD for ENTRY_CONFIRM, after it otherwise)."""
-    for entry in (cp.ENTRY_CONFIRM, cp.ENTRY_SPEC, cp.ENTRY_GENERATE):
-        state = _state(tmp_path, act_first=True, brief="## B", entry=entry)
-        result = orchestrator._finish(state)
-        assert "brief_summary" not in result, entry
-        assert "brief_shown" not in result, entry
-        assert orchestrator._stopped_over_budget(state, "x")["brief_shown"] is True, entry
-
-
-def test_a_resumed_ask_first_budget_stop_is_unchanged(tmp_path):
-    result = orchestrator._stopped_over_budget(
-        _state(tmp_path, brief="## B", entry=cp.ENTRY_SPEC), "x",
-    )
+def test_an_ask_first_budget_stop_still_carries_the_brief(tmp_path):
+    result = orchestrator._stopped_over_budget(_state(tmp_path, brief="## B"), "x")
     assert "brief_shown" not in result
     assert result["brief_summary"] == "## B"
+
+
+async def _skipped(state, *args, **kwargs):
+    return None
+
+
+@pytest.mark.parametrize("entry", [cp.ENTRY_CONFIRM, cp.ENTRY_SPEC, cp.ENTRY_GENERATE])
+@pytest.mark.parametrize("act_first", [True, False])
+async def test_a_repeat_call_past_the_brief_counts_it_as_seen_only_when_acting_first(
+    tmp_path, monkeypatch, entry, act_first,
+):
+    """An earlier turn showed the brief (for ENTRY_CONFIRM, the budget stop
+    that asked to continue), so acting first it is neither resent nor
+    re-shown; asking first, nothing changes."""
+    async def prd_written(state, *, entry):
+        return cp.STAGE_PRD_WRITTEN
+
+    monkeypatch.setattr(orchestrator, "run_discovery", prd_written)
+    for name in ("_data_phase", "_write_tech_spec", "_gen_verify_frontend"):
+        monkeypatch.setattr(orchestrator, name, _skipped)
+    state = _state(tmp_path, act_first=act_first, brief="## B")
+
+    result = await orchestrator.run(state, entry=entry)
+
+    assert result["status"] == "generated"
+    assert "brief_summary" not in result
+    assert ("brief_shown" in result) is act_first
 
 
 def test_status_instructions_branch_on_brief_shown():
