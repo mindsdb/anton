@@ -302,6 +302,28 @@ def test_filter_options_match_row_keys_for_floats_and_blanks():
     assert '<option value="">(blank)</option>' in html and "<b>" not in html
 
 
+def test_a_filter_added_to_a_page_brings_its_script_once(tmp_path):
+    def table(region):
+        return rt.filter_table(COLS, ROWS, key="Region", label="Region", region_name=region)
+
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Summary", rt.para("x")), rt.section("Old", id="old")))
+    assert rt._FILTER_SCRIPT not in out.read_text()
+    rt.insert(out, table("North items"), after="summary-section")
+    rt.update(out, {"old": table("South items")})
+    text = out.read_text()
+    assert text.count(rt._FILTER_SCRIPT) == 1
+    assert text.index(rt._FILTER_SCRIPT) > text.index("south-items-filter")  # runs after both filters
+    assert text.endswith(rt._FILTER_SCRIPT + "</body></html>\n")
+    rt.check(out)
+
+    legacy = tmp_path / "legacy.html"
+    legacy.write_text('<html lang="en"><body><div id="a">x</div></body></html>')
+    rt.update(legacy, {"a": table("Items")})
+    assert legacy.read_text().endswith(rt._FILTER_SCRIPT + "</body></html>")
+    rt.insert(legacy, rt.para("note"), after="a")
+    assert legacy.read_text().count(rt._FILTER_SCRIPT) == 1
+
+
 def test_filter_table_needs_real_columns():
     with pytest.raises(ValueError):
         rt.filter_table(COLS, ROWS, key="Site", label="Site", region_name="r")

@@ -86,6 +86,7 @@ if(total){total.textContent=total.getAttribute('data-rt-total')+': '+String(Math
 if(empty){empty.hidden=shown>0;}}
 sel.addEventListener('change',apply);apply();});})();
 """
+_FILTER_SCRIPT = f"<script>{_FILTER_JS}</script>"
 
 
 def page(title: str, *parts, lang: str = "en", theme: str = "light", subtitle: str | None = None) -> Html:
@@ -93,7 +94,7 @@ def page(title: str, *parts, lang: str = "en", theme: str = "light", subtitle: s
     if theme not in ("light", "dark"):
         raise ValueError('theme must be "light" or "dark"')
     body = "".join(_esc(p) for p in parts)
-    script = f"<script>{_FILTER_JS}</script>" if "data-rt-filter" in body else ""
+    script = _FILTER_SCRIPT if "data-rt-filter" in body else ""
     sub = f'<p class="subtitle">{_esc(subtitle)}</p>' if subtitle else ""
     return Html(
         f'<!doctype html><html lang="{_esc(lang)}" data-theme="{theme}"><head><meta charset="utf-8">'
@@ -442,6 +443,20 @@ def _one(found: dict, id_: str) -> tuple[int, int]:
     return spans[0]
 
 
+def _with_filter_script(text: str) -> str:
+    """``text`` with the filter script before ``</body>``, unless it already has it.
+
+    page() embeds the script only when it builds a filter, so a filter added to
+    an existing page later would otherwise get a select that does nothing.
+    """
+    # A single-line marker, so a copy saved with other line endings still counts.
+    if "querySelectorAll('[data-rt-filter]')" in text:
+        return text
+    body_ends = list(re.finditer(r"</body\s*>", text, re.I))
+    at = body_ends[-1].start() if body_ends else len(text)
+    return text[:at] + _FILTER_SCRIPT + text[at:]
+
+
 def _carries_id(markup: str, id_: str) -> bool:
     count = len(_locate(markup).outer.get(id_, []))
     if count > 1:
@@ -460,7 +475,8 @@ def update(path, changes: dict) -> dict:
     that itself carries an element with the same id, such as a whole
     ``rt.section(..., id=)`` or ``rt.table(..., id=)``, replaces the element
     rather than its content, so the id is never duplicated. Each id must match
-    exactly one element. Returns a receipt of the ids changed and the old and
+    exactly one element. A filter added to a page without the filter script
+    also adds the script. Returns a receipt of the ids changed and the old and
     new file sizes.
     """
     path = Path(path)
@@ -488,6 +504,8 @@ def update(path, changes: dict) -> dict:
     out = text
     for start, end, new in reversed(edits):
         out = out[:start] + new + out[end:]
+    if any("data-rt-filter" in new for _, _, new in edits):
+        out = _with_filter_script(out)
     save(path, out)
     return {"changed": sorted(changes), "bytes_before": len(text.encode()), "bytes_after": len(out.encode())}
 
@@ -497,8 +515,9 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
 
     For new parts of an existing page, e.g. a decision summary above the
     detail: ``rt.insert(path, rt.section("Decision summary", rt.para(...)),
-    before="detail-section")``. Every other byte is unchanged. Plain text is
-    escaped, as elsewhere. Returns a receipt like ``update``.
+    before="detail-section")``. Every other byte is unchanged, except that a
+    filter added to a page without the filter script also adds the script.
+    Plain text is escaped, as elsewhere. Returns a receipt like ``update``.
     """
     if (before is None) == (after is None):
         raise ValueError("give exactly one of before= or after=")
@@ -506,7 +525,10 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
     text = _read(path)
     start, end = _one(_locate(text).outer, before or after)
     at = start if before is not None else end
-    out = text[:at] + _esc(content) + text[at:]
+    new = _esc(content)
+    out = text[:at] + new + text[at:]
+    if "data-rt-filter" in new:
+        out = _with_filter_script(out)
     save(path, out)
     return {"inserted": "before " + before if before is not None else "after " + after,
             "bytes_before": len(text.encode()), "bytes_after": len(out.encode())}
