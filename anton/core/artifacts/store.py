@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
 from anton.core.artifacts.models import (
     ARTIFACT_ID_SLUG_PREFIX_LEN,
+    ARTIFACT_TYPES,
     METADATA_SCHEMA_VERSION,
     Artifact,
     ArtifactType,
@@ -32,21 +35,59 @@ from anton.core.artifacts.models import (
     ProvenanceEntry,
     TurnEntry,
 )
+# BACKEND_LOG_FILENAME is re-exported for backend_launcher and generate_artifact.
+from anton.core.artifacts.internal_files import (
+    BACKEND_LOG_FILENAME,
+    GENERATION_INPUT_FILES,
+    HOUSEKEEPING_DIRS,
+    HOUSEKEEPING_FILES,
+    METADATA_FILENAME,
+    NON_CONTENT_NAMES,
+    README_FILENAME,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-METADATA_FILENAME = "metadata.json"
-README_FILENAME = "README.md"
-PUBLISHED_FILENAME = ".published.json"
+# `_reconcile` matches these file names against the whole relative path and
+# `HOUSEKEEPING_DIRS` against its first component. The only difference from
+# `iter_content_files` is a top-level directory named like a housekeeping file.
+_EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
 
-# Files the store owns or that hold publish-state — not artifact content the
-# agent authored — so they're excluded from `files[]`. Mirrors cowork-server's
-# artifacts-service housekeeping set so the agent's view and the UI agree on
-# what counts as an artifact file.
-_HOUSEKEEPING_FILES = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
-_HOUSEKEEPING_DIRS = {".revisions"}
+
+def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Yield (path, lstat) for each regular file that is artifact content.
+
+    Top-level `NON_CONTENT_NAMES` are pruned without descending and symlinks
+    are never followed. An entry or directory that errors is skipped on its
+    own; a missing `folder` yields nothing. Order is unspecified.
+
+    Directories are told apart by the scan's own entry type, so only files
+    cost a stat call (none at all on Windows, where the scan carries it).
+    """
+    stack = [(os.fspath(folder), True)]
+    while stack:
+        current, is_root = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            if is_root and entry.name in NON_CONTENT_NAMES:
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append((entry.path, False))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            yield Path(entry.path), st
+
 
 # Same character whitelist projects_store uses — keeps slug shapes
 # consistent across antontron's project names AND artifact slugs.
@@ -245,6 +286,7 @@ class ArtifactStore:
         primary: str | None = _UNSET,  # type: ignore[assignment]
         port: int | None = _UNSET,  # type: ignore[assignment]
         datasources: list[DatasourceRef] | None = _UNSET,  # type: ignore[assignment]
+        type: ArtifactType | None = _UNSET,  # type: ignore[assignment]  # noqa: A002 (shadows builtin `type` — matches `create()`'s existing param name below)
     ) -> Artifact | None:
         """Update mutable agent-supplied fields on an existing artifact.
 
@@ -252,11 +294,26 @@ class ArtifactStore:
         left unchanged. Pass `primary=None` or `primary=""` to clear
         the entry-point pointer. Pass `port=None` to clear the port.
         Pass `datasources=[]` to clear the datasource list.
+
+        `type` is validated against `ARTIFACT_TYPES` after the slug is
+        confirmed to exist, but before anything is mutated — Pydantic's
+        `Artifact` model has no `validate_assignment`, so an invalid value
+        assigned directly would write corrupt JSON that only fails on the
+        *next* load. A missing slug always returns `None` regardless of
+        `type`'s validity (checked first): `None` already means "slug not
+        found", so a bad `type` on top of a missing slug must not escalate
+        that into a `ValueError` — the two causes stay distinguishable by
+        checking existence before validity.
+
         Returns the updated artifact, or None when the slug is missing.
         """
         artifact = self._load_silent(slug)
         if artifact is None:
             return None
+        if type is not _UNSET and type not in ARTIFACT_TYPES:
+            raise ValueError(
+                f"`type` must be one of {ARTIFACT_TYPES}. Got: {type!r}."
+            )
         if primary is not _UNSET:
             artifact.primary = (
                 primary.strip() if isinstance(primary, str) and primary.strip() else None
@@ -265,6 +322,8 @@ class ArtifactStore:
             artifact.port = int(port) if port is not None else None
         if datasources is not _UNSET:
             artifact.datasources = list(datasources or [])
+        if type is not _UNSET:
+            artifact.type = type
         artifact.updatedAt = _utc_now()
         self._save(artifact)
         return artifact
@@ -380,8 +439,11 @@ class ArtifactStore:
         Persists (and bumps ``updatedAt``) ONLY when the on-disk file set
         actually changed, so this is safe and cheap to call on every read —
         no metadata/README churn and no spurious ``updatedAt`` bumps when
-        nothing moved. Skips housekeeping files (`metadata.json` /
-        `README.md` / `.published.json`).
+        nothing moved. Skips everything in ``_EXCLUDED_FROM_FILES``: the
+        store's own files, the backend log, and the generation pipeline's
+        inputs (`prd.md` / `spec.md` / `openapi.json`) — the last group sits
+        in the folder but is not what the user asked to be built, and listing
+        it invites the agent to present a spec as a deliverable.
         """
         folder = self.folder_for(artifact.slug)
         entries: list[FileEntry] = []
@@ -393,16 +455,16 @@ class ArtifactStore:
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
             rel = p.relative_to(folder).as_posix()
-            if rel in _HOUSEKEEPING_FILES or rel.split("/", 1)[0] in _HOUSEKEEPING_DIRS:
+            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in HOUSEKEEPING_DIRS:
                 continue
             try:
-                stat = p.stat()
+                st = p.stat()
             except OSError:
                 continue
             mtime_iso = datetime.fromtimestamp(
-                stat.st_mtime, timezone.utc
+                st.st_mtime, timezone.utc
             ).isoformat(timespec="seconds")
-            entries.append(FileEntry(path=rel, bytes=stat.st_size, modifiedAt=mtime_iso))
+            entries.append(FileEntry(path=rel, bytes=st.st_size, modifiedAt=mtime_iso))
 
         def _fingerprint(files: list[FileEntry]) -> list[tuple]:
             return sorted((f.path, f.bytes, f.modifiedAt) for f in files)

@@ -134,3 +134,18 @@ cur.execute(sql)
     assert len(record.sql_queries) == 1
     assert "SELECT EXTRACT(YEAR FROM sale_date)" in record.sql_queries[0]["sql"]
     assert record.sql_queries[0]["datasource"] == "postgres-prod-db"
+
+
+def test_explainability_skips_an_unparseable_url_and_keeps_the_rest(tmp_path):
+    # A regex literal in cell code matches the URL pattern, and its unmatched
+    # `[` makes urlparse raise "Invalid IPv6 URL".
+    store = ExplainabilityStore(tmp_path)
+    collector = ExplainabilityCollector(store, turn=1, user_message="Open a tunnel")
+    collector.add_sources_from_text(
+        "re.search(r'https://[a-z0-9-]+\\.trycloudflare\\.com', output)\n"
+        "print('see https://burmancoffee.com/')"
+    )
+
+    record = collector.finalize("Tunnel is up.")
+
+    assert {source["name"] for source in record.data_sources} == {"burmancoffee.com"}

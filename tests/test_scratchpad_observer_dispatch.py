@@ -401,6 +401,19 @@ class TestSingleScratchpadGuard:
         assert "failed" not in result and "[error]" not in result
 
     @pytest.mark.asyncio
+    async def test_the_challenge_carries_a_reason_the_pipeline_can_recognise(self):
+        """`ok=True` keeps it out of the error streak, so the reason is the
+        only way `discovery.engine._exec_ran` tells this guidance from a cell
+        that ran and must be recorded for the generators."""
+        session, _ = _fake_session()
+        session._agent_scratchpad_names = {"dash"}
+        # The module-level wrapper flattens outcomes to text; the reason
+        # lives on the ToolOutcome the real handler returns.
+        outcome = await _handle_scratchpad(session, self._exec("report"))
+        assert getattr(outcome, "ok", None) is True
+        assert getattr(outcome, "reason", None) == "new_scratchpad_challenged"
+
+    @pytest.mark.asyncio
     async def test_confirm_allows_second_scratchpad(self):
         session, _ = _fake_session()
         session._agent_scratchpad_names = {"dash"}

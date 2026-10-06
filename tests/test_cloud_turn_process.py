@@ -8,10 +8,12 @@ Event kinds match the controller contract: delta / turn_completed / turn_failed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -168,3 +170,117 @@ async def test_session_close_terminates_scratchpad(tmp_path, monkeypatch):
     await session.close()
     assert pad._proc is None                              # manager released it
     assert proc.returncode is not None                    # OS process terminated
+
+
+# ── interactive turn: ask_user answered over stdin ───────────────────────────
+
+
+def _run_interactive_turn(tmp_path, *, close_stdin_before_wait):
+    """Drive one interactive turn through the real entrypoint: answer the
+    ask_user question with "pg", read to the terminal event, wait for exit.
+    Returns (events, stderr, returncode)."""
+    env = os.environ.copy()
+    # `sys.executable <script>` puts the script's own dir first on sys.path, not
+    # this repo, so an editable install pointing at a sibling checkout (a
+    # multi-worktree dev setup) would otherwise shadow this worktree's `anton`.
+    # Same fix as tests/e2e/harness.py's `_env()`: put the repo root first.
+    env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+    env["ANTON_CLOUD_WORKSPACE_PATH"] = str(tmp_path)
+    env["CLOUD_TURN_FAKE_MODE"] = "model"
+    env["ANTON_CLOUD_ASK_USER_TIMEOUT_SECONDS"] = "30"
+    env["CLOUD_TURN_FAKE_SCRIPT"] = json.dumps([
+        {"tool": {"id": "t1", "name": "ask_user", "input": {
+            "question": "Which database?",
+            "options": [{"value": "pg"}, {"value": "my"}],
+        }}},
+        {"text": "Using pg."},
+    ])
+    proc = subprocess.Popen(
+        [sys.executable, _HARNESS],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    watchdog = threading.Timer(120, proc.kill)
+    watchdog.start()
+    events = []
+    try:
+        proc.stdin.write((json.dumps(_req(interactive=True)) + "\n").encode())
+        proc.stdin.flush()
+        for raw in proc.stdout:
+            event = json.loads(raw)
+            events.append(event)
+            if event["kind"] == "ask_user":
+                answer = {"kind": "answer", "question_id": event["id"], "answer_id": "a1",
+                          "values": ["pg"], "text": "", "skipped": False}
+                proc.stdin.write((json.dumps(answer) + "\n").encode())
+                proc.stdin.flush()
+            if event["kind"] in ("turn_completed", "turn_failed"):
+                break
+        if close_stdin_before_wait:
+            proc.stdin.close()
+        proc.wait(timeout=60)
+    finally:
+        watchdog.cancel()
+        with contextlib.suppress(Exception):
+            proc.stdin.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+    return events, proc.stderr.read().decode(), proc.returncode
+
+
+def test_interactive_turn_takes_an_answer_from_stdin(tmp_path):
+    """Real ChatSession + real ask_user registration: the question goes out
+    as an event, the answer comes back as a stdin line, the turn finishes."""
+    events, stderr, returncode = _run_interactive_turn(tmp_path, close_stdin_before_wait=True)
+
+    kinds = [e["kind"] for e in events]
+    assert kinds[-1] == "turn_completed", (kinds, stderr[-2000:])
+    assert returncode == 0, (returncode, stderr[-2000:])
+    question = next(e for e in events if e["kind"] == "ask_user")
+    assert [o["value"] for o in question["options"]] == ["pg", "my"]
+    answered = next(e for e in events if e["kind"] == "ask_user_answered")
+    assert answered["status"] == "answered"
+    assert answered["values"] == ["pg"]
+    assert answered["answer_id"] == "a1"
+    # ask_user answers via elicit(), which bypasses ChatSession's generic
+    # per-tool-call dispatch loop entirely — its result never reaches the
+    # wire as a `tool_result` event (that kind is scratchpad-`dump`-only;
+    # see cloud_turn/contract.py). The answer does reach the model, in the
+    # pre-terminal `history` event the pod emits so cowork can replay this
+    # turn's tool_use -> tool_result pair next turn.
+    history_events = [e for e in events if e["kind"] == "history"]
+    assert len(history_events) == 1, history_events
+    history_event = history_events[0]
+    ask_user_call_id = next(
+        block["id"]
+        for row in history_event["rows"]
+        for block in row["content"]
+        if block.get("type") == "tool_use" and block.get("name") == "ask_user"
+    )
+    tool_result_block = next(
+        block
+        for row in history_event["rows"]
+        for block in row["content"]
+        if block.get("type") == "tool_result" and block.get("tool_use_id") == ask_user_call_id
+    )
+    assert '"answered"' in tool_result_block["content"] and '"pg"' in tool_result_block["content"]
+
+
+
+
+def test_interactive_turn_exits_cleanly_with_stdin_left_open(tmp_path):
+    """The live-pod exec never closes stdin after the turn, so the process must
+    exit cleanly with the write end still open.
+
+    Before the fix, the daemon answer-reader thread blocked in ``readline()``
+    on ``sys.stdin``'s own buffered reader, and interpreter shutdown aborted
+    trying to finalize it while the thread held its lock: rc -6, "Fatal Python
+    error: _enter_buffered_busy ... at interpreter shutdown, possibly due to
+    daemon threads".
+    """
+    events, stderr, returncode = _run_interactive_turn(tmp_path, close_stdin_before_wait=False)
+
+    kinds = [e["kind"] for e in events]
+    assert kinds[-1] == "turn_completed", (kinds, stderr[-2000:])
+    assert returncode == 0, (returncode, stderr[-2000:])
+    assert "Fatal Python error" not in stderr

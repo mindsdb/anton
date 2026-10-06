@@ -1,8 +1,11 @@
 """`python -m anton.cloud_turn` - the sandbox-pod turn entrypoint.
 
 Contract (matches scratchpad-controller + cowork-server):
-  stdin : ONE newline-terminated TurnRequestV1 JSON line (controller closes stdin)
-  stdout: JSONL events - `delta` / `turn_completed` / `turn_failed`, nothing else
+  stdin : the TurnRequestV1 JSON line; then, for an interactive turn only, one
+          answer line per user answer (see contract.py). The live-pod exec
+          never closes stdin.
+  stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
+          then exactly one terminal
   stderr: diagnostic logs + full tracebacks
   exit  : 0 (the controller detects the terminal from the event, not the code)
 
@@ -16,14 +19,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
 import logging
 import os
 import sys
 import time
+from typing import BinaryIO
 
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.elicitor import (
+    CloudElicitor,
+    ask_user_answered_event,
+    ask_user_event,
+)
 from anton.cloud_turn.history_rows import split_turn_into_rows
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
@@ -32,11 +42,16 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
     drain_pending_skills,
 )
+from anton.cloud_turn.stdin import start_answer_reader
 
 logger = logging.getLogger(__name__)
 
 #: Bound step-event payloads (tool args / results) on the wire. Matches the
 #: cap cowork's SSE formatter applies to the same content.
+# Trace-block keys the pod applies to the session config rather than forwarding
+# as per-turn Langfuse metadata (see `stream_turn`).
+_SESSION_CONFIG_TRACE_KEYS = frozenset({"surface", "user_id", "organization_id"})
+
 MAX_STEP_CHARS = 65536
 MAX_PROGRESS_CHARS = 2000
 #: Per-string-field cap when shrinking a cell-result JSON to fit the wire.
@@ -148,12 +163,15 @@ async def _settle_memory(session) -> None:
         logger.warning("memory settle failed (non-fatal)", exc_info=True)
 
 
-async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
+async def stream_turn(
+    raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
+) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
     a bare ``turn_completed``. Any failure (parse or turn) -> one ``turn_failed``
-    with a scrubbed error string.
+    with a scrubbed error string, plus ``reset_at`` when the failure is a
+    MindsHub billing stop that knows when its limit lifts.
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
@@ -162,6 +180,9 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     the ticker and the delta loop cannot interleave mid-line - no lock needed.
     """
     from anton.core.llm.provider import (
+        MindsHubBillingStop,
+        StreamAskUser,
+        StreamAskUserAnswered,
         StreamComplete,
         StreamContextCompacted,
         StreamTaskProgress,
@@ -189,13 +210,21 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     # a terminal event in `finally` — else the turn dies with no terminal and
     # the controller reports a silent "unexpected error".
     terminal_emitted = False
+    elicitor = None
     try:
         req = TurnRequestV1.from_json(raw_line)
+        build = functools.partial(builder, req)
+        if req.interactive and stdin is not None:
+            # Before the build: the build is what registers `ask_user`, and a
+            # question must never be asked with nothing reading its answer.
+            elicitor = CloudElicitor(emit)
+            start_answer_reader(stdin, asyncio.get_running_loop(), elicitor.deliver)
+            build = functools.partial(builder, req, elicitor=elicitor)
         # build_cloud_chat_session() can block synchronously for several
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
-        session = await asyncio.get_running_loop().run_in_executor(None, builder, req)
+        session = await asyncio.get_running_loop().run_in_executor(None, build)
         # Length of the seeded history — everything anton appends past this
         # index belongs to this turn. Captured BEFORE turn_stream, so the
         # current turn's user input lands inside the slice and is trimmed off
@@ -219,17 +248,20 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         # pod memory with args that would be clipped anyway.
         tool_args: dict[str, list[str]] = {}
         tool_args_len: dict[str, int] = {}
-        seen_tool_progress: set[str] = set()
         last_progress_wire = 0.0
         # Build attribution rides the turn, not the session: cowork resolved it
         # per turn and only it knows the server version / install channel (this
         # image has no cowork-server). `surface` is handled on the session
         # config instead, so it is dropped here to avoid stamping it twice.
+        # So are the account ids (ENG-2121): they ride the session config for
+        # the analytics event, and the gateway already records the verified
+        # user and org on the trace itself, so a client-supplied copy in
+        # Langfuse-Metadata would only be a second, weaker source.
         # Observability only — a malformed block must never affect the turn.
         _trace_md = {
             str(k): str(v)
             for k, v in (req.trace or {}).items()
-            if k != "surface" and v is not None
+            if k not in _SESSION_CONFIG_TRACE_KEYS and v is not None
         } or None
         async for event in session.turn_stream(turn_content, trace_metadata=_trace_md):
             if isinstance(event, StreamTextDelta):
@@ -255,19 +287,21 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             elif isinstance(event, StreamTaskProgress):
                 logger.info("progress [%s]: %s", event.phase, event.message)
                 phase = event.phase or ""
-                first_progress = (phase == "tool_progress" and event.id
-                                  and event.id not in seen_tool_progress)
-                if first_progress:
-                    seen_tool_progress.add(event.id)
-                # Step-creating/closing phases and the first tool_progress per
-                # id must never be dropped (they open/close renderer steps);
-                # the rest is rate-limited. `continuation` and `handback` are
-                # exempt for a different reason: together they tell a consumer
-                # whether the text that follows replaces the answer or adds to
-                # it, and dropping either corrupts the answer in one direction
-                # or the other. Both fire at most once per continuation, so
-                # exempting them cannot flood.
-                always = bool(first_progress) or phase in (
+                # A tool_progress line with an id is a step announcement: the
+                # first one opens the renderer's step, every one is a step the
+                # user must see (ENG-2981 — reasoning_start from the tool's own
+                # LLM calls used to take the window and drop the line). A tool
+                # emits a handful per run; one that streams many lines must use
+                # the tool_peek phase instead, which this pod never relays.
+                step_line = phase == "tool_progress" and bool(event.id)
+                # Step-creating/closing phases and step lines must never be
+                # dropped; the rest is rate-limited. `continuation` and
+                # `handback` are exempt for a different reason: together they
+                # tell a consumer whether the text that follows replaces the
+                # answer or adds to it, and dropping either corrupts the answer
+                # in one direction or the other. Both fire at most once per
+                # continuation, so exempting them cannot flood.
+                always = step_line or phase in (
                     "scratchpad_start", "scratchpad_done", "tool_done",
                     "continuation", "handback")
                 now = time.monotonic()
@@ -289,6 +323,12 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                 logger.info("context compacted: %s", event.message)
                 compacted = True
                 emit({"kind": "compacted", "message": event.message})
+            elif isinstance(event, StreamAskUser):
+                logger.info("ask_user question: %s", event.id)
+                emit(ask_user_event(event))
+            elif isinstance(event, StreamAskUserAnswered):
+                logger.info("ask_user closed: %s status=%s", event.id, event.answer.status)
+                emit(ask_user_answered_event(event, elicitor))
             elif isinstance(event, StreamComplete):
                 logger.info("model response complete")
                 # Round boundary: cowork's formatter separates rounds with a
@@ -309,6 +349,19 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
             emit({"kind": "skill", "entries": drafts})
+        # Pre-terminal like memory and skills. Without this the pod compacts
+        # every turn and throws the result away: the host owns history, so it
+        # must be told which seeded messages the summary now covers.
+        #
+        # `getattr`: cowork and anton deploy independently, and a session double
+        # (or a build predating `last_compaction`) must no-op here, not raise.
+        compaction = getattr(session, "last_compaction", None)
+        if compaction:
+            logger.info("emitting compaction covering %d seeded message(s)",
+                        compaction["covered_through"])
+            emit({"kind": "compaction",
+                  "summary": compaction["summary"],
+                  "covered_through": compaction["covered_through"]})
         # Pre-terminal for the same reason as memory and skills: cowork stops
         # reading the stream at the terminal event.
         #
@@ -337,7 +390,14 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     except Exception as exc:
         # Full traceback -> stderr only; wire carries a short scrubbed string.
         logger.exception("cloud turn failed")
-        emit({"kind": "turn_failed", "error": _scrub(exc)})
+        failed = {"kind": "turn_failed", "error": _scrub(exc)}
+        # A billing stop's reset instant rides beside the string, so the host
+        # can say when the limit lifts. `reset_at` is already a normalized
+        # ISO-8601 instant (`parse_reset_at`), or None when the gateway sent
+        # no instant that parses, and then the key is left off.
+        if isinstance(exc, MindsHubBillingStop) and exc.reset_at:
+            failed["reset_at"] = exc.reset_at
+        emit(failed)
         terminal_emitted = True
     finally:
         # No terminal yet = BaseException/teardown path; emit one (guarded — a
@@ -361,10 +421,16 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     with _isolated_protocol_stdout() as emit:
-        # One bounded line (the controller writes a single JSON line + \n, then
-        # closes stdin). ``readline`` returns on the newline without blocking.
-        raw_line = sys.stdin.readline(MAX_REQUEST_BYTES + 1)
-        asyncio.run(stream_turn(raw_line, emit))
+        # A private reader over a dup of fd 0, never `sys.stdin` (why: see the
+        # cloud_turn/stdin.py docstring).
+        stdin = open(os.dup(0), "rb")
+        # Then point fd 0 itself at /dev/null, so no child process spawned
+        # during the turn inherits the answer pipe and swallows an answer line.
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(devnull, 0)
+        os.close(devnull)
+        raw_line = stdin.readline(MAX_REQUEST_BYTES + 1).decode("utf-8", errors="replace")
+        asyncio.run(stream_turn(raw_line, emit, stdin=stdin))
     return 0
 
 

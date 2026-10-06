@@ -242,6 +242,56 @@ def test_distinct_id_is_the_install_fingerprint(monkeypatch):
     assert body["properties"]["aid"] == "abc123def456abcd"
 
 
+def test_distinct_id_is_the_account_when_the_host_supplied_one(monkeypatch):
+    """ENG-2121: a turn with a known account is keyed on the Keycloak ``sub``,
+    the same distinct_id the console, the desktop renderer and the auth
+    service's billing mirror use, so completed work lands on the person who
+    signed up and topped up. Personless still: this event must never create or
+    update a Person, it only joins one that already exists."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_cached_aid", "abc123def456abcd")
+    captured = _capture_posthog(monkeypatch)
+    sub = "0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30"
+
+    analytics.send_event(_PosthogSettings(), "turn_completed", user_id=sub)
+
+    _, body = captured[0]
+    assert body["distinct_id"] == sub
+    assert body["properties"]["user_id"] == sub
+    # The install stays queryable, and the person is still never processed.
+    assert body["properties"]["aid"] == "abc123def456abcd"
+    assert body["properties"]["$process_person_profile"] is False
+
+
+def test_an_empty_account_falls_back_to_the_install(monkeypatch):
+    """The emit site sends "" when the host said nothing (CLI, older hosts).
+    That must read as "no account", never as a distinct_id of "", which would
+    merge every anonymous turn into one identity."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_cached_aid", "abc123def456abcd")
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(_PosthogSettings(), "turn_completed", user_id="")
+
+    assert captured[0][1]["distinct_id"] == "abc123def456abcd"
+
+
+def test_a_non_uuid_account_is_never_a_distinct_id(monkeypatch):
+    """The sink checks the account id itself rather than trusting every caller:
+    free text such as an email address must never become the distinct_id or a
+    property, whoever passes it."""
+    _clear_ci(monkeypatch)
+    monkeypatch.setattr(analytics, "_cached_aid", "abc123def456abcd")
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(_PosthogSettings(), "turn_completed", user_id="someone@example.com")
+
+    _, body = captured[0]
+    assert body["distinct_id"] == "abc123def456abcd"
+    assert "user_id" not in body["properties"]
+    assert "someone@example.com" not in json.dumps(body)
+
+
 def test_every_property_survives(monkeypatch):
     """The collector allowlisted five names and dropped the other 26. The
     direct path must carry all of them, so assert on ones the collector is

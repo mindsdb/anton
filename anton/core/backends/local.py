@@ -91,7 +91,7 @@ def _apply_workspace_overlay(env: dict[str, str], overlay: dict[str, str] | None
     project .env can neither replace PATH nor a key this process already holds.
     The per-turn cloud state is the exception: whatever a previous cloud
     runtime left in the parent environment is dropped first and the overlay's
-    values replace it, so a stale bearer or connection set never reaches a pad.
+    values replace it, so a stale correlation id or connection set never reaches a pad.
     """
     for key in list(env):
         if _is_cloud_turn_state(key):
@@ -364,10 +364,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 last_error = exc
                 self._nuke_venv()
 
+        # The model reads this message and relays it to the user, so it states
+        # facts only: a generic fix hint here gets repeated as a diagnosis.
+        uv = self._find_uv()
+        method = f"uv venv ({uv})" if uv else "stdlib venv (uv not found)"
         raise RuntimeError(
-            f"Failed to create a working Python venv after {self._MAX_VENV_RETRIES} "
-            f"attempts. Last error: {last_error}. "
-            f"Try running: python3 -c 'print(\"ok\")' to verify your Python installation."
+            f"Scratchpad failed to start: could not create a working Python venv at "
+            f"{venv_path} from {sys.executable} using {method} after "
+            f"{self._MAX_VENV_RETRIES} attempts. Last error: {last_error}"
         )
 
     @staticmethod
@@ -416,7 +420,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                         "--python",
                         sys.executable,
                         "--system-site-packages",
-                        "--seed",
                         "--quiet",
                     ],
                     check=True,
@@ -975,15 +978,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "either way the next exec call starts from an empty "
                     "namespace."
                 )
-            error_msg = (
-                f"{exc}. {state_note}\n\n"
-                "If a database query was running, it may still be executing server-side.\n"
-                "To check and cancel: run SHOW PROCESSLIST (MySQL) or\n"
-                "SELECT * FROM information_schema.processlist WHERE status='running' "
-                "and cancel with KILL <id>.\n"
-                "For Snowflake: use SHOW RUNNING QUERIES and "
-                "SELECT SYSTEM$CANCEL_ALL_QUERIES(<session_id>)."
-            )
+            # A cancellation carries no message; name it so the error still
+            # leads with its cause like every other kill.
+            error_msg = f"{str(exc) or 'Cancelled'}. {state_note}"
             salvaged = "".join(self._salvage)
             if salvaged:
                 if self._salvage_truncated:

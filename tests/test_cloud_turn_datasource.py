@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,12 +17,18 @@ def _cloud_env() -> dict[str, str]:
     env.update(
         {
             "ANTON_CLOUD_TURN": "1",
-            "ANTON_CLOUD_DATASOURCE_TURN_KEY": "mdb_turn_secret",
+            # What the pod sets for this child from the turn's llm block.
+            "OPENAI_API_KEY": "mdb_turn_secret",
+            "OPENAI_BASE_URL": "https://inference.internal/v1",
+            # Not the helper's: the shared provider values get_llm falls back to.
+            "ANTON_OPENAI_API_KEY": "shared-provider-key",
+            "ANTON_OPENAI_BASE_URL": "https://shared.invalid/v1",
             "ANTON_CLOUD_DATASOURCE_CORRELATION_ID": "corr-1",
             "ANTON_CLOUD_DATASOURCE_CONNECTIONS": json.dumps(
                 [{"connection_id": 7, "credential_version": 3}]
             ),
-            "ANTON_DATASOURCE_GATEWAY_URL": "https://datasource.internal/base",
+            # A gateway setting from before, which nothing reads now.
+            "ANTON_DATASOURCE_GATEWAY_URL": "https://attacker.invalid",
             # The complete legacy configuration: the static-key helper must lose
             # the name to the turn-bound one even when a pod carries all of it.
             "ANTON_MINDS_DATASOURCE": "legacy-datasource",
@@ -33,14 +41,14 @@ def _cloud_env() -> dict[str, str]:
     return env
 
 
-def _run_cell(cell: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_cell(cell: str, tmp_path: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(REPO_ROOT / "anton" / "core" / "backends" / "scratchpad_boot.py")],
         input=cell + "\n__ANTON_CELL_END__\n",
         text=True,
         capture_output=True,
         cwd=tmp_path,
-        env=_cloud_env(),
+        env=env or _cloud_env(),
         timeout=15,
         check=False,
     )
@@ -116,7 +124,7 @@ assert result == {
     "truncation_reason": None,
 }
 assert seen["method"] == "POST"
-assert seen["url"] == "https://datasource.internal/base/v1/datasources/execute"
+assert seen["url"] == "https://inference.internal/v1/datasources/execute"
 assert seen["port"] == 443 and seen["timeout"] == 30 and seen["verifies"] and seen["closed"]
 assert seen["headers"]["Authorization"] == "Bearer mdb_turn_secret"
 assert seen["body"]["connection_id"] == 7
@@ -145,11 +153,21 @@ print("ok")
     _assert_cell_printed_ok(_run_cell(cell, tmp_path))
 
 
-def test_no_helper_is_injected_without_connection_refs(tmp_path):
-    """A pod with the legacy configuration but no turn-bound references gets no
-    helper at all, so an old producer meeting a new pod cannot reach a static key."""
+@pytest.mark.parametrize(
+    "removed",
+    ["ANTON_CLOUD_DATASOURCE_CONNECTIONS", "ANTON_CLOUD_TURN"],
+    ids=["no-connection-refs", "not-a-cloud-turn"],
+)
+def test_no_helper_is_injected_outside_a_cloud_turn_with_references(tmp_path, removed):
+    """Without turn-bound references there is no helper, so an old producer
+    meeting a new pod cannot reach a static key; outside a cloud turn there is
+    none either, so a desktop child's own OPENAI_API_KEY never becomes a bearer."""
     env = _cloud_env()
-    del env["ANTON_CLOUD_DATASOURCE_CONNECTIONS"]
+    del env[removed]
+    if removed == "ANTON_CLOUD_TURN":
+        # Outside a cloud turn the desktop helper for these takes the same name.
+        for legacy in ("ANTON_MINDS_DATASOURCE", "ANTON_MINDS_URL", "ANTON_MINDS_API_KEY"):
+            del env[legacy]
     cell = """
 assert "query_minds_data" not in globals()
 print("ok")
@@ -247,3 +265,27 @@ assert query_minds_data(7, "SELECT wide_name") == error("result_too_large")
 print("ok")
 """
     _assert_cell_printed_ok(_run_cell(cell, tmp_path))
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://inference.internal/v1", "https://inference.internal/api/v1", "https://:443/v1"],
+    ids=["plaintext", "api-v1-path", "no-host"],
+)
+def test_the_helper_refuses_a_base_it_cannot_send_the_bearer_to(tmp_path, base_url):
+    """The helper's own check, for a child whose environment the session did
+    not build: nothing is sent unless the base is https at /v1."""
+    env = _cloud_env()
+    env["OPENAI_BASE_URL"] = base_url
+    cell = """
+import http.client
+
+class Connection:
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("a connection was opened")
+
+http.client.HTTPSConnection = Connection
+assert query_minds_data(7, "SELECT 1") == {"type": "error", "error_code": "gateway_unavailable"}
+print("ok")
+"""
+    _assert_cell_printed_ok(_run_cell(cell, tmp_path, env))

@@ -385,6 +385,12 @@ _DEFAULT_AUTH_BASE_URL = "https://auth.mindshub.ai"
 #: desktop.
 _TURNKEY_RESPONSE_FIELDS = ("access_token", "account_email", "token_type", "scope", "expires_at")
 
+#: A connector's own connect-time fields, which auth returns only for the
+#: connector that declares them (Google Ads: its API rejects every call
+#: without the developer token).
+_TURNKEY_EXTRA_FIELDS = ("developer_token", "login_customer_id")
+_TURNKEY_SECURE_KEYS = ("access_token", "developer_token")
+
 
 class TurnKeyDataVault:
     """Read-only DataVault backed by a live call to auth's turn-key token
@@ -442,7 +448,7 @@ class TurnKeyDataVault:
             "created_at": "",
             "updated_at": "",
             "fields": fields,
-            "secure_keys": ["access_token"],
+            "secure_keys": [k for k in _TURNKEY_SECURE_KEYS if k in fields],
         }
 
     def save(
@@ -535,7 +541,11 @@ class TurnKeyDataVault:
         if not isinstance(data, dict) or not data.get("access_token"):
             logger.warning("turn-key token fetch for %s/%s returned no access_token", engine, name)
             return None
-        fields = {k: str(data[k]) for k in _TURNKEY_RESPONSE_FIELDS if data.get(k) is not None}
+        fields = {
+            k: str(data[k])
+            for k in _TURNKEY_RESPONSE_FIELDS + _TURNKEY_EXTRA_FIELDS
+            if data.get(k) is not None
+        }
         # Every credential this vault serves is OAuth-backed by construction
         # (the turn-key endpoint only exists for OAuth connectors) — this is
         # the same signal LocalDataVault's own stored `auth_type` field gives

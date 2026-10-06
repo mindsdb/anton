@@ -376,7 +376,7 @@ def test_launch_backend_overlay_never_overrides_process_env(tmp_path, monkeypatc
 
 
 def test_launch_backend_never_receives_the_turns_cloud_state(tmp_path, monkeypatch):
-    """The overlay carries the cloud turn's bearer and connection references for
+    """The overlay carries the cloud turn's correlation id and connection references for
     the scratchpad only; a long-lived agent-authored process must not inherit them."""
     from anton.core.datasources.data_vault import LocalDataVault
 
@@ -385,7 +385,7 @@ def test_launch_backend_never_receives_the_turns_cloud_state(tmp_path, monkeypat
     sess._scratchpads = None
     sess._workspace_env_overlay = {
         "ANTON_CLOUD_TURN": "1",
-        "ANTON_CLOUD_DATASOURCE_TURN_KEY": "mdb_turn.secret",
+        "ANTON_CLOUD_DATASOURCE_CORRELATION_ID": "corr-1",
         "ANTON_CLOUD_DATASOURCE_CONNECTIONS": "[]",
         "PROJECT_ONLY": "yes",
     }

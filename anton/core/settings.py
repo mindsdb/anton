@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
@@ -18,10 +20,16 @@ class CoreSettings(BaseSettings):
     max_tool_rounds: int = 25
     max_continuations: int = 3
     # Skip the completion verifier when a turn used fewer than this many tool
-    # rounds. Default 1 preserves today's behavior (only pure Q&A, tool_round==0,
-    # is skipped). Raise to 2 to also skip trivial single-tool-round turns once
-    # verdict logs confirm they're rarely INCOMPLETE (ENG-716).
-    verify_min_tool_rounds: int = 1
+    # rounds. At 2, pure Q&A and single-tool-round turns skip it: prod data showed
+    # it sent back fewer than 2.5% of single-round turns, so the call rarely pays.
+    verify_min_tool_rounds: int = 2
+    # Jev settles confident COMPLETE/WAITING verdicts on MindsHub; everything else,
+    # and every BYOK setup, uses the LLM verifier as before. "off" is the kill switch.
+    verifier_jev: Literal["on", "off"] = "on"
+    verifier_jev_model: str = "jev-1.13.0"
+    verifier_jev_timeout_s: float = 2.0
+    # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
+    verifier_jev_min_p: float = 0.8
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
     # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -12,9 +12,14 @@ from anton.core.llm.provider import (
     LLMProvider,
     LLMResponse,
     ProviderAuthError,
+    StreamComplete,
     StreamTextDelta,
     Usage,
 )
+
+
+async def _stream_of(response):
+    yield StreamComplete(response=response)
 
 
 class _Schema(BaseModel):
@@ -32,6 +37,12 @@ def mock_providers():
     )
     coding.complete = AsyncMock(
         return_value=LLMResponse(content="code", usage=Usage())
+    )
+    planning.stream = Mock(
+        side_effect=lambda **kw: _stream_of(LLMResponse(content="plan-stream", usage=Usage()))
+    )
+    coding.stream = Mock(
+        side_effect=lambda **kw: _stream_of(LLMResponse(content="code-stream", usage=Usage()))
     )
     return planning, coding
 
@@ -85,6 +96,26 @@ class TestLLMClient:
         )
         call_kwargs = planning.complete.call_args.kwargs
         assert call_kwargs["tools"] == tools
+
+    async def test_code_stream_delegates_to_coding_provider(self, mock_providers):
+        planning, coding = mock_providers
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+        events = [
+            event
+            async for event in client.code_stream(
+                system="sys", messages=[{"role": "user", "content": "code this"}]
+            )
+        ]
+        coding.stream.assert_called_once()
+        call_kwargs = coding.stream.call_args.kwargs
+        assert call_kwargs["model"] == "model-b"
+        assert isinstance(events[-1], StreamComplete)
+        assert events[-1].response.content == "code-stream"
 
     async def test_plan_confirms_one_auth_refusal_then_returns_success(
         self, mock_providers

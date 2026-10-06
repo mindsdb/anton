@@ -1170,6 +1170,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     )
 
     from anton.core.backends.base import Cell
+    from anton.core.utils.scratchpad import cell_error_headline
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
@@ -1210,7 +1211,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     if cell is None or cell.error:
         err = cell.error if cell else "No result"
         console.print()
-        err_line = err.strip().split("\n")[-1] if err else err
+        err_line = cell_error_headline(err)
         console.print(f"[anton.error]  Demo encountered an issue: {err_line}[/]")
         console.print("[anton.muted]  You can still use Anton normally.[/]")
         console.print()
@@ -1541,6 +1542,8 @@ async def _chat_loop(
         harness=HARNESS_ANTON,
         # WHERE it ran — the other axis, and now the only place "cli" appears.
         surface=SURFACE_CLI,
+        # The CLI footer shows a streaming tool's live tail (`tool_peek`).
+        live_tool_peek=True,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,

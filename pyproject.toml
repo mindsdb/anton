@@ -25,9 +25,24 @@ dependencies = [
     "openai>=3.0",
     # Declared, not inherited: it arrived transitively via anthropic/openai.
     # Same range those SDKs require, so the client we hand them matches theirs.
+    # Also what `generate_artifact` catches transport errors by type against
+    # when a tool-call stream dies mid-generation.
     "httpx2>=2.7,<3",
+    # Floor for GHSA-8bx3-mgpq-m8m9 (IDNA 2003 vs IDNA 2009 host-name encoding
+    # mismatch in TLSStream/connect_tcp() lets a hijacked connection to an
+    # internationalized domain present a certificate that validates against
+    # the IDNA-2003 encoding while the client meant the IDNA-2009 one).
+    # Transitive via anthropic/openai/httpx2, none of which pin it
+    # themselves, so it floats to whatever the resolver picks without this.
+    "anyio>=4.14.2",
     "pydantic>=2.0",
-    "pydantic-settings>=2.0",
+    # Floor for GHSA-c8vh-cgw2-cfmc (NestedSecretsSettingsSource followed
+    # symlinked directories inside secrets_dir out to their target and
+    # skipped them in the secrets_dir_max_size accounting, an out-of-tree
+    # read + size-cap bypass on secrets_nested_subdir=True). We don't use
+    # that source (no secrets_dir/secrets_nested_subdir anywhere in this
+    # repo), but the fix costs nothing.
+    "pydantic-settings>=2.14.2",
     # Declared, not inherited: it arrives transitively via pydantic-settings.
     # `workspace.vault_key` calls dotenv_values directly so a vault file is
     # parsed exactly the way pydantic-settings parsed it — the two disagreeing
@@ -35,6 +50,11 @@ dependencies = [
     # settings require, so the parser matches the one resolving the settings.
     "python-dotenv>=0.21",
     "typer>=0.12.4",
+    # Declared, not inherited: it arrives transitively via typer. Pinned
+    # directly to force the fix for CVE-2026-7246
+    # (SNYK-PYTHON-CLICK-16347201, shell=True command injection in
+    # click.edit()'s filename handling) since typer doesn't pin click itself.
+    "click>=8.3.3",
     "rich>=13.0,<15",
     "prompt-toolkit>=3.0",
     "packaging>=21.0",
@@ -43,6 +63,9 @@ dependencies = [
     "truststore>=0.10.4",
     # Reads .xlsx artifacts for the structural lint 
     "openpyxl>=3.1,<4",
+    # MCP client (anton/core/mcp/) — v2 renamed FastMCP to MCPServer and
+    # replaced the old in-memory test helper; pin the major version.
+    "mcp>=2,<3",
 ]
 
 [project.optional-dependencies]

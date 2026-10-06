@@ -16,7 +16,6 @@ from anton.utils.datasources import scrub_credentials
 
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
-    ContentValidationError,
     ContextOverflowError,
     EndpointConfigurationError,
     LLMProvider,
@@ -24,6 +23,7 @@ from .provider import (
     ModelUnavailableError,
     ProviderAuthError,
     ProviderConnectionInfo,
+    ProviderErrorBody,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -36,11 +36,15 @@ from .provider import (
     TransientProviderError,
     Usage,
     classify_404,
+    classify_content_rejection,
+    classify_request_refusal,
+    classify_responses_failure,
     classify_transient,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
-    wallet_denial_code,
+    mindshub_billing_stop,
+    mindshub_model_restriction,
     raise_on_empty_response,
     ensure_replayable_tool_call,
 )
@@ -48,6 +52,132 @@ from .provider import (
 logger = logging.getLogger(__name__)
 
 AsyncAPIKeyProvider = Callable[[], Awaitable[str]]
+
+
+def _error_body(exc: "openai.APIStatusError") -> object:
+    """The body off an SDK error, Gemini's list wrapper undone.
+
+    The result is the unwrapped value even when it is not a dict: the shared
+    helpers it is handed to (``mindshub_billing_stop``,
+    ``mindshub_model_restriction``, ``classify_transient``) take the raw body,
+    and :class:`ProviderErrorBody` parses it for every structured check below.
+
+    Google's Gemini OpenAI-compat endpoint wraps chat errors in a single-element
+    ARRAY (``[{"error": {...}}]``) while OpenAI and others use a bare object, and
+    the SDK stores whatever it parsed. Shared by the 400 path and the full status
+    ladder so the two cannot read the wire differently — missing this unwrap is
+    what made ENG-1145 surface as an opaque 404.
+    """
+    raw = exc.body
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        raw = raw[0]
+    return raw
+
+
+def _rejects_reasoning_summary(exc: "openai.BadRequestError") -> bool:
+    """True when a 400 refuses ``reasoning.summary`` itself (e.g. an account
+    that must verify its organisation before it may request summaries)."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    param = err.get("param")
+    if param:
+        return param == "reasoning.summary"
+    message = str(err.get("message") or "").strip().lower()
+    return message.startswith(
+        "your organization must be verified to generate reasoning summaries."
+    )
+
+
+def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
+    """True when a 400 refuses the explicit ``prompt_cache_breakpoint`` field,
+    e.g. a model or endpoint that does not support explicit breakpoints."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    text = f"{err.get('param') or ''} {err.get('message') or ''}"
+    return "prompt_cache_breakpoint" in text
+
+
+# (base_url, model) pairs that refused an explicit cache breakpoint. Process-wide
+# because Cowork builds a provider per turn: one refusal is enough.
+_CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
+
+
+def _shared_prompt_input(static: str, session: str) -> list[dict]:
+    """The system prompt as two developer messages, the shared part cacheable."""
+    return [
+        {"role": "developer", "type": "message", "content": [
+            {"type": "input_text", "text": static,
+             "prompt_cache_breakpoint": {"mode": "explicit"}},
+        ]},
+        {"role": "developer", "type": "message", "content": session},
+    ]
+
+
+def _has_cache_breakpoint(kwargs: dict) -> bool:
+    first = (kwargs.get("input") or [None])[0]
+    content = first.get("content") if isinstance(first, dict) else None
+    return (
+        isinstance(content, list) and bool(content)
+        and isinstance(content[0], dict) and "prompt_cache_breakpoint" in content[0]
+    )
+
+
+def _without_cache_breakpoint(kwargs: dict) -> dict:
+    """``kwargs`` with the shared-prompt split undone: back to ``instructions``."""
+    static = kwargs["input"][0]["content"][0]["text"]
+    session = kwargs["input"][1]["content"]
+    return dict(kwargs, instructions=static + session, input=kwargs["input"][2:])
+
+
+def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
+    """Classify the 400s we can name. Returns when we cannot, so the caller
+    re-raises the SDK error exactly as it does today.
+
+    **A 400 never reaches ``_raise_for_status_error``.** ``BadRequestError``
+    subclasses ``APIStatusError``, so the ``except openai.BadRequestError``
+    clause at each call site matches first, and its bare ``raise`` re-raises out
+    of the whole ``try`` — a sibling ``except`` cannot catch an exception
+    re-raised from its own handler. The content classifier was therefore
+    unreachable on exactly the path ENG-2689's incident came from, and ENG-1992's
+    branch had the same problem before it: that fix only ever worked because
+    cowork-server independently matched the provider's message text.
+
+    Deliberately NOT "route 400s through the full ladder": ``classify_transient``
+    maps a 400 carrying ``type: api_error`` to a retryable TransientProviderError
+    (verified), so doing that would silently make some 400s retry that are
+    terminal today. Naming only what we can name leaves every other 400
+    byte-identical; the generic-fallback question is ENG-1283's.
+    """
+    msg = str(exc).lower()
+    if "context_length_exceeded" in msg or "maximum context length" in msg:
+        raise ContextOverflowError(str(exc)) from exc
+
+    parsed = ProviderErrorBody.parse(_error_body(exc))
+    message = parsed.envelope.message or parsed.top.message
+    param = parsed.envelope.param or parsed.top.param
+    content = classify_content_rejection(
+        error_type=parsed.envelope.type or parsed.top.type,
+        message=message,
+        param=param,
+    )
+    if content is not None:
+        raise content from exc
+
+    # A request the provider refuses outright: a refused reasoning effort, such
+    # as function tools on chat.completions for a model that reasons by
+    # default, or a prompt its policy blocks. Re-sending the identical request
+    # cannot pass, so it fails the turn instead of being re-sent and then
+    # ending as prose with no error shown. Last, so the rungs above keep their
+    # recoveries.
+    refusal = classify_request_refusal(
+        status_code=exc.status_code, code=parsed.code, message=message, param=param,
+    )
+    if refusal is not None:
+        raise refusal from exc
 
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
@@ -68,9 +198,15 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
       - 429 with a quota detail → TokenLimitExceeded, checked first so a body
         carrying both ``detail`` and a structured code stays token_limit
         (quota keeps its own card downstream).
-      - 402/429 with an M3 gate wallet code (``wallet_empty`` /
-        ``included_allowance_exhausted``, body or X-MindsHub-Reason header)
-        → TokenLimitExceeded (ENG-1169). Code-exact: BYOK 402s stay generic.
+      - 402/429 with an M3 gate billing code (``wallet_empty`` /
+        ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
+        body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
+        subclass from ``mindshub_billing_stop`` (ENG-1169). Code-exact: BYOK
+        402s stay generic.
+      - 403 with the gateway's ``model_restricted`` deny detail
+        (``X-MindsHub-Deny-Detail`` header or ``deny_detail`` in the body)
+        → ModelRestrictedError from ``mindshub_model_restriction``. A 403
+        ``permission_denied`` without the detail stays generic.
       - anything else → the generic "temporarily unavailable" ConnectionError.
 
     Body-shape tolerance (ENG-747): the OpenAI SDK UNWRAPS the error
@@ -109,12 +245,9 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # structured check below (auth / quota / model) silently misses on Gemini
     # and the error falls through to the generic "temporarily unavailable"
     # message — the exact reason ENG-1145 surfaced as an opaque 404.
-    raw_body = exc.body
-    if isinstance(raw_body, list) and raw_body and isinstance(raw_body[0], dict):
-        raw_body = raw_body[0]
-    body = raw_body if isinstance(raw_body, dict) else {}
-    envelope = body.get("error") if isinstance(body.get("error"), dict) else {}
-    detail = body.get("detail") or envelope.get("detail")
+    raw_body = _error_body(exc)
+    parsed = ProviderErrorBody.parse(raw_body)
+    detail = parsed.top.detail or parsed.envelope.detail
     # str-only: FastAPI validation errors put a LIST in detail — rendering
     # its repr into user-facing copy (with an upgrade CTA!) helps nobody.
     # ENG-1693: origin-gated like every other branch that can mint a MindsHub
@@ -128,8 +261,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
         raise TokenLimitExceeded(msg) from exc
 
-    code = body.get("code") or envelope.get("code")
-    etype = body.get("type") or envelope.get("type")
+    code = parsed.code
+    etype = parsed.top.type or parsed.envelope.type
     # OpenAI's own quota dialect (BYOK): permanent for the identical request, so
     # retrying it as a rate limit just burns the session's backoff budget and
     # surfaces a misleading "provider overloaded". No MindsHub CTA — the remedy
@@ -140,55 +273,41 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
             "and billing at https://platform.openai.com."
         ) from exc
 
-    # MindsHub M3 wallet taxonomy (ENG-1169): the authorization gate denies
-    # out-of-credits as 402 ``wallet_empty`` and a spent free allowance as 429
-    # ``included_allowance_exhausted`` — the latter carries NO FastAPI
-    # ``detail``, so the legacy 429 branch above never sees it. Both are
-    # permanent for the identical request: without this branch the 402 fell
-    # to the generic "temporarily unavailable" ConnectionError, got auto-
-    # retried, and was finally rendered as assistant prose — the out-of-
-    # credits card never showed and the user had no path to refill.
-    # TokenLimitExceeded fails fast (the session re-raises it unretried) and
-    # cowork-server maps it to the ``token_limit`` card. The X-MindsHub-Reason
-    # header is the fallback discriminator for a body that lost its code
-    # (e.g. an anthropic-dialect proxy); detection stays code/reason-exact so
-    # BYOK 402s fall through to the generic copy, never the credits card.
-    # ENG-1693: BOTH carriers are origin-checked. On a BYOK OPENAI_COMPATIBLE
-    # provider the whole response — header and body — is third-party
-    # controlled, so without this any endpoint could return 402 +
-    # `X-MindsHub-Reason: wallet_empty` (or the same `code` in the body) and
-    # put our out-of-credits card, with its top-up CTA, in front of a user
-    # whose MindsHub wallet is fine.
-    #
-    # cowork-server gates its own copies of these reads (ENG-1537, ENG-1686),
-    # but that is too late: anton converts a wallet denial into a typed
-    # TokenLimitExceeded, which cowork-server matches at the TOP of its ladder,
-    # above all origin logic. So the check has to happen here or not at all.
-    #
-    # Three-valued: only a PROVABLE third party is refused. An unknown origin
-    # stays trusted, because a real SDK error always carries its request, so
-    # only synthetic/mid-stream errors lack a host — nothing a remote can pick.
-    # Read once, UNGATED, then used two different ways below.
+    # MindsHub billing taxonomy: the authorization gate denies
+    # an empty wallet as 402 ``wallet_empty``, a spent free allowance as 429
+    # ``included_allowance_exhausted`` and a tripped fleet-wide free-serving
+    # budget as 429 ``free_air_daily_spend_fuse_exceeded``. The 429s carry NO
+    # FastAPI ``detail``, so the legacy 429 branch above never sees them. All
+    # three are permanent for the identical request: without this branch the
+    # 402 fell to the generic "temporarily unavailable" ConnectionError, got
+    # auto-retried, and was finally rendered as assistant prose. The typed
+    # subclass fails fast (the session re-raises TokenLimitExceeded unretried).
+    # A hosted turn's `turn_failed` frame carries its class name in the `error`
+    # string and its reset hint as `reset_at` (see
+    # `cloud_turn.__main__.stream_turn`). `mindshub_billing_stop` owns the
+    # detection, the copy, the reset hint and the origin gate, shared with the
+    # anthropic twin and the mid-stream lanes below.
+    billing_stop = mindshub_billing_stop(exc=exc, body=raw_body, status_code=exc.status_code)
+    if billing_stop is not None:
+        raise billing_stop from exc
+
+    # An org admin's model rule: a 403 the gateway marks with the
+    # `model_restricted` deny detail. It is permanent for the identical request
+    # and credits do not lift it, so it gets its own type and no billing link.
+    # `mindshub_model_restriction` owns the carriers, the copy and the origin
+    # gate, shared with the anthropic twin. A 403 `permission_denied` without
+    # the detail falls through to the generic copy at the bottom, as before.
+    restriction = mindshub_model_restriction(
+        exc=exc, body=raw_body, status_code=exc.status_code, model=model,
+    )
+    if restriction is not None:
+        raise restriction from exc
+
+    # Read UNGATED, for the velocity check below only: a velocity limit is not
+    # a billing verdict, so the origin gate does not apply to it.
     raw_gate_reason = ""
     if getattr(exc, "response", None) is not None:
         raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
-    # Gated form — only this one may pick a BILLING verdict.
-    gate_reason = "" if _foreign else raw_gate_reason
-    wallet_code = None if _foreign else (
-        wallet_denial_code(raw_body) or (
-            gate_reason if gate_reason in ("wallet_empty", "included_allowance_exhausted") else None
-        )
-    )
-    if exc.status_code in (402, 429) and wallet_code:
-        what = (
-            "your MindsHub credits are used up."
-            if wallet_code == "wallet_empty"
-            else "your included token allowance is exhausted."
-        )
-        raise TokenLimitExceeded(
-            f"Server returned {exc.status_code} — {what} Add credits at "
-            "https://console.mindshub.ai/settings/organization/billing to continue."
-        ) from exc
 
     # Origin-gated too (ENG-1693 review): this branch's copy names a MindsHub
     # PLAN and links console.mindshub.ai to upgrade, so it is a billing verdict
@@ -216,36 +335,29 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # itself mean the model is missing. `classify_404` (shared with the Anthropic
     # mapper, ENG-1139) decides model-not-found vs. endpoint-misconfiguration.
     if exc.status_code == 404:
-        provider_msg = envelope.get("message") or body.get("message")
-        status_str = str(body.get("status") or envelope.get("status") or "")
+        provider_msg = parsed.envelope.message or parsed.top.message
+        status_str = str(parsed.top.status or parsed.envelope.status or "")
         raise classify_404(
             model, message=provider_msg, code=code, status=status_str,
         ) from exc
 
-    # A permanent, content-SHAPED rejection: some block in conversation history
-    # reached the provider in a shape it doesn't parse — not a provider-
-    # availability issue, so retrying the identical request fails identically
-    # every time (ENG-1992). Two dialects recognized: OpenAI Responses' "Invalid
-    # value: 'x'. Supported values are: ..." (param names the offending content
-    # index) and Anthropic's "Input tag 'x' found using 'type' does not match
-    # any of the expected tags". cowork-server's turn-error mapping detects this
-    # type (or its scrubbed class name on the remote path) and repairs the
-    # offending content in the conversation's stored history so the next turn
-    # doesn't resend the same poison — see ContentValidationError's docstring.
-    if etype == "invalid_request_error":
-        provider_msg = str(envelope.get("message") or body.get("message") or "").lower()
-        param = str(envelope.get("param") or body.get("param") or "").lower()
-        _content_shape_error = (
-            (".content[" in param or param.endswith(".content"))
-            or "supported values are" in provider_msg
-            or "does not match any of the expected tags" in provider_msg
-        )
-        if _content_shape_error:
-            raise ContentValidationError(
-                "The model provider rejected part of this conversation's content "
-                "(an attachment or image in an unsupported format). That content "
-                "will be removed automatically so the conversation can continue."
-            ) from exc
+    # A permanent rejection of the request's OWN content — either the wrong
+    # SHAPE (ENG-1992) or too large (ENG-2689). Neither is a provider-
+    # availability issue: retrying the identical request fails identically
+    # every time, because the translation that built the bad block runs fresh
+    # from the same stored history on every call. cowork-server's turn-error
+    # mapping detects the resulting type (or its scrubbed class name on the
+    # remote path) and repairs the conversation's stored history so the next
+    # turn doesn't resend the same poison. The heuristic lives in provider.py
+    # so this mapper and the Anthropic one can't drift apart — before ENG-2689
+    # only this one had the branch, and BYOK Anthropic had the bug untreated.
+    _content = classify_content_rejection(
+        error_type=etype,
+        message=parsed.envelope.message or parsed.top.message,
+        param=parsed.envelope.param or parsed.top.param,
+    )
+    if _content is not None:
+        raise _content from exc
 
     # Retryable provider/infra failures — overload/api_error (incl. the mid-stream
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
@@ -264,7 +376,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # forwarding our 429 and `Retry-After` lost its wait (ENG-1537).
     _velocity = raw_gate_reason == "rate_limited" or code == "rate_limited"
     transient = classify_transient(
-        exc.status_code, body, provider="The model provider", model=model,
+        exc.status_code, raw_body, provider="The model provider", model=model,
         retry_after=retry_after_seconds(exc),
         velocity_confirmed=_velocity,
     )
@@ -550,6 +662,11 @@ def _translate_tools_to_responses(tools: list[dict]) -> list[dict]:
     The Responses API uses a flat shape (``{"type": "function", "name": ...,
     "description": ..., "parameters": ...}``) rather than the chat.completions
     nested shape under a ``function`` key.
+
+    ``strict`` is sent as False on every tool. chat.completions reads an
+    omitted ``strict`` as non-strict, while the Responses API normalizes an
+    omitted one into strict mode, which can change what the model sends for
+    optional fields. False keeps both transports on the same schema rules.
     """
     result: list[dict] = []
     for tool in tools:
@@ -559,6 +676,7 @@ def _translate_tools_to_responses(tools: list[dict]) -> list[dict]:
                 "name": tool["name"],
                 "description": tool.get("description", ""),
                 "parameters": tool.get("input_schema", {}),
+                "strict": False,
             }
         )
     return result
@@ -660,9 +778,16 @@ def _translate_assistant_blocks_to_responses(blocks: list[dict]) -> list[dict]:
 def _translate_user_blocks_to_responses(
     blocks: list[dict], supports_vision: bool = True
 ) -> list[dict]:
-    """Convert user content blocks (text, tool_result, image) to Responses API items."""
+    """Convert user content blocks (text, tool_result, image) to Responses API items.
+
+    Images a tool returned are not dropped: like the chat.completions path,
+    they are deferred to one user message after ALL ``function_call_output``
+    items, so the outputs for a multi-call round stay contiguous and each
+    output stays a plain string.
+    """
     result: list[dict] = []
     content_parts: list[dict] = []
+    deferred_img_parts: list[dict] = []
 
     for block in blocks:
         if block.get("type") == "tool_result":
@@ -672,9 +797,21 @@ def _translate_user_blocks_to_responses(
                 content_parts = []
             tool_content = block.get("content", "")
             if isinstance(tool_content, list):
-                tool_content = "\n".join(
-                    b.get("text", "") for b in tool_content if b.get("type") == "text"
-                )
+                texts = [b.get("text", "") for b in tool_content if b.get("type") == "text"]
+                images = [
+                    part for part in map(_responses_image_part, tool_content) if part
+                ] if supports_vision else []
+                if images and not deferred_img_parts:
+                    deferred_img_parts.append(
+                        {"type": "input_text", "text": "Image(s) returned by previous tool call:"}
+                    )
+                deferred_img_parts.extend(images)
+                if texts:
+                    tool_content = "\n".join(texts)
+                elif images:
+                    tool_content = "Image attached in next user message."
+                else:
+                    tool_content = ""
             result.append(
                 {
                     "type": "function_call_output",
@@ -684,22 +821,40 @@ def _translate_user_blocks_to_responses(
             )
         elif block.get("type") == "text":
             content_parts.append({"type": "input_text", "text": block.get("text", "")})
-        elif block.get("type") == "image" and supports_vision:
-            source = block.get("source", {})
-            if source.get("type") == "base64":
-                media_type = source.get("media_type", "image/png")
-                data = source.get("data", "")
-                content_parts.append(
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{media_type};base64,{data}",
-                    }
-                )
+        elif supports_vision and (part := _responses_image_part(block)):
+            content_parts.append(part)
+
+    # Flush deferred images after all function_call_output items.
+    if deferred_img_parts:
+        result.append(_user_message_from_parts(deferred_img_parts))
 
     if content_parts:
         result.append(_user_message_from_parts(content_parts))
 
     return result
+
+
+def _responses_image_part(block: dict) -> dict | None:
+    """An Anthropic ``image`` or OpenAI ``image_url`` block as an ``input_image`` part.
+
+    ``image_url`` blocks come from scratchpad code that built the message in
+    OpenAI shape; the chat.completions path passes them through, so they must
+    reach the model here too.
+    """
+    if block.get("type") == "image":
+        source = block.get("source", {})
+        if source.get("type") != "base64":
+            return None
+        media_type = source.get("media_type", "image/png")
+        url = f"data:{media_type};base64,{source.get('data', '')}"
+    elif block.get("type") == "image_url":
+        image_url = block.get("image_url")
+        url = image_url.get("url", "") if isinstance(image_url, dict) else (image_url or "")
+        if not url:
+            return None
+    else:
+        return None
+    return {"type": "input_image", "image_url": url, "detail": "auto"}
 
 
 def _user_message_from_parts(parts: list[dict]) -> dict:
@@ -813,7 +968,6 @@ def _split_cached_input(usage) -> tuple[int, int, int]:
     return total - read - write, read, write
 
 
-
 async def _aclose_stream(stream: object) -> None:
     """Release a provider stream and its HTTP pool connection.
 
@@ -844,6 +998,11 @@ class OpenAIProvider(LLMProvider):
     FLAVOR_OPENAI = "openai"  # Direct OpenAI BYOK — uses Responses API.
     FLAVOR_MINDS_PASSTHROUGH = "minds-passthrough"  # mdb.ai — chat.completions w/ native tools.
     FLAVOR_OPENAI_COMPATIBLE_GENERIC = "openai-compatible-generic"  # third-party.
+    # The Responses transport (FLAVOR_OPENAI) reports truncation and failures,
+    # forwards tool_result images and attaches trace headers. Hosts that pin
+    # anton to a branch check this before moving direct OpenAI onto it; older
+    # builds lacked those and should stay on chat.completions.
+    RESPONSES_TRANSPORT_READY = True
 
     async def aclose(self) -> None:
         client = getattr(self, "_client", None)
@@ -868,6 +1027,7 @@ class OpenAIProvider(LLMProvider):
         # whose subprocess/env boundary cannot carry a callable. The main-process
         # async OpenAI client can ask the supplier for a fresh bearer per request.
         self._api_key = api_key
+        self._api_key_provider = api_key_provider
         self._base_url = base_url
         self._ssl_verify = ssl_verify
         self._api_version = api_version
@@ -878,6 +1038,9 @@ class OpenAIProvider(LLMProvider):
         # chat.completions path and as ``reasoning={"effort": ...}`` on the
         # Responses API path. None = the model's default.
         self._reasoning_effort = reasoning_effort
+        # Responses only: ask for a reasoning summary until the account refuses
+        # one (see _create_response), then stop asking for this provider's life.
+        self._reasoning_summary = True
         # Whether to attach langfuse-style headers (Langfuse-Session-Id,
         # Langfuse-Tags, Langfuse-Metadata) to outbound requests. Default-on
         # only for the MindsHub-backed deployment, which is the curated
@@ -951,6 +1114,10 @@ class OpenAIProvider(LLMProvider):
             ssl_verify=self._ssl_verify,
             api_version=self._api_version,
         )
+
+    async def current_api_key(self) -> str | None:
+        """The key for the next request: the live supplier's, since a refresh makes the stored one stale."""
+        return await self._api_key_provider() if self._api_key_provider else self._api_key
 
     def native_web_tools(self) -> set[str]:
         # BYOK OpenAI exposes web_search via Responses API (which covers fetch
@@ -1101,9 +1268,7 @@ class OpenAIProvider(LLMProvider):
         try:
             response = await self._client.chat.completions.create(**kwargs)
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1316,9 +1481,7 @@ class OpenAIProvider(LLMProvider):
                                 json_delta=tc_delta.function.arguments,
                             )
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1342,36 +1505,28 @@ class OpenAIProvider(LLMProvider):
             # must classify it here or it surfaces as an opaque generic error on
             # the OpenAI/MindsHub path (ENG-673, Sam's review). Body type sits at
             # the top level (SDK-unwrapped); classify_transient handles that shape.
-            # Out-of-credits smuggled into an open stream (defensive — the M3
-            # gate denies pre-stream today): permanent, so it must fail fast
-            # onto the credits card, not enter the 30s stream_error backoff
+            # A gate billing denial smuggled into an open stream (defensive — the
+            # M3 gate denies pre-stream today): permanent, so it must fail fast
+            # onto its billing card, not enter the 30s stream_error backoff
             # and surface as a misleading "provider overloaded" (ENG-1169).
             # Checked BEFORE the transient classifier — permanent-first, the
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
-            # Origin-checked like the request-time mapper (ENG-1693). NOT a
-            # no-op: an earlier revision claimed a mid-stream error carries no
-            # recoverable host so this was almost always inert, and that was
-            # wrong in the most dangerous direction. The bare `openai.APIError`
-            # raised here has no `.response` but DOES carry `.request` with the
-            # real URL, and answering 200 with the wallet code smuggled into an
-            # SSE frame is the remote's choice — so this is precisely where a
-            # hostile BYOK endpoint would aim. `response_origin_host` now falls
-            # back to `.request`, which is what makes this gate real.
-            wallet_code = (
-                None if origin_is_known_third_party(exc)
-                else wallet_denial_code(getattr(exc, "body", None))
+            # `mindshub_billing_stop` origin-checks it like the request-time
+            # mapper. NOT a no-op: an earlier revision claimed a mid-stream
+            # error carries no recoverable host so this was almost always inert,
+            # and that was wrong in the most dangerous direction. The bare
+            # `openai.APIError` raised here has no `.response` but DOES carry
+            # `.request` with the real URL, and answering 200 with the wallet
+            # code smuggled into an SSE frame is the remote's choice — so this
+            # is precisely where a hostile BYOK endpoint would aim.
+            # `response_origin_host` now falls back to `.request`, which is what
+            # makes this gate real.
+            billing_stop = mindshub_billing_stop(
+                exc=exc, body=getattr(exc, "body", None), status_code=None,
             )
-            if wallet_code:
-                what = (
-                    "Your MindsHub credits are used up"
-                    if wallet_code == "wallet_empty"
-                    else "Your included token allowance is exhausted"
-                )
-                raise TokenLimitExceeded(
-                    f"{what} — add credits at "
-                    "https://console.mindshub.ai/settings/organization/billing to continue."
-                ) from exc
+            if billing_stop is not None:
+                raise billing_stop from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1390,6 +1545,7 @@ class OpenAIProvider(LLMProvider):
 
         finally:
             await _aclose_stream(stream)
+
 
         # Finalize tool calls. Same safe-parse protection as the
         # non-streaming path — a model cut off mid-JSON-arguments
@@ -1484,7 +1640,18 @@ class OpenAIProvider(LLMProvider):
             "input": responses_input,
             "max_output_tokens": max_tokens,
         }
-        if system:
+        from .prompt_builder import SESSION_CONTEXT_MARKER
+
+        if (
+            self._flavor == self.FLAVOR_OPENAI
+            and system.count(SESSION_CONTEXT_MARKER) == 1
+            and (self._base_url or "", model) not in _CACHE_BREAKPOINT_REFUSED
+        ):
+            # The shared part ends in an explicit cache breakpoint, so it is read
+            # from cache by every session, not only by later turns of this one.
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            kwargs["input"] = _shared_prompt_input(static, SESSION_CONTEXT_MARKER + session) + responses_input
+        elif system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
             # "summary": "auto" asks the Responses API to also stream a
@@ -1494,7 +1661,9 @@ class OpenAIProvider(LLMProvider):
             # all. Safe to always pair with effort: only sent when effort
             # is already set, which is itself gated to reasoning-capable
             # models by the caller (see AntonSettings.planning_reasoning_effort).
-            kwargs["reasoning"] = {"effort": self._reasoning_effort, "summary": "auto"}
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            if self._reasoning_summary:
+                kwargs["reasoning"]["summary"] = "auto"
 
         merged_tools: list[dict] = []
         if tools:
@@ -1504,7 +1673,41 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice_to_responses(tool_choice)
+        # Same trace headers as the chat.completions path.
+        trace_headers = self._build_trace_headers()
+        if trace_headers:
+            kwargs["extra_headers"] = trace_headers
+        # `store` is left at the provider default on purpose. store=False was
+        # measured to slow every later prompt-cache hit on the prefix it
+        # wrote (gpt-6.1-sol, 2026-10-02: time to first text 2.5-2.8 s vs
+        # 1.75-1.9 s on identical prefixes), and this path depends on cross-
+        # call cache hits. Retention then follows the key owner's OpenAI
+        # organisation settings.
         return kwargs
+
+    async def _create_response(self, kwargs: dict):
+        """``responses.create``, retried once without the reasoning summary when
+        the account may not request one.
+
+        chat.completions never asks for a summary, so on that transport such an
+        account works; here the same account would get a 400 on every call. The
+        refusal happens before any output, so the retry is a clean re-issue.
+        """
+        try:
+            return await self._client.responses.create(**kwargs)
+        except openai.BadRequestError as exc:
+            if _has_cache_breakpoint(kwargs) and _rejects_cache_breakpoint(exc):
+                logger.warning("explicit prompt cache breakpoints refused for %s; continuing without them",
+                               kwargs.get("model"))
+                _CACHE_BREAKPOINT_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
+                return await self._create_response(_without_cache_breakpoint(kwargs))
+            reasoning = kwargs.get("reasoning") or {}
+            if "summary" not in reasoning or not _rejects_reasoning_summary(exc):
+                raise
+            logger.warning("reasoning summaries refused for this account; continuing without them")
+            self._reasoning_summary = False
+            retry = dict(kwargs, reasoning={k: v for k, v in reasoning.items() if k != "summary"})
+            return await self._client.responses.create(**retry)
 
     async def _complete_via_responses(
         self,
@@ -1528,11 +1731,9 @@ class OpenAIProvider(LLMProvider):
         )
 
         try:
-            response = await self._client.responses.create(**kwargs)
+            response = await self._create_response(kwargs)
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1588,7 +1789,7 @@ class OpenAIProvider(LLMProvider):
 
         stream = None
         try:
-            stream = await self._client.responses.create(**kwargs)
+            stream = await self._create_response(kwargs)
             stream_started = True
             async for event in stream:
                 etype = getattr(event, "type", "")
@@ -1673,11 +1874,11 @@ class OpenAIProvider(LLMProvider):
                     if info["started"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
-                # Final completion event carries the resolved Response object
-                # with usage/stop_reason. We trust the structured parse here in
-                # case the streamed deltas missed something (e.g. server-tool
-                # calls produce text we already streamed but no function call).
-                elif etype == "response.completed":
+                # Terminal event carries the resolved Response object with
+                # usage/stop_reason. `incomplete` is the token-budget cut: it
+                # must report usage and "length" like `completed` reports
+                # its stop, or truncation recovery never sees it.
+                elif etype in ("response.completed", "response.incomplete"):
                     final_response = getattr(event, "response", None)
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
@@ -1688,12 +1889,23 @@ class OpenAIProvider(LLMProvider):
                                 cache_creation_tokens,
                             ) = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
-                        stop_reason = getattr(final_response, "status", None)
+                        stop_reason = _responses_stop_reason(final_response)
                         served_model = getattr(final_response, "model", None) or served_model
+
+                # A failed response and a stream `error` event both arrive as
+                # ordinary events (the SDK only raises on a top-level `error`
+                # key). Unhandled, the stream just ended and the failure looked
+                # like an empty answer. Raised as the bare APIError the SDK
+                # raises for a mid-stream SSE error, so the handler below
+                # classifies it the same way (billing stop, a code that names
+                # its cause, transient, or stream_error with backoff).
+                elif etype in ("response.failed", "error"):
+                    error = (getattr(getattr(event, "response", None), "error", None)
+                             if etype == "response.failed" else event)
+                    body = _responses_error_body(error)
+                    raise openai.APIError(body["message"], _stream_request(stream), body=body)
         except openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if "context_length_exceeded" in msg or "maximum context length" in msg:
-                raise ContextOverflowError(str(exc)) from exc
+            _raise_for_bad_request(exc)
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
@@ -1712,36 +1924,37 @@ class OpenAIProvider(LLMProvider):
             # Bare mid-stream SSE error (no status_code) — not an APIStatusError,
             # so it slips past the handlers above; the SDK already consumed the
             # 200 and never retried it → the session must back off (ENG-673).
-            # Out-of-credits smuggled into an open stream (defensive — the M3
-            # gate denies pre-stream today): permanent, so it must fail fast
-            # onto the credits card, not enter the 30s stream_error backoff
+            # A gate billing denial smuggled into an open stream (defensive — the
+            # M3 gate denies pre-stream today): permanent, so it must fail fast
+            # onto its billing card, not enter the 30s stream_error backoff
             # and surface as a misleading "provider overloaded" (ENG-1169).
             # Checked BEFORE the transient classifier — permanent-first, the
             # same policy as the request-time mapper — so a wallet denial that
             # also carries a transient-looking `type` still fails fast.
-            # Origin-checked like the request-time mapper (ENG-1693). NOT a
-            # no-op: an earlier revision claimed a mid-stream error carries no
-            # recoverable host so this was almost always inert, and that was
-            # wrong in the most dangerous direction. The bare `openai.APIError`
-            # raised here has no `.response` but DOES carry `.request` with the
-            # real URL, and answering 200 with the wallet code smuggled into an
-            # SSE frame is the remote's choice — so this is precisely where a
-            # hostile BYOK endpoint would aim. `response_origin_host` now falls
-            # back to `.request`, which is what makes this gate real.
-            wallet_code = (
-                None if origin_is_known_third_party(exc)
-                else wallet_denial_code(getattr(exc, "body", None))
+            # `mindshub_billing_stop` origin-checks it like the request-time
+            # mapper. NOT a no-op: an earlier revision claimed a mid-stream
+            # error carries no recoverable host so this was almost always inert,
+            # and that was wrong in the most dangerous direction. The bare
+            # `openai.APIError` raised here has no `.response` but DOES carry
+            # `.request` with the real URL, and answering 200 with the wallet
+            # code smuggled into an SSE frame is the remote's choice — so this
+            # is precisely where a hostile BYOK endpoint would aim.
+            # `response_origin_host` now falls back to `.request`, which is what
+            # makes this gate real.
+            billing_stop = mindshub_billing_stop(
+                exc=exc, body=getattr(exc, "body", None), status_code=None,
             )
-            if wallet_code:
-                what = (
-                    "Your MindsHub credits are used up"
-                    if wallet_code == "wallet_empty"
-                    else "Your included token allowance is exhausted"
-                )
-                raise TokenLimitExceeded(
-                    f"{what} — add credits at "
-                    "https://console.mindshub.ai/settings/organization/billing to continue."
-                ) from exc
+            if billing_stop is not None:
+                raise billing_stop from exc
+            # A code that names its cause gets that cause's handling instead of
+            # the incident backoff: compaction, the count-based retry for a rate
+            # limit, the image repair, or a visible refusal. Covers both the
+            # event raised above and an `error` event the SDK raised itself.
+            named = classify_responses_failure(
+                getattr(exc, "body", None), provider="The model provider", model=model,
+            )
+            if named is not None:
+                raise named from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
@@ -1761,6 +1974,22 @@ class OpenAIProvider(LLMProvider):
         finally:
             await _aclose_stream(stream)
 
+        # Same rule as the chat.completions reader (ENG-673): a stream that
+        # ended with no terminal event and produced nothing was cut, and must
+        # fail fast rather than hand back an empty answer.
+        if stop_reason is None:
+            if content_text or tool_calls:
+                logger.warning("responses stream ended with no terminal event but produced "
+                               "output — passing through")
+            else:
+                logger.warning("responses stream ended empty with no terminal event — "
+                               "treating as truncated")
+                raise TransientProviderError(
+                    "The model provider ended the response early — try again in a moment.",
+                    provider="The model provider", code="truncated_stream",
+                    session_backoff=False, model=model,
+                )
+
         yield StreamComplete(
             response=LLMResponse(
                 content=content_text,
@@ -1778,6 +2007,42 @@ class OpenAIProvider(LLMProvider):
                 model=served_model,
             )
         )
+
+
+def _stream_request(stream):
+    """The httpx request behind an SDK stream, or None (fakes, odd transports)."""
+    try:
+        return stream.response.request
+    except Exception:
+        return None
+
+
+def _responses_stop_reason(response) -> str | None:
+    """The Responses API ``status`` as the stop reason the session reads.
+
+    A response cut at ``max_output_tokens`` comes back ``incomplete``; it is
+    reported as ``"length"`` (the chat.completions word) so ``looks_truncated``
+    and the session's truncation recovery fire on this transport too. Other
+    incomplete reasons (``content_filter``, ...) pass through by name.
+    """
+    status = getattr(response, "status", None)
+    if status != "incomplete":
+        return status
+    reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+    return "length" if reason in (None, "max_output_tokens") else reason
+
+
+def _responses_error_body(error) -> dict:
+    """``{"code", "message"}`` from a Responses ``error`` (object, dict or None).
+
+    No ``type`` key: the classifier reads ``type`` before ``code``, and the
+    Responses error event's ``type`` is the literal ``"error"``.
+    """
+    if isinstance(error, dict):
+        code, message = error.get("code"), error.get("message")
+    else:
+        code, message = getattr(error, "code", None), getattr(error, "message", None)
+    return {"code": code, "message": message or "The model provider failed the response."}
 
 
 def _parse_response_object(response, model: str) -> LLMResponse:
@@ -1821,7 +2086,19 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
-    status = getattr(response, "status", None)
+    if getattr(response, "status", None) == "failed":
+        body = _responses_error_body(getattr(response, "error", None))
+        named = classify_responses_failure(body, provider="The model provider", model=model)
+        if named is not None:
+            raise named
+        raise classify_transient(
+            None, body, provider="The model provider", model=model,
+        ) or TransientProviderError(
+            "The model provider failed the response — try again in a moment.",
+            provider="The model provider", code=body["code"] or "response_failed",
+            session_backoff=False, model=model,
+        )
+    status = _responses_stop_reason(response)
     raise_on_empty_response(
         content=content_text, tool_calls=tool_calls, stop_reason=status, model=model,
     )

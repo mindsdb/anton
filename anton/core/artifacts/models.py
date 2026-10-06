@@ -145,6 +145,19 @@ ARTIFACT_TYPES: tuple[str, ...] = (
     "fullstack-stateful-app",
 )
 
+# The types `generate_artifact` can build. One definition, because the tool
+# handler and the pipeline entry point both gate on it.
+GENERATOR_ARTIFACT_TYPES: frozenset[str] = frozenset({
+    "html-app",
+    "fullstack-stateless-app",
+    "fullstack-stateful-app",
+})
+# The same set in ARTIFACT_TYPES order, for a schema `enum` or a prompt list
+# that must read the same on every call (a frozenset iterates in hash order).
+GENERATOR_ARTIFACT_TYPES_ORDERED: tuple[str, ...] = tuple(
+    t for t in ARTIFACT_TYPES if t in GENERATOR_ARTIFACT_TYPES
+)
+
 
 class FileEntry(BaseModel):
     """One file inside the artifact folder.

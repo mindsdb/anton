@@ -13,6 +13,13 @@ import secrets
 import zipfile
 from pathlib import Path
 
+from anton.core.artifacts.internal_files import (
+    GENERATION_INPUT_FILES,
+    NON_CONTENT_NAMES,
+    PUBLISHED_FILENAME,
+    REVISIONS_DIRNAME,
+    STATE_SNAPSHOT_FILENAME,
+)
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
@@ -38,24 +45,15 @@ _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 # Artifact types that ship as a fullstack bundle (backend + static/ + secrets).
 FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
 
-# Filenames inside an artifact folder that are housekeeping — never bundled.
-# The .anton_state.db* entries are defensive: _zip_fullstack is allowlist-based
-# so root files are not bundled anyway, but this guards against future changes
-# (and covers the WAL side-files, where -wal holds the freshest data).
 # Local snapshot of the last-published state key schema (for the client-side
 # schema-change warning). Never bundled.
-_STATE_SNAPSHOT = ".state_manifest.published.json"
-_FULLSTACK_EXCLUDED = {
-    "metadata.json",
-    "README.md",
-    "backend.log",
-    ".published.json",
-    ".revisions",
-    ".anton_state.db",
-    ".anton_state.db-wal",
-    ".anton_state.db-shm",
-    _STATE_SNAPSHOT,
-}
+_STATE_SNAPSHOT = STATE_SNAPSHOT_FILENAME
+# Names inside an artifact folder that are housekeeping or generation inputs
+# (prd.md, discovery.json, ...) — never bundled. The same set the store hides
+# from `files[]`, so what the agent sees and what the bundle omits cannot drift.
+# `_zip_fullstack` is allowlist-based, so root files are not bundled anyway;
+# the set guards static/ and any future change to that allowlist.
+_FULLSTACK_EXCLUDED = NON_CONTENT_NAMES
 
 
 class StatePublishBlocked(Exception):
@@ -66,10 +64,13 @@ class StatePublishBlocked(Exception):
 
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 
-# Owner-side housekeeping files that must never enter the published
-# bundle. `.published.json` in particular holds the artifact's plaintext
-# access password (for the in-app eye-reveal) and must stay local.
-_BUNDLE_SKIP_NAMES = {".published.json", ".revisions"}
+# Owner-side files that must never enter a published html-app bundle.
+# `.published.json` in particular holds the artifact's plaintext access
+# password (for the in-app eye-reveal) and must stay local; the generation
+# inputs (PRD, tech spec, discovery state) are the user's working documents,
+# not deliverables — they are hidden from `files[]` and must stay out of the
+# public bundle for the same reason.
+_BUNDLE_SKIP_NAMES = {PUBLISHED_FILENAME, REVISIONS_DIRNAME} | GENERATION_INPUT_FILES
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without

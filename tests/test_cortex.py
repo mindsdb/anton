@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -88,6 +89,30 @@ class TestBuildMemoryContext:
         result = await cortex.build_memory_context()
         assert "timeout at 30s" not in result
         assert "rate-limits" in result
+
+    async def test_global_and_project_rule_filters_run_concurrently(self, cortex, dirs):
+        for d in dirs:
+            lines = "\n".join(f"- {e.text}" for e in _when_engrams(12))
+            (d / "rules.md").write_text(f"## When\n{lines}\n")
+
+        in_flight = peak = 0
+
+        class _SlowLLM:
+            async def code(self, **kwargs):
+                from anton.core.llm.provider import LLMResponse, Usage
+
+                nonlocal in_flight, peak
+                in_flight += 1
+                peak = max(peak, in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+                # Empty response keeps every rule.
+                return LLMResponse(content="", usage=Usage())
+
+        cortex._llm = _SlowLLM()
+        result = await cortex.build_memory_context("do the august campaign")
+        assert peak == 2
+        assert result.index("Global Rules") < result.index("Project Rules")
 
 
 class TestGetScratchpadContext:

@@ -13,17 +13,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from anton.core.artifacts.store import iter_content_files
+
 logger = logging.getLogger(__name__)
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _EMAIL_SPLIT_RE = re.compile(r"[\s,;]+")
-
-# Keep in sync with anton.publisher._FULLSTACK_EXCLUDED: backend.log is the
-# running backend's runtime log — excluded from the published bundle there, so
-# it must not count as user content here either.
-# Matched against the artifact-relative path's FIRST component, so reserved
-# directories belong here too (`.revisions`, the private revision journal).
-_HOUSEKEEPING_FILES = {"metadata.json", "README.md", "backend.log", ".published.json", ".revisions"}
 
 
 def normalize_emails(values) -> list[str]:
@@ -188,24 +183,14 @@ def _load_metadata(folder: Path) -> dict | None:
 
 
 def _user_files(folder: Path) -> list[Path]:
-    """All non-housekeeping files inside an artifact folder, mtime desc."""
-    out: list[Path] = []
-    try:
-        for p in folder.rglob("*"):
-            if not p.is_file() or p.is_symlink():
-                continue
-            rel = p.relative_to(folder)
-            top = rel.parts[0] if rel.parts else ""
-            if top in _HOUSEKEEPING_FILES:
-                continue
-            out.append(p)
-    except OSError:
-        return []
-    try:
-        out.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        pass
-    return out
+    """All user-facing files inside an artifact folder, mtime desc.
+
+    Skips the store's housekeeping files and the generation inputs (prd.md,
+    discovery.json, ...): otherwise `_pick_primary`'s `files[0]` fallback
+    could name an internal document as the artifact's entry point.
+    """
+    found = sorted(iter_content_files(folder), key=lambda item: item[1].st_mtime, reverse=True)
+    return [path for path, _ in found]
 
 
 def _pick_primary(folder: Path, files: list[Path], primary_hint: str | None = None) -> Path | None:

@@ -158,6 +158,21 @@ class TurnCost:
     # needs. Empty when no exception ended the verdict (verdict produced, or
     # latched skip with no call made).
     verifier_error_type: str = ""
+    # Jev verdicts this turn. `jev_decided` counts checks Jev settled without the
+    # LLM; `jev_disagreements` counts fallbacks where the LLM then chose another
+    # status. The `jev_last_*` fields describe the latest check.
+    jev_checks: int = 0
+    jev_decided: int = 0
+    jev_disagreements: int = 0
+    jev_errors: int = 0
+    jev_last_status: str = ""
+    jev_last_p_complete: float | None = None
+    jev_last_ms: int = 0
+    # Jev's own token usage, kept apart from the coding model's: it is priced
+    # separately. Checks whose reply carried no usage are counted, not assumed free.
+    jev_input_tokens: int = 0
+    jev_output_tokens: int = 0
+    jev_checks_without_usage: int = 0
     # WHY the retry flow terminated, when a turn ended after retrying (ENG-1361).
     # Named for TERMINATION, not exhaustion: `rate_limit_wait_too_long` is a
     # terminal where nothing ran out — the server named an interval past our cap
@@ -175,7 +190,13 @@ class TurnCost:
     #   "rate_limit_wait_limit"     — the rate-limit wait allowance ran out
     #   "rate_limit_wait_too_long"  — Retry-After exceeded our cap; we carded
     #                                 immediately rather than stalling the turn
-    # Empty for every terminal that did not retry.
+    #   "content_rejected"          — the provider refused content already in
+    #                                 the history
+    #   "request_refused"           — the provider refused the request itself:
+    #                                 a setting the model does not accept, or a
+    #                                 prompt its policy blocks
+    # The last two end the turn on the first attempt, without retrying. Empty
+    # for every other terminal that did not retry.
     retry_terminal_reason: str = ""
     # WHAT kind of provider failure ended the turn — a closed vocabulary
     # (`PROVIDER_FAILURE_KINDS`), NOT the raw exception `code` (ENG-1361).

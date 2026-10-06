@@ -121,6 +121,8 @@ The boot script also provides `agentic_loop(...)` (a sync tool-call loop),
 `progress(message)` (inactivity-timer reset), and `sample(var)` (type-aware
 variable inspection).
 
+Each model call from these helpers builds its own provider client and closes it before the call returns. A sync call runs on an event loop that `asyncio.run` closes when the call ends, so a client kept for the next call would hand it a connection tied to a closed loop.
+
 ## Dispatch flow for one `exec` call
 
 ```

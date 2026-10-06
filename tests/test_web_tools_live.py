@@ -613,8 +613,8 @@ class TestWebFetchLive:
     """Real ``handle_web_fetch_fallback`` against a stable known URL.
 
     No API key needed — fetch is the always-on Case 3 capability. ``example.com``
-    is operated by IANA and has a stable, well-formed signature page (``Example
-    Domain`` heading) which makes this assertion stable enough to live in CI.
+    is operated by IANA and has a stable, well-formed signature page, which makes
+    this assertion stable enough to live in CI.
     """
 
     @pytest.mark.asyncio
@@ -626,8 +626,9 @@ class TestWebFetchLive:
         )
         # The header line includes status + byte count.
         assert "HTTP 200" in _text(out)
-        # Signature text from the canonical example.com page.
-        assert "Example Domain" in _text(out)
+        # Body text from the canonical example.com page. "Example Domain" is
+        # now only in <title>, which the stripper drops with the rest of <head>.
+        assert "for use in documentation examples" in _text(out)
         # Confirms the HTML stripper actually ran (the live page has
         # <html>/<body>/<a> tags that should not survive in our output).
         assert "<html" not in _text(out).lower()

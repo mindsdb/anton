@@ -16,6 +16,8 @@ import pytest
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
 from anton.core.llm.provider import (
+    AllowanceExhaustedError,
+    FreeServingPausedError,
     LLMResponse,
     StreamComplete,
     StreamContextCompacted,
@@ -25,6 +27,7 @@ from anton.core.llm.provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    WalletEmptyError,
 )
 
 
@@ -223,6 +226,48 @@ def test_the_continuation_boundary_outlives_a_progress_flood():
     )
 
 
+def test_every_tool_progress_line_reaches_the_wire():
+    """ENG-2981: generate_artifact announces each pipeline step as a
+    tool_progress line, and its own LLM calls emit reasoning_start right next
+    to it. The rate limiter used to let reasoning_start take the window and
+    drop the step line, so cowork never showed that step. A tool emits a
+    handful of these lines per run, so exempting them cannot flood the wire.
+    """
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamTaskProgress(phase="tool_progress", message="Gathering", id="t1")
+            for step in ("step 1", "step 2", "step 3"):
+                yield StreamTaskProgress(phase="reasoning_start", message="Thinking...")
+                yield StreamTaskProgress(phase="tool_progress", message=step, id="t1")
+            yield StreamTaskProgress(
+                phase="tool_done", message="generate_artifact", id="t1", ok=True,
+            )
+
+    events = _drive(_S())
+    lines = [
+        e["message"] for e in events
+        if e.get("kind") == "progress" and e["phase"] == "tool_progress"
+    ]
+    assert lines == ["Gathering", "step 1", "step 2", "step 3"]
+    # tool_progress does not take the window from other phases either: the
+    # first reasoning_start still gets through right after "Gathering".
+    phases = [e["phase"] for e in events if e.get("kind") == "progress"]
+    assert phases.count("reasoning_start") >= 1
+
+
+def test_tool_progress_without_an_id_is_still_rate_limited():
+    """Only step lines WITH an id are exempt (ENG-2981): an id-less line cannot
+    open or advance a renderer step, so a flood of them must still collapse."""
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            for i in range(50):
+                yield StreamTaskProgress(phase="tool_progress", message=f"m{i}")
+
+    events = _drive(_S())
+    progress = [e for e in events if e.get("kind") == "progress"]
+    assert 0 < len(progress) < 10
+
+
 def test_tool_args_accumulation_is_bounded():
     class _S(_FakeSession):
         async def turn_stream(self, user_input, **kwargs):
@@ -268,6 +313,124 @@ def test_turn_failure_is_terminal_and_scrubbed():
     assert "boom" in events[0]["error"]
     assert "sk-ant-" + "A" * 80 not in events[0]["error"]  # credential scrubbed
     assert session.closed is True  # closed even on failure
+
+
+class _GateDenial(Exception):
+    """Stands in for the SDK error the mapper reads: status and body only, no
+    response, so the origin is unknown and trusted."""
+
+    def __init__(self, status_code, body):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+        self.body = body
+
+
+def _mapped_denial(*, status, body):
+    from anton.core.llm.openai import _raise_for_status_error
+
+    try:
+        _raise_for_status_error(_GateDenial(status, body), "latest:sonnet")
+    except Exception as exc:
+        return exc
+    raise AssertionError("the mapper did not raise")
+
+
+def _mapped_gate_denial(status, code):
+    return _mapped_denial(status=status, body={"code": code})
+
+
+@pytest.mark.parametrize("status,code,type_name", [
+    (402, "wallet_empty", "WalletEmptyError"),
+    (429, "included_allowance_exhausted", "AllowanceExhaustedError"),
+    (429, "free_air_daily_spend_fuse_exceeded", "FreeServingPausedError"),
+])
+def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
+    """A hosted turn's host reads the failure's kind from the `TypeName:`
+    prefix of the `turn_failed` string. The string's format is unchanged; the
+    subclass name is what tells the host which limit fired."""
+    events = _drive(_FakeSession(raise_on_stream=_mapped_gate_denial(status, code)))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    error = events[0]["error"]
+    assert error.startswith(f"{type_name}: ")
+    # The whole curated message fits under the wire cap, billing link included.
+    assert not error.endswith("…")
+    assert error.endswith(
+        "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+    )
+
+
+def test_an_admin_model_restriction_names_itself_on_the_wire():
+    """A hosted turn's host reads the failure's kind from the `TypeName:`
+    prefix of the `turn_failed` string, so the restriction must arrive as
+    `ModelRestrictedError:`. Without its own type the 403 reached the wire as a
+    generic ConnectionError, which reads as an outage."""
+    body = {  # SDK-unwrapped: the OpenAI SDK peels the `error` envelope
+        "message": "An administrator in your organization has restricted the model "
+                   "'latest:sonnet'. Choose another model.",
+        "type": "permission_error",
+        "code": "permission_denied",
+        "deny_detail": "model_restricted",
+    }
+    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(status=403, body=body)))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    assert events[0]["error"] == (
+        "ModelRestrictedError: An admin in your organization restricted the model "
+        "'latest:sonnet'. Choose another model in Settings."
+    )
+
+
+_RESET_AT = "2026-09-26T00:00:00Z"
+_RESET_AT_NORMALIZED = "2026-09-26T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("error_type,reason", [
+    (FreeServingPausedError, "free_air_daily_spend_fuse_exceeded"),
+    (AllowanceExhaustedError, "included_allowance_exhausted"),
+])
+def test_a_billing_stop_carries_its_reset_instant_on_the_wire(error_type, reason):
+    """The `error` string has no room for when the limit lifts, so the reset
+    instant rides the frame as its own `reset_at` key, in the normalized form
+    the stop already holds."""
+    stop = error_type("denied", reason=reason, status_code=429, reset_at=_RESET_AT)
+    events = _drive(_FakeSession(raise_on_stream=stop))
+    assert events == [{
+        "kind": "turn_failed",
+        "error": f"{error_type.__name__}: denied",
+        "reset_at": _RESET_AT_NORMALIZED,
+    }]
+
+
+class _ResetLookalike(RuntimeError):
+    """Not a billing stop, but carries a `reset_at` attribute anyway."""
+
+    reset_at = _RESET_AT_NORMALIZED
+
+
+@pytest.mark.parametrize("exc", [
+    pytest.param(
+        AllowanceExhaustedError("denied", reason="included_allowance_exhausted",
+                                status_code=429),
+        id="allowance-without-reset"),
+    pytest.param(
+        FreeServingPausedError("denied", reason="free_air_daily_spend_fuse_exceeded",
+                               status_code=429, reset_at="tomorrow"),
+        id="unparseable-reset"),
+    pytest.param(
+        WalletEmptyError("denied", reason="wallet_empty", status_code=402),
+        id="wallet-empty"),
+    pytest.param(RuntimeError("boom"), id="plain"),
+    pytest.param(_ResetLookalike("boom"), id="not-a-billing-stop"),
+])
+def test_a_failure_without_a_reset_instant_sends_no_reset_key(exc):
+    """The key is present only when there is an instant to show: a consumer
+    must never meet `reset_at: null`, or a reset from an error anton did not
+    classify."""
+    events = _drive(_FakeSession(raise_on_stream=exc))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    assert set(events[0]) == {"kind", "error"}
 
 
 class _BaseBoom(BaseException):
@@ -566,6 +729,57 @@ def test_a_session_without_history_still_completes():
     assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
 
 
+# ── compaction result ────────────────────────────────────────────────────────
+
+
+class _CompactingSession(_HistorySession):
+    """Reports a compaction the way ChatSession.last_compaction does."""
+
+    def __init__(self, covered_through=3, summary="EARLIER: the user asked X.", **kw):
+        super().__init__(seed=[], appended=_HISTORY_TURN, compact=True, **kw)
+        self.last_compaction = {"summary": summary, "covered_through": covered_through}
+
+
+def _compaction_events(events):
+    return [e for e in events if e.get("kind") == "compaction"]
+
+
+def test_compaction_is_emitted_before_the_terminal_event():
+    """Without this the pod compacts every turn and the host never learns of
+    it, so the next turn resends — and re-summarizes — the whole history."""
+    events = _drive(_CompactingSession())
+    assert _compaction_events(events) == [
+        {"kind": "compaction", "summary": "EARLIER: the user asked X.",
+         "covered_through": 3},
+    ]
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_no_compaction_event_when_the_turn_did_not_compact():
+    session = _HistorySession(seed=[], appended=_HISTORY_TURN)
+    session.last_compaction = None
+    assert _compaction_events(_drive(session)) == []
+
+
+def test_a_session_without_last_compaction_still_completes():
+    """cowork-server and anton deploy independently: a build predating
+    `last_compaction` must no-op, not fail the turn."""
+    events = _drive(_FakeSession(deltas=["ok"]))
+    assert _compaction_events(events) == []
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_compaction_not_emitted_when_the_turn_fails():
+    """Same as memory and skills: every pre-terminal emit sits past the point a
+    failure exits from. What that costs is re-compacting next turn, not a wrong
+    cutoff — the count is clamped to the seed, so it cannot reach a message the
+    failed turn produced."""
+    session = _CompactingSession(raise_on_stream=RuntimeError("boom"))
+    events = _drive(session)
+    assert _compaction_events(events) == []
+    assert events[-1]["kind"] == "turn_failed"
+
+
 # ── build attribution rides the turn (ENG-1459 / ENG-1279) ───────────────────
 
 
@@ -611,6 +825,18 @@ def test_surface_is_not_duplicated_into_the_turn_metadata():
     assert "surface" not in kwargs["trace_metadata"]
 
 
+def test_the_account_key_is_not_forwarded_into_the_turn_metadata():
+    # ENG-2121: it rides the session config, like `surface`. Kept out of the
+    # gateway's Langfuse-Metadata too: the gateway already records the verified
+    # user and org itself, and a client-supplied copy is a second source.
+    kwargs = _drive_with_trace(
+        '{"surface":"web","install_channel":"hosted",'
+        '"user_id":"0f2b5c71-9e3a-4d18-bb44-7c6a1d2e5f30",'
+        '"organization_id":"7c6a1d2e-5f30-4d18-bb44-0f2b5c719e3a"}'
+    )
+    assert kwargs["trace_metadata"] == {"install_channel": "hosted"}
+
+
 def test_a_surface_only_block_forwards_no_metadata():
     kwargs = _drive_with_trace('{"surface":"web"}')
     assert kwargs["trace_metadata"] is None
@@ -636,3 +862,119 @@ def test_the_handback_marker_outlives_a_progress_flood_too():
     assert phases.count("handback") == 1, (
         f"the hand-back marker was dropped by the rate limiter; phases: {phases}"
     )
+
+
+# ── interactive turns: ask_user over stdin ───────────────────────────────────
+
+import io
+import os
+
+from anton.core.interaction.elicit import AskOption, AskRequest
+from anton.core.llm.provider import StreamAskUser, StreamAskUserAnswered
+
+_QUESTION = AskRequest(
+    prompt="Which database?",
+    options=(AskOption(value="pg", label="postgres"), AskOption(value="my", label="mysql")),
+    timeout_s=300,
+)
+
+
+class _AskingSession(_FakeSession):
+    """Asks one question through the real elicitor it was built with, the way
+    `elicit()` would, and answers it from the stdin the test provides."""
+
+    def __init__(self):
+        super().__init__()
+        self.elicitor = None
+
+    async def turn_stream(self, user_input, **kwargs):
+        await self.elicitor.begin("ask:1", _QUESTION)
+        yield StreamAskUser(id="ask:1", request=_QUESTION)
+        answer = await self.elicitor.ask("ask:1", _QUESTION)
+        await self.elicitor.end("ask:1")
+        yield StreamAskUserAnswered(id="ask:1", answer=answer)
+
+
+def _interactive_req(interactive=True):
+    return json.dumps({"protocol_version": 1, "conversation_id": "c",
+                       "input": "hi", "interactive": interactive})
+
+
+def test_interactive_turn_asks_and_takes_the_stdin_answer(monkeypatch):
+    import anton.cloud_turn.__main__ as entry_mod
+
+    session = _AskingSession()
+    built = {}
+    # Record the reader thread so the test can join it instead of leaking it.
+    threads = []
+    real_start = entry_mod.start_answer_reader
+
+    def recording_start(*args):
+        thread = real_start(*args)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(entry_mod, "start_answer_reader", recording_start)
+
+    def builder(req, elicitor=None):
+        built["elicitor"] = elicitor
+        session.elicitor = elicitor
+        return session
+
+    answer = {"kind": "answer", "question_id": "ask:1", "answer_id": "a1",
+              "values": ["pg"], "text": "", "skipped": False}
+    # A pipe, not BytesIO: the answer must arrive only after the question is
+    # out, as it does in production — earlier, it would be `not_found`.
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "rb")
+    events = []
+
+    def emit(event):
+        events.append(event)
+        if event["kind"] == "ask_user":
+            os.write(write_fd, (json.dumps(answer) + "\n").encode())
+
+    try:
+        asyncio.run(stream_turn(_interactive_req(), emit,
+                                session_builder=builder, stdin=stdin))
+    finally:
+        os.close(write_fd)  # EOF ends the reader thread
+        for thread in threads:
+            thread.join(timeout=5)
+        stdin.close()
+
+    assert built["elicitor"] is not None
+    assert events[0] == {
+        "kind": "ask_user", "id": "ask:1", "prompt": "Which database?",
+        "options": [{"value": "pg", "label": "postgres", "detail": ""},
+                    {"value": "my", "label": "mysql", "detail": ""}],
+        "select": "one", "allow_custom": True, "timeout_s": 300,
+    }
+    assert events[1] == {"kind": "ask_user_answered", "id": "ask:1", "status": "answered",
+                         "values": ["pg"], "text": "", "answer_id": "a1"}
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_non_interactive_turn_builds_without_an_elicitor():
+    calls = []
+
+    def builder(req, **kwargs):
+        calls.append(kwargs)
+        return _FakeSession(deltas=["ok"])
+
+    events = []
+    asyncio.run(stream_turn(_interactive_req(False), events.append,
+                            session_builder=builder, stdin=io.BytesIO(b"")))
+    assert calls == [{}]
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_interactive_request_without_stdin_builds_without_an_elicitor():
+    calls = []
+
+    def builder(req, **kwargs):
+        calls.append(kwargs)
+        return _FakeSession()
+
+    asyncio.run(stream_turn(_interactive_req(), lambda e: None, session_builder=builder))
+    assert calls == [{}]
