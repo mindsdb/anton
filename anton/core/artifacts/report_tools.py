@@ -35,14 +35,19 @@ class Html(str):
     """Markup produced by these helpers. Plain strings passed in are escaped."""
 
 
-def _esc(value) -> str:
-    if isinstance(value, Html):
-        return str(value)
+def _text(value) -> str:
+    """The text a value is shown as: None is empty, an integral float drops ".0"."""
     if value is None:
         return ""
     if isinstance(value, float) and value.is_integer():
         value = int(value)
-    return _html.escape(str(value), quote=True)
+    return str(value)
+
+
+def _esc(value) -> str:
+    if isinstance(value, Html):
+        return str(value)
+    return _html.escape(_text(value), quote=True)
 
 
 def _attr_id(id: str | None) -> str:
@@ -187,15 +192,17 @@ def filter_table(columns, rows, *, key: str, label: str, region_name: str, value
     k = columns.index(key)
     v = columns.index(value) if value is not None else None
     numeric = [bool(body) and all(_is_number(r[i]) or r[i] is None for r in body) for i in range(len(columns))]
-    options = sorted({str(r[k]) for r in body})
+    # Options and row keys must be the same text, or the select never matches a row.
+    keys = [_text(r[k]) for r in body]
+    options = sorted(set(keys))
     fid = id or _slug(region_name) + "-filter"
     trs, shown, total = [], 0, 0
-    for r in body:
+    for r, row_key in zip(body, keys):
         visible = not (hide_zero and v is not None and not (_is_number(r[v]) and r[v] > 0))
         shown += visible
         total += r[v] if visible and v is not None and _is_number(r[v]) else 0
         val_attr = f' data-rt-value="{_esc(r[v])}"' if v is not None and _is_number(r[v]) else ""
-        trs.append(f'<tr data-rt-key="{_esc(r[k])}"{val_attr}{"" if visible else " hidden"}>'
+        trs.append(f'<tr data-rt-key="{_esc(row_key)}"{val_attr}{"" if visible else " hidden"}>'
                    + "".join(f'<td{" class=num" if n else ""}>{_esc(c)}</td>' for c, n in zip(r, numeric)) + "</tr>")
     total_html = ""
     if v is not None:
@@ -205,7 +212,7 @@ def filter_table(columns, rows, *, key: str, label: str, region_name: str, value
         f'<div class="filter" id="{_esc(fid)}" data-rt-filter{" data-rt-hide-zero" if hide_zero else ""}>'
         f'<label for="{_esc(fid)}-select">{_esc(label)}</label>'
         f'<select id="{_esc(fid)}-select"><option value="">All</option>'
-        + "".join(f'<option value="{_esc(o)}">{_esc(o)}</option>' for o in options) + "</select>"
+        + "".join(f'<option value="{_esc(o)}">{_esc(o) or "(blank)"}</option>' for o in options) + "</select>"
         f'<div role="region" aria-label="{_esc(region_name)}"><h3>{_esc(region_name)}</h3>{total_html}'
         f'<p data-rt-empty{" hidden" if shown else ""}>{_esc(empty_text)}</p>'
         f'<div class="table-wrap"><table>{_thead(columns, numeric)}<tbody>{"".join(trs)}</tbody></table></div></div></div>'

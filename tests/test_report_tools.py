@@ -271,6 +271,16 @@ def test_filter_script_filters_rows_and_totals(hide_zero):
     assert out["South"] == {"visible": 0 if hide_zero else 1, "total": "Total gap: 0", "empty": hide_zero}
 
 
+def test_filter_options_match_row_keys_for_floats_and_blanks():
+    html = rt.filter_table(["Bin", "Qty"], [[2.0, 1], [None, 2], [2.5, 3], ["<b>", 4]],
+                           key="Bin", label="Bin", region_name="Bins")
+    parsed = _Rows()
+    parsed.feed(html)
+    # The script compares option values with data-rt-key exactly.
+    assert parsed.options[1:] == sorted({r["key"] for r in parsed.rows}) == ["", "2", "2.5", "<b>"]
+    assert '<option value="">(blank)</option>' in html and "<b>" not in html
+
+
 def test_filter_table_needs_real_columns():
     with pytest.raises(ValueError):
         rt.filter_table(COLS, ROWS, key="Site", label="Site", region_name="r")
