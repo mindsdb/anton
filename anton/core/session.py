@@ -93,6 +93,7 @@ from anton.core.tools.tool_defs import (
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
     select_path_tool_with_working_folders,
+    generate_artifact_tool_with_working_folders,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
@@ -2578,7 +2579,9 @@ class ChatSession:
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
-            self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(
+                generate_artifact_tool_with_working_folders(GENERATE_ARTIFACT_TOOL, self._working_folders)
+            )
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

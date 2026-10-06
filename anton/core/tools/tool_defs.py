@@ -836,6 +836,30 @@ def select_path_tool_with_working_folders(tool: ToolDef, working_folders: tuple[
         input_schema={**tool.input_schema, "properties": properties},
     )
 
+
+_ATTACHMENTS_OUTSIDE = "a path outside the workspace,"
+
+
+def generate_artifact_tool_with_working_folders(tool: ToolDef, working_folders: tuple[Path, ...]) -> ToolDef:
+    """*tool* (generate_artifact) for a session with *working_folders*.
+
+    Returns *tool* itself when there are none. Otherwise returns a copy whose
+    `attachments` description allows files in the working folders; the schema,
+    its properties and that one property are rebuilt, never mutated.
+    """
+    if not working_folders:
+        return tool
+    properties = dict(tool.input_schema["properties"])
+    attachments = properties["attachments"]
+    properties["attachments"] = {
+        **attachments,
+        "description": attachments["description"].replace(
+            _ATTACHMENTS_OUTSIDE, "a path outside the workspace and this session's working folders,"
+        )
+        + " A file inside one of this session's working folders may be attached.",
+    }
+    return replace(tool, input_schema={**tool.input_schema, "properties": properties})
+
 ASK_USER_TOOL = ToolDef(
     name="ask_user",
     description=(

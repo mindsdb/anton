@@ -42,5 +42,12 @@ def normalize_working_folders(paths: Iterable[Path | str] | None) -> tuple[Path,
 
 
 def working_folder_roots(session: Any) -> tuple[Path, ...]:
-    """The session's working folders, or none for a session that has no such list."""
-    return tuple(getattr(session, "_working_folders", ()) or ())
+    """The session's working folders, or none for a session that has no such list.
+
+    Only a real sequence of paths counts, so a mock or a differently shaped
+    session reads as having no working folders, never as an open fence.
+    """
+    value = getattr(session, "_working_folders", ())
+    if not isinstance(value, (tuple, list)):
+        return ()
+    return tuple(path for path in value if isinstance(path, Path))

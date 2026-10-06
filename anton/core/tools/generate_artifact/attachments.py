@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import mimetypes
 import shutil
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -113,23 +114,33 @@ def _is_cowork_upload(resolved: Path) -> bool:
     return False
 
 
-def refusal_reason(resolved: Path, workspace: Path | None) -> str | None:
+def refusal_reason(
+    resolved: Path, workspace: Path | None, extra_roots: Sequence[Path] = ()
+) -> str | None:
     """Why a RESOLVED file path may not be attached, or None when it may.
 
     Checked on the resolved path so a symlink inside the workspace cannot
-    point the copy at something outside it. Three ways in:
+    point the copy at something outside it. Four ways in:
 
     - a cowork upload, by layout (see `_is_cowork_upload`);
+    - a file inside one of `extra_roots`, the session's working folders,
+      with no dot-component in its path relative to that folder;
     - a file under one of `UPLOAD_ROOTS_IN_WORKSPACE`;
     - a file inside the workspace with no dot-component in its relative
       path — a user's own project file, never `.anton/`, `.git/`, `.env`.
 
-    Without a workspace only the first applies: there is nothing to be
-    "inside" of, and guessing would be the leak this function exists to
-    stop.
+    Without a workspace or a working folder holding it, only the first
+    applies: there is nothing to be "inside" of, and guessing would be the
+    leak this function exists to stop.
     """
     if _is_cowork_upload(resolved):
         return None
+    for root in extra_roots:
+        try:
+            rel = resolved.relative_to(root)
+        except ValueError:
+            continue
+        return REFUSED_HIDDEN if any(part.startswith(".") for part in rel.parts) else None
     if workspace is None:
         return REFUSED_OUTSIDE
     try:
@@ -145,14 +156,14 @@ def refusal_reason(resolved: Path, workspace: Path | None) -> str | None:
 
 
 def resolve_attachments(
-    paths, *, workspace: Path | None = None
+    paths, *, workspace: Path | None = None, extra_roots: Sequence[Path] = ()
 ) -> tuple[list[Attachment], list[str]]:
     """Turn the tool's `attachments` argument into records, dropping what is
     not a readable, attachable file. Returns (kept, reasons for the dropped
     ones).
 
-    `workspace` is the session's workspace base; `refusal_reason` says which
-    paths pass. Duplicates collapse on the resolved path. Nothing here
+    `workspace` is the session's workspace base and `extra_roots` its working
+    folders, already resolved; `refusal_reason` says which paths pass. Duplicates collapse on the resolved path. Nothing here
     raises: a wrong path is the calling agent's mistake, recorded in the
     trace, and must not cost the run.
     """
@@ -173,7 +184,7 @@ def resolve_attachments(
         except OSError as exc:
             dropped.append(f"{text}: {exc.__class__.__name__}")
             continue
-        reason = refusal_reason(resolved, workspace)
+        reason = refusal_reason(resolved, workspace, extra_roots)
         if reason is not None:
             dropped.append(f"{text}: {reason}")
             continue
