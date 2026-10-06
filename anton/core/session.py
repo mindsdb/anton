@@ -9,10 +9,10 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
-from pathlib import Path
 import logging
 import re
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, List, Literal
 import os
 import uuid
@@ -2580,7 +2580,9 @@ class ChatSession:
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(
-                generate_artifact_tool_with_working_folders(GENERATE_ARTIFACT_TOOL, self._working_folders)
+                generate_artifact_tool_with_working_folders(
+                    GENERATE_ARTIFACT_TOOL, self._working_folders
+                )
             )
 
     async def close(self) -> None:

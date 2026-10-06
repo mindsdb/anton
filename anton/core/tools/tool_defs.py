@@ -777,7 +777,6 @@ SELECT_PATH_TOOL_PICK_ONLY = replace(
 )
 
 
-
 # Phrases in both select_path definitions that confine the model to the
 # project; widened only for a session the host gave working folders.
 _SELECT_PATH_WIDENED_TEXT = (
@@ -859,6 +858,7 @@ def generate_artifact_tool_with_working_folders(tool: ToolDef, working_folders: 
         + " A file inside one of this session's working folders may be attached.",
     }
     return replace(tool, input_schema={**tool.input_schema, "properties": properties})
+
 
 ASK_USER_TOOL = ToolDef(
     name="ask_user",

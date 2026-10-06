@@ -171,9 +171,10 @@ def resolve_attachments(
     ones).
 
     `workspace` is the session's workspace base and `extra_roots` its working
-    folders, already resolved; `refusal_reason` says which paths pass. Duplicates collapse on the resolved path. Nothing here
-    raises: a wrong path is the calling agent's mistake, recorded in the
-    trace, and must not cost the run.
+    folders, already resolved; `refusal_reason` says which paths pass.
+    Duplicates collapse on the resolved path. Nothing here raises: a wrong
+    path is the calling agent's mistake, recorded in the trace, and must not
+    cost the run.
     """
     kept: list[Attachment] = []
     dropped: list[str] = []
