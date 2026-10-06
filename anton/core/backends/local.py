@@ -1030,6 +1030,21 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 logs=recovery_note or "",
             )
             self.cells.append(cell)
+            # A Stop or a host's watchdog cancels the task running this cell.
+            # With the cell killed and recorded, that cancel goes on up and
+            # ends the turn; stopped here, the turn would read the error cell
+            # and make its next model call. It is raised before the yield,
+            # because a consumer that stops at the first Cell, as execute()
+            # does, never resumes this generator to receive it. Only a
+            # CancelledError re-raises, so a cell past its own budget
+            # (TimeoutError) still yields its error cell. cancelling() is
+            # checked too, so a CancelledError that leaks up from something
+            # the cell awaited, with no cancel() on this task, yields its
+            # cell like any other kill.
+            if isinstance(exc, asyncio.CancelledError):
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
             yield cell
             return
         except Exception as exc:

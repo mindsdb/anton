@@ -27,6 +27,11 @@ convenience that drains `execute_streaming()` (progress strings, then a final
 destroys them — that's the difference between session end and the `remove`
 action.
 
+When the task running a cell is cancelled, the local backend kills the cell's
+process tree, records the `Cell` in `pad.cells` and re-raises the cancel
+instead of yielding the `Cell`, so the turn ends. A cell past its own time
+budget still yields its error `Cell`.
+
 ## `ScratchpadManager`
 
 Owned by the session; maps names to runtimes. `get_or_create(name)` builds a
