@@ -23,6 +23,12 @@ from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict,
 from anton.core.settings import CoreSettings
 
 
+@pytest.fixture(autouse=True)
+def _verify_single_round_turns(monkeypatch):
+    # These tests drive the verifier through single-tool-round turns.
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
+
+
 @pytest.fixture()
 def workspace():
     base = Path(__file__).resolve().parents[1] / ".pytest-workspace"
