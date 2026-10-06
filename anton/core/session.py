@@ -92,6 +92,7 @@ from anton.core.tools.tool_defs import (
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
     SELECT_PATH_TOOL_PICK_ONLY,
+    select_path_tool_with_working_folders,
     UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
@@ -2504,9 +2505,12 @@ class ChatSession:
         # choice card (ENG-1852), and ≥2 comes back with the candidate list to
         # ask about — so this is a narrowing, not a removal.
         if self.elicitor is not None and "path" in self.elicitor.supported_kinds:
-            self.tool_registry.register_tool(SELECT_PATH_TOOL)
+            select_path_tool = SELECT_PATH_TOOL
         else:
-            self.tool_registry.register_tool(SELECT_PATH_TOOL_PICK_ONLY)
+            select_path_tool = SELECT_PATH_TOOL_PICK_ONLY
+        self.tool_registry.register_tool(
+            select_path_tool_with_working_folders(select_path_tool, self._working_folders)
+        )
 
         # Multiple-choice questions — only when some host can actually render
         # them. Without this the model would ask into a void. The cowork kill

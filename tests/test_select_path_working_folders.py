@@ -259,3 +259,59 @@ async def test_with_working_folders_the_messages_name_them(layout):
     )
     assert "You supplied 'docs/data'" in needs["message"]
     assert "outside the project and its working folders" in needs["message"]
+
+
+def _registered_select_path(session):
+    session._build_tools()
+    return next(t for t in session.tool_registry.get_tool_defs() if t.name == "select_path")
+
+
+@pytest.mark.parametrize("kinds", [("choice", "path"), ("choice",)])
+def test_without_working_folders_the_registered_tool_is_the_module_definition(make_session, kinds):
+    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
+
+    tool = _registered_select_path(make_session(elicitor=_ChoiceElicitor(kinds=kinds)))
+
+    assert tool is (SELECT_PATH_TOOL if "path" in kinds else SELECT_PATH_TOOL_PICK_ONLY)
+
+
+def test_every_widened_phrase_exists_in_the_definitions():
+    """A phrase reworded upstream would otherwise stop being widened silently."""
+    from anton.core.tools.tool_defs import (
+        _SELECT_PATH_WIDENED_PROPERTIES,
+        _SELECT_PATH_WIDENED_TEXT,
+        SELECT_PATH_TOOL,
+        SELECT_PATH_TOOL_PICK_ONLY,
+    )
+
+    texts = " ".join(
+        part for tool in (SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY) for part in (tool.description, tool.prompt)
+    )
+    for old, _new in _SELECT_PATH_WIDENED_TEXT:
+        assert old in texts, old
+    for key, (old, _new) in _SELECT_PATH_WIDENED_PROPERTIES.items():
+        assert old in SELECT_PATH_TOOL.input_schema["properties"][key]["description"], key
+
+
+@pytest.mark.parametrize("kinds", [("choice", "path"), ("choice",)])
+def test_with_working_folders_the_registered_tool_names_them(make_session, tmp_path, kinds):
+    import copy
+
+    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
+
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    pristine = copy.deepcopy((SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY))
+
+    tool = _registered_select_path(
+        make_session(elicitor=_ChoiceElicitor(kinds=kinds), working_folders=(folder,))
+    )
+
+    assert str(folder.resolve()) in tool.description
+    if "path" not in kinds:
+        # The browse-capable prompt never names the project, so only this one changes.
+        assert "working folders" in tool.prompt
+    assert "the absolute path of a working folder" in tool.input_schema["properties"]["base_dir"]["description"]
+    assert "working folder" in tool.input_schema["properties"]["pattern"]["description"]
+    assert "working folder" in tool.input_schema["properties"]["candidates"]["description"]
+    assert (SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY) == pristine
