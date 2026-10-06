@@ -58,6 +58,21 @@ def test_table_rejects_a_row_of_the_wrong_length():
         rt.table(COLS, [["only", "two"]])
 
 
+def test_dict_rows_must_name_every_column():
+    rows = [{"item": "A-100", "region": "North", "gap": 40}]  # keys differ from COLS in case
+    for build in (lambda: rt.table(COLS, rows),
+                  lambda: rt.filter_table(COLS, rows, key="Region", label="Region", region_name="r")):
+        with pytest.raises(ValueError, match="row has no"):
+            build()
+    html = rt.table(COLS, [{"Item": "A", "Region": None, "Gap": None}])
+    assert "<td>A</td><td></td><td></td>" in html  # explicit None stays a blank cell
+
+
+def test_a_column_of_blanks_is_not_numeric():
+    html = rt.table(["Note", "Gap"], [[None, 1], [None, None]])
+    assert '<th scope="col">Note</th><th scope="col" class=num>Gap</th>' in html
+
+
 def test_bar_chart_is_an_accessible_image():
     svg = rt.bar_chart(["North", "South"], [65, 0], name="Gap by region", threshold=50)
     assert 'role="img"' in svg and 'aria-label="Gap by region"' in svg and "<title>Gap by region</title>" in svg

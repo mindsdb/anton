@@ -124,11 +124,20 @@ def _is_number(value) -> bool:
 
 def _row_cells(columns, row) -> list:
     if isinstance(row, dict):
-        return [row.get(c) for c in columns]
+        missing = [c for c in columns if c not in row]
+        if missing:
+            raise ValueError(f"row has no {missing} for columns {columns}: {row!r}")
+        return [row[c] for c in columns]
     cells = list(row)
     if len(cells) != len(columns):
         raise ValueError(f"row has {len(cells)} cells for {len(columns)} columns: {row!r}")
     return cells
+
+
+def _numeric_columns(body, count) -> list[bool]:
+    """A column is numeric when it holds at least one number and otherwise only blanks."""
+    return [any(_is_number(r[i]) for r in body) and all(_is_number(r[i]) or r[i] is None for r in body)
+            for i in range(count)]
 
 
 def _thead(columns, numeric) -> str:
@@ -140,7 +149,7 @@ def table(columns, rows, *, caption: str | None = None, id: str | None = None) -
     """A data table. Rows are lists in column order or dicts keyed by column name."""
     columns = list(columns)
     body = [_row_cells(columns, r) for r in rows]
-    numeric = [bool(body) and all(_is_number(r[i]) or r[i] is None for r in body) for i in range(len(columns))]
+    numeric = _numeric_columns(body, len(columns))
     cap = f"<caption>{_esc(caption)}</caption>" if caption else ""
     trs = "".join("<tr>" + "".join(f'<td{" class=num" if n else ""}>{_esc(v)}</td>' for v, n in zip(r, numeric))
                   + "</tr>" for r in body)
@@ -192,7 +201,7 @@ def filter_table(columns, rows, *, key: str, label: str, region_name: str, value
     body = [_row_cells(columns, r) for r in rows]
     k = columns.index(key)
     v = columns.index(value) if value is not None else None
-    numeric = [bool(body) and all(_is_number(r[i]) or r[i] is None for r in body) for i in range(len(columns))]
+    numeric = _numeric_columns(body, len(columns))
     # Options and row keys must be the same text, or the select never matches a row.
     keys = [_text(r[k]) for r in body]
     options = sorted(set(keys))
