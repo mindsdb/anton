@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,7 +11,9 @@ import pytest
 from anton.core.tools.generate_artifact import attachments as att_mod
 from anton.core.tools.generate_artifact import engine, orchestrator
 from anton.core.tools.generate_artifact.attachments import refusal_reason, resolve_attachments
+from anton.core.tools.tool_defs import _ATTACHMENTS_OUTSIDE, GENERATE_ARTIFACT_TOOL
 from anton.core.tools.working_folders import working_folder_roots
+from anton.workspace import Workspace
 
 
 @pytest.fixture()
@@ -106,24 +107,16 @@ def _registered_generate_artifact(session):
 
 
 def test_the_widened_phrase_exists_in_the_definition():
-    from anton.core.tools.tool_defs import _ATTACHMENTS_OUTSIDE, GENERATE_ARTIFACT_TOOL
-
     assert _ATTACHMENTS_OUTSIDE in GENERATE_ARTIFACT_TOOL.input_schema["properties"]["attachments"]["description"]
 
 
 def test_without_working_folders_the_registered_tool_is_the_module_definition(make_session, tmp_path):
-    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
-    from anton.workspace import Workspace
-
     tool = _registered_generate_artifact(make_session(workspace=Workspace(tmp_path)))
 
     assert tool is GENERATE_ARTIFACT_TOOL
 
 
 def test_with_working_folders_the_attachments_text_allows_them(make_session, layout):
-    from anton.core.tools.tool_defs import GENERATE_ARTIFACT_TOOL
-    from anton.workspace import Workspace
-
     workspace, folder, _ = layout
     pristine = copy.deepcopy(GENERATE_ARTIFACT_TOOL)
 

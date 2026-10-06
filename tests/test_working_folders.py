@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from anton.config.settings import AntonSettings
+from anton.core.settings import CoreSettings
 from anton.core.tools.working_folders import normalize_working_folders, working_folder_roots
 
 
@@ -48,11 +50,9 @@ def test_the_session_keeps_the_normalised_list(make_session, tmp_path):
     assert working_folder_roots(session) == (docs.resolve(),)
 
 
-def test_an_environment_variable_cannot_add_a_working_folder(make_session, tmp_path, monkeypatch):
-    """Only a host building the session names these; a settings file or the
-    environment must not widen what the tools may reach."""
-    monkeypatch.setenv("ANTON_WORKING_FOLDERS", f'["{tmp_path}"]')
-
-    session = make_session()
-
-    assert working_folder_roots(session) == ()
+def test_no_settings_class_can_carry_working_folders():
+    """Only a host building the session names these. A settings field would be
+    filled from `ANTON_*` env vars and `.env` files, widening what the tools
+    may reach without any host asking."""
+    assert "working_folders" not in AntonSettings.model_fields
+    assert "working_folders" not in CoreSettings.model_fields

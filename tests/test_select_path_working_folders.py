@@ -6,6 +6,7 @@ they existed; the expected strings below are copied from that version.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -15,6 +16,12 @@ import pytest
 
 from anton.core.interaction.elicit import AskAnswer
 from anton.core.tools import tool_handlers
+from anton.core.tools.tool_defs import (
+    _SELECT_PATH_WIDENED_PROPERTIES,
+    _SELECT_PATH_WIDENED_TEXT,
+    SELECT_PATH_TOOL,
+    SELECT_PATH_TOOL_PICK_ONLY,
+)
 from anton.core.tools.tool_handlers import handle_select_path
 
 
@@ -123,6 +130,18 @@ async def test_an_anton_directory_inside_a_working_folder_is_never_offered(layou
     result = await _call(_session(workspace, [folder]), {"pattern": "**/*.md"})
 
     assert result["status"] == "no_matches"
+
+
+async def test_a_link_in_a_working_folder_pointing_outside_is_never_offered(layout):
+    workspace, folder, outside = layout
+    (outside / "secret.csv").write_text("a")
+    (folder / "link.csv").symlink_to(outside / "secret.csv")
+
+    by_candidate = await _call(_session(workspace, [folder]), {"candidates": [str(folder / "link.csv")]})
+    by_pattern = await _call(_session(workspace, [folder]), {"pattern": "*.csv"})
+
+    assert by_candidate["status"] == "no_matches"
+    assert by_pattern["status"] == "no_matches"
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="case-insensitive volume")
@@ -286,8 +305,6 @@ def _registered_select_path(session):
 
 @pytest.mark.parametrize("kinds", [("choice", "path"), ("choice",)])
 def test_without_working_folders_the_registered_tool_is_the_module_definition(make_session, kinds):
-    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
-
     tool = _registered_select_path(make_session(elicitor=_ChoiceElicitor(kinds=kinds)))
 
     assert tool is (SELECT_PATH_TOOL if "path" in kinds else SELECT_PATH_TOOL_PICK_ONLY)
@@ -295,13 +312,6 @@ def test_without_working_folders_the_registered_tool_is_the_module_definition(ma
 
 def test_every_widened_phrase_exists_in_the_definitions():
     """A phrase reworded upstream would otherwise stop being widened silently."""
-    from anton.core.tools.tool_defs import (
-        _SELECT_PATH_WIDENED_PROPERTIES,
-        _SELECT_PATH_WIDENED_TEXT,
-        SELECT_PATH_TOOL,
-        SELECT_PATH_TOOL_PICK_ONLY,
-    )
-
     texts = " ".join(
         part for tool in (SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY) for part in (tool.description, tool.prompt)
     )
@@ -313,10 +323,6 @@ def test_every_widened_phrase_exists_in_the_definitions():
 
 @pytest.mark.parametrize("kinds", [("choice", "path"), ("choice",)])
 def test_with_working_folders_the_registered_tool_names_them(make_session, tmp_path, kinds):
-    import copy
-
-    from anton.core.tools.tool_defs import SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY
-
     folder = tmp_path / "docs"
     folder.mkdir()
     pristine = copy.deepcopy((SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY))
