@@ -42,6 +42,12 @@ from anton.core.llm.provider import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _verify_single_round_turns(monkeypatch):
+    # These tests drive the verifier through single-tool-round turns.
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
+
+
 @pytest.fixture()
 def workspace():
     # Keep scratchpad venvs inside the repo workspace (pytest runs sandboxed and
@@ -165,6 +171,29 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
             if m.get("role") == "assistant" and isinstance(m.get("content"), str)
         ]
         assert any("how you'd like to proceed" in t for t in final_texts)
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("tool_rounds, verified", [(1, False), (2, True)])
+async def test_default_verifies_only_multi_round_turns(workspace, monkeypatch, tool_rounds, verified):
+    monkeypatch.delenv("ANTON_VERIFY_MIN_TOOL_ROUNDS")
+    mock_llm = make_mock_llm()
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="done")
+    )
+    responses = [
+        _scratchpad_response("Running.", "exec", "main", "print(1)")
+        for _ in range(tool_rounds)
+    ] + [_text_response("Done.")]
+    mock_llm.plan_stream = lambda **kwargs: _FakeAsyncIter(
+        [StreamComplete(response=responses.pop(0))]
+    )
+
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+    try:
+        [e async for e in session.turn_stream("run my script")]
+        assert mock_llm.generate_object_code.await_count == int(verified)
     finally:
         await session.close()
 
