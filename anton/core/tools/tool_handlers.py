@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Callable
 from anton.core.backends.base import Cell
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
+from anton.core.tools.working_folders import working_folder_roots
 from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
@@ -1371,13 +1372,31 @@ def _is_within(root: "Path", candidate: "Path") -> bool:
         return False
 
 
-def _collect_selection_candidates(tc_input: dict, root: "Path", kind: str) -> "list[Path]":
-    """Resolve candidate paths: confined to *root*, deduped, kind-filtered, capped.
+def _containing_root(roots: "tuple[Path, ...]", candidate: "Path") -> "Path | None":
+    """The first of *roots* that holds *candidate*, or None when none does."""
+    for root in roots:
+        if _is_within(root, candidate):
+            return root
+    return None
+
+
+def _selection_scope(working_folders: "tuple[Path, ...]") -> str:
+    """How the select_path messages name where files may come from."""
+    return "the project and its working folders" if working_folders else "the project"
+
+
+def _collect_selection_candidates(
+    tc_input: dict, root: "Path", kind: str, working_folders: "tuple[Path, ...]" = ()
+) -> "list[Path]":
+    """Resolve candidate paths: confined to *root* and *working_folders*,
+    deduped, kind-filtered, capped.
 
     Prefers the model's explicit ``candidates`` list; otherwise globs
-    ``pattern`` (under an optional ``base_dir``). The private ``.anton``
-    workspace is never exposed.
+    ``pattern`` under an optional ``base_dir``, or under every root when none
+    is given, with one scan budget shared across them. Relative paths resolve
+    against *root*. A private ``.anton`` directory is never exposed.
     """
+    roots = (root, *working_folders)
     seen: set[Path] = set()
     found: list[Path] = []
 
@@ -1386,9 +1405,10 @@ def _collect_selection_candidates(tc_input: dict, root: "Path", kind: str) -> "l
         if len(found) >= _SELECTION_MAX_CANDIDATES:
             return False
         resolved = path.resolve()
-        if resolved in seen or not _is_within(root, resolved) or not resolved.exists():
+        owner = _containing_root(roots, resolved)
+        if resolved in seen or owner is None or not resolved.exists():
             return True
-        if ".anton" in resolved.relative_to(root).parts:
+        if ".anton" in resolved.relative_to(owner).parts:
             return True
         if (kind == "file" and not resolved.is_file()) or (kind == "folder" and not resolved.is_dir()):
             return True
@@ -1410,30 +1430,45 @@ def _collect_selection_candidates(tc_input: dict, root: "Path", kind: str) -> "l
         pattern = (tc_input.get("pattern") or "").strip()
         if pattern:
             base_dir = (tc_input.get("base_dir") or "").strip()
-            search_root = root
+            search_roots: tuple[Path, ...] = roots
             if base_dir:
                 rel = Path(base_dir).expanduser()
                 search_root = (rel if rel.is_absolute() else root / rel).resolve()
-            if _is_within(root, search_root):
-                for scanned, match in enumerate(search_root.glob(pattern)):
+                search_roots = (search_root,) if _containing_root(roots, search_root) else ()
+            scanned = 0
+            for search_root in search_roots:
+                for match in search_root.glob(pattern):
                     if scanned >= _SELECTION_SCAN_LIMIT or not consider(match):
                         break
+                    scanned += 1
+                else:
+                    continue
+                break
 
     found.sort(key=lambda p: str(p).lower())
     return found
 
 
-def _selection_option(path: "Path", root: "Path"):
-    """One picker entry for *path*, labelled relative to the project root."""
+def _selection_label(path: "Path", root: "Path", working_folders: "tuple[Path, ...]" = ()) -> str:
+    """*path* relative to the project root, or as ``<folder>/<path>`` inside a
+    working folder, or absolute when it is in neither."""
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        pass
+    folder = _containing_root(working_folders, path)
+    if folder is not None:
+        return str(Path(folder.name) / path.relative_to(folder))
+    return str(path)
+
+
+def _selection_option(path: "Path", root: "Path", working_folders: "tuple[Path, ...]" = ()):
+    """One picker entry for *path*, labelled as `_selection_label` does."""
     from anton.core.interaction.elicit import AskOption
 
-    try:
-        label = str(path.relative_to(root))
-    except ValueError:
-        label = str(path)
     return AskOption(
         value=str(path),
-        label=label,
+        label=_selection_label(path, root, working_folders),
         kind="folder" if path.is_dir() else "file",
     )
 
@@ -1494,7 +1529,7 @@ def _status(status: str, message: str = "", **extra) -> str:
     return json.dumps({"status": status, **({"message": message} if message else {}), **extra})
 
 
-def _needs_confirmation(candidate: "Path", label: str) -> str:
+def _needs_confirmation(candidate: "Path", label: str, scope: str = "the project") -> str:
     """The model-supplied candidate cannot be silently accepted and no
     confirmation card can render on this host: hand the decision back."""
     return _status(
@@ -1502,16 +1537,20 @@ def _needs_confirmation(candidate: "Path", label: str) -> str:
         f"You supplied '{label}' as the only candidate — that is your guess, not "
         "the user's choice, so it was not accepted. Ask the user to confirm it "
         "before using it, and do not present it as chosen or connected until "
-        "they do. If they asked for a file or folder outside the project, no "
-        "path inside the project is an answer: tell them plainly that this host "
-        "cannot reach paths outside the project, and ask them to attach the "
+        f"they do. If they asked for a file or folder outside {scope}, no "
+        f"path inside {scope} is an answer: tell them plainly that this host "
+        f"cannot reach paths outside {scope}, and ask them to attach the "
         "relevant files to the conversation.",
         candidates=[str(candidate)],
     )
 
 
 async def _confirm_single_candidate(
-    session: "ChatSession", candidate: "Path", root: "Path", timeout_s: "int | None"
+    session: "ChatSession",
+    candidate: "Path",
+    root: "Path",
+    timeout_s: "int | None",
+    working_folders: "tuple[Path, ...]" = (),
 ) -> str:
     """Confirm a model-supplied single candidate with the user (ENG-1852).
 
@@ -1528,10 +1567,8 @@ async def _confirm_single_candidate(
     """
     from anton.core.interaction.elicit import AskOption, AskRequest, elicit
 
-    try:
-        label = str(candidate.relative_to(root))
-    except ValueError:
-        label = str(candidate)
+    label = _selection_label(candidate, root, working_folders)
+    scope = _selection_scope(working_folders)
     noun = "folder" if candidate.is_dir() else "file"
     request = AskRequest(
         prompt=f"Only one candidate was found — use this {noun}?",
@@ -1548,7 +1585,7 @@ async def _confirm_single_candidate(
         _log.warning("select_path confirmation elicitor failed: %s", exc, exc_info=True)
         return _status("error", f"Selection failed: {exc}")
     if answer.status == "unavailable":
-        return _needs_confirmation(candidate, label)
+        return _needs_confirmation(candidate, label, scope)
     if answer.status == "cancelled":
         return _status(
             "cancelled",
@@ -1581,7 +1618,7 @@ async def _confirm_single_candidate(
             f"'{label}' is not confirmed — do not use it or present it as "
             "connected; act on their reply. If it reads as agreement, call "
             "select_path again for an explicit confirmation. If they want a "
-            "file or folder outside the project, tell them plainly that this "
+            f"file or folder outside {scope}, tell them plainly that this "
             "host cannot reach it and ask them to attach the relevant files "
             "to the conversation.",
         )
@@ -1589,8 +1626,8 @@ async def _confirm_single_candidate(
         "cancelled",
         f"The user declined '{label}'. Do not use this path and do not present "
         "it as connected. Ask what they actually meant — and if it is a file or "
-        "folder outside the project, tell them plainly that this host cannot "
-        "reach paths outside the project, and ask them to attach the relevant "
+        f"folder outside {scope}, tell them plainly that this host cannot "
+        f"reach paths outside {scope}, and ask them to attach the relevant "
         "files to the conversation."
         + (f' The user said: "{typed}"' if typed else ""),
     )
@@ -1642,6 +1679,8 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         kind = "any"
 
     root = _selection_root(session)
+    working_folders = working_folder_roots(session)
+    scope = _selection_scope(working_folders)
     elicitor = getattr(session, "elicitor", None)
     # Early-out only: elicit() re-checks kind support itself and answers
     # "unavailable" (mapped to picker_unavailable below) if this check were
@@ -1661,12 +1700,18 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             # unusable even when the user supplies it. Naming the one route
             # that works matters: with no legitimate exit offered, the model
             # fabricated the user's data instead of asking.
+            search_first = (
+                " First search the working folders by calling select_path with a pattern."
+                if working_folders
+                else ""
+            )
             return _status(
                 "picker_unavailable",
                 "This host cannot render a file browser. Ask the user to attach the "
                 "file to the conversation — that is how they grant you access to a "
-                "file outside the project. Do not ask them to type or paste a path, "
-                "and do not proceed with invented or example data in its place.",
+                f"file outside {scope}. Do not ask them to type or paste a path, "
+                "and do not proceed with invented or example data in its place."
+                + search_first,
             )
         request = AskRequest(
             prompt=prompt,
@@ -1688,7 +1733,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         return _finalize_browse_choice(_chosen_path(answer), kind, browse_root)
 
     # ── pick — disambiguate concrete candidates within the project ───────
-    candidates = _collect_selection_candidates(tc_input, root, kind)
+    candidates = _collect_selection_candidates(tc_input, root, kind, working_folders)
     if not candidates:
         # The browse suggestion is only honest where browse can actually run —
         # on a host without a path elicitor it leads straight to
@@ -1702,8 +1747,8 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             )
             if can_pick
             else (
-                "No match found in the project. Refine the pattern, or — if the file "
-                "is not in the project at all — ask the user to attach it to the "
+                f"No match found in {scope}. Refine the pattern, or — if the file "
+                f"is not in {scope} at all — ask the user to attach it to the "
                 "conversation. This host has no file browser, and you cannot read a "
                 "path the user types."
             ),
@@ -1718,7 +1763,9 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             # in the path picker where one renders.
             return _status("resolved", auto_resolved=True, path=str(candidates[0]))
         if not can_pick:
-            return await _confirm_single_candidate(session, candidates[0], root, timeout_s)
+            return await _confirm_single_candidate(
+                session, candidates[0], root, timeout_s, working_folders
+            )
     if not can_pick:
         return _status(
             "picker_unavailable",
@@ -1726,7 +1773,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             candidates=[str(p) for p in candidates],
         )
 
-    options = tuple(_selection_option(p, root) for p in candidates)
+    options = tuple(_selection_option(p, root, working_folders) for p in candidates)
     request = AskRequest(
         prompt=prompt,
         kind="path",
