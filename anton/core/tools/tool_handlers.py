@@ -1449,26 +1449,25 @@ def _collect_selection_candidates(
     return found
 
 
-def _selection_label(path: "Path", root: "Path", working_folders: "tuple[Path, ...]" = ()) -> str:
-    """*path* relative to the project root, or as ``<folder>/<path>`` inside a
-    working folder, or absolute when it is in neither."""
+def _selection_label(path: "Path", root: "Path") -> str:
+    """*path* relative to the project root, else absolute.
+
+    A working-folder file is labelled by its absolute path: a shorter label
+    could read the same as a project path or a file in a same-named folder.
+    """
     try:
         return str(path.relative_to(root))
     except ValueError:
-        pass
-    folder = _containing_root(working_folders, path)
-    if folder is not None:
-        return str(Path(folder.name) / path.relative_to(folder))
-    return str(path)
+        return str(path)
 
 
-def _selection_option(path: "Path", root: "Path", working_folders: "tuple[Path, ...]" = ()):
+def _selection_option(path: "Path", root: "Path"):
     """One picker entry for *path*, labelled as `_selection_label` does."""
     from anton.core.interaction.elicit import AskOption
 
     return AskOption(
         value=str(path),
-        label=_selection_label(path, root, working_folders),
+        label=_selection_label(path, root),
         kind="folder" if path.is_dir() else "file",
     )
 
@@ -1567,7 +1566,7 @@ async def _confirm_single_candidate(
     """
     from anton.core.interaction.elicit import AskOption, AskRequest, elicit
 
-    label = _selection_label(candidate, root, working_folders)
+    label = _selection_label(candidate, root)
     scope = _selection_scope(working_folders)
     noun = "folder" if candidate.is_dir() else "file"
     request = AskRequest(
@@ -1773,7 +1772,7 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             candidates=[str(p) for p in candidates],
         )
 
-    options = tuple(_selection_option(p, root, working_folders) for p in candidates)
+    options = tuple(_selection_option(p, root) for p in candidates)
     request = AskRequest(
         prompt=prompt,
         kind="path",

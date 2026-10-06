@@ -136,7 +136,7 @@ async def test_a_case_variant_of_a_working_folder_path_fails_safe_on_macos(layou
     assert result["status"] == "no_matches"
 
 
-async def test_options_label_working_folder_files_by_folder_name(layout):
+async def test_options_label_working_folder_files_by_absolute_path(layout):
     workspace, folder, _ = layout
     (workspace / "a.csv").write_text("a")
     (folder / "b.csv").write_text("b")
@@ -145,8 +145,26 @@ async def test_options_label_working_folder_files_by_folder_name(layout):
     result = await _call(_session(workspace, [folder], elicitor), {"pattern": "*.csv"})
 
     labels = sorted(option.label for option in elicitor.requests[0].options)
-    assert labels == ["a.csv", "docs/b.csv"]
+    assert labels == sorted(["a.csv", str((folder / "b.csv").resolve())])
     assert result["path"] == str((folder / "b.csv").resolve())
+
+
+async def test_a_project_file_and_a_working_folder_file_never_share_a_label(tmp_path):
+    workspace = tmp_path / "project"
+    (workspace / "docs").mkdir(parents=True)
+    (workspace / "docs" / "b.csv").write_text("a")
+    folder_a = tmp_path / "a" / "docs"
+    folder_b = tmp_path / "b" / "docs"
+    for folder in (folder_a, folder_b):
+        folder.mkdir(parents=True)
+        (folder / "b.csv").write_text("a")
+    elicitor = _ChoiceElicitor()
+
+    await _call(_session(workspace, [folder_a, folder_b], elicitor), {"pattern": "**/b.csv"})
+
+    labels = [option.label for option in elicitor.requests[0].options]
+    assert len(labels) == 3
+    assert len(set(labels)) == 3
 
 
 async def test_the_scan_budget_is_shared_across_roots(layout, monkeypatch):
@@ -257,7 +275,7 @@ async def test_with_working_folders_the_messages_name_them(layout):
     assert browse["message"].endswith(
         "First search the working folders by calling select_path with a pattern."
     )
-    assert "You supplied 'docs/data'" in needs["message"]
+    assert f"You supplied '{(folder / 'data').resolve()}'" in needs["message"]
     assert "outside the project and its working folders" in needs["message"]
 
 
