@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import venv
 from pathlib import Path
 
@@ -206,6 +207,23 @@ def snapshot_file(venvs_base: Path, session_id: str | None, pad_name: str) -> Pa
     return path
 
 
+# Pads with the same name in one workspace share one venv directory, and they
+# provision it on worker threads (concurrent turns in a project, or a host
+# calling _ensure_venv through asyncio.to_thread). Creating and deleting that
+# directory therefore happens under one lock per directory, held by the thread
+# doing the work. The map keeps each small lock for the life of the process.
+# Reentrant, because _ensure_venv deletes a broken venv while it holds the lock.
+_VENV_LOCKS: dict[str, threading.RLock] = {}
+_VENV_LOCKS_GUARD = threading.Lock()
+
+
+def _venv_lock(*, venv_path: Path) -> threading.RLock:
+    """The process-wide lock for one venv directory."""
+    key = os.path.realpath(venv_path)
+    with _VENV_LOCKS_GUARD:
+        return _VENV_LOCKS.setdefault(key, threading.RLock())
+
+
 class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
@@ -345,24 +363,31 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if venv_path.is_dir() and self._try_recycle_venv(venv_path):
             return
 
-        if venv_path.is_dir():
-            self._nuke_venv()
+        # Only one thread at a time deletes and rebuilds this directory. A
+        # thread that waited here recycles the venv the first one built, so
+        # concurrent first starts create it once.
+        with _venv_lock(venv_path=venv_path):
+            if venv_path.is_dir() and self._try_recycle_venv(venv_path):
+                return
 
-        last_error: Exception | None = None
-        for attempt in range(1, self._MAX_VENV_RETRIES + 1):
-            try:
-                self._create_venv()
-                if self._verify_venv_python():
-                    self._setup_parent_site_packages()
-                    self._save_python_version()
-                    return
-                detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
-                raise RuntimeError(
-                    f"venv Python binary at {self._venv_python} is not functional{detail}"
-                )
-            except Exception as exc:
-                last_error = exc
+            if venv_path.is_dir():
                 self._nuke_venv()
+
+            last_error: Exception | None = None
+            for attempt in range(1, self._MAX_VENV_RETRIES + 1):
+                try:
+                    self._create_venv()
+                    if self._verify_venv_python():
+                        self._setup_parent_site_packages()
+                        self._save_python_version()
+                        return
+                    detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
+                    raise RuntimeError(
+                        f"venv Python binary at {self._venv_python} is not functional{detail}"
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    self._nuke_venv()
 
         # The model reads this message and relays it to the user, so it states
         # facts only: a generic fix hint here gets repeated as a diagnosis.
@@ -487,13 +512,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return False
 
     def _nuke_venv(self) -> None:
-        if self._venv_dir is not None:
-            try:
-                shutil.rmtree(self._venv_dir)
-            except OSError:
-                pass
-        self._venv_dir = None
-        self._venv_python = None
+        with _venv_lock(venv_path=self._venvs_base / self.name):
+            if self._venv_dir is not None:
+                try:
+                    shutil.rmtree(self._venv_dir)
+                except OSError:
+                    pass
+            self._venv_dir = None
+            self._venv_python = None
 
     def _add_windows_firewall_rule(self) -> None:
         if self._venv_python is None or not os.path.isfile(self._venv_python):
@@ -610,7 +636,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def start(self) -> None:
         """Write the boot script to a temp file and launch the subprocess."""
-        self._ensure_venv()
+        # _ensure_venv runs a subprocess on every start and may build the venv,
+        # so it runs on a worker thread. On the event loop it would stall every
+        # other turn and request the host serves until it finished.
+        await asyncio.to_thread(self._ensure_venv)
 
         boot_code = _read_boot_script()
         fd, path = tempfile.mkstemp(suffix=".py", prefix="anton_scratchpad_")
@@ -764,7 +793,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 start_new_session=(sys.platform != "win32"),
             )
         except (FileNotFoundError, PermissionError, OSError) as exc:
-            self._nuke_venv()
+            await asyncio.to_thread(self._nuke_venv)
             raise RuntimeError(
                 f"Failed to start scratchpad: {exc}. "
                 "The Python venv has been deleted and will be recreated on next attempt."
@@ -804,8 +833,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self.cells.clear()
         self._discard_session_snapshot()
         self._consecutive_deaths = 0
-        if not self._verify_venv_python():
-            self._nuke_venv()
+        if not await asyncio.to_thread(self._verify_venv_python):
+            await asyncio.to_thread(self._nuke_venv)
         await self.start()
 
     async def _auto_resume(self) -> bool:
@@ -894,7 +923,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     async def cleanup(self) -> None:
         """Kill process and delete the venv entirely."""
         await self._stop_process()
-        self._nuke_venv()
+        await asyncio.to_thread(self._nuke_venv)
         self._discard_session_snapshot()
 
     async def execute_streaming(
@@ -1284,7 +1313,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         refused = reject_invalid_packages(needed)
         if refused:
             return refused
-        self._ensure_venv()
+        await asyncio.to_thread(self._ensure_venv)
 
         uv = self._find_uv()
         if uv:
