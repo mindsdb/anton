@@ -9,7 +9,10 @@ macOS). These tests pin the widened candidate list.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -257,3 +260,117 @@ def test_find_uv_checks_winget_links_on_windows(monkeypatch):
     monkeypatch.setattr(local.os, "access", lambda p, mode: True)
 
     assert local.LocalScratchpadRuntime._find_uv() == winget_path
+
+
+def _record_threads(*, monkeypatch, threads: list[int]) -> None:
+    """Record the thread of every venv subprocess, venv.create and rmtree call."""
+
+    def recording(*, real):
+        def call(*args, **kwargs):
+            threads.append(threading.get_ident())
+            return real(*args, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(subprocess, "run", recording(real=subprocess.run))
+    monkeypatch.setattr(local.venv, "create", recording(real=local.venv.create))
+    monkeypatch.setattr(local.shutil, "rmtree", recording(real=local.shutil.rmtree))
+
+
+async def test_start_runs_the_venv_work_off_the_event_loop(tmp_path, monkeypatch):
+    # Every start runs a `python -c print('ok')` check, and the first one also
+    # builds the venv. On the event loop thread, each start stalled every other
+    # turn and request in the host's process until it finished.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    threads: list[int] = []
+    _record_threads(monkeypatch=monkeypatch, threads=threads)
+    pad = make_pad(tmp_path)
+
+    try:
+        await pad.start()
+    finally:
+        await pad.close()
+
+    assert threads, "start() neither built nor checked the venv"
+    assert threading.get_ident() not in threads
+
+
+async def test_reset_and_cleanup_run_the_venv_work_off_the_event_loop(tmp_path, monkeypatch):
+    # reset() checks the venv again before its restart, and cleanup() deletes
+    # it: both reach the same blocking work as start().
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    pad = make_pad(tmp_path)
+    await pad.start()
+    threads: list[int] = []
+    _record_threads(monkeypatch=monkeypatch, threads=threads)
+
+    try:
+        await pad.reset()
+    finally:
+        await pad.cleanup()
+
+    assert threads, "reset() and cleanup() neither checked nor deleted the venv"
+    assert threading.get_ident() not in threads
+    assert not (tmp_path / "probe").exists()
+
+
+async def test_install_packages_provisions_the_venv_off_the_event_loop(tmp_path, monkeypatch):
+    class _Provisioned(Exception):
+        pass
+
+    threads: list[int] = []
+
+    def fake_ensure_venv():
+        threads.append(threading.get_ident())
+        raise _Provisioned
+
+    pad = make_pad(tmp_path)
+    monkeypatch.setattr(pad, "_ensure_venv", fake_ensure_venv)
+
+    with pytest.raises(_Provisioned):
+        await pad.install_packages(["requests"])
+
+    assert threads and threads[0] != threading.get_ident()
+
+
+def test_concurrent_provisions_of_one_venv_path_create_it_once(tmp_path, monkeypatch):
+    # Concurrent turns in one project share a pad's venv directory and now
+    # provision it on worker threads, as cowork-server's app backends already
+    # did. Two first starts must not both build it, each deleting the other's
+    # half-built venv.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    real_create = LocalScratchpadRuntime._create_venv
+    creates: list[str] = []
+
+    def slow_create(self):
+        creates.append(self.name)
+        # Long enough that a second thread without the lock also reaches here.
+        time.sleep(0.3)
+        real_create(self)
+
+    monkeypatch.setattr(LocalScratchpadRuntime, "_create_venv", slow_create)
+    pads = [make_pad(tmp_path, name="shared"), make_pad(tmp_path, name="shared")]
+    start_together = threading.Barrier(len(pads))
+    errors: list[Exception] = []
+
+    def provision(*, pad):
+        start_together.wait()
+        try:
+            pad._ensure_venv()
+        except Exception as exc:
+            errors.append(exc)
+
+    # Daemon threads, so a deadlocked lock fails this test without hanging the run.
+    workers = [
+        threading.Thread(target=provision, kwargs={"pad": pad}, daemon=True) for pad in pads
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=60)
+
+    assert not any(worker.is_alive() for worker in workers)
+    assert not errors
+    assert creates == ["shared"]
+    assert pads[0]._venv_python == pads[1]._venv_python
+    assert all(pad._verify_venv_python() for pad in pads)
