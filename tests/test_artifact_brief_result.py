@@ -42,9 +42,9 @@ def test_a_budget_stop_says_the_brief_was_shown(tmp_path):
 
 
 def test_a_resumed_act_first_run_does_not_retell_the_brief(tmp_path):
-    """Turn 1 showed the brief and stopped over budget on the spec; turn 2
-    resumes at the spec. The user saw the brief a turn ago."""
-    for entry in (cp.ENTRY_SPEC, cp.ENTRY_GENERATE):
+    """The user saw the brief a turn ago: turn 1 showed it and then stopped
+    over budget (before the PRD for ENTRY_CONFIRM, after it otherwise)."""
+    for entry in (cp.ENTRY_CONFIRM, cp.ENTRY_SPEC, cp.ENTRY_GENERATE):
         state = _state(tmp_path, act_first=True, brief="## B", entry=entry)
         result = orchestrator._finish(state)
         assert "brief_summary" not in result, entry

@@ -397,6 +397,11 @@ def test_act_first_brief_has_one_assumptions_section_and_no_question():
         assert marker in lowered, marker
 
 
-def test_the_confirm_brief_is_unchanged_by_default():
-    assert brief.draft_brief_instruction() == brief._DRAFT_BRIEF_INSTRUCTION
-    assert "- Proposals — one line per `assumption`" in brief._DRAFT_BRIEF_INSTRUCTION
+def test_the_default_brief_is_the_confirm_variant():
+    text = brief.draft_brief_instruction()
+    assert "SHORT proposal for the user to confirm." in text
+    assert "a summary before confirmation, not the final document." in text
+    assert "belongs in the full PRD, after acceptance." in text
+    assert "- Proposals — one line per `assumption`" in text
+    assert "End with two short lines" in text
+    assert "- Assumptions —" not in text

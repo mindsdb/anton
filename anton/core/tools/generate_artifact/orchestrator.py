@@ -50,6 +50,10 @@ if TYPE_CHECKING:
 
 # Entries that run discovery (phases A-C) in this call; the rest resume past it.
 _DISCOVERY_ENTRIES = (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION)
+# Entries where acting first shows the brief in this call. After any other
+# entry the user saw the brief in an earlier turn (`ENTRY_CONFIRM` follows a
+# budget stop that showed it).
+_ANNOUNCE_ENTRIES = (cp.ENTRY_FULL, cp.ENTRY_NEW_ITERATION)
 
 # Sentinel returned by a generation node that stopped because the turn ran
 # out of budget. Distinguished from an error string on purpose: the cause is
@@ -1180,11 +1184,11 @@ def _brief_fields(state: GenState) -> dict:
 
     When the agent acts first the brief is shown as a message that never
     reaches the agent's history, so its text travels here; `brief_shown`
-    says whether the user already saw it. A call that resumed past
-    discovery says nothing: the brief belongs to an earlier turn.
+    says whether the user already saw it. Any other entry says nothing: the
+    brief belongs to an earlier turn.
     """
     fields: dict = {"brief_shown": True} if state.brief_shown else {}
-    if state.act_first and state.brief and state.entry in _DISCOVERY_ENTRIES:
+    if state.act_first and state.brief and state.entry in _ANNOUNCE_ENTRIES:
         fields["brief_summary"] = state.brief
     return fields
 
@@ -1193,11 +1197,11 @@ def _brief_already_seen(state: GenState) -> bool:
     """Whether a budget stop may skip showing the brief.
 
     Ask-first keeps its rule (`brief_summary` is the only way to show it).
-    Acting first, a call that resumed past discovery has no unseen brief:
-    the earlier turn showed it, or the agent relayed it then.
+    Acting first, only an entry that shows the brief can leave one unseen;
+    after any other the earlier turn showed it, or the agent relayed it then.
     """
     return state.brief_shown or (
-        state.act_first and state.entry not in _DISCOVERY_ENTRIES
+        state.act_first and state.entry not in _ANNOUNCE_ENTRIES
     )
 
 

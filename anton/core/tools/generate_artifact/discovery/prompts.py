@@ -250,11 +250,12 @@ _REDRAW_RESTATE = (
 _REDRAW_SUFFIX = _REDRAW_CORRECTION + _REDRAW_RESTATE
 
 _REDRAW_CORRECTION_ACT_FIRST = (
-    "\n\nThe user has seen the brief or the finished artifact and asked for "
-    "a change; the correction is in this call's updated understanding. "
-    "Redraw the brief with the correction applied. A correction can accept "
-    "or reject an assumption: whatever it settles leaves Assumptions and, if "
-    "kept, becomes a requirement.\n\n"
+    "\n\nThe user has seen the brief or the finished artifact and called "
+    "again; any correction is in this call's updated understanding. Redraw "
+    "the brief with it applied. If the updated understanding only restates "
+    "the request, keep the brief as it is — do not invent a change. A "
+    "correction can accept or reject an assumption: whatever it settles "
+    "leaves Assumptions and, if kept, becomes a requirement.\n\n"
 )
 
 

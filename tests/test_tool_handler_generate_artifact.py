@@ -807,8 +807,11 @@ async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(tmp_p
             text("## Goal\nAn analog clock, full."),  # write_prd
         ])),
         question_count=0, elicitor=None, emit=AsyncMock(),
-        _act_first=True, tool_messages=True, emitter=object(),
+        act_first=True, tool_messages=True, emitter=object(),
+        # Not the developer's own vault: its connections would leak into the kickoff.
+        _data_vault=SimpleNamespace(list_connections=lambda: []),
     )
+    monkeypatch.delenv("ANTON_DEBUG_ARTIFACT_GENERATE_TOOL", raising=False)
 
     async def skipped(state, *args, **kwargs):
         return None

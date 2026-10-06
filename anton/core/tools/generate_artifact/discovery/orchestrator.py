@@ -127,25 +127,29 @@ async def _run_act_first(state: PrdState, *, entry: str) -> str:
     `agent_understanding` every time — goes through `redraw_brief`: in this
     mode it is the only path for a correction, and only the redraw step can
     re-declare the data sources a correction may add.
+
+    `ENTRY_CONFIRM` follows a budget stop where the outer agent already showed
+    the brief and the user said to continue, so the brief is not shown again
+    here; a correction is still redrawn into the PRD.
     """
     if entry == cp.ENTRY_FULL:
         await _run_gathering(state)
         await draft_brief(state)
         return await _announce_and_write(state)
-    if entry not in (cp.ENTRY_NEW_ITERATION, cp.ENTRY_CONFIRM):
-        raise ValueError(
-            f"run_discovery called with an entry it does not own: {entry!r}"
-        )
-    if state.call_changed:
-        await redraw_brief(state)
-        return await _announce_and_write(state)
     if entry == cp.ENTRY_NEW_ITERATION:
-        await draft_brief(state)
+        if state.call_changed:
+            await redraw_brief(state)
+        else:
+            await draft_brief(state)
         return await _announce_and_write(state)
-    # ENTRY_CONFIRM with an unchanged call: the outer agent already showed
-    # the brief (a budget stop) and the repeat call is the go-ahead.
-    await write_prd(state)
-    return cp.STAGE_PRD_WRITTEN
+    if entry == cp.ENTRY_CONFIRM:
+        if state.call_changed:
+            await redraw_brief(state)
+        await write_prd(state)
+        return cp.STAGE_PRD_WRITTEN
+    raise ValueError(
+        f"run_discovery called with an entry it does not own: {entry!r}"
+    )
 
 
 async def run_discovery(state: PrdState, *, entry: str) -> str:

@@ -147,20 +147,15 @@ def announce_brief(state: PrdState) -> None:
     """Act-first: show the brief as an agent message and do not wait.
 
     It goes out on the progress channel so it keeps its place among the step
-    lines, and the handler relays it as a message only to a host that
-    declared it renders one (`ChatSessionConfig.tool_messages`) and only on a
-    session that can emit. Elsewhere nothing is sent and `brief_shown` stays
-    False, which tells the calling agent to relay the assumptions itself.
+    lines. Sent only where the registry will relay it (`renders_tool_messages`);
+    elsewhere `brief_shown` stays False, which tells the calling agent to
+    relay the assumptions itself.
     """
+    from anton.core.tools.progress import renders_tool_messages
+
     from ..progress import MESSAGE_PREFIX
 
-    session = state.session
-    # No emitter (the non-streaming turn path): the registry drops messages.
-    deliverable = (
-        state.progress is not None
-        and bool(getattr(session, "tool_messages", False))
-        and getattr(session, "emitter", None) is not None
-    )
+    deliverable = state.progress is not None and renders_tool_messages(state.session)
     if state.brief.strip() and deliverable:
         state.progress.put_nowait(MESSAGE_PREFIX + state.brief)
         state.brief_shown = True

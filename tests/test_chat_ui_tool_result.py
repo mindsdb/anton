@@ -11,6 +11,8 @@ from anton.core.llm.provider import StreamToolResult
     ("scratchpad", "dump", True),
     ("scratchpad", "exec", False),
     ("scratchpad", None, False),
+    # The model's own action on a discarded scratchpad call, not a message.
+    ("scratchpad", "message", False),
     ("generate_artifact", "message", True),
     ("generate_artifact", None, False),
 ])

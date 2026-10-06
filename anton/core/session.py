@@ -1763,6 +1763,11 @@ class ChatSession:
         return self._history
 
     @property
+    def act_first(self) -> bool:
+        """The "act first, ask later" setting this session was built with."""
+        return self._act_first
+
+    @property
     def artifacts_touched(self) -> set[str]:
         """Slugs this turn created or opened for editing.
 

@@ -1,7 +1,7 @@
 """Phase C: expand the brief into `prd.md` and save it.
 
-The document stays on disk as the human-readable record of what the user
-written for, and `prd_section` hands it verbatim to the spec and generation
+The document stays on disk as the human-readable record of what is being
+built, and `prd_section` hands it verbatim to the spec and generation
 nodes as the authoritative requirements source. What shrank is its mandate,
 not its reach: connection code and source material travel through
 `data_notes` / `web_notes`, and the tech spec is told not to restate it.

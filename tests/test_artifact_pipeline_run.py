@@ -327,8 +327,12 @@ def _spy_steps(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("entry", [cp.ENTRY_NEW_ITERATION, cp.ENTRY_CONFIRM])
-async def test_act_first_redraws_a_changed_call(tmp_path, monkeypatch, entry):
+@pytest.mark.parametrize("entry,shown", [
+    (cp.ENTRY_NEW_ITERATION, ["redrawn"]),
+    # A budget stop already showed this brief and the user said to continue.
+    (cp.ENTRY_CONFIRM, []),
+])
+async def test_act_first_redraws_a_changed_call(tmp_path, monkeypatch, entry, shown):
     """The usual repeat call: `agent_understanding` is re-typed every time.
     Only the redraw step can re-declare sources, so a correction that names a
     new one still reaches the data loop."""
@@ -341,7 +345,8 @@ async def test_act_first_redraws_a_changed_call(tmp_path, monkeypatch, entry):
 
     assert result == cp.STAGE_PRD_WRITTEN
     assert calls == ["redraw", "write_prd"]
-    assert _messages(state) == ["redrawn"]
+    assert _messages(state) == shown
+    assert state.brief_shown is bool(shown)
 
 
 async def test_act_first_new_iteration_with_the_same_call_drafts(tmp_path, monkeypatch):

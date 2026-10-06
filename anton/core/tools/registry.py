@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from anton.core.llm.provider import StreamTaskProgress, StreamToolResult
-from anton.core.tools.progress import ToolProgress
+from anton.core.tools.progress import ToolProgress, renders_tool_messages
 
 if TYPE_CHECKING:
     from anton.core.session import ChatSession
@@ -141,12 +141,12 @@ class ToolRegistry:
         """
         emitter = getattr(session, "emitter", None)
         peek_wanted = bool(getattr(session, "live_tool_peek", False))
-        messages_wanted = bool(getattr(session, "tool_messages", False))
+        messages_wanted = renders_tool_messages(session)
         result = None
         async for item in self.dispatch_tool_stream(session, tool_name, tc_input):
             if isinstance(item, ToolProgress):
                 if item.kind == "message":
-                    if emitter is not None and messages_wanted:
+                    if messages_wanted:
                         await emitter.emit(
                             StreamToolResult(
                                 name=tool_name, action="message",

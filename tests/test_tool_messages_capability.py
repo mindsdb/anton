@@ -43,3 +43,19 @@ def test_the_cloud_contract_documents_the_message_result():
     doc = contract.__doc__ or ""
     assert '`action: "message"`' in doc
     assert "tool_messages" in doc
+
+
+def test_a_message_reaches_the_user_only_with_both_the_flag_and_an_emitter():
+    from types import SimpleNamespace
+
+    from anton.core.tools.progress import renders_tool_messages
+
+    assert renders_tool_messages(SimpleNamespace(tool_messages=True, emitter=object())) is True
+    assert renders_tool_messages(SimpleNamespace(tool_messages=True, emitter=None)) is False
+    assert renders_tool_messages(SimpleNamespace(tool_messages=False, emitter=object())) is False
+    assert renders_tool_messages(SimpleNamespace()) is False
+
+
+def test_the_session_exposes_its_act_first_setting(make_session):
+    assert make_session().act_first is True
+    assert make_session(act_first=False).act_first is False

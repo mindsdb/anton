@@ -24,3 +24,15 @@ class ToolProgress:
 
     text: str
     kind: str = "step"
+
+
+def renders_tool_messages(session) -> bool:
+    """Whether a `"message"` marker reaches the user on this session.
+
+    The one gate for both sides: the registry relays a message only when this
+    holds, and a tool reports the message as shown only when it does.
+    """
+    return (
+        bool(getattr(session, "tool_messages", False))
+        and getattr(session, "emitter", None) is not None
+    )
