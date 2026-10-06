@@ -138,6 +138,19 @@ def test_update_works_on_pages_not_made_with_these_helpers(tmp_path):
     assert out.read_text() == original.replace(">Old<", ">Planner handoff<").replace(">10<", ">12<")
 
 
+@pytest.mark.parametrize("separator", [" ", " ", "\x0c", "\x0b", "\x85", "\x1e"])
+def test_update_and_insert_find_elements_after_non_newline_line_breaks(tmp_path, separator):
+    # PDF text carries \x0c between pages; rt.data keeps U+2028 as is.
+    out = tmp_path / "legacy.html"
+    original = (f'<!DOCTYPE html>\n<html lang="en">\n<body>\n<p id="intro">Quarter{separator}summary</p>\n'
+                '<section id="detail">\n<h2>Detail</h2>\n<p>old</p>\n</section>\n</body>\n</html>\n')
+    out.write_text(original, encoding="utf-8")
+    rt.update(out, {"detail": rt.para("new")})
+    rt.insert(out, rt.para("note"), after="detail")
+    expected = original.replace("\n<p>old</p>\n", "<p>new</p>").replace("</section>", "</section><p>note</p>")
+    assert out.read_text(encoding="utf-8") == expected
+
+
 def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path):
     out = rt.save(tmp_path / "r.html", _page(rt.section("Conclusion", rt.para("Old."), id="conclusion"),
                                              rt.section("Detail", rt.para("Rows."), id="detail")))

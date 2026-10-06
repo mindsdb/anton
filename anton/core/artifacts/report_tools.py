@@ -380,9 +380,9 @@ class _Locator(HTMLParser):
     def __init__(self, text):
         super().__init__(convert_charrefs=False)
         self._text = text
-        self._lines = [0]
-        for line in text.splitlines(keepends=True):
-            self._lines.append(self._lines[-1] + len(line))
+        # getpos() counts lines by "\n" only. str.splitlines() also breaks on
+        # \x0b, \x0c, \x85, U+2028 and others, which would shift every later offset.
+        self._lines = [0] + [m.end() for m in re.finditer("\n", text)]
         self._stack, self.spans, self.outer = [], {}, {}
 
     def _offset(self):
