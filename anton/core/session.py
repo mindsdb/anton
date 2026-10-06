@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import logging
 import re
 import sys
@@ -32,6 +33,7 @@ from anton.core.memory.base import Engram
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
+from anton.core.tools.working_folders import normalize_working_folders
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
@@ -1323,6 +1325,9 @@ class ChatSessionConfig:
     # the only source; see anton.utils.datasources._resolve_usage_notes.
     connector_usage_notes: dict[str, str] | None = None
     workspace_env_overlay: dict[str, str] | None = None
+    # Folders beside the workspace that select_path and generate_artifact
+    # attachments may use. Host-only on purpose: no setting or env var fills it.
+    working_folders: tuple[Path, ...] = ()
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1543,6 +1548,7 @@ class ChatSession:
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
+        self._working_folders = normalize_working_folders(config.working_folders)
         self._console = config.console
         if self._console is None:
             # connect_new_datasource's interactive mode needs a terminal to
