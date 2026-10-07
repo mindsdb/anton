@@ -370,14 +370,23 @@ async def test_reset_deletes_a_broken_venv_off_the_event_loop(tmp_path, monkeypa
     assert threading.get_ident() not in deleted_on
 
 
-async def test_a_failed_spawn_deletes_the_venv_off_the_event_loop(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("error", "expected_spawns"), [(OSError, 1), (FileNotFoundError, 2)]
+)
+async def test_a_failed_spawn_deletes_the_venv_off_the_event_loop(
+    tmp_path, monkeypatch, error, expected_spawns
+):
     # When the pad's process can't start, start() deletes the venv so the next
-    # attempt builds a fresh one.
+    # attempt builds a fresh one. A missing interpreter gets one more check and
+    # spawn first, and only one.
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
     pad = make_pad(tmp_path)
+    spawns = 0
 
     async def refuse_spawn(*_args, **_kwargs):
-        raise OSError("spawn refused")
+        nonlocal spawns
+        spawns += 1
+        raise error("spawn refused")
 
     monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_spawn)
     deleted_on: list[int] = []
@@ -389,6 +398,7 @@ async def test_a_failed_spawn_deletes_the_venv_off_the_event_loop(tmp_path, monk
     finally:
         await pad.close()
 
+    assert spawns == expected_spawns
     assert not (tmp_path / "probe").exists()
     assert deleted_on, "the failed spawn kept the venv"
     assert threading.get_ident() not in deleted_on
@@ -555,6 +565,51 @@ def test_a_start_that_finds_a_healthy_venv_takes_no_lock(tmp_path, monkeypatch):
         release.set()
 
 
+async def test_a_start_survives_a_remove_between_its_check_and_its_spawn(
+    tmp_path, monkeypatch
+):
+    # Pads with one name in one workspace share a venv, and a healthy start
+    # checks it without the directory lock. Another pad's cleanup() can then
+    # delete the venv after this start's check and before its spawn.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    remover = make_pad(tmp_path)
+    await remover.start()
+    starting = make_pad(tmp_path)
+    checked, removed = threading.Event(), threading.Event()
+    real_ensure = starting._ensure_venv
+
+    def ensure_then_wait_for_the_remove():
+        real_ensure()
+        if not checked.is_set():
+            checked.set()
+            assert removed.wait(10), "the test never removed the venv"
+
+    real_create = local.venv.create
+    creates = 0
+
+    def counting_create(*args, **kwargs):
+        nonlocal creates
+        creates += 1
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(local.venv, "create", counting_create)
+    monkeypatch.setattr(starting, "_ensure_venv", ensure_then_wait_for_the_remove)
+    start = asyncio.create_task(starting.start())
+    try:
+        assert await asyncio.to_thread(checked.wait, 10)
+        await remover.cleanup()
+        assert not (tmp_path / "probe").exists()
+        removed.set()
+        await asyncio.wait_for(start, timeout=60)
+        assert starting._proc is not None and starting._proc.returncode is None
+        assert starting._verify_venv_python()
+        assert creates == 1
+    finally:
+        removed.set()
+        await asyncio.gather(start, return_exceptions=True)
+        await starting.close()
+
+
 @pytest.mark.skipif(
     sys.platform not in ("darwin", "win32"), reason="case-insensitive hosts only"
 )
@@ -671,3 +726,53 @@ async def test_cancelled_provisioning_finishes_before_teardown(
         release_build.set()
         await asyncio.gather(operation, close, return_exceptions=True)
         await pad.close()
+
+
+async def test_a_stop_during_cleanup_still_discards_the_namespace_snapshot(
+    tmp_path, monkeypatch
+):
+    # cleanup() deletes the venv on a worker thread. A Stop that lands during
+    # the delete must still drop the saved namespace, or the next pad with
+    # this name restores the variables of the pad that was removed.
+    monkeypatch.setenv("ANTON_SCRATCHPAD_PERSIST_SESSION", "true")
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+
+    def session_pad():
+        return LocalScratchpadRuntime(
+            name="probe", session_id="conv1", _venvs_base=tmp_path / "venvs", **_DEFAULTS
+        )
+
+    pad = session_pad()
+    cell = await pad.execute("secret = 'value-from-the-removed-pad'")
+    assert cell.error is None, cell.error
+    snapshot = pad._session_snapshot_path()
+    assert snapshot is not None and snapshot.exists()
+    deleting, release_delete = threading.Event(), threading.Event()
+    real_rmtree = local.shutil.rmtree
+
+    def gated_rmtree(*args, **kwargs):
+        deleting.set()
+        assert release_delete.wait(10), "the test never released the delete"
+        return real_rmtree(*args, **kwargs)
+
+    monkeypatch.setattr(local.shutil, "rmtree", gated_rmtree)
+    cleanup = asyncio.create_task(pad.cleanup())
+    try:
+        assert await asyncio.to_thread(deleting.wait, 10)
+        cleanup.cancel()
+        release_delete.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cleanup, timeout=10)
+    finally:
+        release_delete.set()
+        await asyncio.gather(cleanup, return_exceptions=True)
+        monkeypatch.setattr(local.shutil, "rmtree", real_rmtree)
+
+    assert not (tmp_path / "venvs" / "probe").exists()
+    assert not snapshot.exists(), "the cancelled cleanup kept the namespace snapshot"
+    again = session_pad()
+    try:
+        cell = await again.execute("print(globals().get('secret', 'GONE'))")
+        assert cell.stdout.strip() == "GONE"
+    finally:
+        await again.cleanup()

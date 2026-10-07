@@ -829,8 +829,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if self._explicit_workspace_path is not None
             else None
         )
-        try:
-            self._proc = await asyncio.create_subprocess_exec(
+
+        async def spawn() -> asyncio.subprocess.Process:
+            return await asyncio.create_subprocess_exec(
                 self._venv_python,
                 path,
                 stdin=asyncio.subprocess.PIPE,
@@ -840,6 +841,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 cwd=proc_cwd,
                 start_new_session=(sys.platform != "win32"),
             )
+
+        try:
+            try:
+                self._proc = await spawn()
+            except FileNotFoundError:
+                # Pads with this name in this workspace share the venv, and a
+                # healthy check holds no lock. Another pad's cleanup() can
+                # delete the venv between that check and this spawn, so check
+                # again (rebuilding if it is gone) and spawn once more.
+                await self._run_venv_work(self._ensure_venv)
+                self._proc = await spawn()
         except (FileNotFoundError, PermissionError, OSError) as exc:
             await self._run_venv_work(self._nuke_venv)
             raise RuntimeError(
@@ -973,9 +985,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     async def cleanup(self) -> None:
         """Kill process and delete the venv entirely."""
         cancelled = await self._drain_venv_workers()
-        await self._stop_process()
-        await self._run_venv_work(self._nuke_venv)
-        self._discard_session_snapshot()
+        try:
+            await self._stop_process()
+            await self._run_venv_work(self._nuke_venv)
+        finally:
+            # A Stop during the delete still drops the namespace, so a later
+            # pad with this name starts empty instead of restoring it.
+            self._discard_session_snapshot()
         if cancelled is not None:
             raise cancelled
 
