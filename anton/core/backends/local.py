@@ -223,6 +223,12 @@ _VenvResult = TypeVar("_VenvResult")
 def _venv_lock(*, venv_path: Path) -> threading.RLock:
     """The process-wide lock for one venv directory."""
     key = os.path.realpath(venv_path)
+    # macOS and Windows filesystems usually ignore case, so pads named `Report`
+    # and `report` share one directory and must share its lock. On a
+    # case-sensitive volume, those two pads share a lock they do not need,
+    # which only makes one wait for the other.
+    if sys.platform in ("darwin", "win32"):
+        key = key.casefold()
     with _VENV_LOCKS_GUARD:
         return _VENV_LOCKS.setdefault(key, threading.RLock())
 

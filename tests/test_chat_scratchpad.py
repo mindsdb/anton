@@ -551,3 +551,41 @@ class TestCliHostsSupplyTheVault:
 
         assert isinstance(captured["config"].data_vault, LocalDataVault)
         assert captured["policy"] is False
+
+    async def test_the_cli_chat_session_keeps_ctrl_c_cell_only(self, tmp_path):
+        import anton.chat as chat
+        import anton.chat_session as chat_session
+
+        captured: dict = {}
+
+        class Built(Exception):
+            """Stops _chat_loop once it has built its session."""
+
+        def fake_session(config):
+            captured["config"] = config
+            raise Built
+
+        def fake_factory(_settings, *, cancel_ends_turn):
+            captured["policy"] = cancel_ends_turn
+            return MagicMock()
+
+        settings = MagicMock(
+            workspace_path=tmp_path,
+            context_dir=str(tmp_path / "context"),
+            episodic_memory=False,
+            memory_mode="off",
+        )
+        vault = MagicMock()
+        vault.list_connections.return_value = []
+        with (
+            patch("anton.core.llm.client.LLMClient.from_settings", return_value=make_mock_llm()),
+            patch.object(chat, "LocalDataVault", return_value=vault),
+            patch.object(chat, "ChatSession", fake_session),
+            patch.object(chat, "build_runtime_context", lambda _s: ""),
+            patch.object(chat_session, "get_runtime_factory", fake_factory),
+            pytest.raises(Built),
+        ):
+            await chat._chat_loop(MagicMock(), settings)
+
+        assert captured["config"].data_vault is vault
+        assert captured["policy"] is False

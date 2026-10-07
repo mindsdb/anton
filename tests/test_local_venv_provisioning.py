@@ -530,6 +530,42 @@ def test_builds_of_different_venv_directories_run_at_the_same_time(tmp_path, mon
     assert all(pad._verify_venv_python() for pad in pads)
 
 
+def test_a_start_that_finds_a_healthy_venv_takes_no_lock(tmp_path, monkeypatch):
+    # Every start on a shared venv runs a health check. Only a rebuild or a
+    # delete takes the directory lock, so starts that find the venv healthy
+    # never queue behind each other or behind another pad's lock holder.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    started = make_pad(tmp_path)
+    started._ensure_venv()
+    held, release = threading.Event(), threading.Event()
+
+    def hold_the_lock():
+        with local._venv_lock(venv_path=tmp_path / "probe"):
+            held.set()
+            release.wait(30)
+
+    threading.Thread(target=hold_the_lock, daemon=True).start()
+    assert held.wait(10), "the lock holder never started"
+    try:
+        # A pad that already has its venv checks its own interpreter, and a new
+        # pad recycles the directory. Neither waits for the held lock.
+        _in_daemon_thread(fn=started._ensure_venv, timeout=10)
+        _in_daemon_thread(fn=make_pad(tmp_path)._ensure_venv, timeout=10)
+    finally:
+        release.set()
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("darwin", "win32"), reason="case-insensitive hosts only"
+)
+def test_case_variant_pad_names_share_one_venv_lock(tmp_path):
+    # `Report` and `report` name one venv directory on macOS and Windows, so a
+    # build under one name must wait for a build or delete under the other.
+    assert local._venv_lock(venv_path=tmp_path / "Report") is local._venv_lock(
+        venv_path=tmp_path / "report"
+    )
+
+
 async def test_reset_checks_health_after_a_shared_directory_rebuild(tmp_path, monkeypatch):
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
     resetting = make_pad(tmp_path)
