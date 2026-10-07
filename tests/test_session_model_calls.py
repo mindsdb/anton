@@ -551,7 +551,7 @@ async def test_work_a_turn_leaves_running_cannot_reach_the_next_turn():
     )
     session = _session(provider, tool_handler=_hangs)
     session._llm.model_call_idle_timeout_s = 0.2
-    second = None
+    second = leftover = None
     try:
         await asyncio.wait_for(_drain(session), timeout=GUARD_S)
 
@@ -568,13 +568,16 @@ async def test_work_a_turn_leaves_running_cannot_reach_the_next_turn():
         await asyncio.sleep(0.05)
         assert _snapshot(session) is None, "turn 1's leftover call reported a wait in turn 2"
 
-        (outcome,) = await asyncio.gather(leftover, return_exceptions=True)
+        (outcome,) = await asyncio.wait_for(
+            asyncio.gather(leftover, return_exceptions=True), timeout=GUARD_S,
+        )
         assert type(outcome).__name__ == "ModelCallTimeoutError", repr(outcome)
         session.model_calls.raise_if_expired()  # turn 2 latched nothing
     finally:
-        if second is not None:
-            second.cancel()
-            await asyncio.gather(second, return_exceptions=True)
+        for task in (second, leftover):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         await _close(session)
 
 

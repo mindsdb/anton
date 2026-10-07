@@ -222,7 +222,7 @@ async def test_a_real_session_puts_wait_lines_out_and_ends_on_the_deadline(fast_
     session = _session(_ScriptedProvider(streams=[_silent]))
     session._llm.model_call_idle_timeout_s = 0.3
 
-    events = await _run(session)
+    events = await asyncio.wait_for(_run(session), timeout=5)
 
     waits = _waits(events)
     assert waits, f"no model_wait line in {[e['kind'] for e in events]}"
