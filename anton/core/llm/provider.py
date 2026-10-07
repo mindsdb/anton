@@ -2033,6 +2033,74 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+class _ProviderLogError(NamedTuple):
+    error_type: str
+    status: int | None
+
+
+def _provider_log_error(exc: BaseException) -> _ProviderLogError | None:
+    """Find provider failures without reading their body, message or arbitrary codes."""
+    from anthropic import AnthropicError
+    from openai import OpenAIError
+
+    provider_types = (OpenAIError, AnthropicError, *CURATED_PROVIDER_ERRORS)
+    pending = [exc]
+    seen: set[int] = set()
+    error_type: str | None = None
+    status: int | None = None
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, provider_types):
+            if error_type is None:
+                error_type = type(current).__name__
+            candidate = getattr(current, "status_code", None)
+            if status is None and type(candidate) is int and 100 <= candidate <= 599:
+                status = candidate
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+    if error_type is None:
+        return None
+    return _ProviderLogError(error_type, status)
+
+
+class ProviderErrorFilter(logging.Filter):
+    """Keep provider diagnostics while omitting exception bodies and cause traces.
+
+    SDK errors can echo prompts, tool arguments and credentials. Typed errors
+    retain those SDK errors as causes, so logging their traceback would undo
+    the adapters' safe warnings. Filter only records holding a provider error;
+    callers' propagated exceptions and unrelated tracebacks stay unchanged.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        candidates: list[BaseException] = []
+        if record.exc_info and record.exc_info[1] is not None:
+            candidates.append(record.exc_info[1])
+        if isinstance(record.msg, BaseException):
+            candidates.append(record.msg)
+        args = record.args.values() if isinstance(record.args, dict) else (record.args or ())
+        candidates.extend(arg for arg in args if isinstance(arg, BaseException))
+        for exc in candidates:
+            error = _provider_log_error(exc)
+            if error is None:
+                continue
+            record.msg = "Provider operation failed: error_type=%s status=%s"
+            record.args = (error.error_type, error.status)
+            record.message = record.getMessage()
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+            break
+        return True
+
+
 # The analytics vocabulary for WHY the provider failed, kept deliberately small
 # and closed (ENG-1361). `code` on the exception cannot serve this purpose: it
 # selects the client's error card (`provider_overloaded` / `rate_limited` are

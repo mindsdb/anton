@@ -6,7 +6,7 @@ Contract (matches scratchpad-controller + cowork-server):
           never closes stdin.
   stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
           then exactly one terminal
-  stderr: diagnostic logs + full tracebacks
+  stderr: diagnostic logs + tracebacks without provider error bodies
   exit  : 0 (the controller detects the terminal from the event, not the code)
 
 stdout is isolated at the OS file-descriptor level: the real FD 1 is duplicated
@@ -45,8 +45,10 @@ from anton.cloud_turn.session import (
 )
 from anton.cloud_turn.stdin import start_answer_reader
 from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
+from anton.core.llm.provider import ProviderErrorFilter
 
 logger = logging.getLogger(__name__)
+logger.addFilter(ProviderErrorFilter())
 
 #: Bound step-event payloads (tool args / results) on the wire. Matches the
 #: cap cowork's SSE formatter applies to the same content.
@@ -100,8 +102,8 @@ MAX_ERROR_MESSAGE_CHARS = 300
 
 
 def _scrub(exc: Exception) -> str:
-    """Short, credential-scrubbed error string for the wire. Full traceback
-    stays on stderr (logged by the caller)."""
+    """Short, credential-scrubbed error string for the wire. ProviderErrorFilter
+    separately removes provider bodies from stderr diagnostics."""
     from anton.utils.datasources import scrub_credentials
 
     text = scrub_credentials(f"{type(exc).__name__}: {exc}")
@@ -442,7 +444,7 @@ async def stream_turn(
         wire({"kind": "turn_completed"})
         terminal_emitted = True
     except Exception as exc:
-        # Full traceback -> stderr only; wire carries a short scrubbed string.
+        # ProviderErrorFilter omits provider bodies from diagnostics; the wire is unchanged.
         logger.exception("cloud turn failed")
         failed = {"kind": "turn_failed", "error": _scrub(exc)}
         # A billing stop's reset instant rides beside the string, so the host
