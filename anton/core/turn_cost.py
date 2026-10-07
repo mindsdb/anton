@@ -142,7 +142,10 @@ class TurnCost:
     # both say only THAT it failed; 343 such turns / 14 days (5.3% of real
     # turns, 3x the tokens of a completed one) had no groupable cause. Values
     # are the classification the verdict loop already draws for the latch —
-    # `truncated` / `transient` / `hard` / `denied` — plus `latched_hard` /
+    # `truncated` / `transient` / `hard` / `denied`. Also `timeout`: the
+    # verdict call sent no output for its whole idle deadline, and the turn
+    # ended quietly on the streamed answer with `verification_skipped=True`
+    # and no latch. Plus `latched_hard` /
     # `latched_truncated` / `latched_mixed` / `latched_denied` for turns that
     # never made the call because an earlier one latched. `latched_mixed` means
     # the counted failures were not all the same class, so neither names the
@@ -195,7 +198,9 @@ class TurnCost:
     #   "request_refused"           — the provider refused the request itself:
     #                                 a setting the model does not accept, or a
     #                                 prompt its policy blocks
-    # The last two end the turn on the first attempt, without retrying. Empty
+    #   "model_call_timeout"        — a model call sent no output for its whole
+    #                                 idle deadline
+    # The last three end the turn on the first attempt, without retrying. Empty
     # for every other terminal that did not retry.
     retry_terminal_reason: str = ""
     # WHAT kind of provider failure ended the turn — a closed vocabulary

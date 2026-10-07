@@ -235,6 +235,19 @@ ANTON_LANGFUSE_HEADERS=1
 
 ---
 
+## Model-call deadline
+A model call that sends nothing for 10 minutes is stopped, and the turn ends with "The model sent no output for 10 minutes, so the call was stopped." Every chunk the model sends restarts the 10 minutes, so a slow model that keeps writing is never cut. A non-streamed call gets the 10 minutes for the whole call, including the SDK's own retries. After one call in a turn runs out, every later model call in that turn fails at once. The one exception is the completion check after an answer: when it runs out, the turn ends on the answer that already streamed, marked unverified.
+
+To change the deadline, set `ANTON_MODEL_CALL_IDLE_TIMEOUT_S` in seconds. A value of 0 or less turns it off. A value above 600 has no effect on an endpoint that sends no keepalives, because the OpenAI and Anthropic SDKs' default 600-second read timeout fires first. anton sets no timeout of its own on those clients.
+
+```bash
+export ANTON_MODEL_CALL_IDLE_TIMEOUT_S=600
+```
+
+While a model call is silent, hosts can show that the turn is still working. `ChatSession.model_calls` is `None` before the first turn. Its `snapshot()` returns the oldest call waiting on the model, or `None` when nothing is waiting, a question is open, or the turn has ended. The cloud turn entrypoint uses it: when a call is waiting and nothing else has gone out for 20 seconds, it writes a progress line with phase `model_wait`, such as "Waiting for the model (2m 40s)". A hung tool or cell reports no wait, so it still goes quiet and the host's idle limits still end it.
+
+---
+
 ## Dev guidelines
 
 We use three long-lived branches: `dev` → `staging` → `main`.
@@ -265,6 +278,18 @@ Twice a week, on a fixed schedule:
 2. The day after the soak, merge `staging → main`. The release workflow tags and publishes from `main` automatically (see [Releasing](#releasing)).
 
 Net rhythm: two `dev → staging` promotions and two `staging → main` promotions per week, each promotion offset by a soak day.
+
+### Stub model endpoint
+
+`tests/e2e/stub_server.py` is an OpenAI-compatible endpoint that answers from a script. You can hold a call silent, stream tool arguments slowly, or cut a reply at its budget. The e2e tests use it, and you can run it on its own to try Cowork or the CLI against a slow model:
+
+```bash
+uv run --group dev python -m tests.e2e.stub_server --port 8765 --streamed 'hold:360:done' --keepalive-s 15
+```
+
+That holds every streamed call for 6 minutes, sending `: keepalive` every 15 seconds, then answers "done". Non-streamed calls answer at once. Point a client at `http://127.0.0.1:8765/v1` with any API key and the model `stub-model`.
+
+Repeat `--streamed` to give a sequence of steps; the last one repeats. The steps are `text:<s>`, `hold:<secs>[:<s>]`, `slow_args:<secs>[:<tool>[:<json>]]`, `silent_args:<secs>[:<tool>[:<json>]]`, `length_cut` and `trickle:<secs>:<every>`. The module docstring says what each one sends. To change the script while the stub runs, post `{"streamed": [...], "keepalive_s": 15}` to `/_stub/script`. `GET /_stub/requests` lists each request's path, stream flag, token budget and `tool_choice`.
 
 ---
 

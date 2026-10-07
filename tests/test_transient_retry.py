@@ -856,3 +856,136 @@ async def test_a_rate_limit_wait_does_not_advance_the_incident_curve():
     # The incident starts at ITS OWN curve position 0 (~2s ±20%), not position
     # 1 (~10s) as a shared counter would give.
     assert sleeps[1] < 5.0, sleeps
+
+
+# --------------------------------------------------------------------------- #
+# A model call that sends nothing for its whole deadline ends the turn
+# --------------------------------------------------------------------------- #
+#
+# Driven through a real LLMClient whose deadline is set as a plain attribute,
+# so a client without the deadline fails these on behavior: the guard below
+# trips instead of the turn ending.
+
+_DEADLINE_GUARD_S = 3.0
+
+
+class _SilentAfterScriptProvider:
+    """Answers streamed calls from ``streams`` in order, then stays silent.
+    Non-streamed calls run ``complete``."""
+
+    name = "scripted"
+
+    def __init__(self, *, streams=(), complete=None) -> None:
+        self.streams = list(streams)
+        self.complete_fn = complete
+        self.stream_calls = 0
+        self.complete_calls = 0
+
+    async def aclose(self) -> None:
+        return None
+
+    def native_web_tools(self) -> set[str]:
+        return set()
+
+    def export_connection_info(self):
+        from anton.core.llm.provider import ProviderConnectionInfo
+
+        return ProviderConnectionInfo(provider=self.name)
+
+    async def stream(self, **_kwargs):
+        self.stream_calls += 1
+        if self.streams:
+            for event in self.streams.pop(0):
+                yield event
+            return
+        await asyncio.Event().wait()
+
+    async def complete(self, **_kwargs):
+        self.complete_calls += 1
+        return await self.complete_fn()
+
+
+def _deadline_session(provider, *, idle_s: float = 0.2) -> ChatSession:
+    from anton.core.llm.client import LLMClient
+
+    client = LLMClient(
+        planning_provider=provider, planning_model="planner",
+        coding_provider=provider, coding_model="coder",
+    )
+    s = ChatSession(ChatSessionConfig(llm_client=client, session_id="conv-model-calls"))
+    s._llm.model_call_idle_timeout_s = idle_s
+    return s
+
+
+async def _turn_outcome(s: ChatSession, message: str = "do it") -> BaseException | None:
+    try:
+        await asyncio.wait_for(
+            asyncio.ensure_future(_consume(s.turn_stream(message))),
+            timeout=_DEADLINE_GUARD_S,
+        )
+    except Exception as exc:  # noqa: BLE001 - the type is the assertion
+        return exc
+    return None
+
+
+async def _consume(stream) -> None:
+    async for _event in stream:
+        pass
+
+
+async def test_a_silent_first_call_ends_the_turn_with_one_provider_call():
+    """No count retry, no SYSTEM recovery note, no backoff and no wrap-up call:
+    each would wait out another deadline against the same silent provider."""
+    provider = _SilentAfterScriptProvider()
+    s = _deadline_session(provider)
+    s._backoff_sleep = AsyncMock(return_value=False)
+
+    with patch("anton.analytics.send_event") as send:
+        exc = await _turn_outcome(s)
+
+    assert type(exc).__name__ == "ModelCallTimeoutError", repr(exc)
+    assert exc.code == "model_timeout"
+    assert provider.stream_calls == 1, "the turn re-sent a call to a silent provider"
+    assert s._backoff_sleep.await_count == 0
+    joined = json.dumps(s._history)
+    assert "An error interrupted execution" not in joined
+    assert "The task has failed" not in joined
+    fields = send.call_args.kwargs
+    assert fields["ended_by"] == "error"
+    assert fields["error_type"] == "ModelCallTimeoutError"
+    assert fields["retry_terminal_reason"] == "model_call_timeout"
+    assert fields["provider_failure_kind"] == "no_output"
+
+
+async def test_a_deadline_swallowed_by_compaction_fails_the_next_call_at_once():
+    """Compaction swallows its own failure and the turn carries on. The latch
+    makes the next model call fail as soon as it is issued, instead of
+    waiting out a second deadline."""
+    from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+
+    tool_round = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="c1", name="nothing", input={})],
+        usage=Usage(input_tokens=10, output_tokens=5, context_pressure=0.95),
+        stop_reason="tool_use",
+    )
+
+    async def _summarize_hangs():
+        await asyncio.Event().wait()
+
+    provider = _SilentAfterScriptProvider(
+        streams=[[StreamComplete(response=tool_round)]], complete=_summarize_hangs,
+    )
+    s = _deadline_session(provider)
+    for i in range(6):
+        s._history.append({"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"})
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    exc = await _turn_outcome(s)
+
+    elapsed = loop.time() - started
+    assert type(exc).__name__ == "ModelCallTimeoutError", repr(exc)
+    assert provider.complete_calls == 1, "compaction never ran, so nothing was swallowed"
+    assert provider.stream_calls == 1, "the latched call reached the provider"
+    assert elapsed < 0.2 * 2, f"took {elapsed:.2f}s: the next call waited out its own deadline"

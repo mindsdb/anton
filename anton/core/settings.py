@@ -16,6 +16,15 @@ class CoreSettings(BaseSettings):
     # retries one-off at double this value.
     max_tokens: int = 8192
 
+    # How long one model call may send nothing before LLMClient stops it with
+    # ModelCallTimeoutError and the turn ends (ANTON_MODEL_CALL_IDLE_TIMEOUT_S).
+    # It restarts with every chunk a streamed call sends; a non-streamed call
+    # is bounded over its whole duration, across the SDK's retries. 0 or less
+    # turns it off. A value above 600 does nothing on an endpoint that sends
+    # no keepalives, because the OpenAI and Anthropic SDKs' default 600 s read
+    # timeout fires first.
+    model_call_idle_timeout_s: float = 600.0
+
     # Session orchestration tuning
     max_tool_rounds: int = 25
     max_continuations: int = 3
