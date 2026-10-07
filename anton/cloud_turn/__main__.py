@@ -183,6 +183,7 @@ async def stream_turn(
         MindsHubBillingStop,
         StreamAskUser,
         StreamAskUserAnswered,
+        StreamBrowserSession,
         StreamComplete,
         StreamContextCompacted,
         StreamTaskProgress,
@@ -319,6 +320,11 @@ async def stream_turn(
                 emit({"kind": "tool_result", "id": event.id, "name": event.name,
                       "action": event.action,
                       "content": _clip_result_content(event.content or "")})
+            elif isinstance(event, StreamBrowserSession):
+                # cowork opens the viewer beside the chat (ENG-3296).
+                logger.info("browser session opened: %s", event.session_id)
+                emit({"kind": "browser", "session_id": event.session_id,
+                      "view_url": event.view_url, "expires_at": event.expires_at})
             elif isinstance(event, StreamContextCompacted):
                 logger.info("context compacted: %s", event.message)
                 compacted = True

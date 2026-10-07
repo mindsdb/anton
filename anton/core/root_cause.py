@@ -200,6 +200,17 @@ _SENTINEL_REASONS = {
     # wall, with nothing here to tell them apart — stays out of every trip
     # rung, same reasoning as `read_failed`/`bmp_convert_failed` above.
     "mcp_tool_error": (TIER_UNCLASSIFIED, "unclassified"),
+    # The browser tool (ENG-3296). A malformed step, or an element number from
+    # a page that has since changed: the agent re-reads the page and fixes it.
+    "browser_bad_input": (TIER_SELF, "invalid_argument"),
+    "browser_stale_element": (TIER_SELF, "unknown_resource"),
+    # The worker refused the session's credential: the user has to reconnect
+    # MindsHub, the agent cannot fix it by retrying (same as a 401).
+    "browser_unauthorized": (TIER_WALL, "auth_missing"),
+    # The instance is starting, waking from idle, or unreachable for a moment.
+    "browser_unreachable": (TIER_TRANSIENT, "service_unavailable"),
+    # Any other error the service reported; its code doesn't say whose fault.
+    "browser_error": (TIER_UNCLASSIFIED, "unclassified"),
 }
 
 # Identifier extraction, per class. Kept narrow on purpose: a wrong identifier
