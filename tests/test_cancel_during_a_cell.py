@@ -8,8 +8,8 @@ its next model call. A cell that runs past its own time budget still yields its
 error cell, and the turn goes on. Neither cooperative cancel cancels a task: a
 host that sets _cancel_event and keeps draining makes the turn loop call
 pad.cancel(), and anton's CLI raises KeyboardInterrupt in its consumer on
-Escape and closes the pads. The CLI's first-run demo takes a Ctrl+C cancel
-back, so the demo ends and the chat starts.
+Escape and closes the pads. During the CLI's first-run demo cell, Ctrl+C
+reports a killed cell and starts chat. Earlier demo cancellation still exits.
 
 Timing knobs are shrunk through ANTON_* env vars before pad.start(), as in
 test_scratchpad_watchdog_contracts.py.
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +26,7 @@ from rich.console import Console
 
 from anton.channel.theme import build_rich_theme
 from anton.chat import _run_demo_cell
+from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
@@ -163,7 +165,7 @@ async def test_a_cooperative_cancel_restarts_the_pad_and_the_next_cell_runs(monk
         await pad.close()
 
 
-async def test_a_ctrl_c_during_the_first_run_demo_ends_only_the_demo(monkeypatch):
+async def test_a_ctrl_c_during_the_first_run_demo_cell_ends_only_the_demo(monkeypatch):
     # Ctrl+C cancels the CLI's main task. During the first-run demo's cell the
     # demo takes that cancel back and returns the killed cell, so the CLI
     # reports a failed demo, saves first_run_done and starts the chat.
@@ -198,12 +200,14 @@ def _exec_response(*, code: str) -> LLMResponse:
     )
 
 
-async def test_a_stop_during_a_cell_ends_the_turn_before_another_model_call(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("cli", [False, True], ids=["host-stop", "cli-ctrl-c"])
+async def test_a_cancel_during_a_cell_obeys_the_hosts_turn_policy(
+    tmp_path, monkeypatch, cli
 ):
     # cowork-server's Stop and its idle watchdog call task.cancel() on the task
     # that drains turn_stream. The model asks for one long cell; once the cell
-    # runs, the cancel ends the turn, and the model is never called again.
+    # runs, the cancel ends a host's turn. The CLI kills only the cell and
+    # reaches the next model call, preserving its existing Ctrl+C behavior.
     _short_timers(monkeypatch=monkeypatch)
     workspace = MagicMock(base=tmp_path)
     workspace.artifacts_dir = tmp_path / "artifacts"
@@ -228,7 +232,10 @@ async def test_a_stop_during_a_cell_ends_the_turn_before_another_model_call(
 
     llm.plan_stream = plan_stream
     session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
-    pad = LocalScratchpadRuntime(name="main", **_DEFAULTS)
+    factory = get_runtime_factory(
+        SimpleNamespace(backend="local"), **({"cancel_ends_turn": False} if cli else {})
+    )
+    pad = factory(name="main", cells=None, workspace_path=tmp_path, **_DEFAULTS)
     await pad.start()
     session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
@@ -247,5 +254,6 @@ async def test_a_stop_during_a_cell_ends_the_turn_before_another_model_call(
         await session.close()
 
     assert task in done, "the cancel did not end the turn"
-    assert task.cancelled()
-    assert model_calls == 1
+    assert task.cancelled() is not cli
+    assert model_calls == (2 if cli else 1)
+    assert pad.cells[-1].error.startswith("Cancelled")

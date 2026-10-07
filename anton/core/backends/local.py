@@ -12,7 +12,9 @@ import sys
 import tempfile
 import threading
 import venv
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.wire import (
@@ -215,6 +217,7 @@ def snapshot_file(venvs_base: Path, session_id: str | None, pad_name: str) -> Pa
 # Reentrant, because _ensure_venv deletes a broken venv while it holds the lock.
 _VENV_LOCKS: dict[str, threading.RLock] = {}
 _VENV_LOCKS_GUARD = threading.Lock()
+_VenvResult = TypeVar("_VenvResult")
 
 
 def _venv_lock(*, venv_path: Path) -> threading.RLock:
@@ -247,6 +250,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         session_id: str | None = None,
         scratchpad_ds_env: dict[str, str] | None = None,
         workspace_env_overlay: dict[str, str] | None = None,
+        cancel_ends_turn: bool = True,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -273,6 +277,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # DS_* overlay for this pad's subprocess; None keeps legacy full-copy behaviour.
         self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
         self._workspace_env_overlay: dict[str, str] | None = workspace_env_overlay
+        # Hosts need Stop to end the turn; the CLI preserves cell-only Ctrl+C.
+        self._cancel_ends_turn = cancel_ends_turn
+        self._venv_workers: set[asyncio.Task[object]] = set()
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -521,6 +528,41 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             self._venv_dir = None
             self._venv_python = None
 
+    def _remove_broken_venv(self) -> None:
+        # Check after any shared-directory build finishes, rather than deleting
+        # the healthy venv that replaced the missing interpreter we observed.
+        with _venv_lock(venv_path=self._venvs_base / self.name):
+            if not self._verify_venv_python():
+                self._nuke_venv()
+
+    async def _drain_venv_workers(self) -> asyncio.CancelledError | None:
+        """Finish venv work and return any cancellation for the caller to raise."""
+        if not self._venv_workers:
+            return None
+        waiter = asyncio.gather(*self._venv_workers, return_exceptions=True)
+        cancelled: asyncio.CancelledError | None = None
+        while not waiter.done():
+            try:
+                await asyncio.shield(waiter)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        return cancelled
+
+    async def _run_venv_work(self, work: Callable[[], _VenvResult]) -> _VenvResult:
+        """Offload venv work without leaving it running after cancellation."""
+        worker = asyncio.create_task(asyncio.to_thread(work))
+        self._venv_workers.add(worker)
+        try:
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # A thread cannot be cancelled. Finish its mutations before the
+                # caller's finally closes this runtime and clears its paths.
+                await self._drain_venv_workers()
+                raise
+        finally:
+            self._venv_workers.discard(worker)
+
     def _add_windows_firewall_rule(self) -> None:
         if self._venv_python is None or not os.path.isfile(self._venv_python):
             return
@@ -639,7 +681,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # _ensure_venv runs a subprocess on every start and may build the venv,
         # so it runs on a worker thread. On the event loop it would stall every
         # other turn and request the host serves until it finished.
-        await asyncio.to_thread(self._ensure_venv)
+        await self._run_venv_work(self._ensure_venv)
 
         boot_code = _read_boot_script()
         fd, path = tempfile.mkstemp(suffix=".py", prefix="anton_scratchpad_")
@@ -793,7 +835,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 start_new_session=(sys.platform != "win32"),
             )
         except (FileNotFoundError, PermissionError, OSError) as exc:
-            await asyncio.to_thread(self._nuke_venv)
+            await self._run_venv_work(self._nuke_venv)
             raise RuntimeError(
                 f"Failed to start scratchpad: {exc}. "
                 "The Python venv has been deleted and will be recreated on next attempt."
@@ -833,8 +875,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self.cells.clear()
         self._discard_session_snapshot()
         self._consecutive_deaths = 0
-        if not await asyncio.to_thread(self._verify_venv_python):
-            await asyncio.to_thread(self._nuke_venv)
+        await self._run_venv_work(self._remove_broken_venv)
         await self.start()
 
     async def _auto_resume(self) -> bool:
@@ -893,11 +934,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def close(self) -> None:
         """Kill the process and save requirements; preserve the venv."""
+        cancelled = await self._drain_venv_workers()
         await self._stop_process()
         if self._venv_dir is not None:
             self._save_requirements()
             self._venv_dir = None
             self._venv_python = None
+        if cancelled is not None:
+            raise cancelled
 
     async def cancel(self) -> None:
         """Kill the current cell and restart the runtime."""
@@ -922,9 +966,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def cleanup(self) -> None:
         """Kill process and delete the venv entirely."""
+        cancelled = await self._drain_venv_workers()
         await self._stop_process()
-        await asyncio.to_thread(self._nuke_venv)
+        await self._run_venv_work(self._nuke_venv)
         self._discard_session_snapshot()
+        if cancelled is not None:
+            raise cancelled
 
     async def execute_streaming(
         self,
@@ -1040,8 +1087,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # (TimeoutError) still yields its error cell. cancelling() is
             # checked too, so a CancelledError that leaks up from something
             # the cell awaited, with no cancel() on this task, yields its
-            # cell like any other kill.
-            if isinstance(exc, asyncio.CancelledError):
+            # cell like any other kill. The CLI opts out of propagation.
+            if self._cancel_ends_turn and isinstance(exc, asyncio.CancelledError):
                 task = asyncio.current_task()
                 if task is not None and task.cancelling():
                     raise
@@ -1328,7 +1375,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         refused = reject_invalid_packages(needed)
         if refused:
             return refused
-        await asyncio.to_thread(self._ensure_venv)
+        await self._run_venv_work(self._ensure_venv)
 
         uv = self._find_uv()
         if uv:
@@ -1413,6 +1460,7 @@ def local_scratchpad_runtime_factory(
     session_id: str | None = None,
     scratchpad_ds_env: dict[str, str] | None = None,
     workspace_env_overlay: dict[str, str] | None = None,
+    cancel_ends_turn: bool = True,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1425,4 +1473,5 @@ def local_scratchpad_runtime_factory(
         session_id=session_id,
         scratchpad_ds_env=scratchpad_ds_env,
         workspace_env_overlay=workspace_env_overlay,
+        cancel_ends_turn=cancel_ends_turn,
     )

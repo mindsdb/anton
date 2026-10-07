@@ -86,7 +86,8 @@ class ScratchpadRuntime(ABC):
 
         A backend may end without a Cell when the task running the cell is
         cancelled: the local backend kills the cell, records it in ``cells``
-        and re-raises the cancel.
+        and re-raises the cancel. The CLI creates local runtimes with
+        ``cancel_ends_turn=False`` to return the killed Cell and continue.
         """
 
     @abstractmethod

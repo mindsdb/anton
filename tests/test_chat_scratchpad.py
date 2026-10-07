@@ -506,13 +506,18 @@ class TestCliHostsSupplyTheVault:
             captured.update(kwargs)
             return MagicMock()
 
+        def fake_factory(_settings, *, cancel_ends_turn):
+            captured["policy"] = cancel_ends_turn
+            return MagicMock()
+
         with (
             patch.object(cli, "ScratchpadManager", fake_manager),
-            patch.object(cli, "get_runtime_factory", lambda _s: MagicMock()),
+            patch.object(cli, "get_runtime_factory", fake_factory),
         ):
             cli._build_scratchpad_manager(MagicMock(), make_mock_llm())
 
         assert captured["data_vault"] is not None
+        assert captured["policy"] is False
 
     async def test_rebuilt_session_is_given_a_vault(self):
         from anton.core.datasources.data_vault import LocalDataVault
@@ -524,10 +529,14 @@ class TestCliHostsSupplyTheVault:
             captured["config"] = config
             return MagicMock()
 
+        def fake_factory(_settings, *, cancel_ends_turn):
+            captured["policy"] = cancel_ends_turn
+            return MagicMock()
+
         with (
             patch("anton.chat.ChatSession", fake_session),
             patch("anton.core.llm.client.LLMClient.from_settings", return_value=make_mock_llm()),
-            patch.object(chat_session, "get_runtime_factory", lambda _s: MagicMock()),
+            patch.object(chat_session, "get_runtime_factory", fake_factory),
             patch.object(chat_session, "refresh_knowledge", lambda *a, **k: None),
             patch.object(chat_session, "build_runtime_context", lambda _s: ""),
         ):
@@ -541,3 +550,4 @@ class TestCliHostsSupplyTheVault:
             )
 
         assert isinstance(captured["config"].data_vault, LocalDataVault)
+        assert captured["policy"] is False

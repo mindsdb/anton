@@ -1039,10 +1039,10 @@ async def _run_demo_cell(
 ) -> Cell | None:
     """Run the first-run demo's script in ``pad`` behind a spinner and return its Cell.
 
-    Ctrl+C cancels the CLI's task. The runtime then kills the running cell,
-    records it in ``pad.cells`` and passes the cancel on, which ends a turn.
-    The demo is not a turn, so it takes the cancel back and returns the
-    recorded cell: the demo reports a failed run, and the chat starts.
+    During the cell, Ctrl+C kills it and returns its error Cell, as it does
+    in a normal CLI turn. If a runtime propagates cancellation, this demo
+    consumer takes it back after the kill. Cancellation before this helper
+    runs, during the demo's wait or dependency installation, still exits.
     """
     from rich.live import Live
     from rich.spinner import Spinner
@@ -1548,7 +1548,7 @@ async def _chat_loop(
 
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
-        runtime_factory=get_runtime_factory(settings),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
         settings=settings,
         self_awareness=self_awareness,
         cortex=cortex,

@@ -9,6 +9,7 @@ macOS). These tests pin the widened candidate list.
 from __future__ import annotations
 
 import os
+import asyncio
 import subprocess
 import sys
 import threading
@@ -527,3 +528,110 @@ def test_builds_of_different_venv_directories_run_at_the_same_time(tmp_path, mon
     assert not any(worker.is_alive() for worker in workers)
     assert not errors, errors
     assert all(pad._verify_venv_python() for pad in pads)
+
+
+async def test_reset_checks_health_after_a_shared_directory_rebuild(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    resetting = make_pad(tmp_path)
+    await resetting.start()
+    os.remove(resetting._venv_python)
+    builder = make_pad(tmp_path)
+    building, release_build = threading.Event(), threading.Event()
+    real_create = local.venv.create
+    creates = 0
+
+    def gated_create(*args, **kwargs):
+        nonlocal creates
+        creates += 1
+        building.set()
+        assert release_build.wait(10), "the test never released the build"
+        return real_create(*args, **kwargs)
+
+    checked_during_build = False
+    real_verify = resetting._verify_venv_python
+
+    def record_verification():
+        nonlocal checked_during_build
+        checked_during_build |= not release_build.is_set()
+        return real_verify()
+
+    monkeypatch.setattr(local.venv, "create", gated_create)
+    build = asyncio.create_task(asyncio.to_thread(builder._ensure_venv))
+    assert await asyncio.to_thread(building.wait, 10)
+    monkeypatch.setattr(resetting, "_verify_venv_python", record_verification)
+    reset = asyncio.create_task(resetting.reset())
+    try:
+        # The rebuild holds the directory lock. A reset must wait before it
+        # decides whether the interpreter is broken, not queue a stale delete.
+        await asyncio.sleep(0.1)
+        release_build.set()
+        await asyncio.wait_for(asyncio.gather(build, reset), timeout=20)
+        assert not checked_during_build
+        assert creates == 1
+        assert builder._verify_venv_python()
+    finally:
+        release_build.set()
+        await asyncio.gather(build, reset, return_exceptions=True)
+        await resetting.close()
+
+
+@pytest.mark.parametrize("action", ["reset", "install"])
+@pytest.mark.parametrize("cancel_teardown", [False, True])
+async def test_cancelled_provisioning_finishes_before_teardown(
+    tmp_path, monkeypatch, action, cancel_teardown
+):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    pad = make_pad(tmp_path)
+    await pad.start()
+    os.remove(pad._venv_python)
+    building, release_build, provisioned = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    real_create = local.venv.create
+    creates = 0
+
+    def gated_create(*args, **kwargs):
+        nonlocal creates
+        creates += 1
+        building.set()
+        assert release_build.wait(10), "the test never released the build"
+        return real_create(*args, **kwargs)
+
+    real_ensure = pad._ensure_venv
+
+    def record_provisioning():
+        try:
+            return real_ensure()
+        finally:
+            provisioned.set()
+
+    monkeypatch.setattr(local.venv, "create", gated_create)
+    monkeypatch.setattr(pad, "_ensure_venv", record_provisioning)
+    operation = asyncio.create_task(
+        pad.reset() if action == "reset" else pad.install_packages(["requests"])
+    )
+    assert await asyncio.to_thread(building.wait, 10)
+    operation.cancel()
+    await asyncio.sleep(0.05)
+    operation.cancel()  # A second Stop must not abandon the same worker.
+    close = asyncio.create_task(pad.close())
+    try:
+        done, _ = await asyncio.wait({operation, close}, timeout=0.1)
+        finished_early = bool(done)
+        if cancel_teardown:
+            close.cancel()
+            await asyncio.sleep(0.05)
+            close.cancel()
+        release_build.set()
+        assert await asyncio.to_thread(provisioned.wait, 10)
+        await asyncio.wait_for(asyncio.gather(operation, close, return_exceptions=True), 10)
+        assert not finished_early, "cancellation or teardown abandoned venv work"
+        assert operation.cancelled()
+        assert close.cancelled() is cancel_teardown
+        assert creates == 1, "teardown cleared a field the builder still used"
+        assert pad._venv_dir is None
+        assert pad._venv_python is None
+    finally:
+        release_build.set()
+        await asyncio.gather(operation, close, return_exceptions=True)
+        await pad.close()
