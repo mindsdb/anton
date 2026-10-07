@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import weakref
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -848,6 +849,19 @@ class TransientProviderError(ConnectionError):
         # retried those with backoff, so the session fails fast (still with the
         # honest typed message) instead of stacking another 30s on top.
         self.session_backoff = session_backoff
+
+
+def log_transient_provider_error(logger: logging.Logger, error: TransientProviderError) -> None:
+    """Log classified retry metadata without provider bodies or exception text.
+
+    Provider error bodies can echo credentials, prompts and tool arguments.
+    Callers pass the result of classify_transient, whose codes come from the
+    recognized transient types or HTTP status, rather than arbitrary prose.
+    """
+    logger.warning(
+        "transient provider error code=%s status=%s retry_after=%s session_backoff=%s",
+        error.code, error.status_code, error.retry_after, error.session_backoff,
+    )
 
 
 class ProviderOverloadedError(ConnectionError):
