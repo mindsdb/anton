@@ -142,10 +142,12 @@ class TurnCost:
     # both say only THAT it failed; 343 such turns / 14 days (5.3% of real
     # turns, 3x the tokens of a completed one) had no groupable cause. Values
     # are the classification the verdict loop already draws for the latch —
-    # `truncated` / `transient` / `hard` / `denied`. Also `timeout`: the
-    # verdict call sent no output for its whole idle deadline, and the turn
-    # ended quietly on the streamed answer with `verification_skipped=True`
-    # and no latch. Plus `latched_hard` /
+    # `truncated` / `transient` / `hard` / `denied`. Also `timeout`: a model
+    # call ran out its idle deadline, and the turn ended quietly on the
+    # streamed answer with `verification_skipped=True` and no latch.
+    # `verifier_error_type` names the call's role: `ModelCallTimeoutError:coding`
+    # for the verdict call itself, `:router` when compaction ran out earlier
+    # and the deadline latch failed the verdict call unsent. Plus `latched_hard` /
     # `latched_truncated` / `latched_mixed` / `latched_denied` for turns that
     # never made the call because an earlier one latched. `latched_mixed` means
     # the counted failures were not all the same class, so neither names the

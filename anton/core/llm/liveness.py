@@ -5,12 +5,13 @@ that hides thinking from a chat-completions client sends nothing at all in that
 time. A host that ends a turn after a stretch of silence on its wire cannot
 tell that wait from a hung turn. ``ModelCallTracker`` lets it tell them apart.
 
-The session arms one tracker per turn (``ChatSession.model_calls``) and hands
-it to ``LLMClient.call_tracker``. Every call the client issues while armed
-registers here, marks when it is awaiting the provider, and stamps each event
-the provider sends. A host polls ``snapshot()`` and, when it reports a waiting
-call and its own wire has been quiet for ``MODEL_WAIT_TICK_S``, writes one
-progress line with phase ``MODEL_WAIT_PHASE``. A hung tool, a hung cell or an
+The session arms one tracker per turn (``ChatSession.model_calls``) with
+``arm_turn_tracker``, and ``LLMClient.call_tracker`` reads it back. Every call
+the client issues while armed registers here, marks when it is awaiting the
+provider, and stamps each event the provider sends. A host polls
+``snapshot()`` and, when it reports a waiting call and its own wire has been
+quiet for ``MODEL_WAIT_TICK_S``, writes one progress line with phase
+``MODEL_WAIT_PHASE``. A hung tool, a hung cell or an
 open question registers nothing, so silence there still reaches every idle
 bound the host keeps.
 
@@ -19,16 +20,19 @@ The tracker also latches the first model-call deadline of the turn
 exceptions, so without the latch every later call in the turn would wait out a
 full deadline of its own. With it, the next call fails as soon as it is issued.
 
-Each call captures the tracker when it is issued. Model work started
-fire-and-forget during a turn therefore registers on that turn's tracker and
-can keep it reporting a wait. Start such work after the turn ends: the turn's
-``finally`` closes the tracker, and a closed tracker reports nothing, opens
-nothing and latches nothing.
+The armed tracker lives in a ContextVar, like the turn's trace context, and
+each call captures it when it is issued. A task started during a turn copies
+the turn's context, so model work started fire-and-forget during a turn
+registers on that turn's tracker and can keep it reporting a wait. Start such
+work after the turn ends: the turn's ``finally`` closes the tracker and
+disarms the context first, so the task sees no tracker at all and can never
+register on or latch a later turn's tracker on the same session.
 """
 
 from __future__ import annotations
 
 import time
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
@@ -180,3 +184,26 @@ class ModelCallTracker:
         """End of turn. Nothing registers, reports or latches after this."""
         self._closed = True
         self._calls.clear()
+
+
+_turn_tracker: ContextVar[ModelCallTracker | None] = ContextVar(
+    "anton_model_call_tracker", default=None
+)
+
+
+def arm_turn_tracker(tracker: ModelCallTracker | None) -> Token:
+    """Install the turn's tracker for this task and the tasks it starts.
+
+    Pair with ``disarm_turn_tracker`` in the turn's ``finally``.
+    """
+    return _turn_tracker.set(tracker)
+
+
+def disarm_turn_tracker(token: Token) -> None:
+    """Restore the tracker that was armed before ``arm_turn_tracker``."""
+    _turn_tracker.reset(token)
+
+
+def current_turn_tracker() -> ModelCallTracker | None:
+    """The tracker armed for the running task, or None outside a turn."""
+    return _turn_tracker.get()

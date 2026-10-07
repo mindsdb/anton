@@ -24,7 +24,7 @@ from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
-from anton.core.llm.liveness import ModelCallTracker
+from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -847,6 +847,12 @@ def _verifier_error_type(exc: BaseException | None) -> str:
     name = _safe_error_type(exc)
     if isinstance(exc, StructuredOutputError):
         return name + (":unusable_call" if exc.reached_tool_call else ":no_call")
+    if isinstance(exc, ModelCallTimeoutError) and exc.role:
+        # The role of the call that ran out its deadline, a closed set. The
+        # verdict call's own expiry reads `:coding`; `:router` means compaction
+        # ran out earlier in the turn and the latch failed the verdict call
+        # before it was sent.
+        return f"{name}:{exc.role}"
     return name
 
 
@@ -1530,9 +1536,7 @@ class ChatSession:
         # Applied here, not only in LLMClient.from_settings: hosts that build
         # the client themselves (cowork-server) pass their settings to the
         # session, and this is how the deadline setting reaches their client.
-        self._llm.model_call_idle_timeout_s = getattr(
-            s, "model_call_idle_timeout_s", 600.0
-        )
+        self._llm.model_call_idle_timeout_s = s.model_call_idle_timeout_s
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -4591,7 +4595,7 @@ class ChatSession:
         # out its idle deadline latches so later calls fail at once.
         _turn_calls = ModelCallTracker()
         self.model_calls = _turn_calls
-        self._llm.call_tracker = _turn_calls
+        _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
         try:
@@ -5055,12 +5059,16 @@ class ChatSession:
             self._turn_memory = None
             # Closed before the books, with no await in between, so work that
             # outlives the turn (memory consolidation, a late finalizer) can
-            # neither keep a host's wait line alive nor latch a deadline. The
-            # identity check keeps a late finalizer of an abandoned turn from
-            # disarming a newer turn's tracker.
+            # neither keep a host's wait line alive nor latch a deadline.
+            # Disarmed too, so the tasks started below see no tracker and
+            # cannot reach the next turn's on this session.
             _turn_calls.close()
-            if self._llm.call_tracker is _turn_calls:
-                self._llm.call_tracker = None
+            try:
+                disarm_turn_tracker(_calls_token)
+            except ValueError:
+                # Cross-context finalizer of an abandoned turn: the ContextVar
+                # copy dies with that task, and the newer turn keeps its own.
+                pass
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
@@ -6206,15 +6214,17 @@ class ChatSession:
                     if not retrying:
                         break
                 except ModelCallTimeoutError as exc:
-                    # The verdict call sent nothing for its whole deadline. The
-                    # answer already streamed, so the turn ends quietly on it,
+                    # The verdict call sent nothing for its whole deadline, or
+                    # an earlier call in the turn did and the latch failed this
+                    # one before it was sent; exc.role names which. The answer
+                    # already streamed, so the turn ends quietly on it,
                     # unverified, below. A retry would wait out another
                     # deadline, and a hand-back would need the same provider.
                     verdict_failure = "timeout"
                     verdict_exc = exc
                     logger.warning(
-                        "completion-verifier verdict=TIMEOUT budget=%d model=%s",
-                        budget, self._llm.coding_model,
+                        "completion-verifier verdict=TIMEOUT budget=%d role=%s model=%s",
+                        budget, exc.role, exc.model,
                     )
                     break
                 except ProviderAuthError:

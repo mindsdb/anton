@@ -274,6 +274,58 @@ async def test_a_tool_waiting_on_the_model_reports_a_wait():
     assert snap is not None, "a tool's own model call reported no wait"
 
 
+async def test_the_real_generate_artifact_tool_reports_a_wait(tmp_path):
+    """The stand-in above pins the rule; this pins the real tool. Its model
+    calls tick only because they go through the session's client, so a
+    rewrite that gives it its own client or provider fails here."""
+    import traceback
+
+    from anton.core.artifacts import ArtifactStore
+
+    artifacts = tmp_path / "artifacts"
+    slug = ArtifactStore(artifacts).create(name="Clock", description="d", type="html-app").slug
+    build = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(
+            id="ga1", name="generate_artifact",
+            input={"slug": slug, "user_request": "build a clock", "agent_understanding": "an analog clock"},
+        )],
+        usage=_usage(),
+        stop_reason="tool_use",
+    )
+    gate = _Gate()
+    callers: list[str] = []
+
+    async def _held_tool_call():
+        callers.extend(frame.filename for frame in traceback.extract_stack())
+        await gate.hold()
+        return _text_response("gathering notes")
+
+    provider = _ScriptedProvider(
+        streams=[_stream_of(build), _stream_of(_text_response("done"))],
+        completes=[_held_tool_call],
+    )
+    client = LLMClient(
+        planning_provider=provider, planning_model="planner",
+        coding_provider=provider, coding_model="coder",
+    )
+    session = ChatSession(ChatSessionConfig(
+        llm_client=client, workspace=MagicMock(base=tmp_path, artifacts_dir=artifacts),
+    ))
+    turn = asyncio.ensure_future(_drain(session, "make me a clock artifact"))
+    try:
+        await asyncio.wait_for(gate.reached.wait(), timeout=GUARD_S)
+        await asyncio.sleep(0.01)
+        snap = _snapshot(session)
+    finally:
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await _close(session)
+
+    assert any("generate_artifact" in name for name in callers), "the held call did not come from the tool"
+    assert snap is not None, "the real generate_artifact model call reported no wait"
+
+
 async def test_compaction_reports_a_wait():
     gate = _Gate()
     provider = _ScriptedProvider(
@@ -422,8 +474,107 @@ async def test_nothing_reports_after_the_turn():
         calls = getattr(session, "model_calls", None)
         assert calls is not None, "no tracker on the session"
         assert calls.closed
-        assert session._llm.call_tracker is None, "the client is still armed after the turn"
+        assert session._llm.call_tracker is None, "the turn left its tracker armed"
     finally:
+        await _close(session)
+
+
+async def test_the_session_applies_the_deadline_setting_to_a_client_the_host_built():
+    """cowork-server builds its own LLMClient, so the setting reaches the
+    client only through the settings it hands the session."""
+    from anton.core.settings import CoreSettings
+
+    session = _session(_ScriptedProvider(), settings=CoreSettings(model_call_idle_timeout_s=42))
+    try:
+        assert session._llm.model_call_idle_timeout_s == 42.0
+    finally:
+        await _close(session)
+
+
+async def test_a_late_finalizer_of_an_abandoned_turn_leaves_the_next_turn_armed():
+    """A turn abandoned at a yield is finalized later, from another task. Its
+    finally must not disarm or close the turn running by then, whose calls
+    must still register and latch on its own tracker."""
+    tool_started, finalized = asyncio.Event(), asyncio.Event()
+    seen: dict = {}
+
+    async def _checks_after_the_finalizer(session, _input):
+        tool_started.set()
+        await finalized.wait()
+        seen["armed"] = session._llm.call_tracker is session.model_calls
+        seen["closed"] = session.model_calls.closed
+        return "ok"
+
+    provider = _ScriptedProvider(
+        streams=[
+            _stream_of(_text_response("abandoned")),
+            _stream_of(_tool_response()),
+            _stream_of(_text_response("done")),
+        ],
+        completes=[_answer(_verdict_response())],
+    )
+    session = _session(provider, tool_handler=_checks_after_the_finalizer)
+    first = session.turn_stream("first")
+    second = None
+    try:
+        await asyncio.wait_for(asyncio.ensure_future(anext(first)), timeout=GUARD_S)
+        second = asyncio.ensure_future(_drain(session, "second"))
+        await asyncio.wait_for(tool_started.wait(), timeout=GUARD_S)
+
+        await asyncio.wait_for(asyncio.ensure_future(first.aclose()), timeout=GUARD_S)
+        finalized.set()
+        await asyncio.wait_for(second, timeout=GUARD_S)
+    finally:
+        if second is not None and not second.done():
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
+        await _close(session)
+
+    assert seen == {"armed": True, "closed": False}
+
+
+async def test_work_a_turn_leaves_running_cannot_reach_the_next_turn():
+    """The anton CLI keeps one session and one client across turns. Model work
+    started after a turn ends (memory consolidation, the cerebellum flush)
+    must not register on the next turn's tracker. There it would report a
+    wait while that turn hangs in a tool, and its expiry would latch the next
+    turn, failing that turn's later calls unsent."""
+    tool_started = asyncio.Event()
+
+    async def _hangs(_session, _input):
+        tool_started.set()
+        await asyncio.Event().wait()
+
+    provider = _ScriptedProvider(
+        streams=[_stream_of(_text_response("first")), _stream_of(_tool_response())],
+        completes=[_hang],
+    )
+    session = _session(provider, tool_handler=_hangs)
+    session._llm.model_call_idle_timeout_s = 0.2
+    second = None
+    try:
+        await asyncio.wait_for(_drain(session), timeout=GUARD_S)
+
+        async def _leftover_work():
+            # Started after turn 1, issued once turn 2 is running.
+            await tool_started.wait()
+            return await session._llm.summarize(
+                system="s", messages=[{"role": "user", "content": "x"}],
+            )
+
+        leftover = asyncio.ensure_future(_leftover_work())
+        second = asyncio.ensure_future(_drain(session, "again"))
+        await asyncio.wait_for(tool_started.wait(), timeout=GUARD_S)
+        await asyncio.sleep(0.05)
+        assert _snapshot(session) is None, "turn 1's leftover call reported a wait in turn 2"
+
+        (outcome,) = await asyncio.gather(leftover, return_exceptions=True)
+        assert type(outcome).__name__ == "ModelCallTimeoutError", repr(outcome)
+        session.model_calls.raise_if_expired()  # turn 2 latched nothing
+    finally:
+        if second is not None:
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
         await _close(session)
 
 
@@ -455,5 +606,36 @@ async def test_a_verifier_deadline_ends_the_turn_quietly_on_the_answer():
     assert fields["ended_by"] == "completed"
     assert fields["verification_skipped"] == "true"
     assert fields["verifier_failure"] == "timeout"
+    assert fields["verifier_error_type"] == "ModelCallTimeoutError:coding"
     assert session._verifier_latch.no_verdict_failures == 0
     assert not session._verifier_latch.latched
+
+
+async def test_a_compaction_deadline_before_the_verifier_books_the_compaction_role():
+    """Compaction on the final answer runs out its deadline and swallows it.
+    The latch then fails the verdict call before it is sent. The books must
+    name the router call that went silent, not file it as a verifier timeout."""
+    provider = _ScriptedProvider(
+        streams=[
+            _stream_of(_tool_response()),
+            _stream_of(_text_response("done", context_pressure=0.95)),
+        ],
+        completes=[_hang],
+    )
+    session = _session(provider, session_id="conv-model-calls")
+    # Long enough that the summarizer has material to fold, so it calls the model.
+    for i in range(6):
+        session._history.append({
+            "role": "user" if i % 2 == 0 else "assistant", "content": f"m{i} " + "x" * 500,
+        })
+    session._llm.model_call_idle_timeout_s = 0.2
+    try:
+        with patch("anton.analytics.send_event") as send:
+            await asyncio.wait_for(_drain(session), timeout=GUARD_S)
+    finally:
+        await _close(session)
+
+    assert len(provider.complete_budgets) == 1, "the latched verdict call reached the provider"
+    fields = send.call_args.kwargs
+    assert fields["verifier_failure"] == "timeout"
+    assert fields["verifier_error_type"] == "ModelCallTimeoutError:router"

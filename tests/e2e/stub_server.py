@@ -30,7 +30,10 @@ streamed steps are used in order and the last one repeats:
                                        <secs>, then every argument in one burst
     length_cut                         no content, finish_reason "length", and
                                        completion_tokens equal to the budget
-    trickle:<secs>:<every>             one text delta every <every> s for <secs>
+    trickle:<secs>:<every>[:<field>]   one delta every <every> s for <secs>, in
+                                       <field>: content (default), reasoning or
+                                       reasoning_content. A thinking trickle
+                                       then answers "done"
 
 The default tool is `scratchpad` with `{"action":"view","name":"stub"}` when the
 request offers it, else the first tool offered with its required fields filled.
@@ -540,6 +543,12 @@ class _StreamedStep:
     text: str = ""
     tool: str | None = None
     args_json: str | None = None
+    field: str = "content"
+
+
+# The delta fields a trickle can write: the answer, and the two names
+# OpenAI-compatible gateways give streamed thinking.
+_TRICKLE_FIELDS = ("content", "reasoning", "reasoning_content")
 
 
 def _parse_streamed_step(*, step: str) -> _StreamedStep:
@@ -571,12 +580,15 @@ def _parse_streamed_step(*, step: str) -> _StreamedStep:
         return _StreamedStep(kind=kind)
     if kind == "trickle":
         parts = step.split(":")
-        if len(parts) != 3:
+        if len(parts) not in (3, 4):
             raise ValueError(f"trickle needs seconds and an interval: {step!r}")
         every = float(parts[2])
         if every <= 0:
             raise ValueError(f"trickle interval must be positive: {step!r}")
-        return _StreamedStep(kind=kind, secs=float(parts[1]), every=every)
+        field = parts[3] if len(parts) == 4 else "content"
+        if field not in _TRICKLE_FIELDS:
+            raise ValueError(f"trickle field must be one of {_TRICKLE_FIELDS}: {step!r}")
+        return _StreamedStep(kind=kind, secs=float(parts[1]), every=every, field=field)
     raise ValueError(f"unknown streamed step: {step!r}")
 
 
@@ -764,8 +776,10 @@ def _send_scripted_stream(
         deadline = time.monotonic() + parsed.secs
         while time.monotonic() < deadline:
             time.sleep(parsed.every)
-            out.delta({"content": f"tick {sent} "})
+            out.delta({parsed.field: f"tick {sent} "})
             sent += 1
+        if parsed.field != "content":
+            out.delta({"content": "done"})
         out.delta({}, finish_reason="stop")
         out.finish(body=body, completion_tokens=max(1, sent))
         return

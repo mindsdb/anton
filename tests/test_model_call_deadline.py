@@ -216,37 +216,52 @@ async def test_a_slow_consumer_is_not_charged_to_the_model():
     assert exc is None, f"consumer time was charged to the model: {exc!r}"
 
 
-async def test_an_outside_cancel_stays_a_cancel():
+@pytest.mark.parametrize("entry", ["plan", "plan_stream", "code_stream"])
+async def test_an_outside_cancel_stays_a_cancel(entry):
     """Stop, a watchdog or a shutdown cancels the task: that must stay a
-    CancelledError, never become a deadline error the host shows as a card."""
-    client = _client(_ScriptedProvider(complete=_hang), idle_s=5.0)
-    task = asyncio.ensure_future(client.plan(system="s", messages=[]))
+    CancelledError, never become a deadline error the host shows as a card.
+    The streams matter most: the main turn loop calls the model through them."""
+    from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker
+
+    client = _client(_ScriptedProvider(stream_events=_silent_stream, complete=_hang), idle_s=5.0)
+    tracker = ModelCallTracker()
+    arm_turn_tracker(tracker)
+    calls = {
+        "plan": lambda: client.plan(system="s", messages=[]),
+        "plan_stream": lambda: _drain(client.plan_stream(system="s", messages=[])),
+        "code_stream": lambda: _drain(client.code_stream(system="s", messages=[])),
+    }
+    task = asyncio.ensure_future(calls[entry]())
     await asyncio.sleep(0.05)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=GUARD_S)
+    tracker.raise_if_expired()  # a cancel must not latch a deadline
 
 
 async def test_the_deadline_runs_across_the_auth_confirmation_retry():
     """The bound is on the whole call: a refused first attempt and a hung retry
-    together still end at one deadline, not two."""
+    together still end at one deadline, not two. A per-attempt deadline would
+    end at 0.35 + 0.5 s; the margin on both sides is at least 150 ms."""
+    deadline_s = 0.5
     attempts = 0
 
     async def _refuse_then_hang(**_kwargs):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            await asyncio.sleep(DEADLINE_S * 0.6)
+            await asyncio.sleep(0.35)
             raise ProviderAuthError("Invalid API key")
         await asyncio.Event().wait()
 
-    client = _client(_ScriptedProvider(complete=_refuse_then_hang))
+    client = _client(_ScriptedProvider(complete=_refuse_then_hang), idle_s=deadline_s)
 
     exc, elapsed = await _outcome(client.plan(system="s", messages=[]))
 
-    _assert_deadline_error(exc, elapsed, role="planning")
+    assert type(exc).__name__ == "ModelCallTimeoutError", repr(exc)
     assert attempts == 2
+    assert elapsed < deadline_s + 0.2, f"took {elapsed:.2f}s: the deadline restarted on the retry"
 
 
 async def test_zero_turns_the_deadline_off():
@@ -275,11 +290,11 @@ async def test_a_deadline_latches_and_fails_the_next_call_at_once():
     """Side paths (compaction, tool dispatch) swallow the first expiry. The
     turn's tracker latches it, so the next call fails without waiting out a
     second deadline or reaching the provider."""
-    from anton.core.llm.liveness import ModelCallTracker
+    from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker
 
     provider = _ScriptedProvider(complete=_hang)
     client = _client(provider)
-    client.call_tracker = ModelCallTracker()
+    arm_turn_tracker(ModelCallTracker())
 
     first, _ = await _outcome(client.code(system="s", messages=[]))
     assert type(first).__name__ == "ModelCallTimeoutError"
@@ -295,11 +310,11 @@ async def test_a_deadline_latches_and_fails_the_next_call_at_once():
 
 async def test_a_closed_tracker_latches_nothing():
     """Work that outlives the turn must not be failed by that turn's expiry."""
-    from anton.core.llm.liveness import ModelCallTracker
+    from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker
 
     client = _client(_ScriptedProvider(complete=_hang))
     tracker = ModelCallTracker()
-    client.call_tracker = tracker
+    arm_turn_tracker(tracker)
     await _outcome(client.code(system="s", messages=[]))
     tracker.close()
 
@@ -336,6 +351,29 @@ def test_the_default_is_ten_minutes():
         coding_provider=_ScriptedProvider(), coding_model="c",
     )
     assert client._idle_timeout_for(max_tokens=8192) == 600.0
+
+
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_a_deadline_that_is_not_a_finite_number_is_refused(monkeypatch, value):
+    """NaN would fire every call at once and then fail building the message,
+    so every turn would end on a ValueError instead of the deadline."""
+    from pydantic import ValidationError
+
+    from anton.core.settings import CoreSettings
+
+    monkeypatch.setenv("ANTON_MODEL_CALL_IDLE_TIMEOUT_S", value)
+    with pytest.raises(ValidationError):
+        CoreSettings()
+
+
+def test_a_nan_deadline_set_on_the_client_reads_as_off():
+    """Hosts can set the attribute directly, past the settings validator."""
+    client = LLMClient(
+        planning_provider=_ScriptedProvider(), planning_model="p",
+        coding_provider=_ScriptedProvider(), coding_model="c",
+    )
+    client.model_call_idle_timeout_s = float("nan")
+    assert client._idle_timeout_for(max_tokens=8192) is None
 
 
 def test_the_error_is_curated_and_not_a_network_blip():

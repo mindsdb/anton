@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, TypeVar
 
-from .liveness import ModelCallTracker
+from .liveness import ModelCallTracker, current_turn_tracker
 from .provider import (
     LLMProvider,
     LLMResponse,
@@ -152,10 +152,17 @@ class LLMClient:
         # attribute so the session can apply its own settings to a client the
         # host built.
         self.model_call_idle_timeout_s = model_call_idle_timeout_s
-        # The turn's open-call tracker, armed by the session beside
-        # usage_listener and captured by each call when it is issued, for the
-        # same reason as the listener (see _notify_usage). None outside a turn.
-        self.call_tracker: ModelCallTracker | None = None
+
+    @property
+    def call_tracker(self) -> ModelCallTracker | None:
+        """The turn's open-call tracker, or None outside a turn.
+
+        Each call captures it when it is issued. It lives in a ContextVar the
+        session arms (``liveness.arm_turn_tracker``) rather than on this
+        client, so work a turn leaves running after it ends cannot reach the
+        next turn's tracker on a client the two turns share.
+        """
+        return current_turn_tracker()
 
     async def aclose(self) -> None:
         """Close provider transports. The three roles may share objects."""
@@ -197,12 +204,14 @@ class LLMClient:
         Every call gets the same deadline. The budget is a parameter so a call
         that may think longer can be given a longer deadline here, in one
         place, without touching the call sites. A deadline above the OpenAI
-        and Anthropic SDKs' default 600 s read timeout does nothing on an
-        endpoint that sends no keepalives, because that read timeout fires
-        first.
+        and Anthropic SDKs' default 600 s read timeout needs that timeout
+        raised too: on an endpoint that sends no keepalives, a streamed call
+        that goes quiet after its response starts ends at 600 s with a
+        read-timeout error instead of this deadline.
         """
         idle_s = self.model_call_idle_timeout_s
-        if idle_s is None or idle_s <= 0:
+        # `not idle_s > 0` rather than `idle_s <= 0`, so NaN reads as off.
+        if idle_s is None or not idle_s > 0:
             return None
         return float(idle_s)
 
@@ -230,15 +239,19 @@ class LLMClient:
         operation: Callable[[], Awaitable[_T]],
         role: str,
         model: str,
-        idle_s: float | None,
-        tracker: ModelCallTracker | None,
+        max_tokens: int,
     ) -> _T:
         """Await a non-streamed call under the idle deadline.
 
         The deadline covers the whole call, including the auth confirmation
         retry and the SDK's own retries inside ``operation``, because a
-        non-streamed call sends nothing until it is done.
+        non-streamed call sends nothing until it is done. A turn whose
+        deadline already latched fails here, before the provider is reached.
         """
+        tracker = self.call_tracker
+        if tracker is not None:
+            tracker.raise_if_expired()
+        idle_s = self._idle_timeout_for(max_tokens=max_tokens)
         call = tracker.open(role=role, idle_timeout_s=idle_s) if tracker is not None else None
         try:
             if call is not None:
@@ -268,8 +281,7 @@ class LLMClient:
         make_stream: Callable[[], AsyncIterator[_T]],
         role: str,
         model: str,
-        idle_s: float | None,
-        tracker: ModelCallTracker | None,
+        max_tokens: int,
     ) -> AsyncIterator[_T]:
         """Relay a streamed call, bounding each wait for the next event.
 
@@ -277,8 +289,14 @@ class LLMClient:
         provider and never spans a ``yield``, so a slow consumer (a tool
         running between rounds, a host writing to its wire) is never charged
         to the model. For the same reason the call reports "awaiting" to the
-        tracker only while it waits on the provider.
+        tracker only while it waits on the provider. A turn whose deadline
+        already latched fails on the first event, before the provider is
+        reached.
         """
+        tracker = self.call_tracker
+        if tracker is not None:
+            tracker.raise_if_expired()
+        idle_s = self._idle_timeout_for(max_tokens=max_tokens)
         call = tracker.open(role=role, idle_timeout_s=idle_s) if tracker is not None else None
         stream = None
         try:
@@ -328,9 +346,6 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         listener = self.usage_listener
-        tracker = self.call_tracker
-        if tracker is not None:
-            tracker.raise_if_expired()
         budget = max_tokens or self._max_tokens
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
@@ -346,8 +361,7 @@ class LLMClient:
             ),
             role="planning",
             model=self._planning_model,
-            idle_s=self._idle_timeout_for(max_tokens=budget),
-            tracker=tracker,
+            max_tokens=budget,
         )
         self._notify_usage("planning", self._planning_model, response.usage, listener)
         self._record_served(response)
@@ -363,9 +377,6 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         listener = self.usage_listener
-        tracker = self.call_tracker
-        if tracker is not None:
-            tracker.raise_if_expired()
         budget = max_tokens or self._max_tokens
         # aclosing: a caller that stops early closes the call now, not when
         # the abandoned generator is finalized.
@@ -383,8 +394,7 @@ class LLMClient:
             ),
             role="planning",
             model=self._planning_model,
-            idle_s=self._idle_timeout_for(max_tokens=budget),
-            tracker=tracker,
+            max_tokens=budget,
         )
         async with contextlib.aclosing(events):
             async for event in events:
@@ -459,9 +469,6 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> LLMResponse:
         listener = self.usage_listener
-        tracker = self.call_tracker
-        if tracker is not None:
-            tracker.raise_if_expired()
         budget = max_tokens or self._max_tokens
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
@@ -477,8 +484,7 @@ class LLMClient:
             ),
             role="coding",
             model=self._coding_model,
-            idle_s=self._idle_timeout_for(max_tokens=budget),
-            tracker=tracker,
+            max_tokens=budget,
         )
         self._notify_usage("coding", self._coding_model, response.usage, listener)
         return response
@@ -493,9 +499,6 @@ class LLMClient:
         native_web_tools: set[str] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         listener = self.usage_listener
-        tracker = self.call_tracker
-        if tracker is not None:
-            tracker.raise_if_expired()
         budget = max_tokens or self._max_tokens
         events = self._guarded_stream(
             make_stream=lambda: self._coding_provider.stream(
@@ -508,8 +511,7 @@ class LLMClient:
             ),
             role="coding",
             model=self._coding_model,
-            idle_s=self._idle_timeout_for(max_tokens=budget),
-            tracker=tracker,
+            max_tokens=budget,
         )
         async with contextlib.aclosing(events):
             async for event in events:
@@ -533,9 +535,6 @@ class LLMClient:
         this is behavior-preserving unless a distinct model is selected.
         """
         listener = self.usage_listener
-        tracker = self.call_tracker
-        if tracker is not None:
-            tracker.raise_if_expired()
         budget = max_tokens or self._max_tokens
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
@@ -549,8 +548,7 @@ class LLMClient:
             ),
             role="router",
             model=self._router_model,
-            idle_s=self._idle_timeout_for(max_tokens=budget),
-            tracker=tracker,
+            max_tokens=budget,
         )
         self._notify_usage("router", self._router_model, response.usage, listener)
         return response
@@ -585,9 +583,6 @@ class LLMClient:
         budget = max_tokens or self._max_tokens
 
         listener = self.usage_listener
-        tracker = self.call_tracker
-        if tracker is not None:
-            tracker.raise_if_expired()
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
                 lambda: provider.complete(
@@ -602,8 +597,7 @@ class LLMClient:
             ),
             role=role,
             model=model,
-            idle_s=self._idle_timeout_for(max_tokens=budget),
-            tracker=tracker,
+            max_tokens=budget,
         )
         # Count BEFORE the no-tool-call raise below: a structured call that
         # failed (and its bigger-budget retry) still spent real tokens

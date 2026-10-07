@@ -970,7 +970,11 @@ async def test_a_deadline_swallowed_by_compaction_fails_the_next_call_at_once():
         stop_reason="tool_use",
     )
 
+    loop = asyncio.get_running_loop()
+    summarize_started: list[float] = []
+
     async def _summarize_hangs():
+        summarize_started.append(loop.time())
         await asyncio.Event().wait()
 
     provider = _SilentAfterScriptProvider(
@@ -979,13 +983,13 @@ async def test_a_deadline_swallowed_by_compaction_fails_the_next_call_at_once():
     s = _deadline_session(provider)
     for i in range(6):
         s._history.append({"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"})
-    loop = asyncio.get_running_loop()
-    started = loop.time()
 
     exc = await _turn_outcome(s)
 
-    elapsed = loop.time() - started
     assert type(exc).__name__ == "ModelCallTimeoutError", repr(exc)
     assert provider.complete_calls == 1, "compaction never ran, so nothing was swallowed"
     assert provider.stream_calls == 1, "the latched call reached the provider"
+    # Timed from compaction's call, not the turn's start, so setup and the
+    # first round do not count: one 0.2 s deadline, then an immediate failure.
+    elapsed = loop.time() - summarize_started[0]
     assert elapsed < 0.2 * 2, f"took {elapsed:.2f}s: the next call waited out its own deadline"

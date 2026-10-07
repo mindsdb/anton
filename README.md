@@ -236,9 +236,9 @@ ANTON_LANGFUSE_HEADERS=1
 ---
 
 ## Model-call deadline
-A model call that sends nothing for 10 minutes is stopped, and the turn ends with "The model sent no output for 10 minutes, so the call was stopped." Every chunk the model sends restarts the 10 minutes, so a slow model that keeps writing is never cut. A non-streamed call gets the 10 minutes for the whole call, including the SDK's own retries. After one call in a turn runs out, every later model call in that turn fails at once. The one exception is the completion check after an answer: when it runs out, the turn ends on the answer that already streamed, marked unverified.
+A model call that sends nothing for 10 minutes is stopped, and the turn ends with "The model sent no output for 10 minutes, so the call was stopped." Every piece of text, thinking or tool-call arguments anton reads from the model restarts the 10 minutes, so a slow model that keeps writing is never cut. A non-streamed call gets the 10 minutes for the whole call, including the SDK's own retries. After one call in a turn runs out, every later model call in that turn fails at once. The one exception is the completion check after an answer: when it runs out, the turn ends on the answer that already streamed, marked unverified.
 
-To change the deadline, set `ANTON_MODEL_CALL_IDLE_TIMEOUT_S` in seconds. A value of 0 or less turns it off. A value above 600 has no effect on an endpoint that sends no keepalives, because the OpenAI and Anthropic SDKs' default 600-second read timeout fires first. anton sets no timeout of its own on those clients.
+To change the deadline, set `ANTON_MODEL_CALL_IDLE_TIMEOUT_S` in seconds. It must be a finite number. A value of 0 or less turns it off: a model call that never answers then keeps the turn alive, and a host's idle limits no longer end it, until the SDK, the gateway or a Stop does. Above 600, also raise the OpenAI and Anthropic SDKs' default 600-second read timeout. On an endpoint that sends no keepalives, a streamed call that goes quiet after its response starts ends at 600 seconds with a read-timeout error instead of the deadline. anton sets no timeout of its own on those clients.
 
 ```bash
 export ANTON_MODEL_CALL_IDLE_TIMEOUT_S=600

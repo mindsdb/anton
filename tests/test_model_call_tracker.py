@@ -79,8 +79,78 @@ _ENTRY_POINTS = {
     "code": lambda c: c.code(system="s", messages=[]),
     "code_stream": lambda c: _drain(c.code_stream(system="s", messages=[])),
     "summarize": lambda c: c.summarize(system="s", messages=[]),
+    "generate_object": lambda c: c.generate_object(_Verdict, system="s", messages=[]),
     "generate_object_code": lambda c: c.generate_object_code(_Verdict, system="s", messages=[]),
 }
+
+
+class _FailingProvider(_GatedProvider):
+    """Every call waits on ``release``, then fails the way a gateway 500 does."""
+
+    async def complete(self, **_kwargs) -> LLMResponse:
+        await self.release.wait()
+        raise RuntimeError("gateway 500")
+
+    async def stream(self, **_kwargs):
+        await self.release.wait()
+        raise RuntimeError("gateway 500")
+        yield  # pragma: no cover
+
+
+def test_the_names_hosts_read_stay_put():
+    """cowork-server reads these by attribute and by class name, never by
+    import, so a rename here passes its CI and silently stops its ticks or
+    its no-response card: ModelWaitTicker._snapshot and model_wait_sse
+    (cowork/streaming/liveness.py), and is_model_timeout_error and the
+    ``ModelCallTimeoutError`` row of _REMOTE_TYPE_MAPPINGS
+    (cowork/handlers/turn_errors.py). The cloud pod's _model_wait_line reads
+    the same snapshot fields."""
+    from anton.core.llm.provider import ModelCallTimeoutError
+
+    assert MODEL_WAIT_PHASE == "model_wait"
+    assert {"message", "open_for_s"} <= set(ModelCallSnapshot.model_fields)
+    assert ModelCallTimeoutError.__name__ == "ModelCallTimeoutError"
+    assert ModelCallTimeoutError.code == "model_timeout"
+    exc = ModelCallTimeoutError(role="planning", model="m", idle_timeout_s=600.0)
+    assert not hasattr(exc, "response") and not hasattr(exc, "request")
+
+
+@pytest.mark.parametrize("entry", list(_ENTRY_POINTS))
+async def test_every_entry_point_fails_at_once_once_the_turn_latched(entry):
+    """After one call ran out its deadline, every later call in the turn fails
+    as soon as it is issued, without reaching the provider."""
+    from anton.core.llm.provider import ModelCallTimeoutError
+
+    client = _client(_GatedProvider())  # would wait forever if it were reached
+    tracker = ModelCallTracker()
+    liveness.arm_turn_tracker(tracker)
+    tracker.record_expiry(exc=ModelCallTimeoutError(role="router", model="m", idle_timeout_s=600.0))
+
+    with pytest.raises(ModelCallTimeoutError):
+        await asyncio.wait_for(_ENTRY_POINTS[entry](client), timeout=1)
+    assert tracker._calls == [], f"{entry} registered a call after the latch"
+
+
+@pytest.mark.parametrize("entry", list(_ENTRY_POINTS))
+async def test_a_call_that_fails_closes_too(entry):
+    """Side paths (compaction, the rule filter) swallow a failed call. A call
+    left open would keep reporting a wait, so a tool that hangs afterwards
+    would get still-working lines instead of meeting the host's bounds."""
+    provider = _FailingProvider()
+    client = _client(provider)
+    tracker = ModelCallTracker()
+    liveness.arm_turn_tracker(tracker)
+
+    task = asyncio.ensure_future(_ENTRY_POINTS[entry](client))
+    await asyncio.sleep(0.02)
+    assert tracker.snapshot() is not None, f"{entry} reported no wait"
+
+    provider.release.set()
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(task, timeout=2)
+
+    assert tracker._calls == [], f"{entry} left its failed call open"
+    assert tracker.snapshot() is None
 
 
 @pytest.mark.parametrize("entry", list(_ENTRY_POINTS))
@@ -88,7 +158,7 @@ async def test_every_entry_point_reports_while_it_waits_and_closes_after(entry):
     provider = _GatedProvider()
     client = _client(provider)
     tracker = ModelCallTracker()
-    client.call_tracker = tracker
+    liveness.arm_turn_tracker(tracker)
 
     task = asyncio.ensure_future(_ENTRY_POINTS[entry](client))
     await asyncio.sleep(0.02)
@@ -112,7 +182,7 @@ async def test_a_stream_parked_at_its_yield_is_not_waiting_on_the_provider():
     provider.release.set()
     client = _client(provider)
     tracker = ModelCallTracker()
-    client.call_tracker = tracker
+    liveness.arm_turn_tracker(tracker)
 
     stream = client.plan_stream(system="s", messages=[])
     first = await anext(stream)
