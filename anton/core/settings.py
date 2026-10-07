@@ -20,10 +20,9 @@ class CoreSettings(BaseSettings):
     max_tool_rounds: int = 25
     max_continuations: int = 3
     # Skip the completion verifier when a turn used fewer than this many tool
-    # rounds. Default 1 preserves today's behavior (only pure Q&A, tool_round==0,
-    # is skipped). Raise to 2 to also skip trivial single-tool-round turns once
-    # verdict logs confirm they're rarely INCOMPLETE (ENG-716).
-    verify_min_tool_rounds: int = 1
+    # rounds. At 2, pure Q&A and single-tool-round turns skip it: prod data showed
+    # it sent back fewer than 2.5% of single-round turns, so the call rarely pays.
+    verify_min_tool_rounds: int = 2
     # Jev settles confident COMPLETE/WAITING verdicts on MindsHub; everything else,
     # and every BYOK setup, uses the LLM verifier as before. "off" is the kill switch.
     verifier_jev: Literal["on", "off"] = "on"

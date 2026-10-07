@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+from anton.core.llm.prompt_builder import SESSION_CONTEXT_MARKER, ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.skills import Skill, SkillStore
 
 
@@ -79,7 +79,7 @@ class TestProceduralMemorySection:
         # The section instructs the LLM how to use them
         assert "recall_skill" in prompt
 
-    def test_section_appears_after_other_contexts(
+    def test_section_is_in_the_shared_part_before_session_context(
         self, populated_store: SkillStore
     ):
         builder = ChatSystemPromptBuilder()
@@ -89,15 +89,37 @@ class TestProceduralMemorySection:
             datasource_context="\n\n## Datasources\nDS HERE",
             skill_store=populated_store,
         )
-        # Procedural memory should appear AFTER datasource_context
+        # Saved skills are the same in every project, so they sit in the shared,
+        # cacheable part; datasources and memory are project-specific.
         memory_pos = prompt.find("MEMORY HERE")
         ds_pos = prompt.find("DS HERE")
         proc_pos = prompt.find("## Procedural memory")
-        assert memory_pos != -1
-        assert ds_pos != -1
-        assert proc_pos != -1
-        assert proc_pos > ds_pos
-        assert proc_pos < memory_pos
+        boundary = prompt.find(SESSION_CONTEXT_MARKER)
+        assert -1 not in (memory_pos, ds_pos, proc_pos, boundary)
+        assert proc_pos < boundary < ds_pos < memory_pos
+        assert prompt.count(SESSION_CONTEXT_MARKER) == 1
+
+    def test_shared_part_is_identical_across_projects(self, populated_store: SkillStore):
+        builder = ChatSystemPromptBuilder()
+
+        def build(name):
+            return _build_prompt(
+                builder,
+                project_context=f"\n\n## Project\n{name}",
+                datasource_context=f"\n\n## Datasources\n{name} db",
+                memory_context=f"\n\n## Memory\n{name} notes",
+                skill_store=populated_store,
+            )
+
+        alpha, beta = build("alpha"), build("beta")
+        assert alpha.split(SESSION_CONTEXT_MARKER)[0] == beta.split(SESSION_CONTEXT_MARKER)[0]
+        assert "alpha" not in alpha.split(SESSION_CONTEXT_MARKER)[0]
+        assert {"alpha", "alpha db", "alpha notes"} <= set(
+            line.strip() for line in alpha.split(SESSION_CONTEXT_MARKER)[1].splitlines())
+
+    def test_no_session_context_means_no_boundary(self):
+        prompt = _build_prompt(ChatSystemPromptBuilder())
+        assert SESSION_CONTEXT_MARKER not in prompt
 
     def test_section_is_compact(self, populated_store: SkillStore):
         """Sanity check: ~50 tokens per skill or less.
