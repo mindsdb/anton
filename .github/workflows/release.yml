@@ -60,6 +60,7 @@ jobs:
     needs: [auto-release, verify-wheel]
     permissions:
       contents: read
+      id-token: write  # the build job assumes its ECR writer role through GitHub OIDC
     uses: ./.github/workflows/scratchpad-dev-build.yml
     with:
       environment: production

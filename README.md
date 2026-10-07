@@ -316,6 +316,7 @@ Anton uses an automated release flow with two publish streams — **stable** fro
    - Builds the wheel (hatch-vcs derives the version from that tag) and publishes it to PyPI.
    - Publishes a GitHub release with auto-generated notes.
    - Triggers [`tests_e2e_release.yml`](.github/workflows/tests_e2e_release.yml) to run live e2e tests against the released version.
+   - Builds the scratchpad pod image after those tests pass and pushes it to `minds-anton-scratchpad` as `production` (see [Scratchpad image](#scratchpad-image)).
 
 The version computation, tag push, and release creation are shared with the other
 service repos through the `calver-release.yml` reusable workflow in
@@ -325,6 +326,20 @@ workflow supplies the major component and consumes the resulting `tag`/`version`
 ### Staging release candidates
 
 Every push to `staging` publishes a **release candidate** through [`.github/workflows/publish-staging.yml`](.github/workflows/publish-staging.yml): it cuts a PEP 440 pre-release tag (`v2.YY.M.DD.SEQrcN`), publishes a GitHub pre-release, and uploads the wheel to PyPI — so cowork-server staging installs an immutable, versioned Anton instead of a mutable branch or hand-pinned commit (ENG-1159). These never reach production: resolvers ignore pre-releases unless a specifier names one, and PyPI's `info.version` (read by the prod desktop updater) excludes them.
+
+### Scratchpad image
+
+[`.github/workflows/scratchpad-dev-build.yml`](.github/workflows/scratchpad-dev-build.yml) builds the scratchpad pod image and pushes it to ECR. It runs on a GitHub-hosted runner and gets short-lived AWS credentials through GitHub OIDC.
+
+| Run | GitHub environment | AWS role | ECR repository |
+|---|---|---|---|
+| Pull request from a branch in this repo | none | `gha-anton-ecr-dev` | `minds-anton-scratchpad-dev` |
+| Push to `staging`, through `publish-staging.yml` | `staging` | `gha-anton-ecr-dev` | `minds-anton-scratchpad-dev` |
+| Push to `main`, through `release.yml` | `prod` | `gha-anton-ecr-prod` | `minds-anton-scratchpad` |
+
+Each build tags the image `<env>-<sha>` and moves the `<env>` and `latest` tags in its repository. A pull request build also adds `development-head-<head sha>`. Pull requests from forks skip the build, and the run summary says why.
+
+The `staging` environment accepts runs from the `staging` branch only. The `prod` environment accepts runs from `main` only, and `gha-anton-ecr-prod` trusts only `prod` runs on `main`. So in this repo only a `release.yml` run on `main` can push the production image, whether a push or a manual dispatch started it.
 
 ### What you should NOT do
 

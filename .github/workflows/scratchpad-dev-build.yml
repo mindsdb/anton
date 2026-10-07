@@ -1,6 +1,6 @@
 name: Scratchpad image build
 
-# Builds and pushes the minds-anton-scratchpad image (the sandbox pod image) to ECR.
+# Builds and pushes the anton scratchpad image (the sandbox pod image) to ECR.
 # Two ways in:
 #
 #   - Every pull request whose branch lives in this repository builds for the
@@ -9,13 +9,19 @@ name: Scratchpad image build
 #   - release.yml and publish-staging.yml call this workflow after they mint a
 #     tag, building for `production` and `staging` respectively (ENG-2129).
 #
-# The shared build-push-ecr action tags every build three ways:
-# `<env>-<sha>`, `<env>-head-<pr head sha>` (pull requests only), and the
-# moving `<env>` tag. scratchpad-controller points each environment's
-# SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE at the moving tag and pulls with
-# imagePullPolicy Always, so a release reaches worker pods without anyone
-# editing a sha into a values file. There is no Helm chart for this image, so
-# this workflow only builds (no deploy job).
+# The build runs on a GitHub-hosted runner and pushes with a short-lived AWS
+# role it assumes through GitHub OIDC. The gate job's `target` step picks the
+# GitHub environment, the role and the ECR repository for each way in: pull
+# requests and staging push to minds-anton-scratchpad-dev, and only a
+# production build from main pushes to minds-anton-scratchpad.
+#
+# The shared build-push-ecr action tags every build `<env>-<sha>`,
+# `<env>-head-<pr head sha>` (pull requests only), the moving `<env>` tag, and
+# `latest`, all in that build's repository. scratchpad-controller points each
+# environment's SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE at the moving tag and
+# pulls with imagePullPolicy Always, so a release reaches worker pods without
+# anyone editing a sha into a values file. There is no Helm chart for this
+# image, so this workflow only builds (no deploy job).
 #
 # The image is smoke-tested inside the build, not here: the Dockerfile's last layer runs
 # docker/image_smoke.py as UID 1000, which executes both entrypoints the controller execs.
@@ -45,15 +51,18 @@ defaults:
 
 jobs:
 
-  # Who may reach the self-hosted build runner: pull requests from branches in
-  # this repository, and calls from the release pipelines. Anything else is
-  # refused with a run-summary line saying why.
+  # Who may build and push the image: pull requests from branches in this
+  # repository, and calls from the release pipelines. Anything else is refused
+  # with a run-summary line saying why.
   gate:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.decide.outputs.run }}
+      environment: ${{ steps.target.outputs.environment }}
+      role: ${{ steps.target.outputs.role }}
+      repository: ${{ steps.target.outputs.repository }}
     steps:
-      - name: Decide whether this run may reach the runner
+      - name: Decide whether this run may build
         id: decide
         env:
           IS_PR: ${{ github.event_name == 'pull_request' }}
@@ -79,22 +88,59 @@ jobs:
             {
               echo "### Build skipped: fork pull request"
               echo
-              echo "The scratchpad image build runs on a self-hosted runner inside our"
-              echo "cluster, so it does not execute code from a fork. Nothing is wrong"
-              echo "with this pull request."
+              echo "The scratchpad image build pushes to our container registry with"
+              echo "an AWS role, so it does not build code from a fork. Nothing is"
+              echo "wrong with this pull request."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # One row per way in. Which role a job can assume follows from the
+      # environment it names, because the trust policies on the
+      # gha-anton-ecr-dev and gha-anton-ecr-prod IAM roles (mindsdb/terraform)
+      # match the OIDC subject and ref. A pull request names no environment,
+      # so its token carries the pull_request subject, which only the dev role
+      # trusts. The prod role trusts only the prod environment on main, and
+      # the prod environment admits only main.
+      - name: Pick the environment, role and repository for this build
+        id: target
+        env:
+          # Empty on every event except a workflow_call from a release pipeline.
+          CALLED_FOR: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          case "${CALLED_FOR:-}" in
+            "")
+              environment=""
+              role="arn:aws:iam::168681354662:role/gha-anton-ecr-dev"
+              repository="minds-anton-scratchpad-dev"
+              ;;
+            staging)
+              environment="staging"
+              role="arn:aws:iam::168681354662:role/gha-anton-ecr-dev"
+              repository="minds-anton-scratchpad-dev"
+              ;;
+            production)
+              environment="prod"
+              role="arn:aws:iam::168681354662:role/gha-anton-ecr-prod"
+              repository="minds-anton-scratchpad"
+              ;;
+            *)
+              echo "::error::no build target for environment '${CALLED_FOR}'"
+              exit 1
+              ;;
+          esac
+          {
+            echo "environment=$environment"
+            echo "role=$role"
+            echo "repository=$repository"
+          } >> "$GITHUB_OUTPUT"
+
   # The version the image will report, resolved from tags (ENG-1796).
   #
-  # Its own job, on ubuntu-latest, for two reasons. The build runs on the
-  # self-hosted mdb-dev runner and nothing in this repo has ever run setup-uv
-  # there, so resolving the version in the build job would put an unproven
-  # dependency in front of the image. And keeping it separate leaves the build's
-  # checkout shallow: .git never enters the docker context (see .dockerignore),
-  # so only this job needs the history.
+  # Its own job so the build's checkout stays shallow: .git never enters the
+  # docker context (see .dockerignore), so only this job needs the history.
   #
   # A release pipeline passes the version it just minted instead, for the same
   # reason publish-staging.yml pins SETUPTOOLS_SCM_PRETEND_VERSION: a re-run on
@@ -105,13 +151,14 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: inputs.version == ''
         with:
           # hatch-vcs derives the version by describing against tags, and the
           # default fetch-depth of 1 fetches none of them.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v5
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         if: inputs.version == ''
         with:
           python-version: "3.12"
@@ -164,7 +211,16 @@ jobs:
   build:
     needs: [version, gate]
     if: needs.gate.outputs.run == 'true'
-    runs-on: mdb-dev
+    runs-on: ubuntu-latest
+    # Empty on a pull request, so the job names no environment. The gate's
+    # `target` step says why that decides which role the job can assume.
+    environment: ${{ needs.gate.outputs.environment }}
+    # Both callers grant id-token on the job that calls this workflow, because
+    # GitHub fails a caller's whole run before any job starts when a called
+    # job names a scope the caller did not grant.
+    permissions:
+      contents: read
+      id-token: write  # mints the OIDC token the ECR writer role is assumed with
     # Job-level rather than workflow-level so it holds when this workflow is
     # called: a pull request cancels its own superseded build; a release build
     # queues behind the previous one for the same environment and is never
@@ -179,13 +235,23 @@ jobs:
       AWS_REGION: us-east-1
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: mindsdb/github-actions/setup-env@main
+      - name: Assume the ECR writer role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ needs.gate.outputs.role }}
+          aws-region: ${{ env.AWS_REGION }}
       - id: build
         uses: mindsdb/github-actions/build-push-ecr@main
         with:
-          # Override the repo-slug default so the image lands at .../minds-anton-scratchpad.
-          module-name: minds-anton-scratchpad
+          # Build with buildx on this runner, using the credentials the step
+          # above configured, instead of the in-cluster remote builder.
+          builder: local
+          # The ECR repository name, which overrides the repo-slug default.
+          module-name: ${{ needs.gate.outputs.repository }}
           build-for-environment: ${{ inputs.environment || 'development' }}
           # Expanded unquoted by the shared action, so the value must not contain
           # whitespace — a PEP 440 version never does, and the shape check in the
