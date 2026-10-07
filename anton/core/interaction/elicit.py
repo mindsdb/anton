@@ -226,8 +226,13 @@ async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
     # leave answer mode, and the turn would hang until the timeout.
     await elicitor.begin(question_id, request)  # open the channel FIRST
     watcher = getattr(session, "escape_watcher", None)
+    # The turn's model-call tracker: while a question waits on the user, no
+    # host may report a model wait, so the question's own timeout decides.
+    calls = getattr(session, "model_calls", None)
     started = time.monotonic()
     try:
+        if calls is not None:
+            calls.question_opened()
         if watcher is not None:
             # Paused before any emit so an emit() raising can't leave a
             # pause() unmatched by a resume().
@@ -270,6 +275,8 @@ async def elicit(session, question_id: str, request: AskRequest) -> AskAnswer:
         return answer
     finally:
         session.answer_wait_s += time.monotonic() - started
+        if calls is not None:
+            calls.question_closed()
         if watcher is not None:
             watcher.resume()
         await elicitor.end(question_id)

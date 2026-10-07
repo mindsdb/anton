@@ -30,6 +30,7 @@ from anton.core.llm.provider import (
     EndpointConfigurationError,
     FreeServingPausedError,
     MindsHubBillingStop,
+    ModelCallTimeoutError,
     ModelRestrictedError,
     ModelUnavailableError,
     ProviderAuthError,
@@ -326,6 +327,9 @@ _CURATED_SAMPLES = {
     RequestRefusedError: lambda: RequestRefusedError(
         "refused reasoning effort", code="parameter_refused", status_code=400,
     ),
+    ModelCallTimeoutError: lambda: ModelCallTimeoutError(
+        role="planning", model="latest:sonnet", idle_timeout_s=600.0,
+    ),
 }
 
 
@@ -535,6 +539,7 @@ def test_classify_transient_carries_the_status_it_classified_from(status, body, 
         ("connection_error", "connection_failure"),
         ("http_500", "http_5xx"),
         ("http_503", "http_5xx"),
+        ("model_timeout", "no_output"),
     ],
 )
 def test_every_code_anton_mints_maps_to_a_kind(code, expected_kind):
