@@ -13,6 +13,7 @@ import hmac
 import secrets
 import urllib.error
 import zipfile
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from anton.core.artifacts.internal_files import (
@@ -107,7 +108,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # inputs (PRD, tech spec, discovery state) are the user's working documents,
 # not deliverables — they are hidden from `files[]` and must stay out of the
 # public bundle for the same reason.
-_BUNDLE_SKIP_NAMES = {PUBLISHED_FILENAME, REVISIONS_DIRNAME} | GENERATION_INPUT_FILES
+_BUNDLE_SKIP_NAMES = frozenset({PUBLISHED_FILENAME, REVISIONS_DIRNAME}) | GENERATION_INPUT_FILES
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without
@@ -228,14 +229,40 @@ _REF_PATTERNS = [
 ]
 
 
+def _bundle_entries(
+    root: Path, files: Iterable[Path], skip: frozenset[str]
+) -> Iterator[tuple[Path, str]]:
+    """Yield (file, arcname) for each of *files* (paths under *root*) that may
+    enter the published bundle.
+
+    Skipped: non-files, files that resolve outside *root* (a symlink must not
+    publish what it points to), and files with a *skip* name on the path as
+    written or as resolved. Names match case-insensitively because on macOS
+    `.PUBLISHED.json` opens `.published.json`.
+    """
+    real_root = root.resolve()
+    folded = {name.casefold() for name in skip}
+    for f in files:
+        if not f.is_file():
+            continue
+        target = f.resolve()
+        if not target.is_relative_to(real_root):
+            continue
+        rel = f.relative_to(root)
+        parts = rel.parts + target.relative_to(real_root).parts
+        if not any(part.casefold() in folded for part in parts):
+            yield f, rel.as_posix()
+
+
 def _find_referenced_files(html_path: Path) -> list[Path]:
-    """Scan an HTML file for relative references and return existing sibling paths."""
+    """Scan an HTML file for relative references and return the resolved
+    paths they point to; `_bundle_entries` decides which ones are bundled."""
     try:
         html = html_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return []
 
-    parent = html_path.parent
+    parent = html_path.parent.resolve()
     refs: set[Path] = set()
 
     for pattern in _REF_PATTERNS:
@@ -244,10 +271,7 @@ def _find_referenced_files(html_path: Path) -> list[Path]:
             # Skip absolute URLs, data URIs, anchors, protocol-relative
             if not ref or ref.startswith(("/", "http:", "https:", "data:", "//")):
                 continue
-            candidate = (parent / ref).resolve()
-            # Only include files that exist and are under the parent directory
-            if candidate.is_file() and str(candidate).startswith(str(parent.resolve())):
-                refs.add(candidate)
+            refs.add((parent / ref).resolve())
 
     return sorted(refs)
 
@@ -284,17 +308,20 @@ def _zip_html(path: Path) -> bytes:
         if path.is_file():
             _write_scrubbed(zf, path, "index.html")
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
-            parent = path.resolve().parent
-            for ref in _find_referenced_files(path):
-                _write_scrubbed(zf, ref, ref.relative_to(parent).as_posix())
+            primary = path.resolve()
+            refs = _find_referenced_files(path)
+            for ref, arc_name in _bundle_entries(path.parent.resolve(), refs, _BUNDLE_SKIP_NAMES):
+                # The primary page owns `index.html`, so a sibling under that
+                # name would replace it. A self-reference keeps its duplicate
+                # entry so existing bundles keep their md5.
+                if arc_name != "index.html" or ref == primary:
+                    _write_scrubbed(zf, ref, arc_name)
         else:
             # Directory — include all files except owner-side housekeeping
             # (e.g. `.published.json`, which holds the plaintext access
             # password and must never be published).
-            for f in sorted(path.rglob("*")):
-                rel = f.relative_to(path)
-                if f.is_file() and not any(part in _BUNDLE_SKIP_NAMES for part in rel.parts):
-                    _write_scrubbed(zf, f, rel.as_posix())
+            for f, arc_name in _bundle_entries(path, sorted(path.rglob("*")), _BUNDLE_SKIP_NAMES):
+                _write_scrubbed(zf, f, arc_name)
     return buf.getvalue()
 
 
@@ -313,36 +340,20 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
     """Bundle backend.py + static/ + requirements.txt into a zip.
 
     Returns (zip_bytes, included_arcnames). Text files are scrubbed.
-    Housekeeping files (metadata.json, README.md, backend.log) are excluded.
+    Non-content files are skipped (see `_bundle_entries`).
     """
+    files = [
+        artifact_dir / "backend.py",
+        artifact_dir / "requirements.txt",
+        *sorted((artifact_dir / "static").rglob("*")),
+        artifact_dir / "state_manifest.json",
+    ]
     buf = io.BytesIO()
     included: list[str] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        backend = artifact_dir / "backend.py"
-        if backend.is_file():
-            _write_scrubbed(zf, backend, "backend.py")
-            included.append("backend.py")
-
-        reqs = artifact_dir / "requirements.txt"
-        if reqs.is_file():
-            _write_scrubbed(zf, reqs, "requirements.txt")
-            included.append("requirements.txt")
-
-        static_dir = artifact_dir / "static"
-        if static_dir.is_dir():
-            for f in sorted(static_dir.rglob("*")):
-                if not f.is_file():
-                    continue
-                arc_name = f"static/{f.relative_to(static_dir).as_posix()}"
-                if Path(arc_name).name in _FULLSTACK_EXCLUDED:
-                    continue
-                _write_scrubbed(zf, f, arc_name)
-                included.append(arc_name)
-
-        manifest = artifact_dir / "state_manifest.json"
-        if manifest.is_file():
-            _write_scrubbed(zf, manifest, "state_manifest.json")
-            included.append("state_manifest.json")
+        for f, arc_name in _bundle_entries(artifact_dir, files, _FULLSTACK_EXCLUDED):
+            _write_scrubbed(zf, f, arc_name)
+            included.append(arc_name)
 
         included.extend(_vendor_anton_state(zf))
     return buf.getvalue(), included
