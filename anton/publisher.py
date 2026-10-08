@@ -107,7 +107,7 @@ DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 # inputs (PRD, tech spec, discovery state) are the user's working documents,
 # not deliverables — they are hidden from `files[]` and must stay out of the
 # public bundle for the same reason.
-_BUNDLE_SKIP_NAMES = {PUBLISHED_FILENAME, REVISIONS_DIRNAME} | GENERATION_INPUT_FILES
+_BUNDLE_SKIP_NAMES = frozenset({PUBLISHED_FILENAME, REVISIONS_DIRNAME}) | GENERATION_INPUT_FILES
 
 # PBKDF2 parameters for access passwords. Stdlib-only (no argon2 dep) so
 # the same verification runs in the anton-services viewer Lambda without
@@ -228,14 +228,32 @@ _REF_PATTERNS = [
 ]
 
 
+def _bundleable(f: Path, root: Path, skip: frozenset[str]) -> bool:
+    """True if *f*, a path under *root*, may enter the published bundle.
+
+    Owner-side files (a *skip* name anywhere on the path) stay out, and so
+    does anything that resolves outside *root*: a symlink must not publish
+    the file it points to. The resolved path is checked for *skip* names
+    too, so a symlink cannot alias an owner-side file under another name.
+    """
+    if not f.is_file():
+        return False
+    real_root, target = root.resolve(), f.resolve()
+    if not target.is_relative_to(real_root):
+        return False
+    parts = f.relative_to(root).parts + target.relative_to(real_root).parts
+    return not any(part in skip for part in parts)
+
+
 def _find_referenced_files(html_path: Path) -> list[Path]:
-    """Scan an HTML file for relative references and return existing sibling paths."""
+    """Scan an HTML file for relative references and return the bundleable
+    files they point to, as resolved paths under the HTML file's folder."""
     try:
         html = html_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return []
 
-    parent = html_path.parent
+    parent = html_path.parent.resolve()
     refs: set[Path] = set()
 
     for pattern in _REF_PATTERNS:
@@ -245,8 +263,7 @@ def _find_referenced_files(html_path: Path) -> list[Path]:
             if not ref or ref.startswith(("/", "http:", "https:", "data:", "//")):
                 continue
             candidate = (parent / ref).resolve()
-            # Only include files that exist and are under the parent directory
-            if candidate.is_file() and str(candidate).startswith(str(parent.resolve())):
+            if _bundleable(candidate, parent, _BUNDLE_SKIP_NAMES):
                 refs.add(candidate)
 
     return sorted(refs)
@@ -284,7 +301,7 @@ def _zip_html(path: Path) -> bytes:
         if path.is_file():
             _write_scrubbed(zf, path, "index.html")
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
-            parent = path.resolve().parent
+            parent = path.parent.resolve()
             for ref in _find_referenced_files(path):
                 _write_scrubbed(zf, ref, ref.relative_to(parent).as_posix())
         else:
@@ -292,9 +309,8 @@ def _zip_html(path: Path) -> bytes:
             # (e.g. `.published.json`, which holds the plaintext access
             # password and must never be published).
             for f in sorted(path.rglob("*")):
-                rel = f.relative_to(path)
-                if f.is_file() and not any(part in _BUNDLE_SKIP_NAMES for part in rel.parts):
-                    _write_scrubbed(zf, f, rel.as_posix())
+                if _bundleable(f, path, _BUNDLE_SKIP_NAMES):
+                    _write_scrubbed(zf, f, f.relative_to(path).as_posix())
     return buf.getvalue()
 
 
@@ -318,31 +334,19 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
     buf = io.BytesIO()
     included: list[str] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        backend = artifact_dir / "backend.py"
-        if backend.is_file():
-            _write_scrubbed(zf, backend, "backend.py")
-            included.append("backend.py")
-
-        reqs = artifact_dir / "requirements.txt"
-        if reqs.is_file():
-            _write_scrubbed(zf, reqs, "requirements.txt")
-            included.append("requirements.txt")
-
-        static_dir = artifact_dir / "static"
-        if static_dir.is_dir():
-            for f in sorted(static_dir.rglob("*")):
-                if not f.is_file():
-                    continue
-                arc_name = f"static/{f.relative_to(static_dir).as_posix()}"
-                if Path(arc_name).name in _FULLSTACK_EXCLUDED:
-                    continue
+        def add(f: Path) -> None:
+            if _bundleable(f, artifact_dir, _FULLSTACK_EXCLUDED):
+                arc_name = f.relative_to(artifact_dir).as_posix()
                 _write_scrubbed(zf, f, arc_name)
                 included.append(arc_name)
 
-        manifest = artifact_dir / "state_manifest.json"
-        if manifest.is_file():
-            _write_scrubbed(zf, manifest, "state_manifest.json")
-            included.append("state_manifest.json")
+        add(artifact_dir / "backend.py")
+        add(artifact_dir / "requirements.txt")
+        static_dir = artifact_dir / "static"
+        if static_dir.is_dir():
+            for f in sorted(static_dir.rglob("*")):
+                add(f)
+        add(artifact_dir / "state_manifest.json")
 
         included.extend(_vendor_anton_state(zf))
     return buf.getvalue(), included
