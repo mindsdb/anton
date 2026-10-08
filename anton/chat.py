@@ -503,7 +503,7 @@ async def _handle_publish(
         resolve_access,
         resolve_publish_target,
     )
-    from anton.publisher import publish
+    from anton.publisher import ArtifactOwnedByOtherUserError, publish
 
     console.print()
 
@@ -784,10 +784,18 @@ async def _handle_publish(
                 access=eff_access,
                 pwd_version=pwd_version,
                 access_version=access_version,
+                previous_access=prev,
             )
         except Exception as e:
             import urllib.error
-            if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+            if isinstance(e, ArtifactOwnedByOtherUserError):
+                console.print(f"  [anton.error]{e}[/]")
+                console.print(
+                    "  [anton.muted]Nothing was published; the existing link belongs "
+                    "to another account. Run /publish again and choose 'new' to "
+                    "publish your own copy.[/]"
+                )
+            elif isinstance(e, urllib.error.HTTPError) and e.code == 401:
                 rejected = settings.minds_api_key
                 settings.minds_api_key = None
                 # Clear it where it is WRITTEN — but only if the global vault is
@@ -857,6 +865,9 @@ async def _handle_publish(
     # 5. Save mapping (owner-side; new unified location + key).
     if returned_report_id:
         entry = dict(owner_side)
+        if result.get("password_hash"):
+            # Sent again by the next publish while the password is unchanged.
+            entry["password_hash"] = result["password_hash"]
         entry.update({
             "report_id": returned_report_id,
             "url": view_url,
