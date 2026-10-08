@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from anton.core.artifacts.models import (
     FileEntry,
     ProvenanceEntry,
     TurnEntry,
+    canonical_artifact_id,
 )
 # BACKEND_LOG_FILENAME is re-exported for backend_launcher and generate_artifact.
 from anton.core.artifacts.internal_files import (
@@ -148,6 +149,14 @@ def _truncate_summary(text: str) -> str:
     if len(text) <= _SUMMARY_MAX:
         return text
     return text[: _SUMMARY_MAX - 1].rstrip() + "…"
+
+
+def _id_key(key: str) -> str:
+    """`key` as an artifact id would be stored, or `key` itself if it is not one."""
+    try:
+        return canonical_artifact_id(key)
+    except ValueError:
+        return key
 
 
 class ArtifactStore:
@@ -361,6 +370,39 @@ class ArtifactStore:
         if artifact is None:
             return None
         return self._reconcile_files(artifact)
+
+    def find(self, keys: Iterable[str]) -> tuple[list[Artifact], list[str]]:
+        """Artifacts whose slug or id equals one of `keys`, newest first, and
+        the keys that matched nothing, in request order.
+
+        Only the matches are reconciled against disk, so a lookup does not
+        rewrite every artifact's metadata the way `list()` can.
+        """
+        wanted = list(dict.fromkeys(keys))
+        found: dict[str, Artifact] = {}
+        unmatched: list[str] = []
+        for key in wanted:
+            artifact = self._load_silent(key) if key else None
+            if artifact is None:
+                unmatched.append(key)
+            else:
+                found[artifact.slug] = artifact
+        if unmatched and self._root.is_dir():
+            by_id: dict[str, list[str]] = {}
+            for key in unmatched:
+                by_id.setdefault(_id_key(key), []).append(key)
+            matched: set[str] = set()
+            for child in sorted(self._root.iterdir()):
+                if not child.is_dir():
+                    continue
+                artifact = found.get(child.name) or self._load_silent(child.name)
+                if artifact is not None and artifact.id in by_id:
+                    found.setdefault(artifact.slug, artifact)
+                    matched.update(by_id[artifact.id])
+            unmatched = [key for key in unmatched if key not in matched]
+        result = [self._reconcile_files(artifact) for artifact in found.values()]
+        result.sort(key=lambda a: a.updatedAt, reverse=True)
+        return result, unmatched
 
     # ── Provenance + per-turn updates ───────────────────────────
 

@@ -487,29 +487,6 @@ async def test_rounds_left_note_rides_on_every_tool_result_message(tmp_path: Pat
     assert any("wrap up" in n for n in notes), "the tail rounds must tell the model to finish"
 
 
-async def test_read_file_full_flag_is_passed_through(tmp_path: Path, monkeypatch):
-    from anton.core.tools.generate_artifact import sub_tools
-
-    seen: dict = {}
-
-    def fake_read_file(root, rel, *, full=False):
-        seen["full"] = full
-        return {"ok": True, "message": "content"}
-
-    monkeypatch.setattr(sub_tools, "read_file", fake_read_file)
-    session = AsyncMock()
-    session._llm.plan_stream = _stream_mock(
-        _resp([ToolCall(id="1", name="read_file", input={"path": "d.html", "full": True}),
-               ToolCall(id="2", name="finish", input={"summary": "ok"})])
-    )
-    result = await _run_loop(
-        session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
-    )
-    assert isinstance(result, dict)
-    assert seen["full"] is True
-
-
 # ── Output budget per round, and surviving a dropped stream ──────────────────
 
 
@@ -559,9 +536,9 @@ async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
     session = AsyncMock()
     session._llm.max_tokens = 8192          # client default, far below the round's
     session._llm.plan_stream = _stream_mock(
-        # An inert round-0 call: read_file is handled entirely inside sub_tools,
-        # so the round is consumed without dragging a real handler onto the mock.
-        _resp([ToolCall(id="0", name="read_file", input={"path": "absent.html"})])
+        # An inert round-0 call: the mock session has no workspace, so the read
+        # is refused (access denied) and touches nothing.
+        _resp([ToolCall(id="0", name="read_text_file", input={"path": "absent.html"})])
     )
     session._llm.code_stream = _stream_mock(
         _resp_capped(
@@ -602,9 +579,9 @@ async def test_dropped_stream_is_retried_once_with_a_halved_budget(tmp_path: Pat
     """
     session = AsyncMock()
     session._llm.plan_stream = _stream_mock(
-        # An inert round-0 call: read_file is handled entirely inside sub_tools,
-        # so the round is consumed without dragging a real handler onto the mock.
-        _resp([ToolCall(id="0", name="read_file", input={"path": "absent.html"})])
+        # An inert round-0 call: the mock session has no workspace, so the read
+        # is refused (access denied) and touches nothing.
+        _resp([ToolCall(id="0", name="read_text_file", input={"path": "absent.html"})])
     )
     good = _one_event_stream(
         _resp([ToolCall(id="1", name="write_file", input={"path": "index.html"})],
@@ -635,9 +612,9 @@ async def test_a_second_drop_in_the_same_round_propagates(tmp_path: Path):
     """
     session = AsyncMock()
     session._llm.plan_stream = _stream_mock(
-        # An inert round-0 call: read_file is handled entirely inside sub_tools,
-        # so the round is consumed without dragging a real handler onto the mock.
-        _resp([ToolCall(id="0", name="read_file", input={"path": "absent.html"})])
+        # An inert round-0 call: the mock session has no workspace, so the read
+        # is refused (access denied) and touches nothing.
+        _resp([ToolCall(id="0", name="read_text_file", input={"path": "absent.html"})])
     )
     session._llm.code_stream = Mock(
         side_effect=[_dropping_stream()(), _dropping_stream()()]
@@ -647,3 +624,163 @@ async def test_a_second_drop_in_the_same_round_propagates(tmp_path: Path):
             session=session, system="s", kickoff="k", artifact_path=tmp_path,
             node_label="generate_frontend",
         )
+
+
+async def test_read_text_file_paths_are_relative_to_the_artifact_folder(tmp_path: Path, monkeypatch):
+    import anton.core.tools.tool_handlers as tool_handlers
+    from anton.core.tools.registry import ToolOutcome
+
+    seen: list[dict] = []
+
+    async def fake_read(session, tc_input):
+        seen.append(tc_input)
+        return ToolOutcome(content="text", ok=True)
+
+    monkeypatch.setattr(tool_handlers, "handle_read_text_file", fake_read)
+    (tmp_path / "index.html").write_text("<html>")
+    first_input = {"path": "index.html", "line_numbers": True}
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _resp([
+            ToolCall(id="1", name="read_text_file", input=first_input),
+            ToolCall(id="2", name="read_text_file", input={"path": "/index.html"}),
+            ToolCall(id="3", name="read_text_file", input={"path": "/etc/hosts"}),
+            ToolCall(id="4", name="finish", input={"summary": "ok"}),
+        ])
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        require_files=False, node_label="generate_frontend",
+    )
+    assert isinstance(result, dict)
+    assert [call["path"] for call in seen] == [
+        str(tmp_path / "index.html"), str(tmp_path / "index.html"), "/etc/hosts",
+    ]
+    assert all(call["line_numbers"] is False for call in seen)
+    # The call's input already sits in the history; it must not be rewritten.
+    assert first_input == {"path": "index.html", "line_numbers": True}
+
+
+async def test_a_binary_file_is_refused_without_ending_the_run(tmp_path: Path):
+    """The old reader raised UnicodeDecodeError here and the whole generation
+    died; the refusal must come back as a tool result the next round sees."""
+    from types import SimpleNamespace
+
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
+    session = AsyncMock()
+    session._workspace = SimpleNamespace(base=tmp_path, artifacts_dir=tmp_path)
+    session._skill_drafts_root = None
+    captured: list[list[dict]] = []
+
+    def _finish(**kw):
+        captured.append(list(kw["messages"]))
+        return _one_event_stream(_resp([ToolCall(id="2", name="finish", input={"summary": "ok"})]))
+
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="read_text_file", input={"path": "logo.png"})])
+    )
+    session._llm.code_stream = Mock(side_effect=_finish)
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        require_files=False, node_label="generate_frontend",
+    )
+    assert isinstance(result, dict)
+    tool_results = [
+        str(block.get("content"))
+        for message in captured[0]
+        if message["role"] == "user" and isinstance(message["content"], list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert any("not a UTF-8 text file" in content for content in tool_results), tool_results
+
+
+async def test_an_unresolvable_path_is_reported_without_ending_the_run(tmp_path: Path):
+    """`expanduser` raises for an unknown `~user`; that must reach the model
+    as a tool result, not end the generation."""
+    from types import SimpleNamespace
+
+    session = AsyncMock()
+    session._workspace = SimpleNamespace(base=tmp_path, artifacts_dir=tmp_path)
+    session._skill_drafts_root = None
+    captured: list[list[dict]] = []
+
+    def _finish(**kw):
+        captured.append(list(kw["messages"]))
+        return _one_event_stream(_resp([ToolCall(id="2", name="finish", input={"summary": "ok"})]))
+
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="read_text_file", input={"path": "~nosuchuser_xyz/a"})])
+    )
+    session._llm.code_stream = Mock(side_effect=_finish)
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        require_files=False, node_label="generate_frontend",
+    )
+    assert isinstance(result, dict)
+    tool_results = [
+        str(block.get("content"))
+        for message in captured[0]
+        if message["role"] == "user" and isinstance(message["content"], list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert any("invalid path" in content for content in tool_results), tool_results
+
+
+async def _read_result_through_the_loop(tmp_path: Path, path: str) -> str:
+    """Run one `read_text_file` call through the write loop; return its tool result."""
+    from types import SimpleNamespace
+
+    session = AsyncMock()
+    session._workspace = SimpleNamespace(base=tmp_path, artifacts_dir=tmp_path)
+    session._skill_drafts_root = None
+    captured: list[list[dict]] = []
+
+    def _finish(**kw):
+        captured.append(list(kw["messages"]))
+        return _one_event_stream(_resp([ToolCall(id="2", name="finish", input={"summary": "ok"})]))
+
+    session._llm.plan_stream = _stream_mock(
+        _resp([ToolCall(id="1", name="read_text_file", input={"path": path})])
+    )
+    session._llm.code_stream = Mock(side_effect=_finish)
+    result = await _run_loop(
+        session=session, system="s", kickoff="k", artifact_path=tmp_path,
+        require_files=False, node_label="generate_frontend",
+    )
+    assert isinstance(result, dict)
+    tool_results = [
+        str(block.get("content"))
+        for message in captured[0]
+        if message["role"] == "user" and isinstance(message["content"], list)
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert len(tool_results) == 1, tool_results
+    return tool_results[0]
+
+
+async def test_the_read_header_names_the_file_relative_to_the_artifact_folder(tmp_path: Path):
+    """The generator must never see the absolute folder path in a header, or it
+    may copy it into `write_file`."""
+    (tmp_path / "index.html").write_text("<html>\n</html>\n", encoding="utf-8")
+    content = await _read_result_through_the_loop(tmp_path, "index.html")
+    assert content.splitlines()[0].startswith("index.html — lines"), content
+    assert str(tmp_path) not in content.splitlines()[0]
+
+
+async def test_the_file_text_below_the_header_is_left_unchanged(tmp_path: Path):
+    """Only the first line is rewritten; file text that contains the artifact
+    path is data and must reach the generator as written."""
+    body = f"const root = '{tmp_path}/data.json';\n"
+    (tmp_path / "index.html").write_text(body, encoding="utf-8")
+    content = await _read_result_through_the_loop(tmp_path, "index.html")
+    header, rest = content.split("\n", 1)
+    assert header.startswith("index.html — lines"), content
+    assert f"{tmp_path}/data.json" in rest, content
+
+
+async def test_a_read_error_names_the_file_relative_to_the_artifact_folder(tmp_path: Path):
+    content = await _read_result_through_the_loop(tmp_path, "missing.html")
+    assert content.startswith("Error: file not found: missing.html"), content

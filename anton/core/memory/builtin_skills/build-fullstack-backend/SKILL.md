@@ -57,7 +57,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     * Do we need different/more data, or should the spec be revised?
   - If the answer to any question is "no" — go back to step 2 and revise the technical     specification based on what you learned about the actual data
 
-4. IMPLEMENT BACKEND: In a scratchpad **named exactly the artifact slug** (use the `slug` returned by `create_artifact` / `open_artifact` as the scratchpad name), implement the backend code. `launch_backend` runs the backend in this same scratchpad's venv, so any packages you install or imports you test here will be present at launch.
+4. IMPLEMENT BACKEND: In a scratchpad **named exactly the artifact slug** (use the `slug` returned by `create_artifact` or listed by `list_artifacts` as the scratchpad name), implement the backend code. `launch_backend` runs the backend in this same scratchpad's venv, so any packages you install or imports you test here will be present at launch.
 
   CANONICAL TEMPLATE (use this skeleton verbatim, add your routes inside the `# === API routes ===` block). It runs unchanged both locally (`python backend.py --port=NNN`) and on AWS Lambda (handler = `backend.handler`):
 

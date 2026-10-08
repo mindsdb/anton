@@ -25,7 +25,7 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   2. WRITE TO DISK INCREMENTALLY. Open the output `.html` once in 'w' mode, then `open(path, 'a')` to append head → body skeleton → each chart section → nav/JS → closing tags. Each cell appends a small chunk you can sanity-check. Do NOT build a single 20KB+ HTML string in memory and write it at the end.
   3. CAP STRING SIZE PER CELL at ~5KB. Large-string scratchpad calls are the single biggest cause of silent failures (the tool occasionally drops the `code` payload on oversized inputs and the cell comes back with an empty-code error, which still counts against the round cap). If a section is too big, split it.
   4. NEVER re-emit the full HTML mid-build. Append deltas, don't re-print the world. Assembly is a one-line concat at the end, not a re-render of everything you've written so far.
-  5. KEEP READS SMALL. To verify what landed, `os.path.getsize(path)` or `open(path).read(2000)` — never `open(path).read()` on a multi-KB HTML.
+  5. KEEP READS SMALL. To verify what landed, `os.path.getsize(path)` or the `read_text_file` tool with `start_line=-20` — never read a multi-KB HTML whole.
 
   HOST CONTRACT (critical — the same static checks `generate_artifact` runs on every page it produces; a hand-built page gets no automatic check, so verify each item yourself before you finish):
   1. A complete HTML document with an explicit `<body>`...`</body>`, and `<html lang>` set to the language the user writes in (UI text follows it too).

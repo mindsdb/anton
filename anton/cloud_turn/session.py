@@ -65,8 +65,8 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         "scratchpad",
         "create_artifact",
         "list_artifacts",
-        "open_artifact",
         "update_artifact",
+        "read_text_file",
         # Safe to list only because a cortex is always built — core registers
         # `memorize` with one, and an allowlist name matching no tool is fatal.
         "memorize",

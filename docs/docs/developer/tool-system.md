@@ -61,12 +61,13 @@ conditionally:
 |---|---|---|
 | `scratchpad` | Always | `handle_scratchpad` — exec/view/reset/remove/dump/install |
 | `read_image` | Always | `handle_read_image` — returns image content blocks |
+| `read_text_file` | Always | `handle_read_text_file` — a range of lines of a text file, under the read access policy (`file_access.py`) |
 | `memorize` | Cortex (or legacy self-awareness) present | `handle_memorize` → `cortex.encode()` |
 | `recall` | Episodic memory enabled | `handle_recall` → `episodic.recall_formatted()` |
 | `recall_skill` | Always (no-op without skills) | `handle_recall_skill` → `SkillStore.load()` + counter |
 | `web_search` | Only when the provider does NOT execute it natively | `handle_web_search_fallback` |
 | `web_fetch` | Only when the provider does NOT execute it natively | `handle_web_fetch_fallback` |
-| `create_artifact`, `list_artifacts`, `open_artifact`, `set_artifact_primary` | A workspace is bound to the session | Artifact store handlers |
+| `create_artifact`, `list_artifacts`, `update_artifact`, `launch_backend`, `generate_artifact` | A workspace is bound to the session | Artifact store handlers |
 
 Notes:
 

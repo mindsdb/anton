@@ -693,7 +693,7 @@ def test_fetch_prompt_has_no_write_file_instructions():
     system = prompts.build_fetch_data_system_prompt(Path("/tmp/a"))
     assert "Do NOT write any artifact files" in system
     assert "write_file" not in system
-    assert "read_file" not in system
+    assert "read_text_file" not in system
     assert "mode=\"a\"" not in system
 
 
@@ -863,15 +863,14 @@ def test_the_markers_are_quoted_identically_on_every_surface():
         assert begin in kickoff and end in kickoff
 
 
-# ── `read_file`'s surfaces must agree about `full` ──────────────────────────
+# ── The read surfaces must agree ────────────────────────────────────────────
 #
-# A live run found them disagreeing in the way that costs the most:
-# the only place stating that `full=true` is expensive and must not be used to
-# check finished work was the tool schema's `description`, while the system
-# prompt showed `read_file(path)` as a one-argument call and separately
-# promised the tail was "all you need". The model read all of them, believed
-# the promise, discovered the tail says nothing about the middle of a file,
-# and escalated to `full=true` anyway.
+# A live run found them disagreeing in the way that costs the most: the only
+# place saying a whole-file read is expensive and must not be used to check
+# finished work was the tool schema, while the system prompt promised the
+# default read was "all you need". The model believed the promise and then
+# escalated to a whole-file read anyway. The system prompt, the read tool's
+# description and the size rules must say the same things.
 
 def _write_loop_prompts() -> dict[str, str]:
     """Every system prompt a `_run_loop` write round can be sent.
@@ -889,17 +888,20 @@ def _write_loop_prompts() -> dict[str, str]:
     }
 
 
-def test_the_system_prompt_names_the_full_parameter_at_all():
-    """It did not, which is why the only warning about it lived in the tool
-    schema — which the model reads as a listing, not as rules."""
-    for name, text in _write_loop_prompts().items():
-        assert "full=true" in text, name
+def test_every_surface_names_the_tail_read_and_the_whole_file_read():
+    from anton.core.tools.generate_artifact.sub_tools import GEN_READ_TEXT_FILE_DESCRIPTION
+
+    surfaces = {**_write_loop_prompts(), "tool": GEN_READ_TEXT_FILE_DESCRIPTION}
+    for name, text in surfaces.items():
+        assert "start_line=-20" in text, name
+        assert "end_line=-1" in text, name
+        assert "never to check finished work" in text, name
 
 
-def test_the_system_prompt_says_what_full_costs_and_when_not_to_use_it():
+def test_no_surface_still_names_the_old_read_tool():
     for name, text in _write_loop_prompts().items():
-        assert "ENTIRE file" in text, name
-        assert "finish" in text, name
+        assert "read_file" not in text, name
+        assert "full=true" not in text, name
 
 
 def test_no_surface_still_claims_the_tail_is_all_you_need():
@@ -910,12 +912,14 @@ def test_no_surface_still_claims_the_tail_is_all_you_need():
         assert "which is all you need" not in text, name
 
 
-def test_the_write_result_is_advertised_as_the_cheaper_answer():
-    """`write_file` reports lines now; the prompt has to say so, or the model
-    spends a round re-learning what it was already told."""
+def test_every_surface_says_write_file_reports_the_lines_of_each_part():
+    from anton.core.tools.generate_artifact.sub_tools import GEN_READ_TEXT_FILE_DESCRIPTION
+
     for name, text in _write_loop_prompts().items():
-        assert "LINES" in text, name
+        assert "the lines this part occupies" in text, name
         assert "without reading" in text, name
+        assert "reports the lines each part occupies" in text, name
+    assert "reports the lines each part occupies" in GEN_READ_TEXT_FILE_DESCRIPTION
 
 
 # ── html-app generator prompt: structure ────────────────────────────────────

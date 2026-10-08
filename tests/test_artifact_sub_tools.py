@@ -51,6 +51,16 @@ def test_absolute_path_is_coerced_into_the_folder(tmp_path: Path):
     assert (tmp_path / "etc" / "passwd").is_file()
 
 
+def test_an_absolute_path_inside_the_folder_is_used_as_is(tmp_path: Path):
+    """An absolute path that already names a file in the folder must not be
+    re-rooted into a nested copy of the folder's own path."""
+    res = write_file(tmp_path, str(tmp_path / "index.html"), "x", mode="w")
+    assert res["ok"] is True
+    assert res["written"] == "index.html"
+    assert (tmp_path / "index.html").read_text(encoding="utf-8") == "x"
+    assert not (tmp_path / str(tmp_path).lstrip("/")).exists()
+
+
 def test_unknown_mode_is_rejected(tmp_path: Path):
     res = write_file(tmp_path, "a.html", "x", mode="x")
     assert res["ok"] is False
@@ -103,42 +113,11 @@ def test_a_large_body_is_written_without_a_size_warning(tmp_path: Path):
     assert "chunk limit" not in res["message"]
 
 
-def test_read_file_returns_size_and_tail_by_default(tmp_path: Path):
-    text = "A" * 3000 + "</html>"
-    (tmp_path / "d.html").write_text(text, encoding="utf-8")
-    res = sub_tools.read_file(tmp_path, "d.html")
-    assert res["ok"]
-    assert f"{len(text)} characters" in res["message"]
-    assert res["message"].rstrip().endswith("(pass `full=true` to read the entire file)")
-    assert "</html>" in res["message"]  # the tail is what proves the file is closed
-    assert len(res["message"]) < len(text)  # must not ship the whole file
-
-
-def test_read_file_full_returns_everything(tmp_path: Path):
-    text = "A" * 3000
-    (tmp_path / "d.html").write_text(text, encoding="utf-8")
-    res = sub_tools.read_file(tmp_path, "d.html", full=True)
-    assert res["ok"]
-    assert res["message"] == text
-
-
-def test_read_file_small_file_is_returned_whole(tmp_path: Path):
-    (tmp_path / "s.txt").write_text("short", encoding="utf-8")
-    res = sub_tools.read_file(tmp_path, "s.txt")
-    assert res["ok"]
-    assert res["message"] == "short"
-
-
-def test_read_file_schema_advertises_full():
-    props = sub_tools.READ_FILE_SCHEMA["input_schema"]["properties"]
-    assert "full" in props
-
-
 # ── The line map: what removes the "let me verify" round ────────────────────
 #
 # Measured 2026-09-14 on the memory-game (`find the pair`) run: after a successful append the
-# model spent a whole round on `read_file` whose only new information over the
-# write result was the tail, then escalated to `full=true` — 26 006 characters,
+# model spent a whole round on a read whose only new information over the
+# write result was the tail, then escalated to a whole-file read — 26 006 characters,
 # 31% of the final round's context. The write result reporting a size only is
 # what made the first of those rounds look worth spending.
 
@@ -155,8 +134,7 @@ def test_write_file_reports_lines_beside_the_size(tmp_path: Path):
 # delta was len(str) mislabelled while the total came from stat(). For mode="w"
 # those two describe the same thing and must agree; the 890 they differed by
 # said 890 bytes had been in the file before, which was false. The model
-# reasons about REPLY_BODY_CHARS in characters and read_file answers in
-# characters, so characters it is.
+# reasons about REPLY_BODY_CHARS in characters, so characters it is.
 def test_an_overwrite_reports_the_same_figure_for_the_chunk_and_the_file(
     tmp_path: Path,
 ):
@@ -176,10 +154,66 @@ def test_the_reported_size_is_characters_not_bytes(tmp_path: Path):
     assert "20" not in res["message"], res["message"]
 
 
-def test_an_append_reports_both_its_own_lines_and_the_new_total(tmp_path: Path):
-    """Together these give the chunk's span — the last N of M lines — which is
-    the map a targeted re-read needs, without reading anything."""
+def test_an_append_without_a_line_ending_continues_the_last_line(tmp_path: Path):
+    """The part's first character lands on the file's last line, so that is
+    where its range starts — counted the way `read_text_file` counts."""
     write_file(tmp_path, "a.html", "1\n2\n3\n4\n5\n6", mode="w")
     res = write_file(tmp_path, "a.html", "\n7\n8", mode="a")
-    assert "/ 3 lines" in res["message"], res["message"]      # the chunk
-    assert "/ 8 lines)" in res["message"], res["message"]     # the file
+    assert "this part is lines 6-8" in res["message"], res["message"]
+    assert "/ 8 lines)" in res["message"], res["message"]
+
+
+def test_an_append_after_a_line_ending_starts_on_the_next_line(tmp_path: Path):
+    write_file(tmp_path, "a.html", "a\nb\n", mode="w")
+    res = write_file(tmp_path, "a.html", "c\nd", mode="a")
+    assert "this part is lines 3-4" in res["message"], res["message"]
+    assert "/ 4 lines)" in res["message"], res["message"]
+
+
+def test_an_overwrite_starts_at_line_one(tmp_path: Path):
+    res = write_file(tmp_path, "a.html", "one\ntwo\nthree\n", mode="w")
+    assert "this part is lines 1-3" in res["message"], res["message"]
+    assert "/ 3 lines)" in res["message"], res["message"]
+
+
+def test_an_empty_append_after_text_without_a_line_ending_reports_no_part_lines(
+    tmp_path: Path,
+):
+    """An empty part has no lines, so it must not claim the file's last one."""
+    write_file(tmp_path, "a.html", "a\nb", mode="w")
+    res = write_file(tmp_path, "a.html", "", mode="a")
+    assert res["ok"] is True
+    assert "this part is lines" not in res["message"], res["message"]
+    assert "file now 3 characters / 2 lines" in res["message"], res["message"]
+
+
+def test_an_empty_append_after_a_line_ending_reports_no_part_lines(tmp_path: Path):
+    write_file(tmp_path, "a.html", "a\nb\n", mode="w")
+    res = write_file(tmp_path, "a.html", "", mode="a")
+    assert res["ok"] is True
+    assert "this part is lines" not in res["message"], res["message"]
+    assert "file now 4 characters / 2 lines" in res["message"], res["message"]
+
+
+def test_an_append_to_a_file_that_is_not_utf8_reports_no_part_lines(tmp_path: Path):
+    """The file cannot be read back, so the message gives no line range."""
+    (tmp_path / "a.html").write_bytes(b"caf\xe9 au lait")
+    res = write_file(tmp_path, "a.html", "x", mode="a")
+    assert res["ok"] is True
+    assert "this part is lines" not in res["message"], res["message"]
+
+
+def test_the_write_loop_offers_read_text_file_without_line_numbers():
+    from anton.core.tools.tool_defs import READ_TEXT_FILE_TOOL
+
+    schemas = sub_tools.tool_schemas()
+    assert [s["name"] for s in schemas] == ["write_file", "read_text_file", "finish", "scratchpad"]
+    read = schemas[1]
+    props = read["input_schema"]["properties"]
+    assert "line_numbers" not in props
+    assert props["path"]["description"] == "Path relative to the artifact folder, or absolute."
+    assert read["description"] == sub_tools.GEN_READ_TEXT_FILE_DESCRIPTION
+    # `tool_schema` hands out the main agent's dict; it must stay intact.
+    main = READ_TEXT_FILE_TOOL.input_schema["properties"]
+    assert "line_numbers" in main
+    assert main["path"]["description"] == "Absolute path, or a path relative to the project root."

@@ -644,8 +644,9 @@ every artifact fits, so the default is the whole file in a single body with
 `write_file(path, mode="w")`. Split ONLY a file that will clearly exceed it:
 - Each part costs a round; splitting a file that would have fit wastes it.
 - Continue exactly where the file now ends and append with `mode="a"`.
-  The `write_file` result reports the CHARACTERS and LINES added and the
-  file's new totals, so you know where the part landed without reading.
+  The `write_file` result reports the characters added,
+  the lines this part occupies and the file's new totals, so you know where
+  the part landed without reading.
 - If a reply is cut off before the closing marker, nothing is written and
   the tool result tells you what to send next. Follow it; never re-emit the
   whole file to "fix" something.
@@ -676,10 +677,13 @@ _GEN_TOOLS = """\
   them from `os.environ`, never from `data_vault` files. If a cell fails the
   same way twice, change strategy instead of re-running it.
 - `write_file(path, mode="w"|"a")` — writes the body of THIS reply.
-- `read_file(path)` — size, line count and tail of a file you wrote.
-  `read_file(path, full=true)` pulls the ENTIRE file into your context and
-  keeps it there for every remaining round. Use either only when you must
-  re-read content in order to keep WRITING — never to check finished work.
+- `read_text_file(path, start_line?, end_line?)` — read a file you wrote,
+  only when you must see it to keep writing; never to check finished work.
+  `path` is relative to the artifact folder. To see where your last part
+  ended, read the end: `start_line=-20`. To see one section, pass its line
+  range; `write_file` reports the lines each part occupies. `end_line=-1`
+  pulls the whole file into your context and keeps it there for every
+  remaining round.
 - `finish(summary)` — call exactly once, after the file is written.
 
 Python → JS: if you ever build file text inside a scratchpad cell, escape
