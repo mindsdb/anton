@@ -28,8 +28,9 @@ def _make_artifact(tmp_path: Path, content_dir: str = "") -> Path:
     """An artifact folder with normal assets, owner-side files and symlinks.
 
     Assets go under *content_dir* (``static`` for fullstack). Next to them:
-    `.published.json`, a `.revisions/` entry, a symlink to a file outside the
-    folder and a symlink aliasing `.published.json` under an innocent name.
+    `.published.json` (also under another case), `prd.md`, a `.revisions/`
+    entry, a symlink to a file outside the folder and a symlink aliasing
+    `.published.json` under an innocent name.
     """
     artifact = tmp_path / "sales"
     content = artifact / content_dir
@@ -37,6 +38,8 @@ def _make_artifact(tmp_path: Path, content_dir: str = "") -> Path:
     for asset in ASSETS:
         (content / asset).write_bytes(b"asset")
     (artifact / ".published.json").write_text('{"access_password": "owner-secret"}')
+    (artifact / ".PUBLISHED.json").write_text('{"access_password": "owner-secret"}')
+    (artifact / "prd.md").write_text("owner-secret")
     (artifact / ".revisions" / "entries").mkdir(parents=True)
     (artifact / ".revisions" / "entries" / "old.html").write_text("owner-secret")
     outside = tmp_path / "outside.env"
@@ -52,7 +55,8 @@ def test_single_file_bundles_assets_but_not_owner_side_or_outside_files(tmp_path
     html.write_text(
         '<link href="style.css"><script src="app.js"></script><img src="img/logo.png">'
         "<style>body { background: url('img/bg.png') }</style>"
-        '<a href=".published.json">x</a><a href=".revisions/entries/old.html">x</a>'
+        '<a href=".published.json">x</a><a href=".PUBLISHED.json">x</a><a href="prd.md">x</a>'
+        '<a href=".revisions/entries/old.html">x</a>'
         '<a href="data.txt">x</a><a href="settings.json">x</a>'
     )
 
@@ -72,6 +76,29 @@ def test_single_file_skips_sibling_folder_with_same_name_prefix(tmp_path):
     html.write_text('<link href="style.css"><link href="../sales-old/style.css">')
 
     assert _names(_zip_html(html)) == {"index.html", "style.css"}
+
+
+def test_single_file_symlinked_primary_bundles_assets_next_to_the_link(tmp_path):
+    artifact = tmp_path / "artifact"
+    (artifact / "dist").mkdir(parents=True)
+    (artifact / "style.css").write_text("own")
+    (artifact / "dist" / "page.html").write_text('<link href="style.css">')
+    html = artifact / "index.html"
+    html.symlink_to(artifact / "dist" / "page.html")
+
+    assert _names(_zip_html(html)) == {"index.html", "style.css"}
+
+
+def test_single_file_sibling_index_html_does_not_replace_the_primary(tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "index.html").write_text("<h1>Sibling</h1>")
+    report = artifact / "report.html"
+    report.write_text('<h1>Report</h1><a href="index.html">home</a>')
+
+    with zipfile.ZipFile(io.BytesIO(_zip_html(report))) as bundle:
+        assert bundle.namelist() == ["index.html"]
+        assert b"Report" in bundle.read("index.html")
 
 
 def test_directory_bundles_assets_but_not_owner_side_or_outside_files(tmp_path):
@@ -98,5 +125,5 @@ def test_fullstack_bundles_assets_but_not_owner_side_or_outside_files(tmp_path):
 
     own = {name for name in _names(zbytes) if not name.startswith("anton_state/")}
     assert own == {"backend.py", *(f"static/{asset}" for asset in ASSETS)}
-    assert set(included) >= own
+    assert set(included) == _names(zbytes)
     _assert_no_leak(zbytes)

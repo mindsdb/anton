@@ -235,6 +235,8 @@ def _bundleable(f: Path, root: Path, skip: frozenset[str]) -> bool:
     does anything that resolves outside *root*: a symlink must not publish
     the file it points to. The resolved path is checked for *skip* names
     too, so a symlink cannot alias an owner-side file under another name.
+    Names match case-insensitively: on macOS a reference to
+    `.PUBLISHED.json` opens `.published.json`.
     """
     if not f.is_file():
         return False
@@ -242,7 +244,8 @@ def _bundleable(f: Path, root: Path, skip: frozenset[str]) -> bool:
     if not target.is_relative_to(real_root):
         return False
     parts = f.relative_to(root).parts + target.relative_to(real_root).parts
-    return not any(part in skip for part in parts)
+    folded = {name.casefold() for name in skip}
+    return not any(part.casefold() in folded for part in parts)
 
 
 def _find_referenced_files(html_path: Path) -> list[Path]:
@@ -303,11 +306,16 @@ def _zip_html(path: Path) -> bytes:
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
             parent = path.parent.resolve()
             for ref in _find_referenced_files(path):
-                _write_scrubbed(zf, ref, ref.relative_to(parent).as_posix())
+                arc_name = ref.relative_to(parent).as_posix()
+                # The primary page owns `index.html`; a sibling with that
+                # name would replace it in the published bundle.
+                if arc_name != "index.html":
+                    _write_scrubbed(zf, ref, arc_name)
         else:
             # Directory — include all files except owner-side housekeeping
             # (e.g. `.published.json`, which holds the plaintext access
-            # password and must never be published).
+            # password and must never be published) and files that resolve
+            # outside the directory (see `_bundleable`).
             for f in sorted(path.rglob("*")):
                 if _bundleable(f, path, _BUNDLE_SKIP_NAMES):
                     _write_scrubbed(zf, f, f.relative_to(path).as_posix())
@@ -329,7 +337,8 @@ def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
     """Bundle backend.py + static/ + requirements.txt into a zip.
 
     Returns (zip_bytes, included_arcnames). Text files are scrubbed.
-    Housekeeping files (metadata.json, README.md, backend.log) are excluded.
+    Non-content files (`_FULLSTACK_EXCLUDED`) and files that resolve outside
+    the artifact folder are excluded (see `_bundleable`).
     """
     buf = io.BytesIO()
     included: list[str] = []
