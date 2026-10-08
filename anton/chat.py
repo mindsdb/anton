@@ -795,7 +795,8 @@ async def _handle_publish(
                 console.print(f"  [anton.error]{e}[/]")
                 console.print(
                     "  [anton.muted]Nothing was published; the existing link belongs "
-                    "to another account.[/]"
+                    "to another account. Run /publish again and choose 'new' to "
+                    "publish your own copy.[/]"
                 )
             elif isinstance(e, urllib.error.HTTPError) and e.code == 401:
                 rejected = settings.minds_api_key

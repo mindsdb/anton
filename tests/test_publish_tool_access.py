@@ -296,12 +296,23 @@ async def test_tool_does_not_retry_without_report_id_for_another_owner(tmp_path)
     assert fake_publish.call_count == 1  # no second call without report_id
     assert fake_publish.call_args.kwargs["report_id"] == "rid-owned-elsewhere"
     assert out.startswith("PUBLISH FAILED: This artifact was published by another owner.")
+    assert "/publish and choosing 'new'" in out
     assert published.read_text() == before
 
 
+def _http_error(status: int, reason: str, body: bytes = b"") -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://view.test/upload", status, reason, {}, io.BytesIO(body))
+
+
+@pytest.mark.parametrize("failure", [
+    pytest.param(_http_error(409, "Conflict", b"not json"), id="unrecognised-409"),
+    pytest.param(_http_error(503, "Service Unavailable"), id="5xx"),
+    pytest.param(urllib.error.URLError(TimeoutError("timed out")), id="timeout"),
+])
 @pytest.mark.asyncio
-async def test_tool_does_not_retry_without_report_id_on_any_409(tmp_path):
-    """A 409 whose body cannot be recognised must not turn into a silent copy."""
+async def test_tool_does_not_retry_without_report_id_while_the_report_may_exist(tmp_path, failure):
+    """The upload may have landed or the report may belong to someone else:
+    a retry without report_id would publish a copy under a new URL."""
     f = _artifact(tmp_path)
     published = f.parent / ".published.json"
     published.write_text(json.dumps({
@@ -309,8 +320,7 @@ async def test_tool_does_not_retry_without_report_id_on_any_409(tmp_path):
                         "mode": "public", "requires_password": False},
     }))
     before = published.read_text()
-    conflict = urllib.error.HTTPError("https://view.test/upload", 409, "Conflict", {}, io.BytesIO(b"not json"))
-    fake_publish = mock.Mock(side_effect=conflict)
+    fake_publish = mock.Mock(side_effect=failure)
     with mock.patch("anton.publisher.publish", fake_publish), \
          mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
          mock.patch("webbrowser.open"):
@@ -325,15 +335,14 @@ async def test_tool_does_not_retry_without_report_id_on_any_409(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tool_still_retries_without_report_id_on_other_failures(tmp_path):
-    """Only the 409 is exempt: a report deleted server-side still self-heals."""
+async def test_tool_retries_without_report_id_when_the_report_is_gone(tmp_path):
     f = _artifact(tmp_path)
     (f.parent / ".published.json").write_text(json.dumps({
         "report.html": {"report_id": "gone", "url": "u", "last_md5": "m",
                         "mode": "public", "requires_password": False},
     }))
     fake_publish = mock.Mock(side_effect=[
-        RuntimeError("HTTP Error 404: Not Found"),
+        _http_error(404, "Not Found"),
         {"view_url": "u2", "report_id": "fresh", "md5": "m2", "version": 1},
     ])
     with mock.patch("anton.publisher.publish", fake_publish), \

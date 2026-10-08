@@ -129,6 +129,26 @@ def hash_access_password(password: str) -> str:
     return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${b64(salt)}${b64(dk)}"
 
 
+def _hash_matches_password(stored: object, password: str) -> bool:
+    """True if `stored` is a `hash_access_password` hash of `password`.
+
+    Only the exact current format counts, iteration count included, so a hash
+    from older parameters or a hand-edited value is never sent again.
+    """
+    if not isinstance(stored, str):
+        return False
+    try:
+        scheme, iterations, salt_b64, dk_b64 = stored.split("$")
+        if scheme != "pbkdf2_sha256" or iterations != str(_PBKDF2_ITERATIONS):
+            return False
+        salt = base64.b64decode(salt_b64, validate=True)
+        expected = base64.b64decode(dk_b64, validate=True)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    except ValueError:
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
 def _normalize_emails(values) -> list[str]:
     """Strip + lowercase + de-dupe, preserving first-seen order."""
     seen: set[str] = set()
@@ -160,18 +180,7 @@ def _reusable_password_hash(password: str, previous: dict | None) -> str | None:
     if mode != "password" or previous.get("access_password") != password:
         return None
     stored = previous.get("password_hash")
-    if not isinstance(stored, str):
-        return None
-    try:
-        scheme, iterations, salt_b64, dk_b64 = stored.split("$")
-        salt = base64.b64decode(salt_b64, validate=True)
-        expected = base64.b64decode(dk_b64, validate=True)
-        if scheme != "pbkdf2_sha256" or int(iterations) != _PBKDF2_ITERATIONS:
-            return None
-        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
-    except (ValueError, TypeError):
-        return None
-    return stored if hmac.compare_digest(actual, expected) else None
+    return stored if _hash_matches_password(stored, password) else None
 
 
 def build_access_payload(

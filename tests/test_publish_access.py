@@ -194,6 +194,9 @@ def _hash_with(password: str, iterations: int, salt: bytes = b"0123456789abcdef"
         _password_entry("hunter2", hash_access_password("correct-horse")),
         # Another iteration count, even with a valid digest for that count.
         _password_entry("hunter2", _hash_with("hunter2", 1_000)),
+        # The right digest, but the iteration count is not written the way
+        # `hash_access_password` writes it.
+        _password_entry("hunter2", _hash_with("hunter2", 200_000).replace("$200000$", "$0200000$", 1)),
         # Malformed values.
         _password_entry("hunter2", "pbkdf2_sha256$200000$c2FsdA==$ZGs="),
         _password_entry("hunter2", "pbkdf2_sha256$many$c2FsdA==$ZGs="),

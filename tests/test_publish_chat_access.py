@@ -165,6 +165,7 @@ async def test_publish_reports_an_artifact_owned_by_another_account(tmp_path):
     text = console.export_text()
     assert "This artifact was published by another owner." in text
     assert "the existing link belongs to another account" in text
+    assert "choose 'new'" in text
     assert published.read_text() == before
     # Not an auth failure: the key stays in place.
     assert settings.minds_api_key == "key"

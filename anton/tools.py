@@ -700,15 +700,16 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
             return (
                 f"PUBLISH FAILED: {e} Do NOT call this tool again for this artifact "
                 "and do not publish it under a new report on your own. Tell the user "
-                "that the existing link belongs to another account."
+                "that the existing link belongs to another account, and that they can "
+                "publish their own copy by running /publish and choosing 'new'."
             )
         except Exception as e:
-            # A 409 means another owner or key holds this report, so a retry
-            # without report_id could only publish a copy under a new URL.
-            conflict = isinstance(e, urllib.error.HTTPError) and e.code == 409
-            if report_id and not conflict:
-                # The report may have been deleted server-side — retry
-                # without report_id to create a fresh one.
+            # Only a 404 says the report is gone, so publishing it afresh
+            # without report_id is safe. After a timeout, a 5xx or a 409 the
+            # report may still exist, and a retry would publish a copy under
+            # a new URL.
+            gone = isinstance(e, urllib.error.HTTPError) and e.code == 404
+            if report_id and gone:
                 try:
                     result = publish(
                         publish_target,
