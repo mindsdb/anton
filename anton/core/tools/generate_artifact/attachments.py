@@ -115,15 +115,22 @@ def _is_cowork_upload(resolved: Path) -> bool:
 
 
 def _working_folder_reason(resolved: Path, extra_roots: Sequence[Path]) -> str | None:
-    """The verdict for a file outside the workspace: allowed inside a working
-    folder unless a dot-component in its path below that folder hides it."""
+    """The verdict for a file outside the workspace: allowed when some working
+    folder holds it with no dot-component in its path below that folder.
+
+    Every holding folder is checked, so overlapping folders give the same
+    verdict in any order.
+    """
+    held = False
     for root in extra_roots:
         try:
             rel = resolved.relative_to(root)
         except ValueError:
             continue
-        return REFUSED_HIDDEN if any(part.startswith(".") for part in rel.parts) else None
-    return REFUSED_OUTSIDE
+        if not any(part.startswith(".") for part in rel.parts):
+            return None
+        held = True
+    return REFUSED_HIDDEN if held else REFUSED_OUTSIDE
 
 
 def refusal_reason(

@@ -48,6 +48,23 @@ def test_a_hidden_file_in_a_working_folder_is_refused(layout, hidden):
     assert refusal_reason(target.resolve(), workspace, (folder,)) == att_mod.REFUSED_HIDDEN
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_overlapping_working_folders_give_one_verdict_in_either_order(tmp_path, reverse):
+    work = tmp_path / "work"
+    imports = work / ".imports"
+    imports.mkdir(parents=True)
+    sheet = imports / "a.csv"
+    sheet.write_text("x")
+    secret = imports / ".env"
+    secret.write_text("x")
+    roots = (work.resolve(), imports.resolve())
+    if reverse:
+        roots = roots[::-1]
+
+    assert refusal_reason(sheet.resolve(), None, roots) is None
+    assert refusal_reason(secret.resolve(), None, roots) == att_mod.REFUSED_HIDDEN
+
+
 def test_a_file_outside_every_root_is_refused(layout):
     workspace, folder, outside = layout
     stray = outside / "contract.pdf"

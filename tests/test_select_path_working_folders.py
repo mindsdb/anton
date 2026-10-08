@@ -144,6 +144,32 @@ async def test_a_link_in_a_working_folder_pointing_outside_is_never_offered(layo
     assert by_pattern["status"] == "no_matches"
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_overlapping_working_folders_give_one_answer_in_either_order(tmp_path, reverse):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    work = tmp_path / "work"
+    nested = work / ".anton" / "shared"
+    nested.mkdir(parents=True)
+    (nested / "plan.md").write_text("a")
+    folders = [work, nested][::-1] if reverse else [work, nested]
+
+    result = await _call(_session(workspace, folders), {"pattern": "*.md", "base_dir": str(nested)})
+
+    assert result["path"] == str((nested / "plan.md").resolve())
+
+
+async def test_the_projects_anton_directory_stays_hidden_even_when_named_a_working_folder(tmp_path):
+    workspace = tmp_path / "project"
+    private = workspace / ".anton"
+    private.mkdir(parents=True)
+    (private / "notes.md").write_text("a")
+
+    result = await _call(_session(workspace, [private]), {"pattern": "*.md", "base_dir": str(private)})
+
+    assert result["status"] == "no_matches"
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="case-insensitive volume")
 async def test_a_case_variant_of_a_working_folder_path_fails_safe_on_macos(layout):
     workspace, folder, _ = layout

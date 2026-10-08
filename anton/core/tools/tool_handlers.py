@@ -1405,10 +1405,13 @@ def _collect_selection_candidates(
         if len(found) >= _SELECTION_MAX_CANDIDATES:
             return False
         resolved = path.resolve()
-        owner = _containing_root(roots, resolved)
-        if resolved in seen or owner is None or not resolved.exists():
+        holders = [r for r in roots if _is_within(r, resolved)]
+        if resolved in seen or not holders or not resolved.exists():
             return True
-        if ".anton" in resolved.relative_to(owner).parts:
+        # Inside the project its own rule decides; otherwise any working
+        # folder that sees no `.anton` admits it, whatever the folder order.
+        judges = holders[:1] if holders[0] == root else holders
+        if all(".anton" in resolved.relative_to(r).parts for r in judges):
             return True
         if (kind == "file" and not resolved.is_file()) or (kind == "folder" and not resolved.is_dir()):
             return True
