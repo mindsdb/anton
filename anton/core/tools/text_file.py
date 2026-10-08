@@ -51,6 +51,14 @@ def count_lines(text: str) -> int:
     return len(split_lines(text))
 
 
+def next_line_number(text: str) -> int:
+    """The line that text appended to `text` starts on."""
+    if not text:
+        return 1
+    total = count_lines(text)
+    return total + 1 if text.endswith(("\n", "\r")) else total
+
+
 @dataclass(frozen=True)
 class TextRange:
     path: str
@@ -101,7 +109,7 @@ def _shorten(line: str) -> str:
 
 def _resolve_range(
     total: int, start_line: int | None, end_line: int | None
-) -> tuple[int, int, bool]:
+) -> tuple[int, int]:
     if start_line == 0 or end_line == 0:
         raise InvalidRangeError(
             "line numbers start at 1; use a negative value to count from the end"
@@ -112,8 +120,7 @@ def _resolve_range(
         start = start_line
     else:
         start = max(1, total + start_line + 1)
-    default_end = end_line is None
-    if default_end:
+    if end_line is None:
         end = start + DEFAULT_LINE_COUNT - 1
     elif end_line > 0:
         end = end_line
@@ -125,7 +132,7 @@ def _resolve_range(
         )
     if end < start:
         raise InvalidRangeError("end_line is before start_line")
-    return start, min(end, total), default_end
+    return start, min(end, total)
 
 
 def read_text_range(
@@ -149,7 +156,7 @@ def read_text_range(
     total = len(lines)
     if total == 0:
         return TextRange(shown_path, 0, 0, 0, "", "done")
-    start, end, default_end = _resolve_range(total, start_line, end_line)
+    start, end = _resolve_range(total, start_line, end_line)
 
     out: list[str] = []
     size = 0
@@ -166,6 +173,6 @@ def read_text_range(
         out.append(text)
         size += added
         last = number
-    if stop == "done" and default_end and last < total:
+    if stop == "done" and end_line is None and last < total:
         stop = "page"
     return TextRange(shown_path, total, start, last, "\n".join(out), stop)

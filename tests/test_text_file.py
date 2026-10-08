@@ -11,9 +11,19 @@ from anton.core.tools.text_file import (
     InvalidRangeError,
     NotTextError,
     count_lines,
+    next_line_number,
     read_text_range,
     split_lines,
 )
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("", 1), ("a", 1), ("a\n", 2), ("a\r\n", 2), ("a\r", 2), ("a\nb", 2)],
+)
+def test_next_line_number(text, expected):
+    """An append to an unterminated last line continues that line."""
+    assert next_line_number(text) == expected
 
 
 def _write(tmp_path: Path, data: str | bytes, name: str = "f.txt") -> Path:

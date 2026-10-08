@@ -76,6 +76,23 @@ def test_a_key_that_cannot_be_an_id_does_not_scan_the_store(store, monkeypatch):
     assert loaded == ["alpha-typo"]
 
 
+def test_an_id_loads_its_slug_folder_first_and_stops(store, monkeypatch):
+    store.create(name="Alpha", description="d", type="html-app")
+    b = store.create(name="Beta", description="d", type="html-app")
+    store.create(name="Gamma", description="d", type="html-app")
+    loaded: list[str] = []
+    original = ArtifactStore._load_silent
+
+    def spy(self, slug):
+        loaded.append(slug)
+        return original(self, slug)
+
+    monkeypatch.setattr(ArtifactStore, "_load_silent", spy)
+    found, unmatched = store.find([b.id])
+    assert ([x.slug for x in found], unmatched) == ([b.slug], [])
+    assert loaded == [b.id, b.slug]
+
+
 def test_find_on_a_missing_root(tmp_path):
     found, unmatched = ArtifactStore(tmp_path / "none").find(["x"])
     assert (found, unmatched) == ([], ["x"])

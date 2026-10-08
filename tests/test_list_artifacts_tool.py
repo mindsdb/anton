@@ -5,32 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.artifacts import ArtifactStore
-from anton.core.tools.tool_handlers import handle_create_artifact, handle_list_artifacts
-
-
-class _Workspace:
-    def __init__(self, root: Path) -> None:
-        self.artifacts_dir = root
-
-
-class _Session:
-    def __init__(self, root: Path) -> None:
-        self._workspace = _Workspace(root)
-        self._session_id = "conv-1"
-        self._turn_count = 0
-        self._artifacts_touched: set[str] = set()
-        self._data_vault = None
+from anton.core.tools.tool_handlers import handle_list_artifacts
+from tests.test_artifact_turn_tracking import FakeSession, _create
 
 
 @pytest.fixture
-def session(tmp_path: Path) -> _Session:
-    return _Session(tmp_path / "artifacts")
-
-
-async def _create(session, name: str) -> str:
-    await handle_create_artifact(session, {"name": name, "description": "d", "type": "html-app"})
-    return next(a.slug for a in ArtifactStore(session._workspace.artifacts_dir).list() if a.name == name)
+def session(tmp_path: Path) -> FakeSession:
+    return FakeSession(tmp_path / "artifacts")
 
 
 async def test_summary_by_default(session):

@@ -665,68 +665,16 @@ async def test_read_text_file_paths_are_relative_to_the_artifact_folder(tmp_path
 async def test_a_binary_file_is_refused_without_ending_the_run(tmp_path: Path):
     """The old reader raised UnicodeDecodeError here and the whole generation
     died; the refusal must come back as a tool result the next round sees."""
-    from types import SimpleNamespace
-
     (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
-    session = AsyncMock()
-    session._workspace = SimpleNamespace(base=tmp_path, artifacts_dir=tmp_path)
-    session._skill_drafts_root = None
-    captured: list[list[dict]] = []
-
-    def _finish(**kw):
-        captured.append(list(kw["messages"]))
-        return _one_event_stream(_resp([ToolCall(id="2", name="finish", input={"summary": "ok"})]))
-
-    session._llm.plan_stream = _stream_mock(
-        _resp([ToolCall(id="1", name="read_text_file", input={"path": "logo.png"})])
-    )
-    session._llm.code_stream = Mock(side_effect=_finish)
-    result = await _run_loop(
-        session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
-    )
-    assert isinstance(result, dict)
-    tool_results = [
-        str(block.get("content"))
-        for message in captured[0]
-        if message["role"] == "user" and isinstance(message["content"], list)
-        for block in message["content"]
-        if isinstance(block, dict) and block.get("type") == "tool_result"
-    ]
-    assert any("not a UTF-8 text file" in content for content in tool_results), tool_results
+    content = await _read_result_through_the_loop(tmp_path, "logo.png")
+    assert "not a UTF-8 text file" in content, content
 
 
 async def test_an_unresolvable_path_is_reported_without_ending_the_run(tmp_path: Path):
     """`expanduser` raises for an unknown `~user`; that must reach the model
     as a tool result, not end the generation."""
-    from types import SimpleNamespace
-
-    session = AsyncMock()
-    session._workspace = SimpleNamespace(base=tmp_path, artifacts_dir=tmp_path)
-    session._skill_drafts_root = None
-    captured: list[list[dict]] = []
-
-    def _finish(**kw):
-        captured.append(list(kw["messages"]))
-        return _one_event_stream(_resp([ToolCall(id="2", name="finish", input={"summary": "ok"})]))
-
-    session._llm.plan_stream = _stream_mock(
-        _resp([ToolCall(id="1", name="read_text_file", input={"path": "~nosuchuser_xyz/a"})])
-    )
-    session._llm.code_stream = Mock(side_effect=_finish)
-    result = await _run_loop(
-        session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
-    )
-    assert isinstance(result, dict)
-    tool_results = [
-        str(block.get("content"))
-        for message in captured[0]
-        if message["role"] == "user" and isinstance(message["content"], list)
-        for block in message["content"]
-        if isinstance(block, dict) and block.get("type") == "tool_result"
-    ]
-    assert any("invalid path" in content for content in tool_results), tool_results
+    content = await _read_result_through_the_loop(tmp_path, "~nosuchuser_xyz/a")
+    assert "invalid path" in content, content
 
 
 async def _read_result_through_the_loop(tmp_path: Path, path: str) -> str:

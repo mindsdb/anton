@@ -6,6 +6,7 @@ quotes and escapes cost tokens without telling it anything.
 
 from __future__ import annotations
 
+import stat
 import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
@@ -52,12 +53,12 @@ def service_files(folder: Path) -> list[tuple[str, int]]:
     for name in sorted(NON_CONTENT_NAMES):
         if name.startswith("."):
             continue
-        path = folder / name
         try:
-            if path.is_file() and not path.is_symlink():
-                found.append((name, path.stat().st_size))
+            info = (folder / name).lstat()
         except OSError:
             continue
+        if stat.S_ISREG(info.st_mode):
+            found.append((name, info.st_size))
     return found
 
 
@@ -72,14 +73,8 @@ def _entry(artifact: Artifact, folder: Path, fields: Sequence[str]) -> list[str]
     for field in FIELDS:
         if field not in fields:
             continue
-        if field == "id":
-            lines.append(f"id: {artifact.id}")
-        elif field in ("name", "description"):
+        if field in ("name", "description"):
             lines.append(f"{field}: {_one_line(getattr(artifact, field))}")
-        elif field == "type":
-            lines.append(f"type: {artifact.type}")
-        elif field == "updatedAt":
-            lines.append(f"updatedAt: {_escape(artifact.updatedAt)}")
         elif field == "primary":
             lines.append(f"primary: {_escape(artifact.primary) if artifact.primary else '-'}")
         elif field == "files":
@@ -87,6 +82,8 @@ def _entry(artifact: Artifact, folder: Path, fields: Sequence[str]) -> list[str]
             lines += _file_lines("files", entries)
         elif field == "service_files":
             lines += _file_lines("service_files", service_files(folder))
+        else:
+            lines.append(f"{field}: {_escape(getattr(artifact, field))}")
     return lines
 
 

@@ -19,7 +19,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from anton.core.tools.text_file import count_lines
+from anton.core.tools.text_file import (
+    DEFAULT_LINE_COUNT,
+    MAX_LINE_CHARS,
+    count_lines,
+    next_line_number,
+)
 
 
 # ── Tool-call protocol helpers shared by both loops ─────────────────────────
@@ -277,10 +282,10 @@ GEN_READ_TEXT_FILE_DESCRIPTION = (
     "never to check finished work. `path` is relative to the artifact folder. "
     "To see where your last part ended, read the end: `start_line=-20`. To see "
     "one section, pass its line range; `write_file` reports the lines each part "
-    "occupies. Without a range you get the first 1000 lines; `end_line=-1` "
+    f"occupies. Without a range you get the first {DEFAULT_LINE_COUNT} lines; `end_line=-1` "
     "returns the whole file. Whatever you read stays in your context for every "
-    "remaining round. A line longer than 2,000 characters is shortened to its "
-    "first and last 1,000 characters with a mark in between; never copy the "
+    f"remaining round. A line longer than {MAX_LINE_CHARS:,} characters is shortened to its "
+    f"first and last {MAX_LINE_CHARS // 2:,} characters with a mark in between; never copy the "
     "mark into what you write."
 )
 
@@ -405,12 +410,7 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
         tail = ""
     else:
         total = count_lines(whole)
-        if not before:
-            first = 1
-        elif before.endswith(("\n", "\r")):
-            first = count_lines(before) + 1
-        else:
-            first = count_lines(before)
+        first = next_line_number(before)
         span = f"; this part is lines {first}-{total}" if content and first <= total else ""
         tail = f"{span}; file now {len(whole)} characters / {total} lines"
     message = f"{verb} {rel_written} (+{len(content)} characters{tail})."

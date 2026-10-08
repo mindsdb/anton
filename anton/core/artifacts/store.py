@@ -395,12 +395,22 @@ class ArtifactStore:
             if artifact_id is not None:
                 by_id.setdefault(artifact_id, []).append(key)
         if by_id and self._root.is_dir():
+            # A slug ends with `-<id[:8]>`, so the folders that do are loaded
+            # first, and the scan stops once every id (unique in a store) has
+            # its artifact.
+            suffixes = tuple({f"-{artifact_id[:ARTIFACT_ID_SLUG_PREFIX_LEN]}" for artifact_id in by_id})
+            children = sorted(
+                (child for child in self._root.iterdir() if child.is_dir()),
+                key=lambda child: not child.name.endswith(suffixes),
+            )
             matched: set[str] = set()
-            for child in sorted(self._root.iterdir()):
-                if not child.is_dir():
-                    continue
+            pending = set(by_id)
+            for child in children:
+                if not pending:
+                    break
                 artifact = found.get(child.name) or self._load_silent(child.name)
-                if artifact is not None and artifact.id in by_id:
+                if artifact is not None and artifact.id in pending:
+                    pending.discard(artifact.id)
                     found.setdefault(artifact.slug, artifact)
                     matched.update(by_id[artifact.id])
             unmatched = [key for key in unmatched if key not in matched]

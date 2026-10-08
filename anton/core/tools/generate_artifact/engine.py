@@ -796,7 +796,7 @@ async def _read_for_generator(session, artifact_path: Path, inp: dict):
 
     A path means what it means to `write_file`: relative to the artifact
     folder, "/index.html" included; only a path to a real place on this
-    machine is read where it is. A file in the folder is named relative to
+    machine, or under `~`, is read where it is. A file in the folder is named relative to
     it, so the generator never sees the folder's absolute path to copy into
     `write_file`. Line numbers are never returned. The input is copied: `inp`
     already sits in the conversation history.
@@ -806,15 +806,9 @@ async def _read_for_generator(session, artifact_path: Path, inp: dict):
 
     raw = str(inp.get("path") or "").strip()
     path = raw
-    if raw:
-        try:
-            expanded = str(Path(raw).expanduser())
-        except (RuntimeError, ValueError, OSError):
-            # An unresolvable path (for example an unknown `~user`) is
-            # reported by the handler as a tool result, not raised here.
-            expanded = None
-        if expanded is not None and not sub_tools.is_host_path(expanded):
-            path = str(artifact_path / expanded.lstrip("/"))
+    # The handler expands `~` itself, and reports an unknown `~user`.
+    if raw and not raw.startswith("~") and not sub_tools.is_host_path(raw):
+        path = str(artifact_path / raw.lstrip("/"))
     return await handle_read_text_file(
         session,
         {**inp, "path": path, "line_numbers": False},
@@ -1044,10 +1038,8 @@ async def _run_loop(
                             msg = f"{msg}\n\n{inject_msg}"
                 result_blocks.append(sub_tools.tool_result(tc.id, msg))
             elif name == "read_text_file":
-                content = sub_tools.unwrap_outcome(
-                    await _read_for_generator(session, artifact_path, inp)
-                )
-                result_blocks.append(sub_tools.tool_result(tc.id, content))
+                outcome = await _read_for_generator(session, artifact_path, inp)
+                result_blocks.append(sub_tools.tool_result(tc.id, outcome.content))
             elif name == "scratchpad":
                 # Full scratchpad access: the sub-generator pulls or rebuilds
                 # the data described in the brief's `## Data` section. Lazy

@@ -853,12 +853,12 @@ async def handle_list_artifacts(
                 ok=False, reason="invalid_fields",
             )
         for field in requested:
-            if not isinstance(field, str) or field not in FIELDS:
+            if field not in FIELDS:
                 return ToolOutcome(
                     content=f'Error: unknown field "{field}". Valid fields: {valid}.',
                     ok=False, reason="invalid_fields",
                 )
-        fields = tuple(field for field in FIELDS if field in requested)
+        fields = requested
 
     if keys:
         artifacts, unmatched = store.find(keys)
@@ -1299,10 +1299,10 @@ def _read_roots(session: "ChatSession") -> "tuple[Path, tuple[Path, ...]]":
     ignored rather than trusted.
     """
     workspace = getattr(session, "_workspace", None)
-    base = getattr(workspace, "base", None) if workspace is not None else None
+    base = getattr(workspace, "base", None)
     base = Path(base) if isinstance(base, (str, Path)) else Path.cwd()
     owned: list[Path] = []
-    artifacts_dir = getattr(workspace, "artifacts_dir", None) if workspace is not None else None
+    artifacts_dir = getattr(workspace, "artifacts_dir", None)
     if isinstance(artifacts_dir, (str, Path)):
         owned.append(Path(artifacts_dir))
     drafts_root = getattr(session, "_skill_drafts_root", None)
@@ -1363,15 +1363,24 @@ async def handle_read_text_file(
     """
     import asyncio
 
-    from anton.core.tools import file_access, text_file
-
     raw = tc_input.get("path")
     if not isinstance(raw, str) or not raw.strip():
         return ToolOutcome(content="Error: `path` is required.", ok=False, reason="missing_path")
+    # Resolving the path, the policy check and the read all touch the
+    # filesystem, which on a network mount is too slow for the event loop.
+    return await asyncio.to_thread(_read_text_file, session, raw.strip(), tc_input, display_root)
+
+
+def _read_text_file(
+    session: "ChatSession", raw: str, tc_input: dict, display_root: "Path | None"
+) -> ToolOutcome:
+    import stat
+
+    from anton.core.tools import file_access, text_file
 
     base, owned_roots = _read_roots(session)
     try:
-        path = Path(raw.strip()).expanduser()
+        path = Path(raw).expanduser()
         if not path.is_absolute():
             path = base / path
         resolved = path.resolve()
@@ -1395,12 +1404,13 @@ async def handle_read_text_file(
         return ToolOutcome(content=message, ok=False, reason="access_denied")
 
     try:
-        if not resolved.exists():
-            return ToolOutcome(content=f"Error: file not found: {shown}", ok=False, reason="path_not_found")
-        if not resolved.is_file():
-            return ToolOutcome(content=f"Error: {shown} is not a file.", ok=False, reason="not_a_file")
+        mode = resolved.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return ToolOutcome(content=f"Error: file not found: {shown}", ok=False, reason="path_not_found")
     except OSError as exc:
         return ToolOutcome(content=f"Error: cannot read {shown}: {exc}", ok=False, reason="read_failed")
+    if not stat.S_ISREG(mode):
+        return ToolOutcome(content=f"Error: {shown} is not a file.", ok=False, reason="not_a_file")
 
     try:
         start_line = _line_arg(tc_input.get("start_line"))
@@ -1412,8 +1422,8 @@ async def handle_read_text_file(
         )
 
     try:
-        result = await asyncio.to_thread(
-            text_file.read_text_range, resolved, shown, start_line, end_line,
+        result = text_file.read_text_range(
+            resolved, shown, start_line, end_line,
             line_numbers=_flag(tc_input.get("line_numbers")),
         )
     except text_file.FileTooLargeError:

@@ -14,6 +14,12 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.tools.text_file import (
+    DEFAULT_LINE_COUNT,
+    MAX_FILE_BYTES,
+    MAX_LINE_CHARS,
+    MAX_OUTPUT_CHARS,
+)
 
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
@@ -642,16 +648,16 @@ READ_TEXT_FILE_TOOL = ToolDef(
         "dot-files and files in dot-directories are refused.\n\n"
         "`path` is absolute, or relative to the project root. `start_line` and "
         "`end_line` start at 1 and are inclusive; a negative value counts from "
-        "the end, so -1 is the last line. Without them you get the first 1000 "
+        f"the end, so -1 is the last line. Without them you get the first {DEFAULT_LINE_COUNT} "
         "lines. Pass `end_line=-1` to read to the end of the file. One call "
-        "returns at most 250,000 characters, and the header line says where to "
-        "continue. Files over 20 MB are refused.\n\n"
+        f"returns at most {MAX_OUTPUT_CHARS:,} characters, and the header line says where to "
+        f"continue. Files over {MAX_FILE_BYTES // (1024 * 1024)} MB are refused.\n\n"
         "The first line of the result is a header with the path and the range "
         "of lines returned; the file's text starts on the next line. Pass "
         "`line_numbers=true` to get each line's number, for example to pick a "
         "range for the next call; the number and the tab after it are not part "
-        "of the file. A line longer than 2,000 characters is shortened to its "
-        "first and last 1,000 characters with a mark in between. Binary and "
+        f"of the file. A line longer than {MAX_LINE_CHARS:,} characters is shortened to its "
+        f"first and last {MAX_LINE_CHARS // 2:,} characters with a mark in between. Binary and "
         "non-UTF-8 files are refused; read those in the scratchpad."
     ),
     input_schema={
@@ -672,7 +678,7 @@ READ_TEXT_FILE_TOOL = ToolDef(
                 "type": "integer",
                 "description": (
                     "Last line to return, inclusive. A negative value counts from "
-                    "the end: -1 is the last line. Default: start_line + 999."
+                    f"the end: -1 is the last line. Default: start_line + {DEFAULT_LINE_COUNT - 1}."
                 ),
             },
             "line_numbers": {

@@ -77,6 +77,15 @@ def test_all_fields_with_service_files(tmp_path):
     ]))
 
 
+def test_service_files_skip_symlinks_and_folders(tmp_path):
+    from anton.core.artifacts.listing import service_files
+
+    (tmp_path / "prd.md").write_text("# PRD\n")
+    (tmp_path / "README.md").symlink_to(tmp_path / "prd.md")
+    (tmp_path / "spec.md").mkdir()
+    assert service_files(tmp_path) == [("prd.md", 6)]
+
+
 def test_explicit_fields_keep_the_fixed_order():
     text = render_listing([(ROOT, [_artifact()])], ("primary", "name"))
     assert text.splitlines()[-2:] == ["name: Sales dashboard", "primary: index.html"]
