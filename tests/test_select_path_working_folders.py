@@ -284,6 +284,27 @@ async def test_with_working_folders_a_complete_search_says_nothing_extra(layout)
     assert result["message"] == _PICK_PICKER_UNAVAILABLE
 
 
+async def test_a_search_that_ends_exactly_at_a_limit_is_not_cut_short(layout, monkeypatch):
+    workspace, folder, _ = layout
+    for i in range(tool_handlers._SELECTION_MAX_CANDIDATES):
+        (workspace / f"p{i:02}.csv").write_text("a")
+    pathless = _ChoiceElicitor(kinds=("choice",))
+
+    at_cap = await _call(_session(workspace, [folder], pathless), {"pattern": "*.csv"})
+
+    assert len(at_cap["candidates"]) == tool_handlers._SELECTION_MAX_CANDIDATES
+    assert at_cap["message"] == _PICK_PICKER_UNAVAILABLE
+
+    monkeypatch.setattr(tool_handlers, "_SELECTION_SCAN_LIMIT", 3)
+    for path in sorted(workspace.glob("*.csv"))[3:]:
+        path.unlink()
+
+    at_budget = await _call(_session(workspace, [folder], pathless), {"pattern": "*.csv"})
+
+    assert len(at_budget["candidates"]) == 3
+    assert at_budget["message"] == _PICK_PICKER_UNAVAILABLE
+
+
 async def test_without_working_folders_a_cut_short_search_reads_as_before(layout):
     workspace, _, _ = layout
     _fill_the_project(workspace)

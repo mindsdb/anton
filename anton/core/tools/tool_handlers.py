@@ -1445,10 +1445,11 @@ def _collect_selection_candidates(
                 search_roots = (search_root,) if _containing_root(roots, search_root) else ()
             globs = [search_root.glob(pattern) for search_root in search_roots]
             scanned = 0
-            while globs and not cut_short:
+            at_limit = False
+            while globs and not at_limit:
                 for matches in list(globs):
                     if scanned >= _SELECTION_SCAN_LIMIT or len(found) >= _SELECTION_MAX_CANDIDATES:
-                        cut_short = True
+                        at_limit = True
                         break
                     match = next(matches, None)
                     if match is None:
@@ -1456,6 +1457,8 @@ def _collect_selection_candidates(
                         continue
                     scanned += 1
                     consider(match)
+            # Reaching a limit cuts the search short only if a glob still has a match.
+            cut_short = at_limit and any(next(matches, None) is not None for matches in globs)
 
     found.sort(key=lambda p: str(p).lower())
     return found, cut_short
