@@ -504,6 +504,7 @@ class TestProductLines:
         joined = "\n".join(product_lines("desktop"))
         assert 'recall_skill("cowork-product")' in joined
         assert "install" in joined
+        assert "local models" in joined
 
 
 class TestProductBlockRendering:

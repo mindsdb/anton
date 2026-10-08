@@ -516,6 +516,38 @@ class TestCoworkProductSkill:
         assert "browser only" in body
         assert "Coding Mode: **desktop only**" in body
 
+    def test_local_models_are_answered_per_surface(self, store):
+        """Three new users asked how to use local models and were told the
+        product information did not say, or were sent to the docs homepage.
+        The hosted browser build runs in org mode, which hides the LLM
+        Providers group, so the honest browser answer is "not here, use
+        desktop"; desktop takes any OpenAI-compatible base URL."""
+        body = store.load("cowork-product").declarative_md
+        section = body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0]
+        assert "**not available**" in section
+        assert "https://mindshub.ai/download" in section
+        assert "**supported**" in section
+        assert "Settings → Agent → LLM Providers" in section
+        assert "OpenAI-compatible" in section
+        assert "http://localhost:11434/v1" in section
+        assert "Model Router" in section
+        # Cowork does not fetch models; the steps must not imply it does.
+        assert "Cowork does not download" in section
+        assert "tool (function) calling" in section
+
+    def test_local_models_are_reachable_from_the_description(self, store):
+        """The model decides whether to recall from the description alone."""
+        skill = store.load("cowork-product")
+        assert "local models" in skill.description
+
+    def test_fallback_answers_what_it_can_before_pointing_at_docs(self, store):
+        """A docs-homepage referral on its own is the failure, not the fix."""
+        body = store.load("cowork-product").declarative_md
+        fallback = body.split("IF THIS FILE DOES NOT ANSWER THE QUESTION")[1]
+        assert fallback.index("First give whatever part") < fallback.index(
+            "https://docs.mindshub.ai"
+        )
+
     def test_forbids_answering_from_general_knowledge(self, store):
         body = store.load("cowork-product").declarative_md
         assert "Never answer a question about Cowork from general" in body
