@@ -1,6 +1,8 @@
 """Tests for the publish access spec (ENG-322): build_access_payload + publish()."""
 
 import base64
+import hashlib
+import http.client
 import io
 import json
 import urllib.error
@@ -163,19 +165,42 @@ def test_legacy_entry_without_mode_still_reuses_the_hash():
     assert out["password_hash"] == prev_hash
 
 
+_HUNTER2_HASH = hash_access_password("hunter2")
+
+
+def _hash_with(password: str, iterations: int, salt: bytes = b"0123456789abcdef") -> str:
+    """A well-formed stored hash, with the iteration count chosen by the test."""
+    b64 = lambda b: base64.b64encode(b).decode("ascii")
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${b64(salt)}${b64(dk)}"
+
+
 @pytest.mark.parametrize(
     "previous",
     [
         None,
         "not-a-dict",
         {"mode": "public", "requires_password": False},
-        # A restricted entry never carries a password hash worth reusing.
+        # Left password mode in between, but the plaintext and hash survived.
         {"mode": "restricted", "requires_password": False, "emails": ["a@x.com"],
-         "password_hash": "pbkdf2_sha256$200000$c2FsdA==$ZGs="},
+         "access_password": "hunter2", "password_hash": _HUNTER2_HASH},
+        {"mode": "public", "requires_password": False,
+         "access_password": "hunter2", "password_hash": _HUNTER2_HASH},
         # Written before the hash was stored: plaintext only.
         _password_entry("hunter2", None),
         _password_entry("hunter2", ""),
         _password_entry("hunter2", "sha1$not-ours"),
+        # A well-formed hash of another password: the entry disagrees with itself.
+        _password_entry("hunter2", hash_access_password("correct-horse")),
+        # Another iteration count, even with a valid digest for that count.
+        _password_entry("hunter2", _hash_with("hunter2", 1_000)),
+        # Malformed values.
+        _password_entry("hunter2", "pbkdf2_sha256$200000$c2FsdA==$ZGs="),
+        _password_entry("hunter2", "pbkdf2_sha256$many$c2FsdA==$ZGs="),
+        _password_entry("hunter2", "pbkdf2_sha256$200000$c2FsdA=="),
+        _password_entry("hunter2", f"{_HUNTER2_HASH}$extra"),
+        _password_entry("hunter2", "pbkdf2_sha256$200000$@@@@$@@@@"),
+        _password_entry("hunter2", 12345),
     ],
 )
 def test_no_reusable_hash_means_a_fresh_one(previous):
@@ -183,6 +208,15 @@ def test_no_reusable_hash_means_a_fresh_one(previous):
     assert out["password_hash"].startswith(f"pbkdf2_sha256${publisher._PBKDF2_ITERATIONS}$")
     if isinstance(previous, dict):
         assert out["password_hash"] != previous.get("password_hash")
+
+
+def test_a_hash_that_verifies_the_password_is_reused():
+    """The check is a recomputation, not a prefix test: a verifying hash passes it."""
+    stored = _hash_with("hunter2", publisher._PBKDF2_ITERATIONS)
+    out = build_access_payload(
+        {"mode": "password", "password": "hunter2"}, previous=_password_entry("hunter2", stored),
+    )
+    assert out["password_hash"] == stored
 
 
 def _publish_with(tmp_path: Path, fake_request, **publish_kwargs) -> dict:
@@ -252,6 +286,24 @@ def test_publish_raises_a_typed_error_for_another_owner(tmp_path: Path):
     assert str(err.value) == "This artifact was published by another owner."
     assert isinstance(err.value, RuntimeError)
     assert isinstance(err.value.__cause__, urllib.error.HTTPError)
+
+
+class _UnreadableBody(io.BytesIO):
+    def read(self, *args):
+        raise http.client.IncompleteRead(b"")
+
+
+def test_a_409_with_an_unreadable_body_propagates_the_original_error(tmp_path: Path):
+    """A body that cannot be read is "not recognised", never a different exception."""
+    conflict = urllib.error.HTTPError("https://view.test/upload", 409, "Conflict", {}, _UnreadableBody())
+
+    def reject(url, api_key, **kwargs):
+        raise conflict
+
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _publish_with(tmp_path, reject, report_id="r")
+    assert err.value is conflict
+    assert err.value.code == 409
 
 
 @pytest.mark.parametrize(

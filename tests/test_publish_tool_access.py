@@ -1,6 +1,8 @@
 """publish_or_preview tool: access fields + preserve-previous default."""
 
+import io
 import json
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -294,6 +296,31 @@ async def test_tool_does_not_retry_without_report_id_for_another_owner(tmp_path)
     assert fake_publish.call_count == 1  # no second call without report_id
     assert fake_publish.call_args.kwargs["report_id"] == "rid-owned-elsewhere"
     assert out.startswith("PUBLISH FAILED: This artifact was published by another owner.")
+    assert published.read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_tool_does_not_retry_without_report_id_on_any_409(tmp_path):
+    """A 409 whose body cannot be recognised must not turn into a silent copy."""
+    f = _artifact(tmp_path)
+    published = f.parent / ".published.json"
+    published.write_text(json.dumps({
+        "report.html": {"report_id": "rid", "url": "u", "last_md5": "m",
+                        "mode": "public", "requires_password": False},
+    }))
+    before = published.read_text()
+    conflict = urllib.error.HTTPError("https://view.test/upload", 409, "Conflict", {}, io.BytesIO(b"not json"))
+    fake_publish = mock.Mock(side_effect=conflict)
+    with mock.patch("anton.publisher.publish", fake_publish), \
+         mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
+         mock.patch("webbrowser.open"):
+        out = await tools.handle_publish_or_preview(
+            _session(tmp_path), {"file_path": str(f), "action": "publish"},
+        )
+
+    assert fake_publish.call_count == 1
+    assert fake_publish.call_args.kwargs["report_id"] == "rid"
+    assert out.startswith("PUBLISH FAILED:")
     assert published.read_text() == before
 
 

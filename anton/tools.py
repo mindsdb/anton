@@ -597,6 +597,8 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         return f"{title} is at {file_path} but no previewable HTML was found."
 
     # Publish flow
+    import urllib.error
+
     from anton.publisher import ArtifactOwnedByOtherUserError, publish
 
     if not settings.minds_api_key:
@@ -701,7 +703,10 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 "that the existing link belongs to another account."
             )
         except Exception as e:
-            if report_id:
+            # A 409 means another owner or key holds this report, so a retry
+            # without report_id could only publish a copy under a new URL.
+            conflict = isinstance(e, urllib.error.HTTPError) and e.code == 409
+            if report_id and not conflict:
                 # The report may have been deleted server-side — retry
                 # without report_id to create a fresh one.
                 try:

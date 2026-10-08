@@ -9,6 +9,7 @@ import sys
 import json
 import base64
 import hashlib
+import hmac
 import secrets
 import urllib.error
 import zipfile
@@ -85,13 +86,15 @@ def _raise_if_owned_by_other_user(err: urllib.error.HTTPError) -> None:
     """Turn the upload service's 409 `artifact_owned_by_other_user` into a typed error.
 
     Any other HTTP error is left for the caller to re-raise. The body of a 409
-    is consumed here; no caller reads it afterwards.
+    is consumed here; no caller reads it afterwards. A body that cannot be read
+    or parsed (a truncated read raises `http.client.IncompleteRead`, which is
+    not an `OSError`) counts as not recognised.
     """
     if err.code != 409:
         return
     try:
         body = json.loads(err.read(65_536) or b"{}")
-    except (OSError, ValueError):
+    except Exception:
         return
     if isinstance(body, dict) and body.get("code") == OWNED_BY_OTHER_USER_CODE:
         raise ArtifactOwnedByOtherUserError() from err
@@ -147,7 +150,9 @@ def _reusable_password_hash(password: str, previous: dict | None) -> str | None:
     stored hash to revoke viewers' password grants, so a new hash on every
     re-publish would ask every viewer for the password again. A changed
     password, or an entry that left password mode in between (which drops the
-    stored plaintext and hash), gets a fresh hash.
+    stored plaintext and hash), gets a fresh hash. The stored hash is reused
+    only if it verifies `password` at the current iteration count, so an entry
+    whose plaintext and hash disagree can never keep an old password's hash.
     """
     if not isinstance(previous, dict):
         return None
@@ -155,9 +160,18 @@ def _reusable_password_hash(password: str, previous: dict | None) -> str | None:
     if mode != "password" or previous.get("access_password") != password:
         return None
     stored = previous.get("password_hash")
-    if isinstance(stored, str) and stored.startswith("pbkdf2_sha256$"):
-        return stored
-    return None
+    if not isinstance(stored, str):
+        return None
+    try:
+        scheme, iterations, salt_b64, dk_b64 = stored.split("$")
+        salt = base64.b64decode(salt_b64, validate=True)
+        expected = base64.b64decode(dk_b64, validate=True)
+        if scheme != "pbkdf2_sha256" or int(iterations) != _PBKDF2_ITERATIONS:
+            return None
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    except (ValueError, TypeError):
+        return None
+    return stored if hmac.compare_digest(actual, expected) else None
 
 
 def build_access_payload(
@@ -498,7 +512,8 @@ def publish(
     Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files.
     In password mode the dict also carries `password_hash`, the hash that was
     sent; the caller stores it next to `access_password` and passes the entry
-    back as `previous_access` on the next publish.
+    back as `previous_access` on the next publish. The hash is owner-side only:
+    callers must not forward the result dict to clients or logs.
 
     Raises:
         ArtifactOwnedByOtherUserError: the service answered 409
