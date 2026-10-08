@@ -691,6 +691,13 @@ async def _generate_api_spec(
             f"It could not be used: {problem}. Reply with the corrected "
             "OpenAPI JSON document only."
         )
+        if declared:
+            listed = ", ".join(f"`{p}`" for p in declared.values())
+            extra += (
+                f" `paths` must be exactly these, character for character: {listed} "
+                "(plus optional `/api/health`). Inputs not in a path go in query "
+                "parameters or the request body."
+            )
     return f"Error: API spec is not a usable OpenAPI document: {problem}"
 
 

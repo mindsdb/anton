@@ -134,6 +134,10 @@ USING DATA:
 # (html-app and the fullstack `static/index.html`).
 _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
+- SCOPE: render ONLY what the request and the PRD ask for. No invented brand
+  or company names, logos, taglines, marketing copy or intro paragraphs,
+  status pills or badges, footers or disclaimers unless asked. The layout
+  rules below arrange the requested content; they never add content.
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
@@ -436,6 +440,12 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
     do NOT hand-roll read-modify-write
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
+- An item that `increment`/`update` CREATES carries NO `pk`/`sk` attributes
+  (and no `_key` via `Collection`): `query`/`list` return it without them,
+  so a listing must never read the key from such items. When a listing needs
+  the key, keep it as a plain field in the same atomic call —
+  `await store.update("counts", option, set_fields={"option": option},
+  add_fields={"count": 1})` — or `put` the item with its keys first.
 - DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
   `query(pk=...)` call (or `Collection.list()`). Never call the store in a
   loop to assemble a listing.
@@ -804,7 +814,10 @@ def build_api_spec_instruction(*, stateless: bool) -> str:
         "formalise exactly those, every path under `/api/...` spelled exactly "
         "as `spec.md` writes it — same segments, same parameter names; add "
         "none, drop none, rename none (the paths are checked against "
-        "`spec.md` and a document that differs is sent back). Where `spec.md` "
+        "`spec.md` and a document that differs is sent back). Never add a "
+        "`{param}` segment `spec.md` does not write: any other input (an id, "
+        "a browser token) goes in a query parameter or the request body. "
+        "Where `spec.md` "
         "lists none, derive them from the PRD's functional requirements. "
         "`/api/health` is added by the backend generator on its own and may "
         "be left out.\n"
