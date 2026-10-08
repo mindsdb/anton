@@ -358,3 +358,23 @@ def test_the_registered_tool_never_names_the_folders(make_session, tmp_path, kin
     assert one == both
     for folder in folders:
         assert str(folder.resolve()) not in json.dumps([one.description, one.prompt, one.input_schema])
+
+
+def test_with_working_folders_neither_guardrail_lets_a_folder_path_stand_in(make_session, tmp_path):
+    """A request outside every root must not be answered with a working-folder path."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+
+    tool = _registered_select_path(
+        make_session(elicitor=_ChoiceElicitor(kinds=("choice",)), working_folders=(folder,))
+    )
+
+    assert (
+        "Never offer a path inside the project or its working folders as a substitute for a file or "
+        "folder the user asked for outside all of them" in tool.description
+    )
+    assert (
+        "Never offer a folder inside the project or its working folders as a substitute for one the "
+        "user asked for outside all of them." in tool.prompt
+    )
+    assert "outside it" not in tool.description + tool.prompt

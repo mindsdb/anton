@@ -785,6 +785,16 @@ _SELECT_PATH_WIDENED_TEXT = (
     ("If the file is not in the project, ask", "If the file is not in the project or its working folders, ask"),
     ("first look for it inside the project", "first look for it inside the project and its working folders"),
     ("If the file is not in the project at all", "If the file is not in the project or its working folders at all"),
+    (
+        "Never offer a path inside the project as a substitute for a file or folder the user asked for outside it",
+        "Never offer a path inside the project or its working folders as a substitute for a file or folder "
+        "the user asked for outside all of them",
+    ),
+    (
+        "offer a folder inside the project as a substitute for one the user asked for outside it",
+        "offer a folder inside the project or its working folders as a substitute for one the user asked "
+        "for outside all of them",
+    ),
 )
 _SELECT_PATH_WIDENED_PROPERTIES = {
     "candidates": (
