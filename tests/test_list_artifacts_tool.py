@@ -64,6 +64,13 @@ async def test_match_accepts_a_string_and_reports_non_strings_unmatched(session)
     assert out.content.splitlines()[-1] == "unmatched: 123"
 
 
+async def test_blank_match_keys_are_dropped_and_keys_are_stripped(session):
+    slug = await _create(session, "Alpha")
+    out = await handle_list_artifacts(session, {"match": [f" {slug} ", "", "  ", "nope"]})
+    assert f"## {slug}" in out.content
+    assert out.content.splitlines()[-1] == "unmatched: nope"
+
+
 async def test_empty_match_lists_everything(session):
     await _create(session, "Alpha")
     await _create(session, "Beta")
@@ -75,6 +82,12 @@ async def test_fields_accepts_a_single_string(session):
     out = await handle_list_artifacts(session, {"match": [slug], "fields": "files"})
     assert out.content.splitlines()[-1] == "files: none"
     assert "name: " not in out.content
+
+
+async def test_fields_accepts_a_comma_separated_string(session):
+    slug = await _create(session, "Alpha")
+    out = await handle_list_artifacts(session, {"match": [slug], "fields": "name, files"})
+    assert out.content.splitlines()[-2:] == ["name: Alpha", "files: none"]
 
 
 async def test_explicit_fields(session):

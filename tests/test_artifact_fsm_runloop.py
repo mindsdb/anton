@@ -632,8 +632,8 @@ async def test_read_text_file_paths_are_relative_to_the_artifact_folder(tmp_path
 
     seen: list[dict] = []
 
-    async def fake_read(session, tc_input):
-        seen.append(tc_input)
+    async def fake_read(session, tc_input, *, display_root=None):
+        seen.append({**tc_input, "display_root": display_root})
         return ToolOutcome(content="text", ok=True)
 
     monkeypatch.setattr(tool_handlers, "handle_read_text_file", fake_read)
@@ -657,6 +657,7 @@ async def test_read_text_file_paths_are_relative_to_the_artifact_folder(tmp_path
         str(tmp_path / "index.html"), str(tmp_path / "index.html"), "/etc/hosts",
     ]
     assert all(call["line_numbers"] is False for call in seen)
+    assert all(call["display_root"] == tmp_path for call in seen)
     # The call's input already sits in the history; it must not be rewritten.
     assert first_input == {"path": "index.html", "line_numbers": True}
 
@@ -771,8 +772,8 @@ async def test_the_read_header_names_the_file_relative_to_the_artifact_folder(tm
 
 
 async def test_the_file_text_below_the_header_is_left_unchanged(tmp_path: Path):
-    """Only the first line is rewritten; file text that contains the artifact
-    path is data and must reach the generator as written."""
+    """Only the header names the file relative to the folder; file text that
+    contains the artifact path is data and must reach the generator as written."""
     body = f"const root = '{tmp_path}/data.json';\n"
     (tmp_path / "index.html").write_text(body, encoding="utf-8")
     content = await _read_result_through_the_loop(tmp_path, "index.html")
@@ -784,3 +785,11 @@ async def test_the_file_text_below_the_header_is_left_unchanged(tmp_path: Path):
 async def test_a_read_error_names_the_file_relative_to_the_artifact_folder(tmp_path: Path):
     content = await _read_result_through_the_loop(tmp_path, "missing.html")
     assert content.startswith("Error: file not found: missing.html"), content
+
+
+async def test_a_slash_path_is_read_in_the_folder_even_before_it_exists(tmp_path: Path):
+    """`write_file` reads "/static/app.js" as the folder's `static/app.js`; a
+    read of the same path must agree, and report a missing file as missing,
+    not as a file outside the project."""
+    content = await _read_result_through_the_loop(tmp_path, "/static/app.js")
+    assert content.startswith("Error: file not found: static/app.js"), content

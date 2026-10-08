@@ -37,7 +37,7 @@ def read_refusal(
     for root in owned_roots:
         try:
             rel = resolved.relative_to(Path(root).resolve())
-        except (ValueError, OSError):
+        except (ValueError, OSError, RuntimeError):
             continue
         if not any(part.startswith(".") for part in rel.parts):
             return None

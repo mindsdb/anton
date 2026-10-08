@@ -52,7 +52,7 @@ async def test_relative_path_is_read_from_the_project_root(session, project):
 
 async def test_line_numbers_flag_is_parsed_explicitly(session, project):
     (project / "a.txt").write_text("x\n")
-    for value in (True, "true", "TRUE"):
+    for value in (True, "true", "TRUE", 1, "1"):
         assert "     1\tx" in (await _read(session, path="a.txt", line_numbers=value)).content
     for value in (False, "false", 0, None):
         assert "\t" not in (await _read(session, path="a.txt", line_numbers=value)).content
@@ -173,6 +173,33 @@ async def test_a_line_number_that_is_not_a_finite_integer_is_an_invalid_range(se
         out = await _read(session, path="a.txt", start_line=value)
         assert out.ok is False
         assert out.reason == "invalid_range", value
+
+
+async def test_a_fractional_line_number_is_an_invalid_range(session, project):
+    (project / "a.txt").write_text("1\n2\n3\n")
+    out = await _read(session, path="a.txt", start_line=2.5)
+    assert (out.ok, out.reason) == (False, "invalid_range")
+    out = await _read(session, path="a.txt", start_line=2.0, end_line=2.0)
+    assert out.content == f"{project / 'a.txt'} — lines 2-2 of 3\n2"
+
+
+async def test_display_root_names_files_inside_it_relative_to_it(session, project):
+    folder = project / "site"
+    (folder / "css").mkdir(parents=True)
+    (folder / "css" / "a.css").write_text("x\n")
+    out = await handle_read_text_file(
+        session, {"path": str(folder / "css" / "a.css")}, display_root=folder
+    )
+    assert out.content.splitlines()[0] == "css/a.css — lines 1-1 of 1"
+    out = await handle_read_text_file(
+        session, {"path": str(folder / "missing.css")}, display_root=folder
+    )
+    assert out.content == "Error: file not found: missing.css"
+    (project / "notes.md").write_text("n\n")
+    out = await handle_read_text_file(
+        session, {"path": str(project / "notes.md")}, display_root=folder
+    )
+    assert out.content.splitlines()[0] == f"{project / 'notes.md'} — lines 1-1 of 1"
 
 
 async def test_a_path_component_that_is_too_long_gives_a_verdict(session):

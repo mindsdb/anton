@@ -37,18 +37,26 @@ def test_append_mode_keeps_the_sandbox(tmp_path: Path):
         assert "inside the artifact folder" in res["message"]
 
 
-def test_absolute_path_is_coerced_into_the_folder(tmp_path: Path):
-    """An absolute path is NOT rejected — it is coerced into a relative one.
+def test_a_slash_path_that_names_no_real_place_is_read_inside_the_folder(tmp_path: Path):
+    """Models write "/index.html" meaning the folder's root: no directory
+    `/static` exists on the machine, so the path is the folder's `static/`."""
+    for path, written in (("/index.html", "index.html"), ("/static/app.js", "static/app.js")):
+        res = write_file(tmp_path, path, "x", mode="w")
+        assert res["ok"] is True, res
+        assert res["written"] == written
+        assert (tmp_path / written).is_file()
 
-    `_sandboxed_path` applies `lstrip("/")`, so `/etc/passwd` becomes
-    `<artifact>/etc/passwd`. Nothing escapes the folder, so this is safe and,
-    judging by the code, deliberate — pinned by a test so nobody mistakes it for a
-    sandbox hole and "fixes" it.
-    """
-    res = write_file(tmp_path, "/etc/passwd", "x", mode="a")
-    assert res["ok"] is True
-    assert res["written"] == "etc/passwd"
-    assert (tmp_path / "etc" / "passwd").is_file()
+
+def test_a_real_path_outside_the_folder_is_refused(tmp_path: Path):
+    """Re-rooting `/etc/passwd` or a project file would bury a copy of that
+    path inside the artifact; the generator gets an error to correct instead."""
+    folder = tmp_path / "artifact"
+    folder.mkdir()
+    for path in ("/etc/passwd", str(tmp_path / "project" / "data.csv"), str(folder)):
+        res = write_file(folder, path, "x", mode="w")
+        assert res["ok"] is False, path
+        assert "inside the artifact folder" in res["message"]
+    assert list(folder.iterdir()) == []
 
 
 def test_an_absolute_path_inside_the_folder_is_used_as_is(tmp_path: Path):

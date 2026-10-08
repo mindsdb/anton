@@ -809,6 +809,17 @@ def _as_list(value) -> list:
     return [value]
 
 
+def _field_names(value) -> list:
+    """`fields` as a list; a string may name several, separated by commas."""
+    names: list = []
+    for item in _as_list(value):
+        if isinstance(item, str):
+            names += [part.strip() for part in item.split(",") if part.strip()]
+        else:
+            names.append(item)
+    return names
+
+
 async def handle_list_artifacts(
     session: "ChatSession", tc_input: dict
 ) -> "str | ToolOutcome":
@@ -829,11 +840,12 @@ async def handle_list_artifacts(
             ok=False, reason="store_unavailable",
         )
 
-    keys = [key if isinstance(key, str) else str(key) for key in _as_list(tc_input.get("match"))]
+    keys = [str(key).strip() for key in _as_list(tc_input.get("match"))]
+    keys = [key for key in keys if key]
     if tc_input.get("fields") is None:
         fields = FIELDS if keys else SUMMARY_FIELDS
     else:
-        requested = _as_list(tc_input.get("fields"))
+        requested = _field_names(tc_input.get("fields"))
         valid = ", ".join(FIELDS)
         if not requested:
             return ToolOutcome(
@@ -1307,20 +1319,47 @@ def _line_arg(value) -> "int | None":
         return None
     if isinstance(value, bool):
         raise ValueError("a line number cannot be a boolean")
+    # `int(2.5)` is 2: a fractional line number would silently read another range.
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("a line number must be a whole number")
     return int(value)
 
 
 def _flag(value) -> bool:
-    # `bool("false")` is True, and a model or gateway may send the flag as a string.
+    # `bool("false")` is True, and a model or gateway may send the flag as a
+    # string or a number.
     if isinstance(value, bool):
         return value
-    return isinstance(value, str) and value.strip().lower() == "true"
+    if isinstance(value, (int, float)):
+        return value == 1
+    return isinstance(value, str) and value.strip().lower() in ("true", "1")
 
 
-async def handle_read_text_file(session: "ChatSession", tc_input: dict) -> ToolOutcome:
+def _shown_path(path: Path, display_root: "Path | None") -> str:
+    """`path` as the result names it: relative to `display_root` when inside it."""
+    if display_root is None:
+        return str(path)
+    roots = [display_root]
+    try:
+        roots.append(display_root.resolve())
+    except (OSError, RuntimeError):
+        pass
+    for root in roots:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return str(path)
+
+
+async def handle_read_text_file(
+    session: "ChatSession", tc_input: dict, *, display_root: "Path | None" = None
+) -> ToolOutcome:
     """Read a text file the access policy allows, as a range of lines.
 
     Writes nothing: reading an artifact is not attributed to the turn.
+    `display_root`: name files inside it relative to it in the header and in
+    errors (the artifact generator passes its folder).
     """
     import asyncio
 
@@ -1340,12 +1379,13 @@ async def handle_read_text_file(session: "ChatSession", tc_input: dict) -> ToolO
         return ToolOutcome(
             content=f"Error: invalid path {raw!r}: {exc}", ok=False, reason="invalid_path"
         )
-    shown = str(path)
+    shown = _shown_path(path, display_root)
 
     refusal = file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots)
     if refusal is not None:
         _log.debug("read_text_file refused %s: %s", resolved, refusal)
-        where = shown if str(resolved) == shown else f"{shown} (it resolves to {resolved})"
+        resolved_shown = _shown_path(resolved, display_root)
+        where = shown if resolved_shown == shown else f"{shown} (it resolves to {resolved_shown})"
         message = f"Error: access denied: {where} is {refusal}."
         if refusal == file_access.REFUSED_OUTSIDE:
             message += (

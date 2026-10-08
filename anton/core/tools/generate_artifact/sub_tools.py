@@ -306,23 +306,43 @@ def tool_schemas() -> list[dict]:
     return [WRITE_FILE_SCHEMA, _read_text_file_schema(), FINISH_SCHEMA, _scratchpad_schema()]
 
 
+def is_host_path(path: str) -> bool:
+    """`path` starts at a directory that exists on this machine.
+
+    A model writes "/index.html" or "/static/app.js" meaning the artifact
+    folder's root; "/home/u/project/data.csv" names a real file elsewhere.
+    """
+    if not path.startswith("/"):
+        return False
+    parts = Path(path).parts
+    if len(parts) < 2:
+        return False
+    try:
+        return Path(parts[0], parts[1]).is_dir()
+    except OSError:
+        return False
+
+
 def _sandboxed_path(root: Path, rel: str) -> Path | None:
     """Resolve ``rel`` against ``root`` and reject anything escaping it.
 
     Returns ``None`` for paths that traverse outside the artifact folder
-    (via ``..`` or absolute prefixes). The engine surfaces a clear error
-    to the sub-agent so it can retry with a corrected path.
+    (via ``..``, or an absolute path to another place on this machine). The
+    engine surfaces a clear error to the sub-agent so it can retry with a
+    corrected path.
     """
     if not rel or not isinstance(rel, str):
         return None
     rel = rel.strip()
     root_resolved = root.resolve()
     if rel.startswith("/"):
-        # An absolute path that already names a file inside the folder is used
-        # as is; re-rooting it would nest a copy of the folder's own path.
         absolute = Path(rel).resolve()
         if absolute != root_resolved and absolute.is_relative_to(root_resolved):
             return absolute
+        # Re-rooting a real path would bury a copy of it inside the artifact,
+        # where nothing reads it and the publish ships it.
+        if is_host_path(rel):
+            return None
     rel = rel.lstrip("/")
     if not rel:
         return None

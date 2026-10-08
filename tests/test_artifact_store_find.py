@@ -61,6 +61,21 @@ def test_only_matches_are_reconciled(store, monkeypatch):
     assert seen == [a.slug]
 
 
+def test_a_key_that_cannot_be_an_id_does_not_scan_the_store(store, monkeypatch):
+    store.create(name="Alpha", description="d", type="html-app")
+    store.create(name="Beta", description="d", type="html-app")
+    loaded: list[str] = []
+    original = ArtifactStore._load_silent
+
+    def spy(self, slug):
+        loaded.append(slug)
+        return original(self, slug)
+
+    monkeypatch.setattr(ArtifactStore, "_load_silent", spy)
+    assert store.find(["alpha-typo"]) == ([], ["alpha-typo"])
+    assert loaded == ["alpha-typo"]
+
+
 def test_find_on_a_missing_root(tmp_path):
     found, unmatched = ArtifactStore(tmp_path / "none").find(["x"])
     assert (found, unmatched) == ([], ["x"])

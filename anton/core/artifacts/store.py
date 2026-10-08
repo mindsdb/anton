@@ -151,12 +151,12 @@ def _truncate_summary(text: str) -> str:
     return text[: _SUMMARY_MAX - 1].rstrip() + "…"
 
 
-def _id_key(key: str) -> str:
-    """`key` as an artifact id would be stored, or `key` itself if it is not one."""
+def _as_id(key: str) -> str | None:
+    """`key` as an artifact id would be stored, or None if it cannot be one."""
     try:
         return canonical_artifact_id(key)
     except ValueError:
-        return key
+        return None
 
 
 class ArtifactStore:
@@ -387,10 +387,14 @@ class ArtifactStore:
                 unmatched.append(key)
             else:
                 found[artifact.slug] = artifact
-        if unmatched and self._root.is_dir():
-            by_id: dict[str, list[str]] = {}
-            for key in unmatched:
-                by_id.setdefault(_id_key(key), []).append(key)
+        # Only a key that parses as an id can match one; a mistyped slug must
+        # not load every artifact's metadata.
+        by_id: dict[str, list[str]] = {}
+        for key in unmatched:
+            artifact_id = _as_id(key)
+            if artifact_id is not None:
+                by_id.setdefault(artifact_id, []).append(key)
+        if by_id and self._root.is_dir():
             matched: set[str] = set()
             for child in sorted(self._root.iterdir()):
                 if not child.is_dir():
@@ -474,8 +478,8 @@ class ArtifactStore:
         Scratchpad code writes artifact files straight into the folder via
         plain ``open()``, bypassing the store — so without this, `files[]`
         stays frozen at whatever ``create()``/``update()`` last set (usually
-        empty), and ``open()``/``list()`` report file_count 0 for artifacts
-        that are fully written on disk. The agent then concludes the file is
+        empty), and ``open()``/``list()`` report no files for artifacts that
+        are fully written on disk. The agent then concludes the file is
         missing and burns turns in a recovery loop.
 
         Persists (and bumps ``updatedAt``) ONLY when the on-disk file set

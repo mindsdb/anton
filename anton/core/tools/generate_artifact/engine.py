@@ -17,7 +17,6 @@ providers Anton ships (AnthropicProvider, OpenAIProvider) accept on input.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import logging
 import re
@@ -795,9 +794,12 @@ def _strip_code_fence(text: str) -> str:
 async def _read_for_generator(session, artifact_path: Path, inp: dict):
     """`read_text_file` for the write loop.
 
-    Paths are relative to the artifact folder, as they are for `write_file`,
-    and line numbers are never returned. The input is copied: `inp` already
-    sits in the conversation history.
+    A path means what it means to `write_file`: relative to the artifact
+    folder, "/index.html" included; only a path to a real place on this
+    machine is read where it is. A file in the folder is named relative to
+    it, so the generator never sees the folder's absolute path to copy into
+    `write_file`. Line numbers are never returned. The input is copied: `inp`
+    already sits in the conversation history.
     """
     # Lazy import avoids a tool_handlers <-> generate_artifact cycle.
     from anton.core.tools.tool_handlers import handle_read_text_file
@@ -806,39 +808,18 @@ async def _read_for_generator(session, artifact_path: Path, inp: dict):
     path = raw
     if raw:
         try:
-            candidate = Path(raw).expanduser()
-            if not candidate.is_absolute():
-                path = str(artifact_path / candidate)
-            elif not candidate.exists() and (artifact_path / raw.lstrip("/")).exists():
-                # `write_file` strips a leading "/", so "/index.html" names a
-                # file in the artifact folder.
-                path = str(artifact_path / raw.lstrip("/"))
+            expanded = str(Path(raw).expanduser())
         except (RuntimeError, ValueError, OSError):
             # An unresolvable path (for example an unknown `~user`) is
             # reported by the handler as a tool result, not raised here.
-            path = raw
-    outcome = await handle_read_text_file(session, {**inp, "path": path, "line_numbers": False})
-    return _relative_to_artifact(outcome, artifact_path)
-
-
-def _relative_to_artifact(outcome, artifact_path: Path):
-    """Drop the artifact-folder prefix from the first line of a read result.
-
-    That line is the header (or the one-line error) and is the only place the
-    handler writes a path. The generator that sees an absolute path there may
-    copy it into `write_file`. The file text below is never touched.
-    """
-    if not isinstance(outcome.content, str):
-        return outcome
-    prefixes = {f"{artifact_path}/"}
-    try:
-        prefixes.add(f"{artifact_path.resolve()}/")
-    except (OSError, RuntimeError):
-        pass
-    first, newline, rest = outcome.content.partition("\n")
-    for prefix in sorted(prefixes, key=len, reverse=True):
-        first = first.replace(prefix, "")
-    return dataclasses.replace(outcome, content=f"{first}{newline}{rest}")
+            expanded = None
+        if expanded is not None and not sub_tools.is_host_path(expanded):
+            path = str(artifact_path / expanded.lstrip("/"))
+    return await handle_read_text_file(
+        session,
+        {**inp, "path": path, "line_numbers": False},
+        display_root=artifact_path,
+    )
 
 
 async def _run_loop(
