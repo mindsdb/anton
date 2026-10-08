@@ -331,7 +331,7 @@ def test_with_working_folders_the_registered_tool_names_them(make_session, tmp_p
         make_session(elicitor=_ChoiceElicitor(kinds=kinds), working_folders=(folder,))
     )
 
-    assert str(folder.resolve()) in tool.description
+    assert "working folders" in tool.description
     if "path" not in kinds:
         # The browse-capable prompt never names the project, so only this one changes.
         assert "working folders" in tool.prompt
@@ -339,3 +339,22 @@ def test_with_working_folders_the_registered_tool_names_them(make_session, tmp_p
     assert "working folder" in tool.input_schema["properties"]["pattern"]["description"]
     assert "working folder" in tool.input_schema["properties"]["candidates"]["description"]
     assert (SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY) == pristine
+
+
+@pytest.mark.parametrize("kinds", [("choice", "path"), ("choice",)])
+def test_the_registered_tool_never_names_the_folders(make_session, tmp_path, kinds):
+    """Adding a folder must not change the tool definitions, which lead every request."""
+    folders = [tmp_path / name for name in ("docs", "reports")]
+    for folder in folders:
+        folder.mkdir()
+
+    one = _registered_select_path(
+        make_session(elicitor=_ChoiceElicitor(kinds=kinds), working_folders=tuple(folders[:1]))
+    )
+    both = _registered_select_path(
+        make_session(elicitor=_ChoiceElicitor(kinds=kinds), working_folders=tuple(folders))
+    )
+
+    assert one == both
+    for folder in folders:
+        assert str(folder.resolve()) not in json.dumps([one.description, one.prompt, one.input_schema])

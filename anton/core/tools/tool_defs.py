@@ -805,9 +805,10 @@ def select_path_tool_with_working_folders(tool: ToolDef, working_folders: tuple[
 
     Returns *tool* itself when there are none, so every other host sees the
     exact module-level definition. Otherwise returns a copy whose
-    project-only wording also allows the working folders. The schema and each
-    changed property are rebuilt, never mutated: they are shared by every
-    session in the process.
+    project-only wording also allows the working folders. The folders are not
+    named, so adding one leaves the tool definitions (and the prompt cache)
+    as they were. The schema and each changed property are rebuilt, never
+    mutated: they are shared by every session in the process.
     """
     if not working_folders:
         return tool
@@ -816,10 +817,9 @@ def select_path_tool_with_working_folders(tool: ToolDef, working_folders: tuple[
     for old, new in _SELECT_PATH_WIDENED_TEXT:
         description = description.replace(old, new)
         prompt = prompt.replace(old, new) if prompt else prompt
-    listed = ", ".join(str(folder) for folder in working_folders)
     description += (
-        f"\n\nThis session's working folders: {listed}. A `pattern` without "
-        "`base_dir` searches them as well as the project."
+        "\n\nThis session also has working folders. A "
+        "`pattern` without `base_dir` searches them as well as the project."
     )
     properties = dict(tool.input_schema["properties"])
     for key, (old, new) in _SELECT_PATH_WIDENED_PROPERTIES.items():
