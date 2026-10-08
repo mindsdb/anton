@@ -597,7 +597,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         return f"{title} is at {file_path} but no previewable HTML was found."
 
     # Publish flow
-    from anton.publisher import publish
+    from anton.publisher import ArtifactOwnedByOtherUserError, publish
 
     if not settings.minds_api_key:
         console.print()
@@ -687,6 +687,18 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 access=eff_access,
                 pwd_version=pwd_version,
                 access_version=access_version,
+                previous_access=prev if isinstance(prev, dict) else None,
+            )
+        except ArtifactOwnedByOtherUserError as e:
+            # Another account owns this report_id (a fullstack report_id is
+            # global). The retry below would publish a silent copy under a new
+            # URL, which is exactly what this 409 exists to prevent.
+            console.print(f"  [anton.error]{e}[/]")
+            console.print()
+            return (
+                f"PUBLISH FAILED: {e} Do NOT call this tool again for this artifact "
+                "and do not publish it under a new report on your own. Tell the user "
+                "that the existing link belongs to another account."
             )
         except Exception as e:
             if report_id:
@@ -729,6 +741,11 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # instead of creating a new report (owner-side; unified location + key).
     if returned_report_id:
         entry = dict(owner_side)
+        if owner_side.get("mode") == "password" and result.get("password_hash"):
+            # The hash that was sent. The next publish hands this entry back
+            # as `previous_access`, so an unchanged password keeps its hash
+            # and viewers keep their password grants.
+            entry["password_hash"] = result["password_hash"]
         entry.update({
             "report_id": returned_report_id,
             "url": view_url,
