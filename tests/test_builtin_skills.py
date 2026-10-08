@@ -535,6 +535,24 @@ class TestCoworkProductSkill:
         assert "Cowork does not download" in section
         assert "tool (function) calling" in section
 
+    def test_local_models_name_every_router_role(self, store):
+        """Model Router has three independent roles, and one left alone keeps
+        its provider: with MindsHub signed in, that role stays on cloud models
+        while the user believes they are running locally."""
+        body = store.load("cowork-product").declarative_md
+        section = " ".join(body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0].split())
+        for role in ("Planning model", "Routing and summarization model", "Coding model"):
+            assert role in section
+        assert "set all three" in section
+
+    def test_local_models_blame_the_server_not_the_model_size(self, store):
+        """Local servers reject the verifier's named tool_choice before the
+        model runs, so "use a larger model" is advice that cannot help."""
+        body = store.load("cowork-product").declarative_md
+        section = body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0]
+        assert "A larger model does not" in section
+        assert "larger model that supports tool calling works better" not in section
+
     def test_local_models_are_reachable_from_the_description(self, store):
         """The model decides whether to recall from the description alone."""
         skill = store.load("cowork-product")

@@ -112,17 +112,27 @@ paragraph each.
      address, ending in `/v1`. Ollama's default is `http://localhost:11434/v1`;
      LM Studio's default is `http://localhost:1234/v1`. An API key is optional
      for a local server.
-  4. Under Model Router, pick that provider (the picker only appears when more
-     than one provider is set up) and type the model's name exactly as the
-     server lists it, e.g. as `ollama list` shows it.
+  4. Under Model Router there are three roles: **Planning model**, **Routing
+     and summarization model** and **Coding model**. For each one, pick that
+     provider (the picker only appears when more than one provider is set up)
+     and type the model's name exactly as the server lists it, e.g. as
+     `ollama list` shows it. A role left alone keeps its current provider: a
+     user signed in to MindsHub would still have that role running on
+     MindsHub's cloud models. To run fully locally, set all three.
   5. Save. Cowork tests the connection; "connected" means it reached the
      server.
   First-run setup offers the same thing: choose "Custom" and enter a Base URL.
 - Limitations. Mention them so the user is not surprised:
   - Cowork is an agent and calls tools on most turns, so the model must support
     tool (function) calling through the server's OpenAI-compatible API. Small
-    local models often handle this poorly, and some turns may fail or stop
-    early; a larger model that supports tool calling works better.
+    local models often handle this poorly.
+  - The server matters as well as the model. When Cowork checks whether a task
+    is finished, it asks the model to call one named tool. Many local servers
+    (Ollama, LM Studio and similar) reject that kind of request outright,
+    before the model runs. When that happens a turn can stop early, with a
+    message that an internal check failed. A larger model does not
+    fix this; it is the server refusing the request. Tell the user it is a
+    known limitation of local servers, not something they set up wrong.
   - Speed and answer quality depend on the model and the user's hardware.
 - Do not invent other routes. There is no built-in model download, no model
   catalogue to browse inside Cowork, and no local-model option in the browser.
@@ -184,6 +194,10 @@ automatically when that code changes, so re-check these when touching:
   `PROVIDER_LABELS_LOCAL` and the `openai-compatible` Base URL field in
   `SettingsView.jsx`, the `Model Router` group there, and the "Custom" Base URL
   field in `src/renderer/pages/arcade/OnboardingScreen.tsx`
-- the tool-calling limitation — re-check when the verifier gains a fallback
-  for endpoints that reject a forced tool call
+- the three Model Router roles, and a role left alone keeping its provider —
+  the `RoleRow` calls in the `Model Router` group, and
+  `defaultModeProviderType` in `SettingsView.jsx`
+- the server-rejection limitation — `_translate_tool_choice` in
+  `anton/core/llm/openai.py` sends a named `tool_choice` with no unforced
+  fallback; remove that bullet when the verifier gains one
 If the app and this file disagree, the app is right and this file is stale.
