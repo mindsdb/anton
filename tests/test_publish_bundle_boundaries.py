@@ -7,6 +7,8 @@ import io
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from anton.publisher import _zip_fullstack, _zip_html
 
 ASSETS = ("style.css", "app.js", "img/logo.png", "img/bg.png")
@@ -27,25 +29,23 @@ def _assert_no_leak(zbytes: bytes) -> None:
 def _make_artifact(tmp_path: Path, content_dir: str = "") -> Path:
     """An artifact folder with normal assets, owner-side files and symlinks.
 
-    Assets go under *content_dir* (``static`` for fullstack). Next to them:
-    `.published.json` (also under another case), `prd.md`, a `.revisions/`
-    entry, a symlink to a file outside the folder and a symlink aliasing
-    `.published.json` under an innocent name.
+    Everything goes under *content_dir* (``static`` for fullstack): the
+    assets, `.published.json` (also under another case), `prd.md`, a
+    `.revisions/` entry, a symlink to a file outside the folder and a symlink
+    aliasing `.published.json` under an innocent name.
     """
     artifact = tmp_path / "sales"
     content = artifact / content_dir
     (content / "img").mkdir(parents=True)
     for asset in ASSETS:
         (content / asset).write_bytes(b"asset")
-    (artifact / ".published.json").write_text('{"access_password": "owner-secret"}')
-    (artifact / ".PUBLISHED.json").write_text('{"access_password": "owner-secret"}')
-    (artifact / "prd.md").write_text("owner-secret")
-    (artifact / ".revisions" / "entries").mkdir(parents=True)
-    (artifact / ".revisions" / "entries" / "old.html").write_text("owner-secret")
-    outside = tmp_path / "outside.env"
-    outside.write_text("OUTSIDE_SECRET=1")
-    (content / "data.txt").symlink_to(outside)
-    (content / "settings.json").symlink_to(artifact / ".published.json")
+    for name in (".published.json", ".PUBLISHED.json", "prd.md"):
+        (content / name).write_text('{"access_password": "owner-secret"}')
+    (content / ".revisions" / "entries").mkdir(parents=True)
+    (content / ".revisions" / "entries" / "old.html").write_text("owner-secret")
+    (tmp_path / "outside.env").write_text("OUTSIDE_SECRET=1")
+    (content / "data.txt").symlink_to(tmp_path / "outside.env")
+    (content / "settings.json").symlink_to(content / ".published.json")
     return artifact
 
 
@@ -101,6 +101,15 @@ def test_single_file_sibling_index_html_does_not_replace_the_primary(tmp_path):
         assert b"Report" in bundle.read("index.html")
 
 
+@pytest.mark.filterwarnings("ignore:Duplicate name")
+def test_single_file_self_reference_keeps_the_bundle_unchanged(tmp_path):
+    html = tmp_path / "index.html"
+    html.write_text('<a href="index.html">home</a>')
+
+    with zipfile.ZipFile(io.BytesIO(_zip_html(html))) as bundle:
+        assert bundle.namelist() == ["index.html", "index.html"]
+
+
 def test_directory_bundles_assets_but_not_owner_side_or_outside_files(tmp_path):
     artifact = _make_artifact(tmp_path)
     (artifact / "index.html").write_text("<h1>Report</h1>")
@@ -114,12 +123,7 @@ def test_directory_bundles_assets_but_not_owner_side_or_outside_files(tmp_path):
 def test_fullstack_bundles_assets_but_not_owner_side_or_outside_files(tmp_path):
     artifact = _make_artifact(tmp_path, content_dir="static")
     (artifact / "backend.py").write_text("app = None\n")
-    (artifact / "static" / ".published.json").write_text("owner-secret")
-    (artifact / "static" / ".revisions").mkdir()
-    (artifact / "static" / ".revisions" / "old.js").write_text("owner-secret")
-    outside = tmp_path / "outside.txt"
-    outside.write_text("OUTSIDE_SECRET=1")
-    (artifact / "requirements.txt").symlink_to(outside)
+    (artifact / "requirements.txt").symlink_to(tmp_path / "outside.env")
 
     zbytes, included = _zip_fullstack(artifact)
 
@@ -127,3 +131,4 @@ def test_fullstack_bundles_assets_but_not_owner_side_or_outside_files(tmp_path):
     assert own == {"backend.py", *(f"static/{asset}" for asset in ASSETS)}
     assert set(included) == _names(zbytes)
     _assert_no_leak(zbytes)
+
