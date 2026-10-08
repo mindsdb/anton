@@ -10,6 +10,7 @@ import json
 import base64
 import hashlib
 import secrets
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -62,6 +63,40 @@ class StatePublishBlocked(Exception):
     (not an anton_state runtime error) — surfaced to the publish caller."""
 
 
+# The upload service's 409 code for a report that belongs to another account
+# (a fullstack `report_id` is global, so a folder published by someone else,
+# or under another API key, carries a `report_id` this caller does not own).
+OWNED_BY_OTHER_USER_CODE = "artifact_owned_by_other_user"
+
+
+class ArtifactOwnedByOtherUserError(RuntimeError):
+    """The upload service refused the publish: another owner holds this report.
+
+    Callers must not retry without ``report_id``: that publishes a silent copy
+    under a new URL, which is exactly what the 409 exists to prevent. Tell the
+    user instead.
+    """
+
+    def __init__(self, message: str = "This artifact was published by another owner.") -> None:
+        super().__init__(message)
+
+
+def _raise_if_owned_by_other_user(err: urllib.error.HTTPError) -> None:
+    """Turn the upload service's 409 `artifact_owned_by_other_user` into a typed error.
+
+    Any other HTTP error is left for the caller to re-raise. The body of a 409
+    is consumed here; no caller reads it afterwards.
+    """
+    if err.code != 409:
+        return
+    try:
+        body = json.loads(err.read(65_536) or b"{}")
+    except (OSError, ValueError):
+        return
+    if isinstance(body, dict) and body.get("code") == OWNED_BY_OTHER_USER_CODE:
+        raise ArtifactOwnedByOtherUserError() from err
+
+
 DEFAULT_PUBLISH_URL = "https://view.mindshub.ai"
 
 # Owner-side files that must never enter a published html-app bundle.
@@ -103,7 +138,35 @@ def _normalize_emails(values) -> list[str]:
     return out
 
 
-def build_access_payload(access: dict | None, *, pwd_version: int = 1, access_version: int = 1) -> dict:
+def _reusable_password_hash(password: str, previous: dict | None) -> str | None:
+    """The hash sent last time, while the password is still the same one.
+
+    `previous` is the owner-side `.published.json` entry of the last publish.
+    `hash_access_password` salts every call, so the same password would get a
+    new hash on every publish. The artifact content host fingerprints the
+    stored hash to revoke viewers' password grants, so a new hash on every
+    re-publish would ask every viewer for the password again. A changed
+    password, or an entry that left password mode in between (which drops the
+    stored plaintext and hash), gets a fresh hash.
+    """
+    if not isinstance(previous, dict):
+        return None
+    mode = previous.get("mode") or ("password" if previous.get("requires_password") else "public")
+    if mode != "password" or previous.get("access_password") != password:
+        return None
+    stored = previous.get("password_hash")
+    if isinstance(stored, str) and stored.startswith("pbkdf2_sha256$"):
+        return stored
+    return None
+
+
+def build_access_payload(
+    access: dict | None,
+    *,
+    pwd_version: int = 1,
+    access_version: int = 1,
+    previous: dict | None = None,
+) -> dict:
     """Translate the inbound access spec into the `/upload` ``access`` block.
 
     Input (from cowork-server, the caller) is one of::
@@ -118,15 +181,18 @@ def build_access_payload(access: dict | None, *, pwd_version: int = 1, access_ve
         {"mode": "password", "password_hash": "pbkdf2_sha256$...", "pwd_version": N}
         {"mode": "restricted", "allowed_emails": [...], "org_allowed": bool, "access_version": N}
 
-    The plaintext password is hashed here and never forwarded. Emails are
-    normalized and forwarded as-is (auth compares them server-side) and never
-    enter the zip bundle.
+    The plaintext password is hashed here and never forwarded. `previous` is
+    the owner-side `.published.json` entry of the last publish: while the
+    password is unchanged, the hash sent then is sent again (see
+    `_reusable_password_hash`). Emails are normalized and forwarded as-is
+    (auth compares them server-side) and never enter the zip bundle.
     """
     mode = (access or {}).get("mode", "public")
     if mode == "password":
+        password = access["password"]
         return {
             "mode": "password",
-            "password_hash": hash_access_password(access["password"]),
+            "password_hash": _reusable_password_hash(password, previous) or hash_access_password(password),
             "pwd_version": pwd_version,
         }
     if mode == "restricted":
@@ -392,6 +458,7 @@ def publish(
     access_version: int = 1,
     artifact_key: str | None = None,
     vault: DataVault | None = None,
+    previous_access: dict | None = None,
 ) -> dict:
     """Zip and upload an HTML file/directory or a fullstack artifact directory.
 
@@ -423,8 +490,20 @@ def publish(
                   to anton's local vault (`~/.anton/data_vault`); cowork-server
                   passes its own vault so published secrets match where the
                   connection credentials were actually saved.
+        previous_access: The owner-side `.published.json` entry of this
+                  artifact's last publish, or None. In password mode its
+                  `password_hash` is sent again while the password is the
+                  same (see `build_access_payload`).
 
-    Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
+    Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files.
+    In password mode the dict also carries `password_hash`, the hash that was
+    sent; the caller stores it next to `access_password` and passes the entry
+    back as `previous_access` on the next publish.
+
+    Raises:
+        ArtifactOwnedByOtherUserError: the service answered 409
+                  `artifact_owned_by_other_user` — another owner holds
+                  `report_id`. Do not retry without `report_id`.
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Path not found: {file_path}")
@@ -485,18 +564,29 @@ def publish(
     # Backward-compat: a bare `password=` (no `access=`) maps to password mode.
     if access is None and password:
         access = {"mode": "password", "password": password}
-    payload_dict["access"] = build_access_payload(
-        access, pwd_version=pwd_version, access_version=access_version
+    access_payload = build_access_payload(
+        access, pwd_version=pwd_version, access_version=access_version,
+        previous=previous_access,
     )
+    payload_dict["access"] = access_payload
     payload = json.dumps(payload_dict).encode()
 
     url = f"{publish_url.rstrip('/')}/upload"
-    raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    try:
+        raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
+    except urllib.error.HTTPError as err:
+        _raise_if_owned_by_other_user(err)
+        raise
     # Upload succeeded (minds_request raises on failure): record the published
     # key schema so the next publish can warn on an incompatible change.
     if state_manifest is not None:
         _save_state_snapshot(file_path, state_manifest)
-    return json.loads(raw)
+    result = json.loads(raw)
+    if access_payload["mode"] == "password":
+        # Owner-side only: the caller stores it next to `access_password` and
+        # hands the entry back as `previous_access` on the next publish.
+        result["password_hash"] = access_payload["password_hash"]
+    return result
 
 
 def list_published(
