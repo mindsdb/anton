@@ -256,18 +256,25 @@ async def test_with_working_folders_a_cut_short_search_says_so(layout, monkeypat
     pathless = _ChoiceElicitor(kinds=("choice",))
 
     capped = await _call(_session(workspace, [folder], pathless), {"pattern": "**/*.csv"})
-    monkeypatch.setattr(tool_handlers, "_SELECTION_SCAN_LIMIT", 3)
-    nothing_in_budget = await _call(
-        _session(workspace, [folder], pathless), {"kind": "folder", "pattern": "*.csv"}
-    )
 
     assert capped["message"].endswith(_CUT_SHORT)
-    with_picker = await _call(
-        _session(workspace, [folder], _ChoiceElicitor()), {"kind": "folder", "pattern": "*.csv"}
+
+    capped_in_base_dir = await _call(
+        _session(workspace, [folder], pathless), {"pattern": "*.csv", "base_dir": "."}
     )
 
-    assert nothing_in_budget["status"] == "no_matches"
-    assert nothing_in_budget["message"].endswith(_CUT_SHORT)
+    assert capped_in_base_dir["message"].endswith(_CUT_SHORT_IN_BASE_DIR)
+
+    monkeypatch.setattr(tool_handlers, "_SELECTION_SCAN_LIMIT", 3)
+    folders_only = {"kind": "folder", "pattern": "*.csv"}
+
+    without_picker = await _call(_session(workspace, [folder], pathless), folders_only)
+
+    assert without_picker["status"] == "no_matches"
+    assert without_picker["message"].endswith(_CUT_SHORT)
+
+    with_picker = await _call(_session(workspace, [folder], _ChoiceElicitor()), folders_only)
+
     assert with_picker["status"] == "no_matches"
     assert with_picker["message"].endswith(_CUT_SHORT)
 
@@ -342,6 +349,7 @@ _CUT_SHORT = (
     "The search stopped at its limit before checking every match. Narrow the "
     "pattern, or set base_dir to search one folder."
 )
+_CUT_SHORT_IN_BASE_DIR = "The search stopped at its limit before checking every match. Narrow the pattern."
 _PICK_PICKER_UNAVAILABLE = (
     "An interactive picker is unavailable here; ask the user which of these paths they meant."
 )
@@ -463,7 +471,7 @@ def test_every_widened_phrase_exists_in_the_definitions():
 
 
 @pytest.mark.parametrize("kinds", [("choice", "path"), ("choice",)])
-def test_with_working_folders_the_registered_tool_names_them(make_session, tmp_path, kinds):
+def test_with_working_folders_the_registered_tool_mentions_them(make_session, tmp_path, kinds):
     folder = tmp_path / "docs"
     folder.mkdir()
     pristine = copy.deepcopy((SELECT_PATH_TOOL, SELECT_PATH_TOOL_PICK_ONLY))

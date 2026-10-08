@@ -1749,12 +1749,12 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     # ── pick — disambiguate concrete candidates within the project ───────
     candidates, cut_short = _collect_selection_candidates(tc_input, root, kind, working_folders)
     # Only with working folders: the no-folder messages are pinned as they were.
-    cut_short_note = (
-        " The search stopped at its limit before checking every match. Narrow the "
-        "pattern, or set base_dir to search one folder."
-        if cut_short and working_folders
-        else ""
-    )
+    cut_short_note = ""
+    if cut_short and working_folders:
+        narrow = "" if (tc_input.get("base_dir") or "").strip() else ", or set base_dir to search one folder"
+        cut_short_note = (
+            f" The search stopped at its limit before checking every match. Narrow the pattern{narrow}."
+        )
     if not candidates:
         # The browse suggestion is only honest where browse can actually run —
         # on a host without a path elicitor it leads straight to
