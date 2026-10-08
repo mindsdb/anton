@@ -429,6 +429,11 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
   ```
+  `Collection` stores its items under ITS OWN keys: `pk="_"` (unless you
+  pass `pk=`) and `sk="<name>#<key>"`. Data written through a `Collection`
+  is read back ONLY through the same `Collection` (`get`/`list`) — never
+  with raw `store.get(...)`/`store.query(...)` on your own pk/sk, which
+  finds nothing. Pick one style per piece of data and stick to it.
   Low-level `store` methods (all async; there is NO `scan()` and NO secondary
   indexes — `query` has no `index=` argument):
   * `await store.get(pk, sk=None)` → one item or `None`
