@@ -227,9 +227,80 @@ async def test_the_scan_budget_is_shared_across_roots(layout, monkeypatch):
     assert found["status"] == "resolved"
     offered = [option.label for option in elicitor.requests[0].options]
     assert len(offered) == 5
-    assert "docs/late.txt" not in offered
+    assert str((folder / "late.txt").resolve()) in offered
 
 
+def _fill_the_project(workspace: Path) -> None:
+    """More project matches than the candidate cap."""
+    for i in range(tool_handlers._SELECTION_MAX_CANDIDATES + 10):
+        (workspace / f"p{i:02}.csv").write_text("a")
+
+
+async def test_a_full_project_still_leaves_room_for_the_working_folders(layout):
+    workspace, folder, _ = layout
+    _fill_the_project(workspace)
+    (folder / "sales.csv").write_text("a")
+
+    result = await _call(
+        _session(workspace, [folder], _ChoiceElicitor(kinds=("choice",))), {"pattern": "**/*.csv"}
+    )
+
+    assert result["status"] == "picker_unavailable"
+    assert len(result["candidates"]) == tool_handlers._SELECTION_MAX_CANDIDATES
+    assert str((folder / "sales.csv").resolve()) in result["candidates"]
+
+
+async def test_with_working_folders_a_cut_short_search_says_so(layout, monkeypatch):
+    workspace, folder, _ = layout
+    _fill_the_project(workspace)
+    pathless = _ChoiceElicitor(kinds=("choice",))
+
+    capped = await _call(_session(workspace, [folder], pathless), {"pattern": "**/*.csv"})
+    monkeypatch.setattr(tool_handlers, "_SELECTION_SCAN_LIMIT", 3)
+    nothing_in_budget = await _call(
+        _session(workspace, [folder], pathless), {"kind": "folder", "pattern": "*.csv"}
+    )
+
+    assert capped["message"].endswith(_CUT_SHORT)
+    with_picker = await _call(
+        _session(workspace, [folder], _ChoiceElicitor()), {"kind": "folder", "pattern": "*.csv"}
+    )
+
+    assert nothing_in_budget["status"] == "no_matches"
+    assert nothing_in_budget["message"].endswith(_CUT_SHORT)
+    assert with_picker["status"] == "no_matches"
+    assert with_picker["message"].endswith(_CUT_SHORT)
+
+
+async def test_with_working_folders_a_complete_search_says_nothing_extra(layout):
+    workspace, folder, _ = layout
+    (workspace / "a.csv").write_text("a")
+    (folder / "b.csv").write_text("a")
+
+    result = await _call(
+        _session(workspace, [folder], _ChoiceElicitor(kinds=("choice",))), {"pattern": "*.csv"}
+    )
+
+    assert result["message"] == _PICK_PICKER_UNAVAILABLE
+
+
+async def test_without_working_folders_a_cut_short_search_reads_as_before(layout):
+    workspace, _, _ = layout
+    _fill_the_project(workspace)
+
+    result = await _call(_session(workspace, elicitor=_ChoiceElicitor(kinds=("choice",))), {"pattern": "*.csv"})
+
+    assert len(result["candidates"]) == tool_handlers._SELECTION_MAX_CANDIDATES
+    assert result["message"] == _PICK_PICKER_UNAVAILABLE
+
+
+_CUT_SHORT = (
+    "The search stopped at its limit before checking every match. Narrow the "
+    "pattern, or set base_dir to search one folder."
+)
+_PICK_PICKER_UNAVAILABLE = (
+    "An interactive picker is unavailable here; ask the user which of these paths they meant."
+)
 _NO_MATCHES_PATHLESS = (
     "No match found in the project. Refine the pattern, or — if the file "
     "is not in the project at all — ask the user to attach it to the "

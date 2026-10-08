@@ -1387,18 +1387,23 @@ def _selection_scope(working_folders: "tuple[Path, ...]") -> str:
 
 def _collect_selection_candidates(
     tc_input: dict, root: "Path", kind: str, working_folders: "tuple[Path, ...]" = ()
-) -> "list[Path]":
+) -> "tuple[list[Path], bool]":
     """Resolve candidate paths: confined to *root* and *working_folders*,
     deduped, kind-filtered, capped.
 
     Prefers the model's explicit ``candidates`` list; otherwise globs
     ``pattern`` under an optional ``base_dir``, or under every root when none
-    is given, with one scan budget shared across them. Relative paths resolve
+    is given. The roots take turns under one shared cap and scan budget, so a
+    full project cannot crowd out the working folders. Relative paths resolve
     against *root*. A private ``.anton`` directory is never exposed.
+
+    Returns the sorted candidates and whether a pattern search stopped at
+    the cap or the scan budget before its globs ran out.
     """
     roots = (root, *working_folders)
     seen: set[Path] = set()
     found: list[Path] = []
+    cut_short = False
 
     def consider(path: Path) -> bool:
         """Add *path* if it qualifies. Returns False once the cap is hit."""
@@ -1438,18 +1443,22 @@ def _collect_selection_candidates(
                 rel = Path(base_dir).expanduser()
                 search_root = (rel if rel.is_absolute() else root / rel).resolve()
                 search_roots = (search_root,) if _containing_root(roots, search_root) else ()
+            globs = [search_root.glob(pattern) for search_root in search_roots]
             scanned = 0
-            for search_root in search_roots:
-                for match in search_root.glob(pattern):
-                    if scanned >= _SELECTION_SCAN_LIMIT or not consider(match):
+            while globs and not cut_short:
+                for matches in list(globs):
+                    if scanned >= _SELECTION_SCAN_LIMIT or len(found) >= _SELECTION_MAX_CANDIDATES:
+                        cut_short = True
                         break
+                    match = next(matches, None)
+                    if match is None:
+                        globs.remove(matches)
+                        continue
                     scanned += 1
-                else:
-                    continue
-                break
+                    consider(match)
 
     found.sort(key=lambda p: str(p).lower())
-    return found
+    return found, cut_short
 
 
 def _selection_label(path: "Path", root: "Path") -> str:
@@ -1735,26 +1744,29 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
         return _finalize_browse_choice(_chosen_path(answer), kind, browse_root)
 
     # ── pick — disambiguate concrete candidates within the project ───────
-    candidates = _collect_selection_candidates(tc_input, root, kind, working_folders)
+    candidates, cut_short = _collect_selection_candidates(tc_input, root, kind, working_folders)
+    # Only with working folders: the no-folder messages are pinned as they were.
+    cut_short_note = (
+        " The search stopped at its limit before checking every match. Narrow the "
+        "pattern, or set base_dir to search one folder."
+        if cut_short and working_folders
+        else ""
+    )
     if not candidates:
         # The browse suggestion is only honest where browse can actually run —
         # on a host without a path elicitor it leads straight to
         # picker_unavailable, and "ask in plain text" is unusable for a file
         # outside the project (ENG-1357).
-        return _status(
-            "no_matches",
-            (
-                "No match found. Refine the pattern, omit candidates/pattern to let "
-                "the user browse, or ask in plain text."
-            )
+        no_match = (
+            "No match found. Refine the pattern, omit candidates/pattern to let "
+            "the user browse, or ask in plain text."
             if can_pick
-            else (
-                f"No match found in {scope}. Refine the pattern, or — if the file "
-                f"is not in {scope} at all — ask the user to attach it to the "
-                "conversation. This host has no file browser, and you cannot read a "
-                "path the user types."
-            ),
+            else f"No match found in {scope}. Refine the pattern, or — if the file "
+            f"is not in {scope} at all — ask the user to attach it to the "
+            "conversation. This host has no file browser, and you cannot read a "
+            "path the user types."
         )
+        return _status("no_matches", no_match + cut_short_note)
     if len(candidates) == 1:
         if not has_candidates:
             # A lone *pattern* match is a genuine discovery — the glob searched
@@ -1771,7 +1783,8 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
     if not can_pick:
         return _status(
             "picker_unavailable",
-            "An interactive picker is unavailable here; ask the user which of these paths they meant.",
+            "An interactive picker is unavailable here; ask the user which of these paths they meant."
+            + cut_short_note,
             candidates=[str(p) for p in candidates],
         )
 
