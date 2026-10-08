@@ -689,12 +689,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 access=eff_access,
                 pwd_version=pwd_version,
                 access_version=access_version,
-                previous_access=prev if isinstance(prev, dict) else None,
+                previous_access=prev,
             )
         except ArtifactOwnedByOtherUserError as e:
-            # Another account owns this report_id (a fullstack report_id is
-            # global). The retry below would publish a silent copy under a new
-            # URL, which is exactly what this 409 exists to prevent.
             console.print(f"  [anton.error]{e}[/]")
             console.print()
             return (
@@ -747,10 +744,8 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # instead of creating a new report (owner-side; unified location + key).
     if returned_report_id:
         entry = dict(owner_side)
-        if owner_side.get("mode") == "password" and result.get("password_hash"):
-            # The hash that was sent. The next publish hands this entry back
-            # as `previous_access`, so an unchanged password keeps its hash
-            # and viewers keep their password grants.
+        if result.get("password_hash"):
+            # Sent again by the next publish while the password is unchanged.
             entry["password_hash"] = result["password_hash"]
         entry.update({
             "report_id": returned_report_id,

@@ -29,16 +29,20 @@ def _make_artifact(tmp_path: Path) -> Path:
     return root
 
 
-@pytest.mark.asyncio
-async def test_publish_passes_password_access(tmp_path):
-    root = _make_artifact(tmp_path)
-
+def _settings(root: Path, tmp_path: Path):
     settings = mock.Mock()
     settings.minds_api_key = "key"
     settings.artifacts_dir = str(root)
     settings.workspace_path = str(tmp_path)
     settings.publish_url = "https://view.test"
     settings.minds_ssl_verify = True
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_publish_passes_password_access(tmp_path):
+    root = _make_artifact(tmp_path)
+    settings = _settings(root, tmp_path)
 
     fake_publish = mock.Mock(return_value={
         "view_url": "https://view.test/r/abc", "report_id": "abc",
@@ -72,16 +76,6 @@ async def test_publish_passes_password_access(tmp_path):
 # ---------------------------------------------------------------------------
 
 _STORED_HASH = "pbkdf2_sha256$200000$c2FsdHNhbHRzYWx0c2FsdA==$ZGVyaXZlZGtleQ=="
-
-
-def _settings(root: Path, tmp_path: Path):
-    settings = mock.Mock()
-    settings.minds_api_key = "key"
-    settings.artifacts_dir = str(root)
-    settings.workspace_path = str(tmp_path)
-    settings.publish_url = "https://view.test"
-    settings.minds_ssl_verify = True
-    return settings
 
 
 def _write_entry(root: Path, entry: dict) -> Path:

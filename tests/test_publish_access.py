@@ -1,7 +1,6 @@
 """Tests for the publish access spec (ENG-322): build_access_payload + publish()."""
 
 import base64
-import hashlib
 import http.client
 import io
 import json
@@ -13,7 +12,6 @@ import pytest
 
 from anton import publisher
 from anton.publisher import (
-    OWNED_BY_OTHER_USER_CODE,
     ArtifactOwnedByOtherUserError,
     build_access_payload,
     hash_access_password,
@@ -62,19 +60,25 @@ def test_restricted_mode_defaults():
 # ---------------------------------------------------------------------------
 
 
-def _capture_publish(tmp_path: Path, **publish_kwargs) -> dict:
+def _publish_with(tmp_path: Path, fake_request, **publish_kwargs) -> dict:
     f = tmp_path / "index.html"
     f.write_text("<html>hi</html>", encoding="utf-8")
-    captured: dict = {}
+    with mock.patch.object(publisher, "minds_request", fake_request):
+        return publish(f, api_key="k", **publish_kwargs)
 
+
+def _accepting_request(captured: dict):
     def fake_request(url, api_key, *, method="POST", payload=None, verify=True, timeout=30):
         captured["payload"] = json.loads(payload.decode())
         return json.dumps(
             {"user_prefix": "u", "report_id": "r", "md5": "m", "view_url": "url", "version": 1, "files": []}
         )
+    return fake_request
 
-    with mock.patch.object(publisher, "minds_request", fake_request):
-        publish(f, api_key="k", **publish_kwargs)
+
+def _capture_publish(tmp_path: Path, **publish_kwargs) -> dict:
+    captured: dict = {}
+    _publish_with(tmp_path, _accepting_request(captured), **publish_kwargs)
     return captured["payload"]
 
 
@@ -132,47 +136,36 @@ def _password_entry(password: str, password_hash: str | None) -> dict:
     return entry
 
 
-def test_a_fresh_hash_differs_on_every_call():
-    """Why reuse is needed at all: every call salts anew."""
-    first = build_access_payload({"mode": "password", "password": "hunter2"})
-    second = build_access_payload({"mode": "password", "password": "hunter2"})
-    assert first["password_hash"] != second["password_hash"]
+_HUNTER2_HASH = hash_access_password("hunter2")
+_ITERATIONS = publisher._PBKDF2_ITERATIONS
+
+
+def _hunter2_hash_at(iterations: int) -> str:
+    with mock.patch.object(publisher, "_PBKDF2_ITERATIONS", iterations):
+        return hash_access_password("hunter2")
 
 
 def test_same_password_reuses_the_previous_hash():
-    prev_hash = hash_access_password("hunter2")
     out = build_access_payload(
         {"mode": "password", "password": "hunter2"},
-        previous=_password_entry("hunter2", prev_hash),
+        previous=_password_entry("hunter2", _HUNTER2_HASH),
     )
-    assert out["password_hash"] == prev_hash
+    assert out["password_hash"] == _HUNTER2_HASH
 
 
 def test_changed_password_gets_a_new_hash():
-    prev_hash = hash_access_password("hunter2")
     out = build_access_payload(
         {"mode": "password", "password": "correct-horse"},
-        previous=_password_entry("hunter2", prev_hash),
+        previous=_password_entry("hunter2", _HUNTER2_HASH),
     )
-    assert out["password_hash"] != prev_hash
+    assert out["password_hash"] != _HUNTER2_HASH
     assert out["password_hash"].startswith("pbkdf2_sha256$")
 
 
 def test_legacy_entry_without_mode_still_reuses_the_hash():
-    prev_hash = hash_access_password("hunter2")
-    previous = {"requires_password": True, "access_password": "hunter2", "password_hash": prev_hash}
+    previous = {"requires_password": True, "access_password": "hunter2", "password_hash": _HUNTER2_HASH}
     out = build_access_payload({"mode": "password", "password": "hunter2"}, previous=previous)
-    assert out["password_hash"] == prev_hash
-
-
-_HUNTER2_HASH = hash_access_password("hunter2")
-
-
-def _hash_with(password: str, iterations: int, salt: bytes = b"0123456789abcdef") -> str:
-    """A well-formed stored hash, with the iteration count chosen by the test."""
-    b64 = lambda b: base64.b64encode(b).decode("ascii")
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return f"pbkdf2_sha256${iterations}${b64(salt)}${b64(dk)}"
+    assert out["password_hash"] == _HUNTER2_HASH
 
 
 @pytest.mark.parametrize(
@@ -193,10 +186,10 @@ def _hash_with(password: str, iterations: int, salt: bytes = b"0123456789abcdef"
         # A well-formed hash of another password: the entry disagrees with itself.
         _password_entry("hunter2", hash_access_password("correct-horse")),
         # Another iteration count, even with a valid digest for that count.
-        _password_entry("hunter2", _hash_with("hunter2", 1_000)),
+        _password_entry("hunter2", _hunter2_hash_at(1_000)),
         # The right digest, but the iteration count is not written the way
         # `hash_access_password` writes it.
-        _password_entry("hunter2", _hash_with("hunter2", 200_000).replace("$200000$", "$0200000$", 1)),
+        _password_entry("hunter2", _HUNTER2_HASH.replace(f"${_ITERATIONS}$", f"$0{_ITERATIONS}$", 1)),
         # Malformed values.
         _password_entry("hunter2", "pbkdf2_sha256$200000$c2FsdA==$ZGs="),
         _password_entry("hunter2", "pbkdf2_sha256$many$c2FsdA==$ZGs="),
@@ -208,46 +201,20 @@ def _hash_with(password: str, iterations: int, salt: bytes = b"0123456789abcdef"
 )
 def test_no_reusable_hash_means_a_fresh_one(previous):
     out = build_access_payload({"mode": "password", "password": "hunter2"}, previous=previous)
-    assert out["password_hash"].startswith(f"pbkdf2_sha256${publisher._PBKDF2_ITERATIONS}$")
+    assert out["password_hash"].startswith(f"pbkdf2_sha256${_ITERATIONS}$")
     if isinstance(previous, dict):
         assert out["password_hash"] != previous.get("password_hash")
 
 
-def test_a_hash_that_verifies_the_password_is_reused():
-    """The check is a recomputation, not a prefix test: a verifying hash passes it."""
-    stored = _hash_with("hunter2", publisher._PBKDF2_ITERATIONS)
-    out = build_access_payload(
-        {"mode": "password", "password": "hunter2"}, previous=_password_entry("hunter2", stored),
-    )
-    assert out["password_hash"] == stored
-
-
-def _publish_with(tmp_path: Path, fake_request, **publish_kwargs) -> dict:
-    f = tmp_path / "index.html"
-    f.write_text("<html>hi</html>", encoding="utf-8")
-    with mock.patch.object(publisher, "minds_request", fake_request):
-        return publish(f, api_key="k", **publish_kwargs)
-
-
-def _accepting_request(captured: dict):
-    def fake_request(url, api_key, *, method="POST", payload=None, verify=True, timeout=30):
-        captured["payload"] = json.loads(payload.decode())
-        return json.dumps(
-            {"user_prefix": "u", "report_id": "r", "md5": "m", "view_url": "url", "version": 1, "files": []}
-        )
-    return fake_request
-
-
 def test_publish_sends_the_previous_hash_and_returns_it(tmp_path: Path):
-    prev_hash = hash_access_password("hunter2")
     captured: dict = {}
     result = _publish_with(
         tmp_path, _accepting_request(captured),
         access={"mode": "password", "password": "hunter2"},
-        previous_access=_password_entry("hunter2", prev_hash),
+        previous_access=_password_entry("hunter2", _HUNTER2_HASH),
     )
-    assert captured["payload"]["access"]["password_hash"] == prev_hash
-    assert result["password_hash"] == prev_hash
+    assert captured["payload"]["access"]["password_hash"] == _HUNTER2_HASH
+    assert result["password_hash"] == _HUNTER2_HASH
 
 
 def test_publish_returns_the_fresh_hash_it_sent(tmp_path: Path):
@@ -276,13 +243,9 @@ def _http_error(status: int, body) -> urllib.error.HTTPError:
     return urllib.error.HTTPError("https://view.test/upload", status, "Rejected", {}, io.BytesIO(raw))
 
 
-def test_owned_by_other_user_code_is_the_wire_value():
-    assert OWNED_BY_OTHER_USER_CODE == "artifact_owned_by_other_user"
-
-
 def test_publish_raises_a_typed_error_for_another_owner(tmp_path: Path):
     def reject(url, api_key, **kwargs):
-        raise _http_error(409, {"error": "Report belongs to another user", "code": OWNED_BY_OTHER_USER_CODE})
+        raise _http_error(409, {"error": "Report belongs to another user", "code": "artifact_owned_by_other_user"})
 
     with pytest.raises(ArtifactOwnedByOtherUserError) as err:
         _publish_with(tmp_path, reject, report_id="r")
@@ -314,7 +277,7 @@ def test_a_409_with_an_unreadable_body_propagates_the_original_error(tmp_path: P
     [
         (409, {"error": "Artifact key is owned by another user"}),  # auth's artifact_key conflict: no code
         (409, b"not json"),
-        (500, {"error": "boom", "code": OWNED_BY_OTHER_USER_CODE}),
+        (500, {"error": "boom", "code": "artifact_owned_by_other_user"}),
     ],
 )
 def test_other_http_errors_propagate_unchanged(tmp_path: Path, status, body):

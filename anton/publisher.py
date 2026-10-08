@@ -25,6 +25,7 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.minds_client import minds_request
+from anton.publish_access import access_from_owner_side
 from anton.utils.datasources import scrub_credentials
 
 # LLM API key env vars whose values must be stripped from published files.
@@ -83,20 +84,18 @@ class ArtifactOwnedByOtherUserError(RuntimeError):
 
 
 def _raise_if_owned_by_other_user(err: urllib.error.HTTPError) -> None:
-    """Turn the upload service's 409 `artifact_owned_by_other_user` into a typed error.
+    """Turn the upload's 409 `artifact_owned_by_other_user` into a typed error.
 
-    Any other HTTP error is left for the caller to re-raise. The body of a 409
-    is consumed here; no caller reads it afterwards. A body that cannot be read
-    or parsed (a truncated read raises `http.client.IncompleteRead`, which is
-    not an `OSError`) counts as not recognised.
+    Anything else, including a 409 body that cannot be read or parsed, is left
+    for the caller to re-raise.
     """
     if err.code != 409:
         return
     try:
-        body = json.loads(err.read(65_536) or b"{}")
+        code = json.loads(err.read(65_536))["code"]
     except Exception:
         return
-    if isinstance(body, dict) and body.get("code") == OWNED_BY_OTHER_USER_CODE:
+    if code == OWNED_BY_OTHER_USER_CODE:
         raise ArtifactOwnedByOtherUserError() from err
 
 
@@ -165,19 +164,13 @@ def _reusable_password_hash(password: str, previous: dict | None) -> str | None:
     """The hash sent last time, while the password is still the same one.
 
     `previous` is the owner-side `.published.json` entry of the last publish.
-    `hash_access_password` salts every call, so the same password would get a
-    new hash on every publish. The artifact content host fingerprints the
-    stored hash to revoke viewers' password grants, so a new hash on every
-    re-publish would ask every viewer for the password again. A changed
-    password, or an entry that left password mode in between (which drops the
-    stored plaintext and hash), gets a fresh hash. The stored hash is reused
-    only if it verifies `password` at the current iteration count, so an entry
-    whose plaintext and hash disagree can never keep an old password's hash.
+    `hash_access_password` salts every call, and the artifact content host
+    fingerprints the stored hash to revoke viewers' password grants, so a new
+    hash on every re-publish would ask every viewer for the password again.
+    A changed password, an entry that left password mode in between, or a
+    stored hash that does not verify `password` gets a fresh hash.
     """
-    if not isinstance(previous, dict):
-        return None
-    mode = previous.get("mode") or ("password" if previous.get("requires_password") else "public")
-    if mode != "password" or previous.get("access_password") != password:
+    if access_from_owner_side(previous) != {"mode": "password", "password": password}:
         return None
     stored = previous.get("password_hash")
     return stored if _hash_matches_password(stored, password) else None
@@ -520,9 +513,8 @@ def publish(
 
     Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files.
     In password mode the dict also carries `password_hash`, the hash that was
-    sent; the caller stores it next to `access_password` and passes the entry
-    back as `previous_access` on the next publish. The hash is owner-side only:
-    callers must not forward the result dict to clients or logs.
+    sent, for the caller to store next to `access_password`. It is owner-side
+    only: callers must not forward the result dict to clients or logs.
 
     Raises:
         ArtifactOwnedByOtherUserError: the service answered 409
@@ -606,9 +598,7 @@ def publish(
     if state_manifest is not None:
         _save_state_snapshot(file_path, state_manifest)
     result = json.loads(raw)
-    if access_payload["mode"] == "password":
-        # Owner-side only: the caller stores it next to `access_password` and
-        # hands the entry back as `previous_access` on the next publish.
+    if "password_hash" in access_payload:
         result["password_hash"] = access_payload["password_hash"]
     return result
 
