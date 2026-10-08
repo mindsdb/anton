@@ -192,7 +192,7 @@ def _raise_for_status_error(
         velocity_confirmed=_velocity,
     )
     if transient is not None:
-        log_transient_provider_error(logger, transient)
+        log_transient_provider_error(logger=logger, error=transient)
         raise transient from exc
 
     raise ConnectionError(

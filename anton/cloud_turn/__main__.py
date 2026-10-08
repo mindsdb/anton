@@ -27,7 +27,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from typing import BinaryIO
+from typing import BinaryIO, TextIO
 
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.elicitor import (
@@ -48,7 +48,6 @@ from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
 from anton.core.llm.provider import ProviderErrorFilter
 
 logger = logging.getLogger(__name__)
-logger.addFilter(ProviderErrorFilter())
 
 #: Bound step-event payloads (tool args / results) on the wire. Matches the
 #: cap cowork's SSE formatter applies to the same content.
@@ -112,6 +111,14 @@ def _scrub(exc: Exception) -> str:
     return text
 
 
+def _stderr_log_handler(*, stream: TextIO) -> logging.Handler:
+    """The pod's root stderr handler. Its filter sees every record that reaches
+    stderr from any logger, so no traceback prints a provider error body."""
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(ProviderErrorFilter())
+    return handler
+
+
 @contextlib.contextmanager
 def _isolated_protocol_stdout():
     """OS-level stdout isolation. Yields ``emit(event: dict)`` writing JSONL to
@@ -125,7 +132,9 @@ def _isolated_protocol_stdout():
     os.dup2(stderr_fd, 1)                   # any write to fd 1 now lands on stderr
     saved_sys_stdout = sys.stdout
     sys.stdout = sys.stderr
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    # The entrypoint owns the pod's logging. `force` replaces any root handler
+    # configured before main(), so the filtered handler is the only one on stderr.
+    logging.basicConfig(handlers=[_stderr_log_handler(stream=sys.stderr)], level=logging.INFO, force=True)
 
     def emit(event: dict) -> None:
         data = (json.dumps(event) + "\n").encode("utf-8")

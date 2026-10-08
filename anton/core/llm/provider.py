@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -432,20 +433,24 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     try:
         parsed = _json.loads(raw_json)
     except _json.JSONDecodeError as exc:
-        # Try the repair pass before giving up entirely.
+        # Try the repair pass before giving up entirely. Either way the log
+        # names the decoder's message and position, never the arguments: they
+        # are model-authored and can hold SQL values or credentials. The
+        # exception stays out of the args too, because its `doc` is the whole
+        # raw body.
         repair = _try_repair_tool_json(raw_json)
         if repair is not None:
             repaired, truncated = repair
             _logging.getLogger(__name__).info(
-                "Tool-use input JSON was malformed (%s) but repaired "
-                "successfully. Raw bytes: %d, truncated: %s.",
-                exc, len(raw_json), truncated,
+                "Tool-use input JSON was malformed (%s: line %d column %d (char %d)) "
+                "but repaired successfully. Raw bytes: %d, truncated: %s.",
+                exc.msg, exc.lineno, exc.colno, exc.pos, len(raw_json), truncated,
             )
             return repaired, None, truncated
         _logging.getLogger(__name__).warning(
-            "Tool-use input JSON was malformed and unrecoverable (%s). "
-            "Raw bytes: %d, head: %r",
-            exc, len(raw_json), raw_json[:160],
+            "Tool-use input JSON was malformed and unrecoverable "
+            "(%s: line %d column %d (char %d)). Raw bytes: %d",
+            exc.msg, exc.lineno, exc.colno, exc.pos, len(raw_json),
         )
         return {}, str(exc), False
     # Anthropic occasionally emits a top-level scalar (e.g. a string
@@ -851,17 +856,39 @@ class TransientProviderError(ConnectionError):
         self.session_backoff = session_backoff
 
 
-def log_transient_provider_error(logger: logging.Logger, error: TransientProviderError) -> None:
+def log_transient_provider_error(*, logger: logging.Logger, error: TransientProviderError) -> None:
     """Log classified retry metadata without provider bodies or exception text.
 
-    Provider error bodies can echo credentials, prompts and tool arguments.
-    Callers pass the result of classify_transient, whose codes come from the
-    recognized transient types or HTTP status, rather than arbitrary prose.
+    Provider error bodies can echo credentials, prompts and tool arguments, and
+    a Responses failure builds its TransientProviderError from the body's own
+    `code`. So the line names a code only from the closed transient vocabulary
+    and logs `unrecognized` for anything else.
     """
     logger.warning(
-        "transient provider error code=%s status=%s retry_after=%s session_backoff=%s",
-        error.code, error.status_code, error.retry_after, error.session_backoff,
+        "transient provider error error_code=%s status=%s retry_after=%s session_backoff=%s",
+        _loggable_transient_code(code=error.code), _log_status(status=error.status_code),
+        error.retry_after, error.session_backoff,
     )
+
+
+# `http_<status>` exactly as classify_transient mints it. provider_failure_kind
+# parses the digits with int(), which also accepts whitespace, signs and
+# underscores.
+_MINTED_HTTP_CODE = re.compile(r"http_5[0-9]{2}")
+
+
+def _loggable_transient_code(*, code: object) -> str:
+    """Return `code` when it is a transient code anton mints, else `unrecognized`."""
+    if not isinstance(code, str) or not provider_failure_kind(code):
+        return "unrecognized"
+    if code.startswith("http_") and _MINTED_HTTP_CODE.fullmatch(code) is None:
+        return "unrecognized"
+    return code
+
+
+def _log_status(*, status: object) -> int | str:
+    """An HTTP status for a log line: a real status code, else `unknown`."""
+    return status if type(status) is int and 100 <= status <= 599 else "unknown"
 
 
 class ProviderOverloadedError(ConnectionError):
@@ -2033,41 +2060,37 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
-class _ProviderLogError(NamedTuple):
-    error_type: str
-    status: int | None
+def _exception_chain(*, exc: BaseException) -> Iterator[BaseException]:
+    """Yield `exc`, then its cause, its context and its group members, depth first.
 
-
-def _provider_log_error(exc: BaseException) -> _ProviderLogError | None:
-    """Find provider failures without reading their body, message or arbitrary codes."""
-    from anthropic import AnthropicError
-    from openai import OpenAIError
-
-    provider_types = (OpenAIError, AnthropicError, *CURATED_PROVIDER_ERRORS)
+    Each exception is yielded once, so a cycle ends the walk. `__context__` is
+    followed even when `__suppress_context__` is set: a wrapper raised
+    `from None` can still repeat the provider error's text in its own message.
+    """
     pending = [exc]
     seen: set[int] = set()
-    error_type: str | None = None
-    status: int | None = None
     while pending:
         current = pending.pop()
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, provider_types):
-            if error_type is None:
-                error_type = type(current).__name__
-            candidate = getattr(current, "status_code", None)
-            if status is None and type(candidate) is int and 100 <= candidate <= 599:
-                status = candidate
-        if current.__cause__ is not None:
-            pending.append(current.__cause__)
+        yield current
+        # Pushed in reverse so the walk pops the cause first and the members last.
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(reversed(current.exceptions))
         if current.__context__ is not None:
             pending.append(current.__context__)
-        if isinstance(current, BaseExceptionGroup):
-            pending.extend(current.exceptions)
-    if error_type is None:
-        return None
-    return _ProviderLogError(error_type, status)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+
+
+def _provider_error(*, exc: BaseException) -> BaseException | None:
+    """The first provider error in `exc`'s chain, found by type alone."""
+    from anthropic import AnthropicError
+    from openai import OpenAIError
+
+    provider_types = (OpenAIError, AnthropicError, *CURATED_PROVIDER_ERRORS)
+    return next((error for error in _exception_chain(exc=exc) if isinstance(error, provider_types)), None)
 
 
 class ProviderErrorFilter(logging.Filter):
@@ -2077,6 +2100,10 @@ class ProviderErrorFilter(logging.Filter):
     retain those SDK errors as causes, so logging their traceback would undo
     the adapters' safe warnings. Filter only records holding a provider error;
     callers' propagated exceptions and unrelated tracebacks stay unchanged.
+
+    The replacement names the record's own exception class, the provider
+    error's class and the provider error's own HTTP status. Class names come
+    from code, and a status is logged only when it is a real HTTP status code.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -2088,11 +2115,14 @@ class ProviderErrorFilter(logging.Filter):
         args = record.args.values() if isinstance(record.args, dict) else (record.args or ())
         candidates.extend(arg for arg in args if isinstance(arg, BaseException))
         for exc in candidates:
-            error = _provider_log_error(exc)
-            if error is None:
+            provider_error = _provider_error(exc=exc)
+            if provider_error is None:
                 continue
-            record.msg = "Provider operation failed: error_type=%s status=%s"
-            record.args = (error.error_type, error.status)
+            record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
+            record.args = (
+                type(exc).__name__, type(provider_error).__name__,
+                _log_status(status=getattr(provider_error, "status_code", None)),
+            )
             record.message = record.getMessage()
             record.exc_info = None
             record.exc_text = None

@@ -13,7 +13,13 @@ import pytest
 
 from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import OpenAIProvider
-from anton.core.llm.provider import LLMProvider, TransientProviderError
+from anton.core.llm.provider import (
+    LLMProvider,
+    StreamComplete,
+    TransientProviderError,
+    log_transient_provider_error,
+    safe_parse_tool_input,
+)
 
 
 _PRIVATE_VALUES = (
@@ -76,8 +82,9 @@ def _assert_log(
     for private_value in _PRIVATE_VALUES:
         assert private_value not in message
         assert private_value not in repr(record.args)
-    assert f"code={error.code}" in message
-    assert f"status={error.status_code}" in message
+    assert f"error_code={error.code}" in message
+    status = "unknown" if error.status_code is None else error.status_code
+    assert f"status={status}" in message
     assert f"retry_after={error.retry_after}" in message
     assert f"session_backoff={error.session_backoff}" in message
 
@@ -147,3 +154,161 @@ async def test_stream_error_logs_metadata_without_body(
         _assert_log(caplog, lane, error)
     finally:
         await provider.aclose()
+
+
+class _TextStatus(int):
+    """An in-range int whose rendering carries private text."""
+
+    def __str__(self) -> str:
+        return _PRIVATE_VALUES[0]
+
+    __repr__ = __str__
+
+
+@pytest.mark.parametrize("code,status,expected", [
+    ("rate_limited", 429, "error_code=rate_limited status=429"),
+    ("overloaded_error", None, "error_code=overloaded_error status=unknown"),
+    ("http_503", 503, "error_code=http_503 status=503"),
+    # A Responses failure takes its code from the provider's body.
+    (_PRIVATE_VALUES[0], None, "error_code=unrecognized status=unknown"),
+    # int() accepts these digits, so the kind mapping alone would let them through.
+    ("http_\n503", 503, "error_code=unrecognized status=503"),
+    ("http_5_03", 503, "error_code=unrecognized status=503"),
+    # Some providers send an integer code.
+    (503, 503, "error_code=unrecognized status=503"),
+    (None, "503 " + _PRIVATE_VALUES[1], "error_code=unrecognized status=unknown"),
+    # Only an exact int HTTP status is logged; bool is an int subclass.
+    ("rate_limited", True, "error_code=rate_limited status=unknown"),
+    ("rate_limited", 99, "error_code=rate_limited status=unknown"),
+    ("rate_limited", 600, "error_code=rate_limited status=unknown"),
+    # An int subclass can render anything, so it is not a status.
+    ("rate_limited", _TextStatus(429), "error_code=rate_limited status=unknown"),
+])
+def test_transient_warning_logs_only_known_codes_and_real_statuses(
+    caplog: pytest.LogCaptureFixture, code: object, status: object, expected: str,
+) -> None:
+    logger = logging.getLogger("anton.core.llm.openai")
+    error = TransientProviderError("The model provider failed.", code=code, status_code=status)
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        log_transient_provider_error(logger=logger, error=error)
+    records = [record for record in caplog.records
+               if record.name == logger.name and record.levelno == logging.WARNING]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        f"transient provider error {expected} retry_after=None session_backoff=True"
+    )
+    for private_value in _PRIVATE_VALUES:
+        assert private_value not in repr(records[0].args)
+
+
+# The model sends credentials in tool arguments, for example a datasource's
+# known variables. A missing comma leaves them unrepairable.
+_TOOL_SECRET = "private-key-passphrase-3304"
+_MALFORMED_TOOL_ARGUMENTS = (
+    '{"known_variables": {"private_key_passphrase": "%s" "user": "analyst"}}' % _TOOL_SECRET
+)
+_TOOLS = [{"name": "connect_datasource", "description": "Connect.", "input_schema": {"type": "object"}}]
+
+
+def _sse(*, events: list[dict[str, object]], named: bool) -> bytes:
+    lines = []
+    for event in events:
+        if named:
+            lines.append(f"event: {event['type']}\n")
+        lines.append("data: " + json.dumps(event) + "\n\n")
+    return "".join(lines).encode()
+
+
+def _tool_call_response(*, lane: str) -> httpx.Response:
+    if lane == "chat_complete":
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "test-model",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {
+                    "name": "connect_datasource", "arguments": _MALFORMED_TOOL_ARGUMENTS}}],
+            }}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+    if lane == "chat":
+        chunk = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 0, "model": "test-model"}
+        body = _sse(events=[
+            {**chunk, "choices": [{"index": 0, "finish_reason": None, "delta": {
+                "role": "assistant",
+                "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {
+                    "name": "connect_datasource", "arguments": _MALFORMED_TOOL_ARGUMENTS}}],
+            }}]},
+            {**chunk, "choices": [{"index": 0, "finish_reason": "tool_calls", "delta": {}}]},
+        ], named=False) + b"data: [DONE]\n\n"
+    elif lane == "responses":
+        body = _sse(events=[
+            {"type": "response.output_item.added", "sequence_number": 1, "output_index": 0,
+             "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                      "name": "connect_datasource", "arguments": "", "status": "in_progress"}},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 2,
+             "output_index": 0, "item_id": "fc_1", "delta": _MALFORMED_TOOL_ARGUMENTS},
+            {"type": "response.function_call_arguments.done", "sequence_number": 3,
+             "output_index": 0, "item_id": "fc_1", "name": "connect_datasource",
+             "arguments": _MALFORMED_TOOL_ARGUMENTS},
+            {"type": "response.completed", "sequence_number": 4, "response": {
+                "id": "resp_1", "object": "response", "created_at": 0, "model": "test-model",
+                "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}},
+        ], named=False)
+    else:
+        body = _sse(events=[
+            {"type": "message_start", "message": {
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "test-model",
+                "content": [], "stop_reason": None, "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1}}},
+            {"type": "content_block_start", "index": 0, "content_block": {
+                "type": "tool_use", "id": "toolu_1", "name": "connect_datasource", "input": {}}},
+            {"type": "content_block_delta", "index": 0, "delta": {
+                "type": "input_json_delta", "partial_json": _MALFORMED_TOOL_ARGUMENTS}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+             "usage": {"output_tokens": 1}},
+            {"type": "message_stop"},
+        ], named=True)
+    return httpx.Response(200, content=body, headers={"Content-Type": "text/event-stream"})
+
+
+@pytest.mark.parametrize("lane", ["chat_complete", "chat", "responses", "anthropic"])
+async def test_unrecoverable_tool_arguments_log_position_without_text(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, lane: str,
+) -> None:
+    provider = _provider(monkeypatch, "chat" if lane == "chat_complete" else lane,
+                         lambda request: _tool_call_response(lane=lane))
+    request = {"model": "test-model", "system": "system", "tools": _TOOLS,
+               "messages": [{"role": "user", "content": "question"}]}
+    try:
+        with caplog.at_level(logging.INFO, logger="anton.core.llm.provider"):
+            if lane == "chat_complete":
+                tool_calls = (await provider.complete(**request)).tool_calls
+            else:
+                events = [event async for event in provider.stream(**request)]
+                tool_calls = [event for event in events
+                              if isinstance(event, StreamComplete)][-1].response.tool_calls
+    finally:
+        await provider.aclose()
+    assert [call.parse_error for call in tool_calls] == ["Expecting ',' delimiter: line 1 column 78 (char 77)"]
+    records = [record for record in caplog.records
+               if record.name == "anton.core.llm.provider" and record.levelno == logging.WARNING]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        "Tool-use input JSON was malformed and unrecoverable "
+        f"(Expecting ',' delimiter: line 1 column 78 (char 77)). Raw bytes: {len(_MALFORMED_TOOL_ARGUMENTS)}"
+    )
+    assert _TOOL_SECRET not in repr(records[0].args)
+
+
+def test_repaired_tool_arguments_log_position_without_text(caplog: pytest.LogCaptureFixture) -> None:
+    raw = '{"private_key_passphrase": "%s"' % _TOOL_SECRET  # Cut off before the closing brace.
+    with caplog.at_level(logging.INFO, logger="anton.core.llm.provider"):
+        assert safe_parse_tool_input(raw) == ({"private_key_passphrase": _TOOL_SECRET}, None, True)
+    records = [record for record in caplog.records
+               if record.name == "anton.core.llm.provider" and record.levelno == logging.INFO]
+    assert len(records) == 1
+    assert _TOOL_SECRET not in records[0].getMessage()
+    # The decoder's exception keeps the whole raw body in `doc`, so it must not ride in the args.
+    assert all(isinstance(arg, (str, int, bool)) for arg in records[0].args)

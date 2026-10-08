@@ -380,7 +380,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         velocity_confirmed=_velocity,
     )
     if transient is not None:
-        log_transient_provider_error(logger, transient)
+        log_transient_provider_error(logger=logger, error=transient)
         raise transient from exc
 
     raise ConnectionError(
@@ -1534,7 +1534,7 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                log_transient_provider_error(logger, transient)
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
@@ -1959,7 +1959,7 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                log_transient_provider_error(logger, transient)
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",

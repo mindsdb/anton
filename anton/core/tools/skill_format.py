@@ -148,7 +148,17 @@ def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
     try:
         props = yaml.safe_load(yaml_text)
     except yaml.YAMLError as exc:
-        logger.warning("parse_skill_md: YAML error: %s", exc)
+        # PyYAML's message quotes the offending frontmatter lines, which can
+        # hold a token, so the log names only the error class and position.
+        # The mark counts from 0 within the frontmatter, which starts on the
+        # file's second line.
+        mark = getattr(exc, "problem_mark", None)
+        logger.warning(
+            "parse_skill_md: YAML error in SKILL.md: error_type=%s line=%s column=%s",
+            type(exc).__name__,
+            mark.line + 2 if mark is not None else "unknown",
+            mark.column + 1 if mark is not None else "unknown",
+        )
         return None
 
     if not isinstance(props, dict):
