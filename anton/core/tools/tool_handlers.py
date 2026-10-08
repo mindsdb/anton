@@ -1777,9 +1777,11 @@ async def handle_select_path(session: "ChatSession", tc_input: dict) -> str:
             # a prompt is safe. A lone *explicit* candidate is not (ENG-1852):
             # it is the model's own guess echoed back, so it must be confirmed
             # by the user — via the confirmation card below, or by picking it
-            # in the path picker where one renders.
-            return _status("resolved", auto_resolved=True, path=str(candidates[0]))
-        if not can_pick:
+            # in the path picker where one renders. A cut-short search found
+            # one thing so far, not exactly one, so it is offered like a list.
+            if not cut_short_note:
+                return _status("resolved", auto_resolved=True, path=str(candidates[0]))
+        elif not can_pick:
             return await _confirm_single_candidate(
                 session, candidates[0], root, timeout_s, working_folders
             )

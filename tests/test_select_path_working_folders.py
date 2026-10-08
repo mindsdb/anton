@@ -305,6 +305,29 @@ async def test_a_search_that_ends_exactly_at_a_limit_is_not_cut_short(layout, mo
     assert at_budget["message"] == _PICK_PICKER_UNAVAILABLE
 
 
+async def test_a_lone_match_from_a_cut_short_search_is_not_resolved_silently(layout, monkeypatch):
+    """One match found before the budget ran out is not "exactly one match"."""
+    workspace, folder, _ = layout
+    for name in ("a.csv", "b.csv"):
+        (workspace / name).mkdir()
+    (folder / "sales.csv").write_text("a")
+    sales = str((folder / "sales.csv").resolve())
+    lone_file = {"kind": "file", "pattern": "*.csv"}
+    monkeypatch.setattr(tool_handlers, "_SELECTION_SCAN_LIMIT", 2)
+
+    pathless = await _call(_session(workspace, [folder], _ChoiceElicitor(kinds=("choice",))), lone_file)
+
+    assert pathless["status"] == "picker_unavailable"
+    assert pathless["candidates"] == [sales]
+    assert pathless["message"].endswith(_CUT_SHORT)
+
+    picker = _ChoiceElicitor(chosen=sales)
+    picked = await _call(_session(workspace, [folder], picker), lone_file)
+
+    assert [option.value for option in picker.requests[0].options] == [sales]
+    assert picked == {"status": "resolved", "path": sales}
+
+
 async def test_without_working_folders_a_cut_short_search_reads_as_before(layout):
     workspace, _, _ = layout
     _fill_the_project(workspace)
