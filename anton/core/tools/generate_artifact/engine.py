@@ -703,7 +703,7 @@ async def _generate_api_spec(
 
 
 _API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
-_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)]+)")
+_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)*?]+)")
 _HEALTH_PATH = "/api/health"
 
 
@@ -725,7 +725,9 @@ def _declared_api_paths(context: str) -> dict[str, str]:
     if not match:
         return {}
     found: dict[str, str] = {}
-    for path in _DECLARED_PATH_RE.findall(match.group(1)):
+    for raw in _DECLARED_PATH_RE.findall(match.group(1)):
+        # A sentence's full stop; dots inside a path segment stay.
+        path = raw.rstrip(".")
         if _normalise_api_path(path) != _HEALTH_PATH:
             found.setdefault(_normalise_api_path(path), path)
     return found

@@ -305,6 +305,23 @@ def test_declared_api_paths_come_from_the_backend_section_only():
     assert engine._declared_api_paths("## Product requirements\nX") == {}
 
 
+def test_declared_api_paths_drop_markdown_punctuation_and_query():
+    """The paths are quoted back to the model to copy character for
+    character, so bold markers, a sentence's full stop and a query string
+    must not become part of a path."""
+    section = (
+        "## Backend\n"
+        "- **GET /api/poll**: current results.\n"
+        "- Then GET /api/results.\n"
+        "- POST /api/vote?option=Pizza records a vote.\n"
+    )
+    assert engine._declared_api_paths(section) == {
+        "/api/poll": "/api/poll",
+        "/api/results": "/api/results",
+        "/api/vote": "/api/vote",
+    }
+
+
 def _doc(*paths: str) -> dict:
     return {"paths": {p: {"get": {"responses": {"200": {}}}} for p in paths}}
 
