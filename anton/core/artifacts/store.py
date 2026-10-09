@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from anton.core.artifacts.models import (
     FileEntry,
     ProvenanceEntry,
     TurnEntry,
+    canonical_artifact_id,
 )
 # BACKEND_LOG_FILENAME is re-exported for backend_launcher and generate_artifact.
 from anton.core.artifacts.internal_files import (
@@ -148,6 +149,14 @@ def _truncate_summary(text: str) -> str:
     if len(text) <= _SUMMARY_MAX:
         return text
     return text[: _SUMMARY_MAX - 1].rstrip() + "…"
+
+
+def _as_id(key: str) -> str | None:
+    """`key` as an artifact id would be stored, or None if it cannot be one."""
+    try:
+        return canonical_artifact_id(key)
+    except ValueError:
+        return None
 
 
 class ArtifactStore:
@@ -362,6 +371,53 @@ class ArtifactStore:
             return None
         return self._reconcile_files(artifact)
 
+    def find(self, keys: Iterable[str]) -> tuple[list[Artifact], list[str]]:
+        """Artifacts whose slug or id equals one of `keys`, newest first, and
+        the keys that matched nothing, in request order.
+
+        Only the matches are reconciled against disk, so a lookup does not
+        rewrite every artifact's metadata the way `list()` can.
+        """
+        wanted = list(dict.fromkeys(keys))
+        found: dict[str, Artifact] = {}
+        unmatched: list[str] = []
+        for key in wanted:
+            artifact = self._load_silent(key) if key else None
+            if artifact is None:
+                unmatched.append(key)
+            else:
+                found[artifact.slug] = artifact
+        # Only a key that parses as an id can match one; a mistyped slug must
+        # not load every artifact's metadata.
+        by_id: dict[str, list[str]] = {}
+        for key in unmatched:
+            artifact_id = _as_id(key)
+            if artifact_id is not None:
+                by_id.setdefault(artifact_id, []).append(key)
+        if by_id and self._root.is_dir():
+            # A slug ends with `-<id[:8]>`, so the folders that do are loaded
+            # first, and the scan stops once every id (unique in a store) has
+            # its artifact.
+            suffixes = tuple({f"-{artifact_id[:ARTIFACT_ID_SLUG_PREFIX_LEN]}" for artifact_id in by_id})
+            children = sorted(
+                (child for child in self._root.iterdir() if child.is_dir()),
+                key=lambda child: not child.name.endswith(suffixes),
+            )
+            matched: set[str] = set()
+            pending = set(by_id)
+            for child in children:
+                if not pending:
+                    break
+                artifact = found.get(child.name) or self._load_silent(child.name)
+                if artifact is not None and artifact.id in pending:
+                    pending.discard(artifact.id)
+                    found.setdefault(artifact.slug, artifact)
+                    matched.update(by_id[artifact.id])
+            unmatched = [key for key in unmatched if key not in matched]
+        result = [self._reconcile_files(artifact) for artifact in found.values()]
+        result.sort(key=lambda a: a.updatedAt, reverse=True)
+        return result, unmatched
+
     # ── Provenance + per-turn updates ───────────────────────────
 
     def record_turn(
@@ -432,8 +488,8 @@ class ArtifactStore:
         Scratchpad code writes artifact files straight into the folder via
         plain ``open()``, bypassing the store — so without this, `files[]`
         stays frozen at whatever ``create()``/``update()`` last set (usually
-        empty), and ``open()``/``list()`` report file_count 0 for artifacts
-        that are fully written on disk. The agent then concludes the file is
+        empty), and ``open()``/``list()`` report no files for artifacts that
+        are fully written on disk. The agent then concludes the file is
         missing and burns turns in a recovery loop.
 
         Persists (and bumps ``updatedAt``) ONLY when the on-disk file set

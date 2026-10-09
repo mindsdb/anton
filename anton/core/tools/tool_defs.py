@@ -6,12 +6,19 @@ from anton.core.tools.tool_handlers import (
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
-    handle_open_artifact,
     handle_read_image,
+    handle_read_text_file,
     handle_recall,
     handle_scratchpad,
     handle_select_path,
     handle_update_artifact_metadata,
+)
+from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.tools.text_file import (
+    DEFAULT_LINE_COUNT,
+    MAX_FILE_BYTES,
+    MAX_LINE_CHARS,
+    MAX_OUTPUT_CHARS,
 )
 
 from dataclasses import dataclass, replace
@@ -219,8 +226,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "Skip when you don't know yet — the renderer falls back to a "
         "heuristic, and you can set it later via `update_artifact`.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
-        "`list_artifacts` first to find it, then `open_artifact(slug)` to get "
-        "the path."
+        "`list_artifacts` to find it; its folder is `<root>/<slug>`."
     ),
     input_schema={
         "type": "object",
@@ -312,42 +318,50 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
 LIST_ARTIFACTS_TOOL = ToolDef(
     name="list_artifacts",
     description=(
-        "List every artifact in the current workspace (newest first). "
-        "Use this to find an existing artifact you want to modify — paired "
-        "with `open_artifact(slug)` for the actual edit. Each entry includes "
-        "the slug, human name, type, description, file count, and last-update "
-        "timestamp. Returns an empty list when no artifacts exist yet."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {},
-    },
-    handler=handle_list_artifacts,
-)
-
-
-OPEN_ARTIFACT_TOOL = ToolDef(
-    name="open_artifact",
-    description=(
-        "Load an existing artifact by slug. Returns the folder path plus the "
-        "list of files so you can decide what to edit, and the primary file's "
-        "current text as `primary_content` when it is a small text file. Combine "
-        "with the scratchpad to read other files (`open(path).read()`) or write "
-        "updates back into the folder. Provenance is updated automatically — "
-        "every turn that modifies a file in the folder is appended to the "
-        "artifact's metadata.json."
+        "List the artifacts in this workspace, newest first, grouped by "
+        "artifacts root. An artifact's folder is `<root>/<slug>`; `primary` and "
+        "the paths under `files` and `service_files` are relative to that folder.\n\n"
+        "Without `match` you get a summary of each artifact: name, type, "
+        "updatedAt, description, primary. That is enough to pick one and read "
+        "its primary file with `read_text_file`. Pass `match` with slugs or ids "
+        "to get the full record, including id, files and service_files. "
+        "`fields` replaces the default set of fields; `slug` is always included.\n\n"
+        "Service files (metadata.json, README.md, prd.md, spec.md, backend.log, "
+        "…) are not part of what was built. Files whose name starts with a dot "
+        "are not listed."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "slug": {
-                "type": "string",
-                "description": "Folder slug (returned by `list_artifacts` or the previous `create_artifact`).",
+            "fields": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
+                "description": (
+                    "Fields to return for each artifact; `slug` is always included.\n"
+                    "- id: the artifact's stable id (32 hex)\n"
+                    "- name, description: human-readable name and summary\n"
+                    "- type: html-app, document, dataset, image, mixed, "
+                    "fullstack-stateless-app, fullstack-stateful-app\n"
+                    "- updatedAt: last change, ISO 8601\n"
+                    "- primary: entry file, relative to the artifact folder\n"
+                    "- files: the artifact's own files with sizes\n"
+                    "- service_files: housekeeping and generation files "
+                    "(metadata.json, README.md, prd.md, spec.md, backend.log, ...)\n"
+                    "Default without `match`: name, type, updatedAt, description, "
+                    "primary. Default with `match`: all fields."
+                ),
+            },
+            "match": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Return only artifacts whose slug or id equals one of these "
+                    "values. Default: all artifacts."
+                ),
             },
         },
-        "required": ["slug"],
     },
-    handler=handle_open_artifact,
+    handler=handle_list_artifacts,
 )
 
 
@@ -572,7 +586,8 @@ RECALL_TOOL = ToolDef(
         "ONLY use this when the user explicitly asks about a previous conversation "
         "or session (e.g. 'what did we talk about last time?', 'remember when we...', "
         "'have we discussed X before?'). Do NOT use this for questions about code, "
-        "files, or data in the workspace — use the scratchpad to explore those directly.\n\n"
+        "files, or data in the workspace — use `read_text_file` or the "
+        "scratchpad to explore those directly.\n\n"
         "Returns timestamped episodes matching the query (newest first). "
         "A single call is enough — do not call multiple times with different queries."
     ),
@@ -620,6 +635,61 @@ READ_IMAGE_TOOL = ToolDef(
         "required": ["file_path"],
     },
     handler=handle_read_image,
+)
+
+
+READ_TEXT_FILE_TOOL = ToolDef(
+    name="read_text_file",
+    description=(
+        "Read a text file. Use it to read artifact sources, project files and "
+        "conversation attachments, for example before you change them. Use the "
+        "scratchpad to analyse data and to write files. Only files in the "
+        "project, the artifacts and the conversation's attachments can be read; "
+        "dot-files and files in dot-directories are refused.\n\n"
+        "`path` is absolute, or relative to the project root. `start_line` and "
+        "`end_line` start at 1 and are inclusive; a negative value counts from "
+        f"the end, so -1 is the last line. Without them you get the first {DEFAULT_LINE_COUNT} "
+        "lines. Pass `end_line=-1` to read to the end of the file. One call "
+        f"returns at most {MAX_OUTPUT_CHARS:,} characters, and the header line says where to "
+        f"continue. Files over {MAX_FILE_BYTES // (1024 * 1024)} MB are refused.\n\n"
+        "The first line of the result is a header with the path and the range "
+        "of lines returned; the file's text starts on the next line. Pass "
+        "`line_numbers=true` to get each line's number, for example to pick a "
+        "range for the next call; the number and the tab after it are not part "
+        "of the file. If the lines you asked for do not fit into one call, a line "
+        f"longer than {MAX_LINE_CHARS:,} characters is shortened to its "
+        f"first and last {MAX_LINE_CHARS // 2:,} characters with a mark in between. Binary and "
+        "non-UTF-8 files are refused; read those in the scratchpad."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute path, or a path relative to the project root.",
+            },
+            "start_line": {
+                "type": "integer",
+                "description": (
+                    "First line to return, starting at 1. A negative value counts "
+                    "from the end: -20 starts 20 lines before the end. Default: 1."
+                ),
+            },
+            "end_line": {
+                "type": "integer",
+                "description": (
+                    "Last line to return, inclusive. A negative value counts from "
+                    f"the end: -1 is the last line. Default: start_line + {DEFAULT_LINE_COUNT - 1}."
+                ),
+            },
+            "line_numbers": {
+                "type": "boolean",
+                "description": "Prefix every line with its number and a tab. Default: false.",
+            },
+        },
+        "required": ["path"],
+    },
+    handler=handle_read_text_file,
 )
 
 

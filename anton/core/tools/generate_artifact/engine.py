@@ -791,6 +791,31 @@ def _strip_code_fence(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _read_for_generator(session, artifact_path: Path, inp: dict):
+    """`read_text_file` for the write loop.
+
+    A path means what it means to `write_file`: relative to the artifact
+    folder, "/index.html" included; only a path to a real place on this
+    machine, or under `~`, is read where it is. A file in the folder is named relative to
+    it, so the generator never sees the folder's absolute path to copy into
+    `write_file`. Line numbers are never returned. The input is copied: `inp`
+    already sits in the conversation history.
+    """
+    # Lazy import avoids a tool_handlers <-> generate_artifact cycle.
+    from anton.core.tools.tool_handlers import handle_read_text_file
+
+    raw = str(inp.get("path") or "").strip()
+    path = raw
+    # The handler expands `~` itself, and reports an unknown `~user`.
+    if raw and not raw.startswith("~") and not sub_tools.is_host_path(raw):
+        path = str(artifact_path / raw.lstrip("/"))
+    return await handle_read_text_file(
+        session,
+        {**inp, "path": path, "line_numbers": False},
+        display_root=artifact_path,
+    )
+
+
 async def _run_loop(
     *,
     session: "ChatSession",
@@ -857,7 +882,7 @@ async def _run_loop(
                 messages.append({"role": "user", "content": _WIND_DOWN_MSG})
                 wind_down_announced = True
         # First round: use the planning model for highest-quality initial generation.
-        # Subsequent rounds (retries, read_file refinements) use the coding model.
+        # Subsequent rounds (retries, reads to keep writing) use the coding model.
         first_round = round_idx == 0
         llm_call = session._llm.plan_stream if first_round else session._llm.code_stream
         # Every round gets the raised budget, round 0 included.
@@ -940,7 +965,7 @@ async def _run_loop(
             pending_body = body
             advice = _BODY_WITHOUT_CALL_MSG if body is not None else body_error
             # The assistant turn above already holds this reply's `tool_use`
-            # blocks (`finish`, `read_file`, ...). Each needs a `tool_result`
+            # blocks (`finish`, `read_text_file`, ...). Each needs a `tool_result`
             # in the very next message or the provider rejects the following
             # request; without this the run died as "generator crashed" on
             # the normal "final chunk plus finish" ending whenever the model
@@ -1012,12 +1037,9 @@ async def _run_loop(
                             injected.add(inject_msg)
                             msg = f"{msg}\n\n{inject_msg}"
                 result_blocks.append(sub_tools.tool_result(tc.id, msg))
-            elif name == "read_file":
-                res = sub_tools.read_file(
-                    artifact_path, inp.get("path", ""),
-                    full=bool(inp.get("full", False)),
-                )
-                result_blocks.append(sub_tools.tool_result(tc.id, res["message"]))
+            elif name == "read_text_file":
+                outcome = await _read_for_generator(session, artifact_path, inp)
+                result_blocks.append(sub_tools.tool_result(tc.id, outcome.content))
             elif name == "scratchpad":
                 # Full scratchpad access: the sub-generator pulls or rebuilds
                 # the data described in the brief's `## Data` section. Lazy
@@ -1039,7 +1061,7 @@ async def _run_loop(
                 result_blocks.append(sub_tools.tool_result(
                     tc.id,
                     f"Error: unknown sub-tool `{name}`. "
-                    "Use write_file, read_file, or finish.",
+                    "Use write_file, read_text_file, or finish.",
                 ))
 
         # Round accounting rides on the same user message as the tool results.

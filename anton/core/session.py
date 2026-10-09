@@ -86,8 +86,8 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
-    OPEN_ARTIFACT_TOOL,
     READ_IMAGE_TOOL,
+    READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
@@ -1669,12 +1669,13 @@ class ChatSession:
         # Where `create_skill_draft` stages skills the agent builds. None means
         # the host stages none, and the tool is not registered at all.
         self._skill_drafts_root = getattr(s, "skill_drafts_root", None)
-        # Slugs of artifacts this turn created or opened for editing, recorded
-        # by the artifact tool handlers as they run. A host builds the turn's
-        # artifact cards from this rather than diffing the artifacts directory:
-        # the set names what THIS turn actually touched, so a concurrent turn
-        # writing into the same (shared, project-wide) directory can never be
-        # mistaken for this turn's work. Reset at the top of every turn.
+        # Slugs of artifacts this turn created, generated, updated or edited
+        # through the scratchpad, recorded by the artifact tool handlers as
+        # they run. A host builds the turn's artifact cards from this rather
+        # than diffing the artifacts directory: the set names what THIS turn
+        # actually touched, so a concurrent turn writing into the same (shared,
+        # project-wide) directory can never be mistaken for this turn's work.
+        # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
@@ -1774,7 +1775,7 @@ class ChatSession:
 
     @property
     def artifacts_touched(self) -> set[str]:
-        """Slugs this turn created or opened for editing.
+        """Slugs this turn created, generated, updated or edited through the scratchpad.
 
         A copy: a host reads this after the turn to decide which artifacts to
         surface, and must not be able to mutate the session's own record.
@@ -2498,6 +2499,7 @@ class ChatSession:
 
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
+        self.tool_registry.register_tool(READ_TEXT_FILE_TOOL)
         # Interactive file/folder disambiguation. Registered on every host, but
         # in one of two shapes — because "degrades to picker_unavailable" is
         # not a neutral degradation when the definition also injects a
@@ -2582,7 +2584,6 @@ class ChatSession:
         if self._workspace is not None:
             self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
