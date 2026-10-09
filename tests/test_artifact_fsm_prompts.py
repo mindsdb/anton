@@ -308,6 +308,23 @@ def test_stateful_rules_carry_the_state_sdk_contract():
     assert "EXTERNAL database" in stateful
 
 
+def test_stateful_rules_say_which_items_come_back_without_keys():
+    """An app counted with `increment` and listed with `query`, read the option
+    from `sk`, got None and showed every count as 0: the items those calls
+    create carry no key attributes, locally and in the cloud broker."""
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    assert "`increment`/`update` CREATES carries NO `pk`/`sk`" in stateful
+    assert 'set_fields={"option": option}' in stateful
+
+
+def test_stateful_rules_keep_collection_data_behind_collection():
+    """An app wrote through `Collection` (pk `_`, sk `<name>#<key>`) and read
+    with raw `store.get`/`query` on its own keys, so it never found the vote."""
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    assert 'sk="<name>#<key>"' in stateful
+    assert "read back ONLY through the same `Collection`" in stateful
+
+
 def test_stateful_block_says_when_local_state_survives():
     """The STATE store must be described as working both locally and deployed."""
     stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
@@ -467,6 +484,21 @@ def test_design_rules_require_units_and_formatters():
     assert "never a raw float" in rules
     assert "One date format per page" in rules
     assert "estimated, sampled or converted" in rules
+
+
+def test_design_rules_forbid_content_nobody_asked_for():
+    """Pages gained invented brand names, status pills, marketing copy and
+    footers that neither the request nor the PRD mentioned. Both page
+    prompts carry the scope rule."""
+    rules = prompts._DESIGN_RULES
+    assert "render ONLY what the request and the PRD ask for" in rules
+    assert "invented brand" in rules
+    assert "they never add content" in rules
+    for text in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        assert "render ONLY what the request and the PRD ask for" in text
 
 
 def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
