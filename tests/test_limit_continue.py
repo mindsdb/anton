@@ -151,21 +151,6 @@ def _structured_calls(session, *, authorized: bool) -> AsyncMock:
     return calls
 
 
-def _after_a_limit_stop(session) -> None:
-    """History as a host replays it after a ceiling hand-back."""
-    session._history = [
-        {"role": "user", "content": "Convert the RFP to match the strategy"},
-        {
-            "role": "assistant",
-            "content": (
-                f"This task reached its limit of {CEILING:,} tokens per request "
-                "(Max tokens per task, in your settings). I converted sections "
-                "1-4. Reply \"keep going\" to continue from here."
-            ),
-        },
-    ]
-
-
 def _authorization_checks(calls: AsyncMock) -> int:
     return sum(1 for c in calls.call_args_list if c.args and c.args[0] is _FinishAuthorization)
 
@@ -177,7 +162,6 @@ async def test_the_user_s_own_keep_going_passes_the_limit_without_asking(workspa
     elicitor = _ScriptedElicitor(STOP_HERE)
     session.elicitor = elicitor
     _structured_calls(session, authorized=True)
-    _after_a_limit_stop(session)
     events, kwargs = await _run(session, "Keep going, don't stop until you are finished")
     assert kwargs["ended_by"] == "completed"
     assert kwargs["limit_message_continues"] == "1"
@@ -198,7 +182,6 @@ async def test_the_user_s_message_carries_each_limit_once(workspace):
     elicitor = _ScriptedElicitor(STOP_HERE)
     session.elicitor = elicitor
     calls = _structured_calls(session, authorized=True)
-    _after_a_limit_stop(session)
     _, kwargs = await _run(session, "Keep going, don't stop")
     assert kwargs["ended_by"] == "spend_ceiling"
     assert kwargs["limit_message_continues"] == "1"
@@ -213,8 +196,7 @@ async def test_an_ordinary_request_still_asks(workspace):
     elicitor = _ScriptedElicitor(STOP_HERE)
     session.elicitor = elicitor
     _structured_calls(session, authorized=False)
-    _after_a_limit_stop(session)
-    _, kwargs = await _run(session, "Actually, just summarize what you have")
+    _, kwargs = await _run(session, "Convert the RFP to match the strategy")
     assert kwargs["ended_by"] == "spend_ceiling"
     assert kwargs["limit_message_continues"] == "0"
     assert len(elicitor.requests) == 1
@@ -225,7 +207,6 @@ async def test_a_failed_check_falls_back_to_asking(workspace):
     elicitor = _ScriptedElicitor(STOP_HERE)
     session.elicitor = elicitor
     session._llm.generate_object_code = AsyncMock(side_effect=RuntimeError("model down"))
-    _after_a_limit_stop(session)
     _, kwargs = await _run(session, "keep going")
     assert kwargs["ended_by"] == "spend_ceiling"
     assert len(elicitor.requests) == 1
@@ -238,21 +219,3 @@ async def test_the_hand_back_names_the_limit_and_how_to_continue(workspace):
     text = _history_text(session)
     assert f"reached its limit of {CEILING:,} tokens per request" in text
     assert 'replying \\"keep going\\" continues' in text or 'replying "keep going" continues' in text
-
-
-async def test_a_first_message_never_passes_a_limit(workspace):
-    """Without a limit stop before it, a task request is not an answer to a
-    limit question, however it is worded. Read without that context, "one
-    step at a time... before moving on" was judged to mean "keep going"."""
-    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
-    elicitor = _ScriptedElicitor(STOP_HERE)
-    session.elicitor = elicitor
-    calls = _structured_calls(session, authorized=True)
-    _, kwargs = await _run(
-        session,
-        "Do this one step at a time and never combine steps, printing each "
-        "result before moving on. Don't stop until you are finished.",
-    )
-    assert kwargs["limit_message_continues"] == "0"
-    assert len(elicitor.requests) == 1, "asked, as for any request"
-    assert _authorization_checks(calls) == 0, "no call without a limit stop to answer"

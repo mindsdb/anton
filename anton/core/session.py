@@ -467,12 +467,44 @@ class _FinishAuthorization(BaseModel):
 
     authorized: bool = Field(
         description=(
-            "True only if the reply tells the assistant to continue the work "
-            "it stopped (for example 'keep going', 'don't stop until you are "
-            "finished', 'yes, finish it'). False if it says to stop, asks a "
-            "question, or asks for something different."
+            "True only if the message explicitly tells the agent to keep "
+            "working, without stopping or checking in, until the task is finished."
         )
     )
+
+
+def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
+    """The exact (system, messages) pair the finish-authorization check sends.
+
+    Module-level so the live eval (`tests/test_finish_authorization_live.py`)
+    exercises the production prompt, as `_build_verify_request` does for the
+    verifier. The exclusions are the measured failure: read without them,
+    "one step at a time... before moving on" counted as "keep going".
+    """
+    system = (
+        "An AI agent is working on a user's task and has reached an automatic "
+        "usage limit: a cap on the steps or tokens one request may use. It "
+        "would normally stop and ask the user whether to keep going. Decide "
+        "whether the user's message already answers yes, with an explicit "
+        "instruction to keep working without stopping or checking in until "
+        "the task is finished.\n\n"
+        "Answer true for instructions such as: \"keep going\", \"don't stop "
+        "until you're finished\", \"finish the whole thing without checking "
+        "in\", \"go and don't stop until you have something for me to "
+        "review\", \"just finish it\". The instruction may come at the end of "
+        "a longer task request.\n\n"
+        "Answer false for:\n"
+        "- instructions about how to pace or order the work, such as \"one "
+        "step at a time\", \"step by step\", \"check each one before moving "
+        "on\", \"never combine steps\";\n"
+        "- a task request, however long or detailed, that says nothing about "
+        "stopping or checking in;\n"
+        "- continuing with a change of direction, such as \"keep going but "
+        "try a different approach\";\n"
+        "- a question, or an instruction to stop, pause or wait.\n\n"
+        "If unsure, answer false: the agent will then simply ask."
+    )
+    return system, [{"role": "user", "content": f"USER MESSAGE:\n{message[:4000]}"}]
 
 
 # Output budgets for the verdict call: first attempt, then the retry used when
@@ -695,23 +727,6 @@ _HANDBACK_NOT_USER_CLAUSE = (
     "This pause comes from an automatic limit, not from the user: do not say "
     "or imply that they asked you to stop."
 )
-
-
-# Every limit stop's reply begins with `ChatSession._limit_reached`'s sentence,
-# which carries this phrase. Hosts replay that reply as history, so the next
-# turn can tell its user is answering a limit stop without any stored state.
-_LIMIT_REACHED_MARKER = "reached its limit of"
-
-
-def _message_text(msg: dict) -> str:
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(
-            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-        )
-    return ""
 
 
 def _limit_handback_clause(reached: str) -> str:
@@ -1558,9 +1573,6 @@ class ChatSession:
         # carried past once.
         self._finish_authorized: bool | None = None
         self._limits_passed_by_message: set[str] = set()
-        # Whether this turn's message replies to a limit stop. Set per turn in
-        # turn_stream; see `_user_authorized_finishing`.
-        self._replying_to_limit_stop = False
         # Memory section by user message, reused within one turn. None outside a turn.
         self._turn_memory: dict[str, str] | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
@@ -3999,12 +4011,12 @@ class ChatSession:
         if limit == "spend_ceiling":
             ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
             return (
-                f"This task {_LIMIT_REACHED_MARKER} {ceiling:,} tokens per request "
+                f"This task reached its limit of {ceiling:,} tokens per request "
                 "(Max tokens per task, in your settings)"
             )
         cap = self._max_tool_rounds + self._round_cap_continued_rounds
         return (
-            f"This task {_LIMIT_REACHED_MARKER} {cap} steps per request "
+            f"This task reached its limit of {cap} steps per request "
             "(Max steps per task, in your settings)"
         )
 
@@ -4028,9 +4040,9 @@ class ChatSession:
         `_LIMIT_CONTINUE_MULTIPLIER` times its configured size for the rest of
         the turn. Two ways to grant, in order:
 
-        1. This turn's message replies to a limit stop and says to keep going.
-           Honored once per limit per turn, with a progress line naming the
-           limit, so the user is not asked what they just answered.
+        1. The message that started this turn already says to keep going or
+           finish. Honored once per limit per turn, with a progress line
+           naming the limit, so the user is not asked what they just said.
         2. A "Keep going / Stop here" question naming the limit. "Stop
            here", Skip, a timeout, or a host that cannot ask returns False
            and the caller hands back as before.
@@ -4059,34 +4071,25 @@ class ChatSession:
             await inner.aclose()
 
     async def _user_authorized_finishing(self, user_message: str) -> bool:
-        """Whether this turn's message answers a limit stop with "keep going".
+        """Whether this turn's own message tells the agent to keep going.
 
-        Only a reply to a limit stop counts: the previous reply carries
-        `_LIMIT_REACHED_MARKER`. Then a yes/no call on the cheap coding model,
-        made when a limit is reached and at most once per turn, decides whether
-        the reply means "continue". Matching phrases would misread "keep going
-        with a different approach". Any failure reads as no, which falls back
-        to asking.
+        Any message counts, including the first: "don't stop until you're
+        finished" in the original request is honored. A yes/no call on the
+        cheap coding model (`_build_finish_authorization_request`), made only
+        when a limit is reached and at most once per turn. Matching phrases
+        would misread "keep going with a different approach". Any failure
+        reads as no, which falls back to asking.
         """
         if self._finish_authorized is None:
             self._finish_authorized = False
             text = (user_message or "").strip()
-            # Only a reply to a limit stop. A task request read without that
-            # context gets misjudged: "one step at a time… before moving on"
-            # read as "keep going" and silently passed the limit.
-            if text and self._replying_to_limit_stop:
+            if text:
                 try:
+                    system, messages = _build_finish_authorization_request(text)
                     verdict = await self._llm.generate_object_code(
                         _FinishAuthorization,
-                        system=(
-                            "The assistant stopped its work because it reached "
-                            "a usage limit, and told the user that replying "
-                            "\"keep going\" continues. Decide whether the "
-                            "user's reply below tells it to continue that same "
-                            "work. A reply that says to stop, asks a question, "
-                            "or changes the task is not."
-                        ),
-                        messages=[{"role": "user", "content": text[:4000]}],
+                        system=system,
+                        messages=messages,
                         max_tokens=_VERIFIER_TOKEN_BUDGETS[0],
                     )
                     self._finish_authorized = getattr(verdict, "authorized", None) is True
@@ -4732,13 +4735,6 @@ class ChatSession:
         # and synthetic user-role messages also flow through append and must
         # NOT be stamped.
         stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
-        # Read before the input lands: is this input the user's reply to a
-        # limit stop? Only then can its words carry the turn past a limit.
-        self._replying_to_limit_stop = bool(
-            self._history
-            and self._history[-1].get("role") == "assistant"
-            and _LIMIT_REACHED_MARKER in _message_text(self._history[-1])
-        )
         self._append_history({"role": "user", "content": stamped_input})
 
         # Log user input to episodic memory
