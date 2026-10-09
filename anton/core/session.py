@@ -461,6 +461,21 @@ class _VerifierVerdict(BaseModel):
         return False if v is None else v
 
 
+class _FinishAuthorization(BaseModel):
+    """Whether the user's own message already answers a turn limit's
+    "keep going?" question (see `_user_authorized_finishing`)."""
+
+    authorized: bool = Field(
+        description=(
+            "True only if the message explicitly tells the assistant to keep "
+            "going, not to stop, or to finish the work without checking in "
+            "(for example 'keep going', 'don't stop until you are finished', "
+            "'just finish it'). False for an ordinary task request, a "
+            "question, or a change of direction."
+        )
+    )
+
+
 # Output budgets for the verdict call: first attempt, then the retry used when
 # it comes back truncated (ENG-1081).
 #
@@ -681,6 +696,17 @@ _HANDBACK_NOT_USER_CLAUSE = (
     "This pause comes from an automatic limit, not from the user: do not say "
     "or imply that they asked you to stop."
 )
+
+
+def _limit_handback_clause(reached: str) -> str:
+    """Has the hand-back state the limit word for word, and what a reply does.
+    Without it the model explained the stop as "a lot of work", and a user who
+    then wrote "don't stop" could not tell why it stopped again."""
+    return (
+        f'Begin your reply with this sentence, word for word: "{reached}." '
+        "End it by telling the user that replying \"keep going\" continues "
+        "from where you stopped. "
+    )
 
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
@@ -1511,6 +1537,11 @@ class ChatSession:
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # Whether this turn's own message told the agent to keep going (None
+        # until a limit first asks), and the limits that message has already
+        # carried past once.
+        self._finish_authorized: bool | None = None
+        self._limits_passed_by_message: set[str] = set()
         # Memory section by user message, reused within one turn. None outside a turn.
         self._turn_memory: dict[str, str] | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
@@ -3549,6 +3580,7 @@ class ChatSession:
                 # "Keep going" answers at a turn limit — see
                 # `TurnCost.limit_continues`.
                 limit_continues=str(tc.limit_continues),
+                limit_message_continues=str(tc.limit_message_continues),
                 # WHY the verifier produced no verdict (ENG-1858): the loop's
                 # own truncated/transient/hard/denied class plus the content-
                 # free exception type. Empty on verified turns. See
@@ -3938,58 +3970,118 @@ class ChatSession:
             self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
         _record_grace(self._turn_cost, "ceiling")
 
-    async def _ask_to_continue_past_limit(self, limit: str):
-        """Ask the user whether to keep going past a turn limit.
+    def _limit_reached(self, limit: str) -> str:
+        """Names the limit that stopped the turn, and where it is set.
 
-        `limit` is "spend_ceiling" or "round_cap". Yields ``("event", ev)``
-        for the question's own events, then ``("result", granted)``. A
-        "Keep going" raises that limit by `_LIMIT_CONTINUE_MULTIPLIER` times
-        its configured size for the rest of the turn; anything else —
-        "Stop here", Skip, a timeout, or a host that cannot ask — returns
-        False and the caller hands back as before.
+        The user cannot act on "this took a lot of work": they need to know a
+        per-request limit fired, so that a reply carries on and a setting can
+        raise it. Reports the limit in force now, which a "Keep going" may
+        already have raised."""
+        if limit == "spend_ceiling":
+            ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
+            return (
+                f"This task reached its limit of {ceiling:,} tokens per request "
+                "(Max tokens per task, in your settings)"
+            )
+        cap = self._max_tool_rounds + self._round_cap_continued_rounds
+        return (
+            f"This task reached its limit of {cap} steps per request "
+            "(Max steps per task, in your settings)"
+        )
 
-        Asking inside the turn keeps the user's answer with the work it
-        applies to. Ending the turn instead made the reply a new turn with a
-        fresh limit, so work bigger than one limit stopped again and again.
+    def _grant_limit(self, limit: str) -> None:
+        """Raise `limit` by `_LIMIT_CONTINUE_MULTIPLIER` times its configured
+        size for the rest of the turn."""
+        if limit == "spend_ceiling":
+            self._spend_ceiling_continued_tokens += (
+                _LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens
+            )
+        else:
+            self._round_cap_continued_rounds += (
+                _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
+            )
+
+    async def _ask_to_continue_past_limit(self, limit: str, user_message: str = ""):
+        """Decide whether the turn keeps going past a limit.
+
+        `limit` is "spend_ceiling" or "round_cap". Yields ``("event", ev)``,
+        then ``("result", granted)``. Granted raises that limit by
+        `_LIMIT_CONTINUE_MULTIPLIER` times its configured size for the rest of
+        the turn. Two ways to grant, in order:
+
+        1. The message that started this turn already says to keep going or
+           finish. Honored once per limit per turn, with a progress line
+           naming the limit, so the user is not asked what they just said.
+        2. A "Keep going / Stop here" question naming the limit. "Stop
+           here", Skip, a timeout, or a host that cannot ask returns False
+           and the caller hands back as before.
         """
+        if limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
+            user_message
+        ):
+            # Named before the grant, which would report the raised limit.
+            note = f"{self._limit_reached(limit)}. Continuing, as you asked."
+            self._limits_passed_by_message.add(limit)
+            self._grant_limit(limit)
+            if self._turn_cost is not None:
+                self._turn_cost.limit_message_continues += 1
+            yield "event", StreamTaskProgress(phase="analyzing", message=note)
+            yield "result", True
+            return
         inner = self._run_draining(self._continue_question(limit))
         try:
             async for kind, item in inner:
-                if kind == "event":
-                    yield kind, item
-                    continue
-                if item:
-                    if limit == "spend_ceiling":
-                        self._spend_ceiling_continued_tokens += (
-                            _LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens
-                        )
-                    else:
-                        self._round_cap_continued_rounds += (
-                            _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
-                        )
+                if kind == "result" and item:
+                    self._grant_limit(limit)
                     if self._turn_cost is not None:
                         self._turn_cost.limit_continues += 1
                 yield kind, item
         finally:
             await inner.aclose()
 
+    async def _user_authorized_finishing(self, user_message: str) -> bool:
+        """Whether this turn's own message tells the agent to keep going.
+
+        A yes/no call on the cheap coding model, made only when a limit is
+        reached and at most once per turn. Matching phrases would misread
+        "keep going with a different approach". Any failure reads as no, which
+        falls back to asking.
+        """
+        if self._finish_authorized is None:
+            self._finish_authorized = False
+            text = (user_message or "").strip()
+            if text:
+                try:
+                    verdict = await self._llm.generate_object_code(
+                        _FinishAuthorization,
+                        system=(
+                            "Decide whether the user's message explicitly "
+                            "authorizes the assistant to keep working until "
+                            "the task is finished, without stopping to check in."
+                        ),
+                        messages=[{"role": "user", "content": text[:4000]}],
+                        max_tokens=_VERIFIER_TOKEN_BUDGETS[0],
+                    )
+                    self._finish_authorized = getattr(verdict, "authorized", None) is True
+                except Exception:
+                    logger.warning(
+                        "finish-authorization check failed; asking instead",
+                        exc_info=True,
+                    )
+        return self._finish_authorized
+
     async def _continue_question(self, limit: str) -> bool:
         """The "Keep going / Stop here" question itself; True on Keep going."""
         from anton.core.interaction.elicit import AskOption, AskRequest, elicit
 
         if limit == "spend_ceiling":
-            spent = self._turn_cost.total_tokens if self._turn_cost else 0
-            prompt = (
-                f"This task has used {spent:,} tokens, which is a lot of work "
-                "for one request and counts against your plan. Keep going?"
-            )
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens:,} more tokens"
+            cost = " Continuing uses more tokens."
         else:
-            steps = self._turn_cost.rounds if self._turn_cost else self._max_tool_rounds
-            prompt = f"This task has taken {steps} steps without finishing. Keep going?"
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds} more steps"
+            cost = ""
         request = AskRequest(
-            prompt=prompt,
+            prompt=f"{self._limit_reached(limit)}.{cost} Keep going?",
             options=(
                 AskOption(value="continue", label="Keep going", detail=more, style="primary"),
                 AskOption(
@@ -4028,6 +4120,7 @@ class ChatSession:
             "If you are on a good track and can finish, say so and ask if they'd "
             "like you to continue. "
             "Do NOT retry automatically — wait for the user's response. "
+            + _limit_handback_clause(self._limit_reached("spend_ceiling"))
             + _HANDBACK_NOT_USER_CLAUSE
         )
 
@@ -4636,6 +4729,8 @@ class ChatSession:
         self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._finish_authorized = None
+        self._limits_passed_by_message = set()
         self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
@@ -5476,7 +5571,7 @@ class ChatSession:
                     + self._round_cap_continued_rounds
                 )
                 if tool_round > effective_round_cap and self._max_tool_rounds > 0:
-                    agen = self._ask_to_continue_past_limit("round_cap")
+                    agen = self._ask_to_continue_past_limit("round_cap", user_message)
                     try:
                         async for _kind, _payload in agen:
                             if _kind == "event":
@@ -5518,6 +5613,7 @@ class ChatSession:
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
                                 "Do NOT retry automatically — wait for the user's response. "
+                                + _limit_handback_clause(self._limit_reached("round_cap"))
                                 + _HANDBACK_NOT_USER_CLAUSE
                             ),
                         }
@@ -5554,7 +5650,7 @@ class ChatSession:
                     if not self._spend_ceiling_grace_used:
                         self._grant_spend_ceiling_grace()
                     if self._spend_ceiling_stops_the_tool_loop():
-                        agen = self._ask_to_continue_past_limit("spend_ceiling")
+                        agen = self._ask_to_continue_past_limit("spend_ceiling", user_message)
                         try:
                             async for _kind, _payload in agen:
                                 if _kind == "event":
@@ -6660,7 +6756,7 @@ class ChatSession:
                 if verdict.close_to_done and not self._spend_ceiling_grace_used:
                     self._grant_spend_ceiling_grace()
                 if self._spend_ceiling_reached():
-                    agen = self._ask_to_continue_past_limit("spend_ceiling")
+                    agen = self._ask_to_continue_past_limit("spend_ceiling", user_message)
                     try:
                         async for _kind, _payload in agen:
                             if _kind == "event":
