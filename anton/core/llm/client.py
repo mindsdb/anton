@@ -175,6 +175,10 @@ class LLMClient:
     def effort_ceiling(self, level: str):
         """Cap the reasoning effort of every planning and coding call inside.
 
+        The cap lives in a module-level ContextVar, so it applies to every
+        ``LLMClient`` used inside the block, not only the instance whose method
+        was entered.
+
         A nested block can only lower the cap. Enter it in a plain coroutine or
         around a single ``await``, never across a ``yield``: an async generator
         has no context of its own, so the cap would leak to whatever consumes
@@ -572,14 +576,17 @@ class LLMClient:
         budget = max_tokens or self.stream_budget("coding")
         effort_kw = self._effort_kwargs(self._coding_provider)
         events = self._guarded_stream(
-            make_stream=lambda: self._coding_provider.stream(
-                model=self._coding_model,
-                system=system,
-                messages=messages,
-                tools=tools,
-                max_tokens=budget,
-                native_web_tools=native_web_tools,
-                **effort_kw,
+            make_stream=lambda: _stream_with_auth_confirmation(
+                lambda: self._coding_provider.stream(
+                    model=self._coding_model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=budget,
+                    native_web_tools=native_web_tools,
+                    **effort_kw,
+                ),
+                role="coding",
             ),
             role="coding",
             model=self._coding_model,

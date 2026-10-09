@@ -221,6 +221,62 @@ class TestLLMClient:
         assert events == [StreamTextDelta(text="recovered")]
         assert calls == 2
 
+    async def test_code_stream_confirms_auth_before_first_event(
+        self, mock_providers
+    ):
+        planning, coding = mock_providers
+        calls = 0
+
+        async def stream(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ProviderAuthError("Invalid API key")
+            yield StreamTextDelta(text="recovered")
+
+        coding.stream = MagicMock(side_effect=stream)
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+
+        events = [
+            event
+            async for event in client.code_stream(system="sys", messages=[])
+        ]
+
+        assert events == [StreamTextDelta(text="recovered")]
+        assert calls == 2
+
+    async def test_code_stream_propagates_second_auth_refusal(
+        self, mock_providers
+    ):
+        planning, coding = mock_providers
+        calls = 0
+
+        async def stream(**kwargs):
+            nonlocal calls
+            calls += 1
+            raise ProviderAuthError("Invalid API key")
+            yield  # pragma: no cover - preserve the async-iterator protocol
+
+        coding.stream = MagicMock(side_effect=stream)
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=coding,
+            coding_model="model-b",
+        )
+
+        with pytest.raises(ProviderAuthError) as err:
+            async for _ in client.code_stream(system="sys", messages=[]):
+                pass
+
+        assert calls == 2
+        assert err.value.role == "coding"
+
     async def test_plan_stream_propagates_second_auth_refusal(
         self, mock_providers
     ):

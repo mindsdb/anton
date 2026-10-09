@@ -216,6 +216,8 @@ async def test_gathering_cut_off_twice_leaves_no_notes_and_triggers_the_data_loo
         isinstance(m.get("content"), str) and m["content"].startswith("Summary") for m in state.messages
     )
     assert _needs_data_loop(state)
+    truncated = [r for r in state.trace if (r.node, r.outcome) == ("gathering", "truncated")]
+    assert [r.detail for r in truncated] == ["round 0"]
 
 
 async def test_gathering_cut_while_winding_down_is_not_retried():
