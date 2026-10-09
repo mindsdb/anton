@@ -24,6 +24,7 @@ from anton.core.session import (
     _VERIFIER_LATCH_REPROBE_TURNS,
     _VERIFIER_LATCH_REPROBE_TURNS_TRUNCATED,
     _SHARED_VERIFIER_LATCHES,
+    _CHECK_NOTE,
     ChatSession,
     ChatSessionConfig,
     _VerifierVerdict,
@@ -160,7 +161,7 @@ async def test_verifier_exception_yields_real_message_not_silent_stop(workspace)
         assert any(
             "including any tool that returned an error" in t for t in history_texts
         )
-        assert not any("Continue working on the original request" in t for t in history_texts)
+        assert not any("judged the answer above unfinished" in t for t in history_texts)
         # The model must be asked for a solvability self-assessment, not just
         # a status dump — otherwise "let me know how to proceed" is a vague
         # ask instead of an actual recommendation (ENG-1079 follow-up).
@@ -348,6 +349,14 @@ async def test_stuck_diagnosis_is_persisted_as_streamed(workspace):
         assert sum("STALE_PRE_VERIFICATION_REPLY" in t for t in texts) <= 1, (
             "the stale reply was appended twice (2831 + the post-loop fallback)"
         )
+        # The stuck note had the injection shape that drew "I cannot assist" answers.
+        notes = [
+            m["content"] for m in session.history
+            if m.get("role") == "user" and str(m.get("content", "")).startswith(_CHECK_NOTE)
+        ]
+        assert notes and "judged this task stuck" in notes[-1]
+        assert "SYSTEM:" not in notes[-1]
+        assert "Do not mention" not in notes[-1]
     finally:
         await session.close()
 
@@ -788,10 +797,15 @@ async def test_the_continuation_instruction_asks_for_a_standalone_answer(workspa
 
         injected = [
             m["content"] for m in session.history
-            if m.get("role") == "user" and str(m.get("content", "")).startswith("SYSTEM:")
+            if m.get("role") == "user"
+            and str(m.get("content", "")).startswith(_CHECK_NOTE)
         ]
         assert injected, "the continuation instruction was never injected"
         instruction = injected[-1]
+        # The injection shape: Azure's prompt filter blocks it and Luna invented figures.
+        assert "SYSTEM:" not in instruction
+        assert "Do not mention" not in instruction
+        assert "saying so plainly is a complete answer" in instruction
         assert "replaces the previous one" in instruction, (
             f"the instruction does not tell the model its reply replaces the "
             f"earlier one: {instruction!r}"

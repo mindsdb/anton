@@ -118,7 +118,7 @@ def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
     assert_output(result, "WAITING_ON_USER")
     # WAITING is a valid stop: no continuation injection may be sent.
     assert not any(
-        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        "judged the answer above unfinished" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "WAITING verdict must not trigger a continuation injection"
     # The verifier must receive truncated tool-result evidence (not just a flag),
@@ -154,11 +154,11 @@ def test_stuck_verdict_diagnoses_without_continuation(cfg, stub, tmp_path):
     assert_output(result, "STUCK_DIAGNOSIS")
     # STUCK is a stop, not unfinished work.
     assert not any(
-        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        "judged the answer above unfinished" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "STUCK verdict must not trigger a continuation injection"
     assert any(
-        "determined this task is stuck" in json.dumps(r.get("messages", []))
+        "judged this task stuck" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), f"STUCK diagnosis request not found. Request count: {stub.request_count}"
 
