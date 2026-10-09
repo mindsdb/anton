@@ -102,6 +102,11 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
     },
 }
 
+#: Engines whose grant already bounds every tool to what the signed-in user
+#: can access, so they need no read/write table. Opt-in, so an engine with no
+#: table still fails closed.
+UNRESTRICTED_ENGINES: frozenset[str] = frozenset({"notion"})
+
 
 def allowed_for_mode(engine: str, tool_name: str, access_mode: AccessMode) -> bool:
     """Whether `tool_name` should be registered for a connection at `access_mode`.
@@ -110,9 +115,12 @@ def allowed_for_mode(engine: str, tool_name: str, access_mode: AccessMode) -> bo
     all for it — see `registry.discover_tool_defs`). `read` allows only
     tools this engine's table classifies "read"; an unrecognized name is
     never treated as read. `write` allows everything this engine advertises.
+    An engine in `UNRESTRICTED_ENGINES` allows everything in any mode but `none`.
     """
     if access_mode == "none":
         return False
+    if engine in UNRESTRICTED_ENGINES:
+        return True
     if access_mode == "write":
         return True
     return TOOL_ACCESS.get(engine, {}).get(tool_name) == "read"
