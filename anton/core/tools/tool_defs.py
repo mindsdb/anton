@@ -15,6 +15,7 @@ from anton.core.tools.tool_handlers import (
 )
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Callable, Optional
 
 
@@ -774,6 +775,89 @@ SELECT_PATH_TOOL_PICK_ONLY = replace(
         },
     },
 )
+
+
+# Phrases in both select_path definitions that confine the model to the
+# project; widened only for a session the host gave working folders.
+_SELECT_PATH_WIDENED_TEXT = (
+    ("matches within the project", "matches within the project and its working folders"),
+    ("ALREADY located inside the project", "ALREADY located inside the project or one of its working folders"),
+    ("If the file is not in the project, ask", "If the file is not in the project or its working folders, ask"),
+    ("first look for it inside the project", "first look for it inside the project and its working folders"),
+    ("If the file is not in the project at all", "If the file is not in the project or its working folders at all"),
+)
+_SELECT_PATH_WIDENED_PROPERTIES = {
+    "candidates": (
+        "(absolute, or relative to the project root)",
+        "(absolute, or relative to the project root; an absolute path may be inside a working folder)",
+    ),
+    "pattern": ("candidates within the project", "candidates within the project and its working folders"),
+    "base_dir": (
+        "relative to the project root. Defaults to the project root.",
+        "relative to the project root, or the absolute path of a working folder. "
+        "Defaults to searching the project and every working folder.",
+    ),
+}
+
+
+def select_path_tool_with_working_folders(tool: ToolDef, working_folders: tuple[Path, ...]) -> ToolDef:
+    """*tool* (either select_path definition) for a session with *working_folders*.
+
+    Returns *tool* itself when there are none, so every other host sees the
+    exact module-level definition. Otherwise returns a copy whose
+    project-only wording also allows the working folders. The schema and each
+    changed property are rebuilt, never mutated: they are shared by every
+    session in the process.
+    """
+    if not working_folders:
+        return tool
+    description = tool.description
+    prompt = tool.prompt
+    for old, new in _SELECT_PATH_WIDENED_TEXT:
+        description = description.replace(old, new)
+        prompt = prompt.replace(old, new) if prompt else prompt
+    listed = ", ".join(str(folder) for folder in working_folders)
+    description += (
+        f"\n\nThis session's working folders: {listed}. A `pattern` without "
+        "`base_dir` searches them as well as the project."
+    )
+    properties = dict(tool.input_schema["properties"])
+    for key, (old, new) in _SELECT_PATH_WIDENED_PROPERTIES.items():
+        if key in properties:
+            properties[key] = {
+                **properties[key],
+                "description": properties[key]["description"].replace(old, new),
+            }
+    return replace(
+        tool,
+        description=description,
+        prompt=prompt,
+        input_schema={**tool.input_schema, "properties": properties},
+    )
+
+
+_ATTACHMENTS_OUTSIDE = "a path outside the workspace,"
+
+
+def generate_artifact_tool_with_working_folders(tool: ToolDef, working_folders: tuple[Path, ...]) -> ToolDef:
+    """*tool* (generate_artifact) for a session with *working_folders*.
+
+    Returns *tool* itself when there are none. Otherwise returns a copy whose
+    `attachments` description allows files in the working folders; the schema,
+    its properties and that one property are rebuilt, never mutated.
+    """
+    if not working_folders:
+        return tool
+    properties = dict(tool.input_schema["properties"])
+    attachments = properties["attachments"]
+    properties["attachments"] = {
+        **attachments,
+        "description": attachments["description"].replace(
+            _ATTACHMENTS_OUTSIDE, "a path outside the workspace and this session's working folders,"
+        )
+        + " A file inside one of this session's working folders may be attached.",
+    }
+    return replace(tool, input_schema={**tool.input_schema, "properties": properties})
 
 
 ASK_USER_TOOL = ToolDef(

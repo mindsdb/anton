@@ -32,6 +32,7 @@ import httpx2 as httpx
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.llm.structured import looks_truncated
+from anton.core.tools.working_folders import working_folder_roots
 
 from . import sub_tools
 from .debug_trace import NullTrace
@@ -540,7 +541,9 @@ async def generate(
     # gets the strict reading, not a permissive one.
     ws_base = getattr(getattr(session, "_workspace", None), "base", None)
     kept, dropped = resolve_attachments(
-        attachments, workspace=ws_base if isinstance(ws_base, Path) else None
+        attachments,
+        workspace=ws_base if isinstance(ws_base, Path) else None,
+        extra_roots=working_folder_roots(session),
     )
     state.attachments = kept
     if kept or dropped:
