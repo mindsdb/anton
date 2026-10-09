@@ -784,7 +784,8 @@ PUBLISH_TOOL = ToolDef(
             "file_path": {
                 "type": "string",
                 "description": (
-                    "Path to the artifact FOLDER (e.g. artifacts/<slug>). The tool reads "
+                    "The artifact's folder: the absolute path that create_artifact or "
+                    "generate_artifact returned, or the artifact's slug. The tool reads "
                     "the folder's metadata.json to decide how to publish: fullstack apps "
                     "publish the whole folder, static reports publish their primary file. "
                     "A path to a file inside the artifact also works."

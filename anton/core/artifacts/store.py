@@ -1,4 +1,4 @@
-"""ArtifactStore — CRUD over `<workspace>/artifacts/<slug>/`.
+"""ArtifactStore — CRUD over the artifact folders under one artifacts root.
 
 One folder per artifact. Each folder owns:
   - `metadata.json` — Pydantic-validated source of truth
@@ -151,7 +151,8 @@ def _truncate_summary(text: str) -> str:
 
 
 class ArtifactStore:
-    """File-backed artifact store rooted at `<workspace>/artifacts/`.
+    """File-backed artifact store rooted at the artifacts folder it is given
+    (`Workspace.artifacts_dir` in a session).
 
     Stateless beyond the root path — every method reads + writes the
     on-disk metadata.json directly, so concurrent calls (e.g. two
