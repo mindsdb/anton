@@ -14,6 +14,7 @@ from .provider import (
     ProviderAuthError,
     ProviderConnectionInfo,
     ProviderErrorBody,
+    STREAM_DROP_ERRORS,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -30,6 +31,7 @@ from .provider import (
     classify_markup_bad_request,
     classify_transient,
     log_transient_provider_error,
+    stream_drop_error,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
@@ -512,6 +514,10 @@ class AnthropicProvider(LLMProvider):
                 else "Could not reach Anthropic — check your connection or try again in a moment.",
                 provider="Anthropic", code="connection_error",
                 session_backoff=stream_started, model=model,
+            ) from exc
+        except STREAM_DROP_ERRORS as exc:
+            raise stream_drop_error(
+                provider="Anthropic", target="Anthropic", model=model,
             ) from exc
 
         # Missing stop_reason is a genuine truncation only when the stream
