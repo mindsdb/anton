@@ -335,6 +335,7 @@ class LLMClient:
         role: str,
         model: str,
         max_tokens: int,
+        note: str | None = None,
     ) -> AsyncIterator[_T]:
         """Relay a streamed call, bounding each wait for the next event.
 
@@ -350,7 +351,9 @@ class LLMClient:
         if tracker is not None:
             tracker.raise_if_expired()
         idle_s = self._idle_timeout_for(max_tokens=max_tokens)
-        call = tracker.open(role=role, idle_timeout_s=idle_s) if tracker is not None else None
+        call = (
+            tracker.open(role=role, idle_timeout_s=idle_s, note=note) if tracker is not None else None
+        )
         stream = None
         try:
             stream = aiter(make_stream())
@@ -430,7 +433,9 @@ class LLMClient:
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
+        wait_note: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
         budget = max_tokens or self.stream_budget("planning")
         effort_kw = self._effort_kwargs(self._planning_provider)
@@ -452,6 +457,7 @@ class LLMClient:
             role="planning",
             model=self._planning_model,
             max_tokens=budget,
+            note=wait_note,
         )
         async with contextlib.aclosing(events):
             async for event in events:
@@ -559,7 +565,9 @@ class LLMClient:
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
         native_web_tools: set[str] | None = None,
+        wait_note: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        """``wait_note`` leads the host's still-working line while this call waits."""
         listener = self.usage_listener
         budget = max_tokens or self.stream_budget("coding")
         effort_kw = self._effort_kwargs(self._coding_provider)
@@ -576,6 +584,7 @@ class LLMClient:
             role="coding",
             model=self._coding_model,
             max_tokens=budget,
+            note=wait_note,
         )
         async with contextlib.aclosing(events):
             async for event in events:
