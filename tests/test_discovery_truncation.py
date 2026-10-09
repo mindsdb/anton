@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,8 +12,9 @@ import pytest
 
 from anton.core.llm.effort import TRUNCATION_RETRY_NOTE
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
-from anton.core.tools.generate_artifact.discovery import brief, prd, prompts, sub_tools
+from anton.core.tools.generate_artifact.discovery import brief, engine, prd, prompts, sub_tools
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from anton.core.tools.generate_artifact.orchestrator import _needs_data_loop
 from tests.streaming_llm import StreamingLLM
 
 BUDGET = 16384
@@ -158,3 +160,83 @@ async def test_room_result_reports_retry_and_truncation():
         state, "draft_brief", role="planning", system="s", messages=[], tools=None,
     )
     assert room.retried and not room.truncated and room.budget == 2 * BUDGET
+
+
+def _finish():
+    return LLMResponse(
+        content="", usage=Usage(output_tokens=900), stop_reason="tool_calls",
+        tool_calls=[ToolCall(id="f", name="finish_gathering",
+                             input={"summary": "ready", "artifact_type": "html-app"})],
+    )
+
+
+def _scratch(id):
+    return LLMResponse(
+        content="", usage=Usage(output_tokens=300), stop_reason="tool_calls",
+        tool_calls=[ToolCall(id=id, name="scratchpad", input={"action": "view", "name": "g"})],
+    )
+
+
+def _gathering_state(*outcomes):
+    pending = list(outcomes)
+
+    async def nxt(**kw):
+        outcome = pending.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    llm = StreamingLLM(budget=BUDGET, plan=AsyncMock(side_effect=nxt), code=AsyncMock(side_effect=nxt))
+    session = SimpleNamespace(_llm=llm, question_count=0, elicitor=None, emit=AsyncMock())
+    state = PrdState(
+        session=session, slug="s", artifact_path=Path("/tmp/s"), artifact_type="html-app",
+        user_request="build a clock", agent_understanding="an analog clock",
+        known_data="", user_preferences="",
+    )
+    state.progress = asyncio.Queue()
+    return state, llm
+
+
+async def test_cut_off_gathering_round_is_retried_not_taken_as_done():
+    state, llm = _gathering_state(_cut(), _finish())
+    await engine.run_gathering_loop(state)
+    assert state.gathering_complete is True
+    assert state.gathering_notes == "ready"
+    assert [c["role"] for c in llm.stream_calls] == ["planning", "planning"]
+
+
+async def test_gathering_cut_off_twice_leaves_no_notes_and_triggers_the_data_loop():
+    state, _ = _gathering_state(
+        _cut(content="Summary: the data li"), _cut(content="Summary: the", tokens=2 * BUDGET),
+    )
+    await engine.run_gathering_loop(state)
+    assert state.gathering_complete is False
+    assert state.gathering_notes == ""
+    assert not any(
+        isinstance(m.get("content"), str) and m["content"].startswith("Summary") for m in state.messages
+    )
+    assert _needs_data_loop(state)
+
+
+async def test_gathering_cut_while_winding_down_is_not_retried():
+    state, llm = _gathering_state(_cut(content="Summary: the data li"))
+    # The loop checks before each round, call_with_room checks before a retry.
+    flags = itertools.chain([False], itertools.repeat(True))
+    state.spend = SimpleNamespace(should_wind_down=lambda: next(flags))
+    await engine.run_gathering_loop(state)
+    assert len(llm.stream_calls) == 1
+    assert state.gathering_complete is False
+    assert state.gathering_notes == ""
+
+
+async def test_second_cut_round_does_not_repeat_the_attempt_line(monkeypatch):
+    async def fake_scratchpad(session, inp):
+        return "ok"
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_scratchpad)
+    state, llm = _gathering_state(_cut(), _scratch("a"), _cut(), _finish())
+    await engine.run_gathering_loop(state)
+    lines = _lines(state)
+    assert lines.count("Gathering what the artifact needs (attempt 2)") == 1
+    assert [c["role"] for c in llm.stream_calls] == ["planning", "planning", "coding", "coding"]
+    assert llm.stream_calls[3]["wait_note"] == TRUNCATION_RETRY_NOTE
