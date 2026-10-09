@@ -195,10 +195,18 @@ VISUAL DESIGN (for every HTML file you produce):
 
 _VERIFIER_CONTRACT = """\
 A static verifier checks each of these after `finish`; a violation fails the
-step and costs a regeneration:
+step and costs a regeneration, unless the item says it is only a warning:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - No absolute URL in any `fetch()` call — relative paths only.
+- No root-relative path in `src`, `href`, `fetch()` or `new EventSource()`
+  (a value that starts with a single `/`, `/api/...` included): the page is
+  served under a path prefix, in the app preview and once published, and
+  such a path drops it, so the file, link or call fails. Use a relative
+  path for files and links (`logo.png`, or the relative name listed under
+  `## Attached files`); `https://`, `//`, `data:`, `blob:`, `#` and
+  `mailto:` values are fine. Moving the same root-relative path into a JS
+  string does not fix it.
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
@@ -206,13 +214,7 @@ step and costs a regeneration:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them.
-- BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
-  / `document.cookie` may be unavailable — the in-app preview runs the page
-  in a sandboxed frame. Never touch them directly during top-level
-  initialisation: a throw there aborts the script before any listener is
-  bound, and the page renders with every control dead. Go through one
-  guarded helper with an in-memory fallback.\
+  to them. A missing `id` is only a warning.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded
@@ -237,10 +239,27 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
+# Rules the verifier does not check, kept after the browser-gate bullet so the
+# list above holds only what is checked.
+_FRAME_NOTES = """\
+Not checked by the verifier, but the page breaks inside the frame without them:
+- BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
+  / `document.cookie` may be unavailable — the in-app preview runs the page
+  in a sandboxed frame. Never touch them directly during top-level
+  initialisation: a throw there aborts the script before any listener is
+  bound, and the page renders with every control dead. Go through one
+  guarded helper with an in-memory fallback.
+- LINKS: the page runs inside a frame, in the app preview and on the
+  published link alike. `target="_top"` and `target="_parent"` do not work;
+  give a link to another artifact or an external site `target="_blank"`,
+  or it opens inside the frame.\
+"""
+
+
 def _verifier_contract(*, served: bool) -> str:
     return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
-    )
+    ) + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------
@@ -454,9 +473,10 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
 # ---------------------------------------------------------------------------
 
 _FRONTEND_RULES = """\
-Three of these are verifier checks as well: a page without the api-base meta
-tag, one that calls the backend outside `/api/*`, or one whose `fetch()`
-names a path `openapi.json` does not define, fails the step.
+Four of these are verifier checks as well: a page without the api-base meta
+tag, one that calls the backend outside `/api/*`, one that calls it with a
+root-relative path instead of `api()`, or one whose `fetch()` names a path
+`openapi.json` does not define, fails the step.
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
@@ -465,14 +485,20 @@ names a path `openapi.json` does not define, fails the step.
   ```html
   <meta name="api-base" content="">
   ```
-  Empty `content` is the local default — fetch falls back to a relative path
-  and hits the same FastAPI process. At deploy time the publisher rewrites it.
+  Empty `content` is the local default: `api('/api/items')` is then
+  `/api/items` on the same FastAPI process. The publisher and the host
+  rewrite it.
 - Read the meta tag ONCE at startup and use the `api()` helper everywhere:
   ```js
   const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
   const api = (path) => `${API_BASE}${path}`;
   // usage: fetch(api('/api/items'))
   ```
+- API addresses go ONLY through `api()`, with the path's leading `/` kept:
+  `api('/api/items')`. When one is needed in an attribute (a download link,
+  an `<img>`), set it from JS: `a.href = api('/api/export')`. Never write
+  `href="/api/export"` in the markup: a root-relative path fails the step
+  (see the verifier contract).
 - NEVER hardcode an absolute URL in the source.
 - Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
 - Call ONLY the paths listed under `## API Specification`, spelled as the
@@ -480,7 +506,9 @@ names a path `openapi.json` does not define, fails the step.
   fails the step.
 - `static/` is the ONLY folder the backend serves. ANY additional frontend asset
   (separate CSS, JS, images, fonts, large data payloads) MUST live under
-  `static/` too — never at the artifact root, or it will 404 at runtime.\
+  `static/` too — never at the artifact root, or it will 404 at runtime.
+  The page itself is in `static/`, so reference such a file by its name
+  there: `app.js`, not `static/app.js` or `/static/app.js`.\
 """
 
 

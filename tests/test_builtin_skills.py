@@ -617,11 +617,17 @@ class TestPipelineContractMirrored:
         "state_manifest.json",
         'health_path="/api/health"',
         "never derive or invent a `DS_*` key",
+        # A path from the root drops the path prefix the page is served under.
+        "API addresses go ONLY through `api()`",
     )
     FRONTEND_MARKERS = (
         "<body>",
         'name="viewport"',
         "No absolute URL in any `fetch()`",
+        # A path from the root drops the path prefix the page is served
+        # under, and the page always runs inside a frame.
+        "No root-relative path",
+        'target="_blank"',
         "window.__antonCommentsLayer",
         "!important",
         "z-index",
