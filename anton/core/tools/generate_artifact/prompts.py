@@ -450,7 +450,8 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   so a listing must never read the key from such items. When a listing needs
   the key, keep it as a plain field in the same atomic call —
   `await store.update("counts", option, set_fields={"option": option},
-  add_fields={"count": 1})` — or `put` the item with its keys first.
+  add_fields={"count": 1})`. Never `put` a counter item before each
+  increment: `put` replaces the whole item and resets the count.
 - DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
   `query(pk=...)` call (or `Collection.list()`). Never call the store in a
   loop to assemble a listing.

@@ -315,6 +315,8 @@ def test_stateful_rules_say_which_items_come_back_without_keys():
     stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
     assert "`increment`/`update` CREATES carries NO `pk`/`sk`" in stateful
     assert 'set_fields={"option": option}' in stateful
+    # a put before each increment would reset the count every time
+    assert "Never `put` a counter item before each" in stateful
 
 
 def test_stateful_rules_keep_collection_data_behind_collection():
