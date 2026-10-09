@@ -134,11 +134,27 @@ def test_line_numbers_are_off_by_default_and_optional(tmp_path):
     assert _read(path, line_numbers=True).body == "     1\ta\n     2\tb"
 
 
-def test_a_long_line_keeps_its_start_and_end(tmp_path):
+def test_long_lines_come_back_whole_when_the_range_fits(tmp_path):
+    """A generated page keeps its markup on a few long lines; cutting them
+    when the whole range fits would make the reader fetch the file again."""
+    long_line = "S" * 1000 + "M" * 5000 + "E" * 1000
+    assert _read(_write(tmp_path, f"short\n{long_line}\n")).body == f"short\n{long_line}"
+
+
+def test_a_long_line_keeps_its_start_and_end_when_the_range_does_not_fit(tmp_path, monkeypatch):
+    monkeypatch.setattr(text_file, "MAX_OUTPUT_CHARS", 5000)
     long_line = "S" * 1000 + "M" * 5000 + "E" * 1000
     body = _read(_write(tmp_path, f"short\n{long_line}\n")).body.splitlines()
     assert body[0] == "short"
     assert body[1] == "S" * 1000 + " … [line truncated: 7000 chars] … " + "E" * 1000
+
+
+def test_line_numbers_count_toward_the_fit(tmp_path, monkeypatch):
+    line = "x" * 3000
+    monkeypatch.setattr(text_file, "MAX_OUTPUT_CHARS", 3003)
+    path = _write(tmp_path, line)
+    assert _read(path).body == line
+    assert "[line truncated: 3000 chars]" in _read(path, line_numbers=True).body
 
 
 def test_a_line_of_exactly_the_limit_is_kept(tmp_path):

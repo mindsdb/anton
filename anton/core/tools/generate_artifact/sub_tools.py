@@ -284,7 +284,8 @@ GEN_READ_TEXT_FILE_DESCRIPTION = (
     "one section, pass its line range; `write_file` reports the lines each part "
     f"occupies. Without a range you get the first {DEFAULT_LINE_COUNT} lines; `end_line=-1` "
     "returns the whole file. Whatever you read stays in your context for every "
-    f"remaining round. A line longer than {MAX_LINE_CHARS:,} characters is shortened to its "
+    "remaining round. If the lines you asked for do not fit into one call, a line "
+    f"longer than {MAX_LINE_CHARS:,} characters is shortened to its "
     f"first and last {MAX_LINE_CHARS // 2:,} characters with a mark in between; never copy the "
     "mark into what you write."
 )

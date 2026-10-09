@@ -12,8 +12,11 @@ from typing import Literal
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 DEFAULT_LINE_COUNT = 1000
-# A longer line keeps its first and last half: generated pages put inline data
-# on one line, and the end of a file is what a writer needs to see.
+# Only when the requested lines do not fit into one call whole does a longer
+# line keep just its first and last half: generated pages put inline data on
+# one line, and the end of a file is what a writer needs to see. A small page
+# whose markup sits on a few long lines is returned as is, or the reader has
+# to read it again some other way.
 MAX_LINE_CHARS = 2000
 MAX_OUTPUT_CHARS = 250_000
 
@@ -157,13 +160,20 @@ def read_text_range(
     if total == 0:
         return TextRange(shown_path, 0, 0, 0, "", "done")
     start, end = _resolve_range(total, start_line, end_line)
+    numbers = range(start, end + 1)
+    whole_size = sum(len(lines[number - 1]) for number in numbers) + len(numbers) - 1
+    if line_numbers:
+        whole_size += sum(len(f"{number:>6}\t") for number in numbers)
+    shorten = whole_size > MAX_OUTPUT_CHARS
 
     out: list[str] = []
     size = 0
     last = start - 1
     stop: Literal["done", "page", "chars"] = "done"
-    for number in range(start, end + 1):
-        text = _shorten(lines[number - 1])
+    for number in numbers:
+        text = lines[number - 1]
+        if shorten:
+            text = _shorten(text)
         if line_numbers:
             text = f"{number:>6}\t{text}"
         added = len(text) + (1 if out else 0)

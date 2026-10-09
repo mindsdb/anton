@@ -656,7 +656,8 @@ READ_TEXT_FILE_TOOL = ToolDef(
         "of lines returned; the file's text starts on the next line. Pass "
         "`line_numbers=true` to get each line's number, for example to pick a "
         "range for the next call; the number and the tab after it are not part "
-        f"of the file. A line longer than {MAX_LINE_CHARS:,} characters is shortened to its "
+        "of the file. If the lines you asked for do not fit into one call, a line "
+        f"longer than {MAX_LINE_CHARS:,} characters is shortened to its "
         f"first and last {MAX_LINE_CHARS // 2:,} characters with a mark in between. Binary and "
         "non-UTF-8 files are refused; read those in the scratchpad."
     ),
