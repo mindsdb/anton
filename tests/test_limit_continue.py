@@ -143,7 +143,9 @@ def _structured_calls(session, *, authorized: bool) -> AsyncMock:
 
     async def _answer(schema, **_kwargs):
         if schema is _FinishAuthorization:
-            return _FinishAuthorization(authorized=authorized)
+            return _FinishAuthorization(
+                quote="Keep going, don't stop" if authorized else "", authorized=authorized
+            )
         return _VerifierVerdict(status="COMPLETE", reason="done")
 
     calls = AsyncMock(side_effect=_answer)
@@ -219,3 +221,19 @@ async def test_the_hand_back_names_the_limit_and_how_to_continue(workspace):
     text = _history_text(session)
     assert f"reached its limit of {CEILING:,} tokens per request" in text
     assert 'replying \\"keep going\\" continues' in text or 'replying "keep going" continues' in text
+
+
+def test_a_yes_needs_a_quote_from_the_message():
+    from anton.core.session import _finish_authorized
+
+    message = "Go and don't stop until you hae something for me to review!!!!"
+    yes = lambda quote: _FinishAuthorization(quote=quote, authorized=True)  # noqa: E731
+    # Copied with the typo fixed and the punctuation trimmed: still the user's words.
+    assert _finish_authorized(yes("Go and don't stop until you have something for me to review"), message)
+    # A yes with nothing to point at is not a yes.
+    assert not _finish_authorized(yes(""), message)
+    # A quote the message does not contain is invented.
+    assert not _finish_authorized(yes("keep working until everything is finished"), message)
+    assert not _finish_authorized(
+        _FinishAuthorization(quote="don't stop", authorized=False), message
+    )

@@ -465,12 +465,32 @@ class _FinishAuthorization(BaseModel):
     """Whether the user's own message already answers a turn limit's
     "keep going?" question (see `_user_authorized_finishing`)."""
 
-    authorized: bool = Field(
+    # Before `authorized`, so the model finds its evidence first. Asking for the
+    # words, not just a yes/no, is what stopped a whole-job request ("convert
+    # the whole RFP") from reading as "keep going": there is nothing to quote.
+    quote: str = Field(
         description=(
-            "True only if the message explicitly tells the agent to keep "
-            "working, without stopping or checking in, until the task is finished."
+            "The words, copied from the user's message, that tell the agent to "
+            "keep working without stopping or checking in until the task is "
+            "finished. Empty if the message has no such words."
         )
     )
+    authorized: bool = Field(
+        description="True only if `quote` is non-empty and says that."
+    )
+
+
+def _finish_authorized(verdict, message: str) -> bool:
+    """Read a `_FinishAuthorization` verdict: yes needs a quote whose words are
+    in the message. Mostly, not exactly: models fix typos ("hae" → "have") and
+    add punctuation when they copy, but an invented quote shares few words."""
+    if getattr(verdict, "authorized", None) is not True:
+        return False
+    words = re.findall(r"[a-z']+", str(getattr(verdict, "quote", "")).lower())
+    if not words:
+        return False
+    present = set(re.findall(r"[a-z']+", message.lower()))
+    return sum(w in present for w in words) >= 0.8 * len(words)
 
 
 def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
@@ -491,18 +511,22 @@ def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
         "Answer true for instructions such as: \"keep going\", \"don't stop "
         "until you're finished\", \"finish the whole thing without checking "
         "in\", \"go and don't stop until you have something for me to "
-        "review\", \"just finish it\". The instruction may come at the end of "
-        "a longer task request.\n\n"
+        "review\", \"just finish it\", \"yes, continue\". The instruction may "
+        "come at the end of a longer task request.\n\n"
         "Answer false for:\n"
         "- instructions about how to pace or order the work, such as \"one "
         "step at a time\", \"step by step\", \"check each one before moving "
         "on\", \"never combine steps\";\n"
         "- a task request, however long or detailed, that says nothing about "
-        "stopping or checking in;\n"
+        "stopping or checking in. Asking for the whole job (\"convert the whole "
+        "document\", \"deliver all three files\") sets its scope; it does not "
+        "say to skip check-ins;\n"
         "- continuing with a change of direction, such as \"keep going but "
         "try a different approach\";\n"
         "- a question, or an instruction to stop, pause or wait.\n\n"
-        "If unsure, answer false: the agent will then simply ask."
+        "If unsure, answer false: the agent will then simply ask.\n\n"
+        "First copy the words in the message that give that instruction. If "
+        "there are none, leave the quote empty and answer false."
     )
     return system, [{"role": "user", "content": f"USER MESSAGE:\n{message[:4000]}"}]
 
@@ -4092,7 +4116,7 @@ class ChatSession:
                         messages=messages,
                         max_tokens=_VERIFIER_TOKEN_BUDGETS[0],
                     )
-                    self._finish_authorized = getattr(verdict, "authorized", None) is True
+                    self._finish_authorized = _finish_authorized(verdict, text)
                 except Exception:
                     logger.warning(
                         "finish-authorization check failed; asking instead",
