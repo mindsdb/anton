@@ -14,6 +14,11 @@ the caller computed; they do not calculate or check business values.
 
 They are imported from the installed package rather than copied into artifact
 folders, so a report made with one release opens and edits with the next.
+
+Block-level markup (sections, paragraphs, list items, table rows, chart bars)
+ends with a line break, so line-based tools can read and diff a page part by
+part. Line breaks go only between elements where the browser does not show
+whitespace, never inside text.
 """
 
 from __future__ import annotations
@@ -86,36 +91,39 @@ if(total){total.textContent=total.getAttribute('data-rt-total')+': '+String(Math
 if(empty){empty.hidden=shown>0;}}
 sel.addEventListener('change',apply);apply();});})();
 """
-_FILTER_SCRIPT = f"<script>{_FILTER_JS}</script>"
+_FILTER_SCRIPT = f"<script>{_FILTER_JS}</script>\n"
 
 
 def page(title: str, *parts, lang: str = "en", theme: str = "light", subtitle: str | None = None) -> Html:
     """A complete document: lang, charset, viewport, inline CSS, light or dark theme."""
     if theme not in ("light", "dark"):
         raise ValueError('theme must be "light" or "dark"')
+    # Parts are joined without separators: a line break between two inline
+    # parts (text and a link) would show as a space. Block parts end with one.
     body = "".join(_esc(p) for p in parts)
     script = _FILTER_SCRIPT if "data-rt-filter" in body else ""
-    sub = f'<p class="subtitle">{_esc(subtitle)}</p>' if subtitle else ""
+    sub = f'<p class="subtitle">{_esc(subtitle)}</p>\n' if subtitle else ""
     return Html(
-        f'<!doctype html><html lang="{_esc(lang)}" data-theme="{theme}"><head><meta charset="utf-8">'
-        f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{_esc(title)}</title>'
-        f"<style>{_CSS}</style></head><body><main><h1>{_esc(title)}</h1>{sub}{body}{script}</main></body></html>\n"
+        f'<!doctype html>\n<html lang="{_esc(lang)}" data-theme="{theme}">\n<head>\n<meta charset="utf-8">\n'
+        f'<meta name="viewport" content="width=device-width,initial-scale=1">\n<title>{_esc(title)}</title>\n'
+        f"<style>{_CSS}</style>\n</head>\n<body>\n<main>\n<h1>{_esc(title)}</h1>\n{sub}{body}{script}"
+        "</main>\n</body>\n</html>\n"
     )
 
 
 def section(heading: str, *parts, id: str | None = None) -> Html:
     """A titled block. ``id`` defaults to the heading's slug plus "-section"."""
-    return Html(f'<section id="{_esc(id or _slug(heading) + "-section")}"><h2>{_esc(heading)}</h2>'
-                + "".join(_esc(p) for p in parts) + "</section>")
+    return Html(f'<section id="{_esc(id or _slug(heading) + "-section")}"><h2>{_esc(heading)}</h2>\n'
+                + "".join(_esc(p) for p in parts) + "</section>\n")
 
 
 def para(*texts) -> Html:
     """One paragraph per text."""
-    return Html("".join(f"<p>{_esc(t)}</p>" for t in texts))
+    return Html("".join(f"<p>{_esc(t)}</p>\n" for t in texts))
 
 
 def bullets(items) -> Html:
-    return Html("<ul>" + "".join(f"<li>{_esc(i)}</li>" for i in items) + "</ul>")
+    return Html("<ul>\n" + "".join(f"<li>{_esc(i)}</li>\n" for i in items) + "</ul>\n")
 
 
 def _is_number(value) -> bool:
@@ -140,9 +148,16 @@ def _numeric_columns(body, count) -> list[bool]:
             for i in range(count)]
 
 
-def _thead(columns, numeric) -> str:
-    return "<thead><tr>" + "".join(
+def _tds(cells, numeric) -> str:
+    return "".join(f'<td{" class=num" if n else ""}>{_esc(v)}</td>' for v, n in zip(cells, numeric))
+
+
+def _table_wrap(columns, numeric, trs, *, table_attrs: str = "", caption: str = "") -> str:
+    """A scrollable table, one row per line. ``trs`` are whole ``<tr>`` elements."""
+    head = "<thead><tr>" + "".join(
         f'<th scope="col"{" class=num" if n else ""}>{_esc(c)}</th>' for c, n in zip(columns, numeric)) + "</tr></thead>"
+    return (f'<div class="table-wrap"><table{table_attrs}>{caption}\n{head}\n<tbody>\n'
+            + "".join(tr + "\n" for tr in trs) + "</tbody></table></div>\n")
 
 
 def table(columns, rows, *, caption: str | None = None, id: str | None = None) -> Html:
@@ -151,9 +166,8 @@ def table(columns, rows, *, caption: str | None = None, id: str | None = None) -
     body = [_row_cells(columns, r) for r in rows]
     numeric = _numeric_columns(body, len(columns))
     cap = f"<caption>{_esc(caption)}</caption>" if caption else ""
-    trs = "".join("<tr>" + "".join(f'<td{" class=num" if n else ""}>{_esc(v)}</td>' for v, n in zip(r, numeric))
-                  + "</tr>" for r in body)
-    return Html(f'<div class="table-wrap"><table{_attr_id(id)}>{cap}{_thead(columns, numeric)}<tbody>{trs}</tbody></table></div>')
+    trs = [f"<tr>{_tds(r, numeric)}</tr>" for r in body]
+    return Html(_table_wrap(columns, numeric, trs, table_attrs=_attr_id(id), caption=cap))
 
 
 def bar_chart(labels, values, *, name: str, value_label: str = "Value", threshold: float | None = None,
@@ -177,13 +191,14 @@ def bar_chart(labels, values, *, name: str, value_label: str = "Value", threshol
         bars.append(f'<text x="{left - 8}" y="{y + 18}" text-anchor="end">{_esc(label)}</text>'
                     f'<rect class="bar" x="{left}" y="{y + 4}" width="{w:.1f}" height="{row_h - 10}">'
                     f"<title>{_esc(label)}: {_esc(value)} {_esc(value_label)}</title></rect>"
-                    f'<text x="{left + w + 6:.1f}" y="{y + 18}">{_esc(value)}</text>')
+                    f'<text x="{left + w + 6:.1f}" y="{y + 18}">{_esc(value)}</text>\n')
     mark = ""
     if threshold is not None:
         x = left + width * threshold / top
-        mark = f'<line class="threshold" x1="{x:.1f}" x2="{x:.1f}" y1="4" y2="{height - 4}"><title>Threshold {_esc(threshold)}</title></line>'
+        mark = (f'<line class="threshold" x1="{x:.1f}" x2="{x:.1f}" y1="4" y2="{height - 4}">'
+                f"<title>Threshold {_esc(threshold)}</title></line>\n")
     return Html(f'<svg class="bars"{_attr_id(id)} role="img" aria-label="{_esc(name)}" '
-                f'viewBox="0 0 {left + width + 60} {height}"><title>{_esc(name)}</title>{"".join(bars)}{mark}</svg>')
+                f'viewBox="0 0 {left + width + 60} {height}"><title>{_esc(name)}</title>\n{"".join(bars)}{mark}</svg>\n')
 
 
 def filter_table(columns, rows, *, key: str, label: str, region_name: str, value: str | None = None,
@@ -213,19 +228,20 @@ def filter_table(columns, rows, *, key: str, label: str, region_name: str, value
         total += r[v] if visible and v is not None and _is_number(r[v]) else 0
         val_attr = f' data-rt-value="{_esc(r[v])}"' if v is not None and _is_number(r[v]) else ""
         trs.append(f'<tr data-rt-key="{_esc(row_key)}"{val_attr}{"" if visible else " hidden"}>'
-                   + "".join(f'<td{" class=num" if n else ""}>{_esc(c)}</td>' for c, n in zip(r, numeric)) + "</tr>")
+                   f"{_tds(r, numeric)}</tr>")
     total_html = ""
     if v is not None:
         tl = total_label or f"Total {value}"
-        total_html = f'<p class="total" data-rt-total="{_esc(tl)}" aria-live="polite">{_esc(tl)}: {_esc(round(total, 6))}</p>'
+        total_html = f'<p class="total" data-rt-total="{_esc(tl)}" aria-live="polite">{_esc(tl)}: {_esc(round(total, 6))}</p>\n'
+    # The label and the select are inline: a line break between them would show as a space.
     return Html(
         f'<div class="filter" id="{_esc(fid)}" data-rt-filter{" data-rt-hide-zero" if hide_zero else ""}>'
         f'<label for="{_esc(fid)}-select">{_esc(label)}</label>'
-        f'<select id="{_esc(fid)}-select"><option value="">All</option>'
-        + "".join(f'<option value="{_esc(o)}">{_esc(o) or "(blank)"}</option>' for o in options) + "</select>"
-        f'<div role="region" aria-label="{_esc(region_name)}"><h3>{_esc(region_name)}</h3>{total_html}'
-        f'<p data-rt-empty{" hidden" if shown else ""}>{_esc(empty_text)}</p>'
-        f'<div class="table-wrap"><table>{_thead(columns, numeric)}<tbody>{"".join(trs)}</tbody></table></div></div></div>'
+        f'<select id="{_esc(fid)}-select">\n<option value="">All</option>\n'
+        + "".join(f'<option value="{_esc(o)}">{_esc(o) or "(blank)"}</option>\n' for o in options) + "</select>\n"
+        f'<div role="region" aria-label="{_esc(region_name)}"><h3>{_esc(region_name)}</h3>\n{total_html}'
+        f'<p data-rt-empty{" hidden" if shown else ""}>{_esc(empty_text)}</p>\n'
+        + _table_wrap(columns, numeric, trs) + "</div>\n</div>\n"
     )
 
 
@@ -253,7 +269,7 @@ def _json_text(value) -> str:
 
 def data(id: str, value) -> Html:
     """An inert JSON block, for data the author chooses to embed (nothing is embedded otherwise)."""
-    return Html(f'<script type="application/json" id="{_esc(id)}">{_json_text(value)}</script>')
+    return Html(f'<script type="application/json" id="{_esc(id)}">{_json_text(value)}</script>\n')
 
 
 def save(path, html: str) -> Path:
@@ -435,7 +451,20 @@ class _Locator(HTMLParser):
                 return
 
 
-_LEADING_HEADING = re.compile(r"\s*<h([1-6])\b[^>]*>.*?</h\1\s*>", re.I | re.S)
+# The line break after a kept heading stays with it, so new content starts on its own line.
+_LEADING_HEADING = re.compile(r"\s*<h([1-6])\b[^>]*>.*?</h\1\s*>(?:\r?\n)?", re.I | re.S)
+
+
+def _newline_at(text: str, at: int) -> str:
+    """The line break that starts at ``at``, or ""."""
+    if text.startswith("\r\n", at):
+        return "\r\n"
+    return "\n" if text.startswith("\n", at) else ""
+
+
+def _in_page_line_endings(markup: str, page: str) -> str:
+    """``markup`` with "\\r\\n" line breaks when the page uses them."""
+    return re.sub(r"\r?\n", "\r\n", markup) if "\r\n" in page else markup
 
 
 def _locate(text: str) -> _Locator:
@@ -463,7 +492,7 @@ def _with_filter_script(text: str) -> str:
         return text
     body_ends = list(re.finditer(r"</body\s*>", text, re.I))
     at = body_ends[-1].start() if body_ends else len(text)
-    return text[:at] + _FILTER_SCRIPT + text[at:]
+    return text[:at] + _in_page_line_endings(_FILTER_SCRIPT, text) + text[at:]
 
 
 def _carries_id(markup: str, id_: str) -> bool:
@@ -495,10 +524,14 @@ def update(path, changes: dict) -> dict:
     for id_, content in changes.items():
         if isinstance(content, Html) and _carries_id(content, id_):
             start, end = _one(locator.outer, id_)
-            new = str(content)
+            new = _in_page_line_endings(str(content), text)
+            # The page already breaks the line after the element.
+            eol = _newline_at(text, end)
+            if eol and new.endswith(eol):
+                new = new[:-len(eol)]
         elif isinstance(content, str):
             start, end = _one(locator.spans, id_)
-            new = _esc(content)
+            new = _in_page_line_endings(_esc(content), text)
             heading = _LEADING_HEADING.match(text, start, end)
             if heading and not re.match(r"\s*<h[1-6]\b", new, re.I):
                 new = heading.group(0) + new
@@ -533,8 +566,12 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
     path = Path(path)
     text = _read(path)
     start, end = _one(_locate(text).outer, before or after)
-    at = start if before is not None else end
-    new = _esc(content)
+    new = _in_page_line_endings(_esc(content), text)
+    at = start
+    if after is not None:
+        # A block goes after the line break that ends the element, so it gets a
+        # line of its own; inline content stays right next to the element.
+        at = end + (len(_newline_at(text, end)) if new.endswith("\n") else 0)
     out = text[:at] + new + text[at:]
     if "data-rt-filter" in new:
         out = _with_filter_script(out)
