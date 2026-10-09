@@ -195,7 +195,7 @@ VISUAL DESIGN (for every HTML file you produce):
 
 _VERIFIER_CONTRACT = """\
 A static verifier checks each of these after `finish`; a violation fails the
-step and costs a regeneration:
+step and costs a regeneration, unless the item says it is only a warning:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - No absolute URL in any `fetch()` call — relative paths only.
@@ -512,7 +512,9 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
   fails the step.
 - `static/` is the ONLY folder the backend serves. ANY additional frontend asset
   (separate CSS, JS, images, fonts, large data payloads) MUST live under
-  `static/` too — never at the artifact root, or it will 404 at runtime.\
+  `static/` too — never at the artifact root, or it will 404 at runtime.
+  The page itself is in `static/`, so reference such a file by its name
+  there: `app.js`, not `static/app.js` or `/static/app.js`.\
 """
 
 

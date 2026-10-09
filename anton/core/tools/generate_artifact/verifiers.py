@@ -104,19 +104,37 @@ _TAG_BODY = re.compile(r"<[a-z][^<>]*", re.I)
 # one `/`: a path from the root. `(?<![\w-])` keeps `data-src`/`data-href` out;
 # `(?![/\\])` lets a protocol-relative `//host` through (and `/\host`, which
 # browsers read the same way). Quoted or not; leading spaces are tolerated
-# because the browser strips them.
+# because the browser strips them. `\\?` takes the escaped quote of HTML held
+# in a JS string (`"<a href=\"/x\">"`), which innerHTML renders as a real
+# link. The quote and the spaces after it are one optional group: two `\s*`
+# around an optional quote backtrack quadratically on a run of spaces.
 _ROOT_RELATIVE_ATTR = re.compile(
-    r"""(?<![\w-])(?P<name>src|href)\s*=\s*['"]?\s*(?P<value>/(?![/\\])[^\s'"<>]*)""",
+    r"""(?<![\w-])(?P<name>src|href)\s*=\s*(?:\\?['"]\s*)?(?P<value>/(?![/\\])[^\s'"<>\\]*)""",
     re.I,
 )
+# `<link>` relations the browser loads for the top-level page only: icons and
+# the web app manifest. In a framed page a root-relative `href` on them
+# breaks nothing, so failing the step over it would only burn the retry.
+_LINK_REL = re.compile(
+    r"""<link\b[^<>]*?(?<![\w-])rel\s*=\s*\\?(?:['"](?P<quoted>[^'"<>]*)|(?P<bare>[^\s'"<>\\]+))""",
+    re.I,
+)
+_FRAME_IGNORED_RELS = frozenset({
+    "icon", "shortcut", "apple-touch-icon", "apple-touch-icon-precomposed",
+    "mask-icon", "manifest",
+})
 # A `fetch()` or `new EventSource()` whose first argument is a string literal
-# from the root, i.e. not wrapped in `api()`. `(?<![\w$])` keeps `prefetch(`
-# out and lets `window.fetch(` in; `re.S` for multi-line template literals.
+# from the root, i.e. not wrapped in `api()`. The global is caught bare or as
+# `window.`/`self.`/`globalThis.`; any other `x.fetch(` is some object's own
+# method, and `prefetch(` another name. `re.S` for multi-line template literals.
 _ROOT_RELATIVE_CALL = re.compile(
-    r"""(?<![\w$])(?P<name>fetch|EventSource)\s*\(\s*(?P<quote>['"`])(?P<value>/(?![/\\]).*?)(?P=quote)""",
+    r"""(?:(?<![\w$.])|(?<=window\.)|(?<=self\.)|(?<=globalThis\.))"""
+    r"""(?P<name>fetch|EventSource)\s*\(\s*(?P<quote>['"`])(?P<value>/(?![/\\]).*?)(?P=quote)""",
     re.S,
 )
-_ROOT_RELATIVE_SHOWN = 5
+# The page gets one retry, so the message names enough paths for a page full
+# of copied links to be fixed in one go.
+_ROOT_RELATIVE_SHOWN = 20
 _ROOT_RELATIVE_VALUE_MAX = 80
 # Libraries the design rules let a page load from the network. Matched as
 # substrings of the script URL so a different CDN host or version still
@@ -167,6 +185,15 @@ def _shown_value(value: str) -> str:
     return f"'{value}'"
 
 
+def _ignored_in_frame(tag: str) -> bool:
+    """A `<link>` whose every relation is in `_FRAME_IGNORED_RELS`."""
+    m = _LINK_REL.match(tag)
+    if not m:
+        return False
+    rels = (m.group("quoted") or m.group("bare") or "").lower().split()
+    return bool(rels) and set(rels) <= _FRAME_IGNORED_RELS
+
+
 def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
     """The rest of rule 4a's message after its fixed head, or None when the
     page has no root-relative path.
@@ -178,26 +205,29 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
     address in an attribute, embedded data for an html-app page's calls
     (the published html-app bundle carries no file a `fetch()` names).
     """
-    hits = [
-        (tag.start() + m.start(), True, m)
-        for tag in _TAG_BODY.finditer(html)
-        for m in _ROOT_RELATIVE_ATTR.finditer(tag.group())
-    ]
+    hits = []
+    for tag in _TAG_BODY.finditer(html):
+        body = tag.group()
+        if not _ignored_in_frame(body):
+            hits += [(tag.start() + m.start(), True, m) for m in _ROOT_RELATIVE_ATTR.finditer(body)]
     hits += [(m.start(), False, m) for m in _ROOT_RELATIVE_CALL.finditer(html)]
     if not hits:
         return None
     hits.sort(key=lambda hit: hit[0])
 
-    entries = [
-        f"{m.group('name').lower()}={_shown_value(m.group('value'))}"
-        if in_attr
-        else f"{m.group('name')}({_shown_value(m.group('value'))})"
+    # Repeats are dropped by the full value: two long paths that differ only
+    # after the cut are still two findings.
+    found = list(dict.fromkeys(
+        (in_attr, m.group("name").lower() if in_attr else m.group("name"), m.group("value"))
         for _, in_attr, m in hits
+    ))
+    entries = [
+        f"{name}={_shown_value(value)}" if in_attr else f"{name}({_shown_value(value)})"
+        for in_attr, name, value in found
     ]
-    shown = list(dict.fromkeys(entries))
-    listed = ", ".join(shown[:_ROOT_RELATIVE_SHOWN])
-    if len(shown) > _ROOT_RELATIVE_SHOWN:
-        listed += f" and {len(shown) - _ROOT_RELATIVE_SHOWN} more"
+    listed = ", ".join(entries[:_ROOT_RELATIVE_SHOWN])
+    if len(entries) > _ROOT_RELATIVE_SHOWN:
+        listed += f" and {len(entries) - _ROOT_RELATIVE_SHOWN} more"
 
     attr_values = [m.group("value") for _, in_attr, m in hits if in_attr]
     hints = []
@@ -206,6 +236,11 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
             "Use a relative path for files and links, e.g. logo.png, "
             "or a full https:// URL for an external page."
         )
+        if is_fullstack:
+            hints.append(
+                "A fullstack page is itself served from static/, "
+                "so a file in static/ is app.js, not static/app.js."
+            )
         if is_fullstack and any(v.startswith("/api/") for v in attr_values):
             hints.append(
                 "Set an API address in an attribute from JS: a.href = api('/api/export')."

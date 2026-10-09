@@ -399,6 +399,10 @@ _RELATIVE_HINT = (
     "Use a relative path for files and links, e.g. logo.png, "
     "or a full https:// URL for an external page."
 )
+_STATIC_HINT = (
+    "A fullstack page is itself served from static/, "
+    "so a file in static/ is app.js, not static/app.js."
+)
 
 
 def _with_markup(markup: str) -> str:
@@ -429,6 +433,8 @@ def _root_relative_error(html: str, *, is_fullstack: bool) -> str:
         ('<a\n  class="nav"\n  href="/docs">Docs</a>', "href='/docs'"),
         ('<svg><use xlink:href="/sprite.svg#icon"></use></svg>', "href='/sprite.svg#icon'"),
         ('<a href=" /x">X</a>', "href='/x'"),
+        # HTML held in a JS string, which innerHTML turns into a real link.
+        ('<script>const s = "<a href=\\"/wiki/Foo\\">Foo</a>";</script>', "href='/wiki/Foo'"),
     ],
 )
 def test_root_relative_src_or_href_is_error(markup, shown):
@@ -452,6 +458,7 @@ def test_every_root_relative_attribute_of_one_tag_is_listed():
         ("fetch(`/api/rooms/${code}`);", "fetch('/api/rooms/${code}')"),
         ('fetch(\n  "/data.json"\n);', "fetch('/data.json')"),
         ("window.fetch('/x');", "fetch('/x')"),
+        ("self.fetch('/x');", "fetch('/x')"),
         ("const es = new EventSource('/api/stream');", "EventSource('/api/stream')"),
     ],
 )
@@ -478,6 +485,12 @@ def test_root_relative_call_is_error(script, shown):
         '<img data-src="/lazy.png" src="lazy.png">',
         '<a data-href="/x" href="x">X</a>',
         '<img src="/\\evil.example/a.png">',
+        # Icons and the manifest load for the top-level page only.
+        '<link rel="icon" href="/favicon.ico">',
+        '<link rel="shortcut icon" href="/favicon.ico">',
+        '<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
+        '<link rel="manifest" href="/site.webmanifest">',
+        "<link rel=icon href=/favicon.ico>",
     ],
 )
 def test_allowed_src_and_href_values_pass(markup):
@@ -495,6 +508,7 @@ def test_allowed_src_and_href_values_pass(markup):
         "fetch('//cdn.example.com/x.json');",
         "fetch('/\\evil.example/x');",
         "router.prefetch('/page');",
+        "cache.fetch('/users');",
         "new EventSource(api('/api/stream'));",
     ],
 )
@@ -525,11 +539,21 @@ def test_message_lists_each_value_once_in_page_order():
     )
 
 
-def test_message_shows_five_values_and_counts_the_rest():
-    html = _with_markup("".join(f'<img src="/{i}.png">' for i in range(7)))
+def test_message_shows_twenty_values_and_counts_the_rest():
+    """The page gets one retry, so the message names enough paths to fix
+    a page full of copied links in one go."""
+    html = _with_markup("".join(f'<img src="/{i}.png">' for i in range(22)))
     err = _root_relative_error(html, is_fullstack=False)
-    assert "src='/4.png' and 2 more. " in err
-    assert "'/5.png'" not in err and "'/6.png'" not in err
+    assert "src='/19.png' and 2 more. " in err
+    assert "'/20.png'" not in err and "'/21.png'" not in err
+
+
+def test_message_keeps_values_that_differ_only_after_the_cut():
+    """Repeats are dropped by the full value, not by the shortened one."""
+    long = "/" + "a" * 100
+    html = _with_markup(f'<img src="{long}1"><img src="{long}2">')
+    err = _root_relative_error(html, is_fullstack=False)
+    assert err.count("src='/") == 2
 
 
 def test_message_cuts_a_long_value():
@@ -551,6 +575,15 @@ def test_fullstack_hints_point_at_api():
         "new EventSource(api('/api/stream'))."
     ) in err
     assert "Embed the data" not in err
+
+
+def test_fullstack_attribute_hint_names_the_static_folder():
+    """`static/app.js` from a page served out of static/ is a 404."""
+    html = _with_markup('<script src="/static/app.js"></script>')
+    assert _STATIC_HINT in _root_relative_error(html, is_fullstack=True)
+    assert "static/" not in _root_relative_error(
+        _with_markup('<img src="/logo.png">'), is_fullstack=False
+    )
 
 
 def test_api_attribute_hint_only_for_an_api_address():
@@ -586,9 +619,19 @@ def test_message_says_moving_the_path_into_js_does_not_fix_it():
 
 def test_large_page_with_embedded_data_is_checked_quickly():
     """The tag scan stops at the next `<` as well as `>`. With `[^>]` alone
-    every `<b` in embedded data scanned on to the next `>`: 12.8 s on 60 KB."""
-    html = _with_markup("<script>var d=[" + "1<b," * 262_144 + "];</script>")  # 1 MB, no `>`
+    every `<b` in embedded data scanned on to the next `>`: 12.8 s on 60 KB,
+    minutes on this page. The limit leaves room for a slow CI runner."""
+    html = _with_markup("<script>var d=[" + "1<b," * 65_536 + "];</script>")  # 256 KB, no `>`
     started = time.perf_counter()
     for is_fullstack in (True, False):
         verify_frontend(html, is_fullstack=is_fullstack)
+    assert time.perf_counter() - started < 10
+
+
+def test_long_whitespace_after_an_attribute_name_is_checked_quickly():
+    """Two `\\s*` around an optional quote backtracked quadratically: 4.5 s
+    on 40 000 spaces."""
+    html = _with_markup("<a src=" + " " * 40_000 + "x>")
+    started = time.perf_counter()
+    verify_frontend(html, is_fullstack=False)
     assert time.perf_counter() - started < 2
