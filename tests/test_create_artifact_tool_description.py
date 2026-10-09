@@ -42,4 +42,4 @@ def test_artifact_texts_do_not_place_artifacts_at_the_project_root(text):
 
 def test_publish_file_path_says_what_to_pass():
     assert "create_artifact" in _PUBLISH_FILE_PATH
-    assert "slug" in _PUBLISH_FILE_PATH
+    assert "the artifact's slug" in _PUBLISH_FILE_PATH
