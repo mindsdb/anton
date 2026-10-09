@@ -1168,7 +1168,7 @@ class OpenAIProvider(LLMProvider):
         """
         if not self._emit_trace_headers:
             return None
-        from .tracing import get_trace_context, surface_tag
+        from .tracing import get_call_role, get_trace_context, surface_tag
 
         ctx = get_trace_context()
         if ctx is None:
@@ -1206,6 +1206,10 @@ class OpenAIProvider(LLMProvider):
         # tag convention. The tag is what a cheap population count uses.
         if ctx.surface:
             extra["surface"] = ctx.surface
+        # So usage can be summed per role even when roles share a model.
+        role = get_call_role() or self.trace_role
+        if role:
+            extra["role"] = role
         # Our own build (ENG-1279). The router lifts this onto the trace's
         # native `version` field, the only form the Langfuse metrics API can
         # group by — so "did this fix change behaviour in production?" becomes

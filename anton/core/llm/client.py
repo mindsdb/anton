@@ -15,6 +15,7 @@ from .provider import (
     StreamComplete,
     StreamEvent,
 )
+from .tracing import call_role
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -132,6 +133,17 @@ class LLMClient:
         self._router_auth_role = "router" if router_provider is not None else "coding"
         self._router_provider = router_provider or coding_provider
         self._router_model = router_model or coding_model
+        # Calls through this client name their role per call (call_role). This
+        # default covers calls a host makes on a provider directly. A provider
+        # shared by two roles keeps the first.
+        for provider, role in (
+            (planning_provider, "planning"),
+            (coding_provider, "coding"),
+            (router_provider, "router"),
+        ):
+            if provider is not None and getattr(provider, "trace_role", None) is None:
+                with contextlib.suppress(AttributeError):
+                    provider.trace_role = role
         self._max_tokens = max_tokens
         # ENG-1638: the model the planning provider last reported SERVING (the
         # `model` on its response), not the id we asked for. The session reads
@@ -257,11 +269,13 @@ class LLMClient:
             if call is not None:
                 call.awaiting = True
             if idle_s is None:
-                return await operation()
+                with call_role(role):
+                    return await operation()
             scope = asyncio.timeout(idle_s)
             try:
                 async with scope:
-                    return await operation()
+                    with call_role(role):
+                        return await operation()
             except TimeoutError:
                 # Only our own expiry becomes a deadline error. A TimeoutError
                 # from inside the call stays itself, and an outside cancel that
@@ -305,13 +319,17 @@ class LLMClient:
                 if call is not None:
                     call.awaiting = True
                 try:
+                    # Set around each wait, never across the yield, so the
+                    # role cannot leak into the consumer's own calls.
                     if idle_s is None:
-                        event = await anext(stream)
+                        with call_role(role):
+                            event = await anext(stream)
                     else:
                         scope = asyncio.timeout(idle_s)
                         try:
                             async with scope:
-                                event = await anext(stream)
+                                with call_role(role):
+                                    event = await anext(stream)
                         except TimeoutError:
                             if scope.expired():
                                 raise self._timed_out(

@@ -2097,6 +2097,9 @@ class LLMProvider(ABC):
         return None
     # Human-readable provider id (e.g. "anthropic", "openai-compatible").
     name: str = ""
+    # Role reported for a call made on this provider outside LLMClient, such
+    # as cowork-server's route gate. LLMClient sets it.
+    trace_role: str | None = None
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
