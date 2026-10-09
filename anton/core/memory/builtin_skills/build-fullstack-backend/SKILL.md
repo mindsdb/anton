@@ -203,16 +203,16 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
-  - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML, including the HOST CONTRACT list of static checks (explicit `<body>`, viewport meta, closed `<script>` blocks, no `window.__antonCommentsLayer`, no universal `* { !important }`, `z-index` <= 1000, stable `id` attributes on significant blocks, only the Tailwind and ECharts CDNs). Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Tailwind CSS and Apache ECharts via CDN; dark theme #0d1117; responsive layout with a viewport meta tag.
+  - MANDATORY: call `recall_skill("build-html-dashboard")` and apply its full HTML output contract to the frontend — it is the single source of truth for dashboard/chart HTML, including the HOST CONTRACT list of static checks (explicit `<body>`, viewport meta, no root-relative `src`/`href`/`fetch()`, closed `<script>` blocks, no `window.__antonCommentsLayer`, no universal `* { !important }`, `z-index` <= 1000, stable `id` attributes on significant blocks, only the Tailwind and ECharts CDNs). Only if that skill cannot be recalled, fall back to these defaults: single self-contained HTML file; Tailwind CSS and Apache ECharts via CDN; dark theme #0d1117; responsive layout with a viewport meta tag.
   - The frontend calls ONLY the endpoints of the technical specification from step 2, spelled exactly as the backend registers them (same method, same path segments). Keep the two in sync: a `fetch()` to a path the backend does not serve is a 404 at runtime that no static check catches on this path.
   - UI text and the `<html lang>` attribute follow the language the user writes in.
   - Save the entry-point to `<artifact_path>/static/index.html` (create the `static/` subfolder if needed). ANY additional frontend assets that don't end up inlined into `index.html` (separate CSS, JS, images, fonts, large data .js payloads, and any file the user uploaded or pasted that you bring into the artifact) MUST live under `<artifact_path>/static/` — never at the artifact root, since the backend only serves files from `static/` and publishing bundles nothing else.
-  - All backend endpoints MUST be called under the `/api/*` prefix (matches the backend route convention from step 4). The frontend never calls bare paths like `/items` — always `/api/items`.
+  - All backend endpoints MUST be called under the `/api/*` prefix (matches the backend route convention from step 4). The frontend never calls bare paths like `/items` — always `api('/api/items')`.
   - API base URL is supplied via a `<meta>` tag so the same HTML works locally AND when deployed with frontend and backend on different origins (e.g. CloudFront/S3 + API Gateway/Lambda). Include this line in `<head>`:
     ```html
     <meta name="api-base" content="">
     ```
-    Empty `content` is the local default — fetch falls back to a relative path and hits the same FastAPI process that serves the page. At deploy time the publisher rewrites `content=""` to the real API root (e.g. `content="https://abc123.execute-api.us-east-1.amazonaws.com"`).
+    Empty `content` is the local default: `api('/api/items')` is then `/api/items` on the same FastAPI process that serves the page; never call `/api/...` without `api()`. At deploy time the publisher rewrites `content=""` to the real API root (e.g. `content="https://abc123.execute-api.us-east-1.amazonaws.com"`).
   - Read the meta tag once at startup and prepend it to every API call. Use this exact pattern (or an equivalent helper) — do NOT scatter `document.querySelector` calls across the codebase:
     ```js
     const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
@@ -220,6 +220,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     // usage: fetch(api('/api/items'))
     ```
   - NEVER hardcode an absolute URL in the source — no `fetch('http://localhost:PORT/...')`, no `fetch('https://api.example.com/...')`, no `const API_BASE = 'http://...'`. The meta tag is the ONLY place the base URL is configured.
+  - API addresses go ONLY through `api()`. When one is needed in an attribute (a download link, an `<img>`), set it from JS — `a.href = api('/api/export')` — and never write `href="/api/export"` in the markup: a root-relative path drops the path prefix the page is served under, in the app preview and once published, and the request fails.
 
 6. LAUNCH THE BACKEND: Call the `launch_backend` tool with the artifact's slug:
   - `launch_backend(slug=<slug>, health_path="/api/health")` — the tool picks a free port, spawns `python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, waits for readiness, writes the port into `metadata.json`, and returns a JSON envelope: the URL in `external_url` and `{slug, port, pid, log_path}` under `details`.
