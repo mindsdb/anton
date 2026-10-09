@@ -549,14 +549,16 @@ class TestCoworkProductSkill:
         """Local servers reject the verifier's named tool_choice before the
         model runs, so "use a larger model" is advice that cannot help."""
         body = store.load("cowork-product").declarative_md
-        section = body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0]
-        assert "A larger model does not" in section
-        assert "larger model that supports tool calling works better" not in section
+        section = " ".join(body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0].split())
+        assert "not a setup mistake" in section
+        assert "larger model does not fix it" in section
 
-    def test_local_models_are_reachable_from_the_description(self, store):
-        """The model decides whether to recall from the description alone."""
-        skill = store.load("cowork-product")
-        assert "local models" in skill.description
+    def test_maintainer_provenance_stays_out_of_the_loaded_body(self, store):
+        """The body ships to the model on every recall; notes on which code
+        each fact came from are for maintainers and live in SOURCES.md."""
+        body = store.load("cowork-product").declarative_md
+        assert "WHERE THESE FACTS COME FROM" not in body
+        assert "SettingsView.jsx" not in body
 
     def test_fallback_answers_what_it_can_before_pointing_at_docs(self, store):
         """A docs-homepage referral on its own is the failure, not the fix."""
@@ -644,10 +646,11 @@ class TestHermesIsNotStatedAsFact:
         for wrong in ("nous research", "third-party harness", "external agent"):
             assert wrong not in body
 
-    def test_the_maintenance_note_says_how_to_settle_it(self, store):
+    def test_the_maintenance_note_says_how_to_settle_it(self):
         """So the next reader resolves the disagreement instead of guessing."""
-        body = store.load("cowork-product").declarative_md
-        assert "cowork/harnesses/" in body
+        skill_dir = Path(skills_mod.__file__).parent / "builtin_skills" / "cowork-product"
+        sources = (skill_dir / "SOURCES.md").read_text()
+        assert "cowork/harnesses/" in sources
 
 
 class TestPipelineContractMirrored:

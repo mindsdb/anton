@@ -3,11 +3,10 @@ name: cowork-product
 description: 'MANDATORY reading before answering ANY question about Cowork itself —
   what it is, who makes it, whether there is a desktop app, how to install, update
   or uninstall it, which operating systems it runs on, where a setting or feature
-  lives, which models it can use (including local models via Ollama or LM Studio),
-  or why a feature the user read about is missing on their screen. Contains the
-  product identity, the download URL, the per-OS install and uninstall steps, the
-  local-model setup steps, and the desktop-vs-web feature differences that make a
-  correct answer look wrong on the other surface. Answering these from general knowledge describes a
+  lives, or why a feature the user read about is missing on their screen. Contains
+  the product identity, the download URL, the per-OS install and uninstall steps,
+  and the desktop-vs-web feature differences that make a correct answer look wrong
+  on the other surface. Answering these from general knowledge describes a
   different company''s product — that is a real reported bug, not a hypothetical.
   When in doubt about anything concerning Cowork as a product, recall it.'
 metadata:
@@ -126,13 +125,9 @@ paragraph each.
   - Cowork is an agent and calls tools on most turns, so the model must support
     tool (function) calling through the server's OpenAI-compatible API. Small
     local models often handle this poorly.
-  - The server matters as well as the model. When Cowork checks whether a task
-    is finished, it asks the model to call one named tool. Many local servers
-    (Ollama, LM Studio and similar) reject that kind of request outright,
-    before the model runs. When that happens a turn can stop early, with a
-    message that an internal check failed. A larger model does not
-    fix this; it is the server refusing the request. Tell the user it is a
-    known limitation of local servers, not something they set up wrong.
+  - Some local servers refuse a request Cowork makes, so a turn can stop
+    early. It is a known limitation of those servers, not a setup mistake, and a
+    larger model does not fix it.
   - Speed and answer quality depend on the model and the user's hardware.
 - Do not invent other routes. There is no built-in model download, no model
   catalogue to browse inside Cowork, and no local-model option in the browser.
@@ -172,32 +167,4 @@ version number, a price, a roadmap date, a support email, or a feature that is
 not described here — inventing one is the failure this file exists to prevent,
 and a wrong answer about our own product is worse than no answer.
 
-WHERE THESE FACTS COME FROM (for whoever maintains this file)
-Each fact was read out of the code that implements it. Nothing here fails
-automatically when that code changes, so re-check these when touching:
-- installed app name — `package.json` `productName` (cowork)
-- platforms and installer types — `.github/workflows/build-installers.yml`
-- download URL — `src/renderer/lib/mindsUrls.ts` and the `mindshub.ai/download`
-  call sites in `ComingSoonModal`, `ConnectorPicker`, `useAppUpdates`
-- account-wide harness toggle — the `host.isWeb` gate on the `Agent Harness`
-  group in `src/renderer/cowork/views/settings/SettingsView.jsx`
-- whether Hermes still exists — `cowork/harnesses/` in cowork-server (the
-  directory is the answer) against the UI references above; when they agree
-  again, replace the HERMES section with the settled fact
-- Coding Mode being desktop-only — `codeModeAvailable` in
-  `src/renderer/platform/host.ts`, and `renderCodingModeSection`
-- local models being desktop-only — the `{!orgMode && …}` gate on the
-  `LLM Providers` group in `SettingsView.jsx` `renderAgentSection`, and
-  `setOrgMode(decision.orgMode ?? host.isWeb)` in `src/renderer/App.tsx`
-  (the hosted browser deployment is org mode)
-- local-model setup steps and labels — `PROVIDER_TYPE_DESC` /
-  `PROVIDER_LABELS_LOCAL` and the `openai-compatible` Base URL field in
-  `SettingsView.jsx`, the `Model Router` group there, and the "Custom" Base URL
-  field in `src/renderer/pages/arcade/OnboardingScreen.tsx`
-- the three Model Router roles, and a role left alone keeping its provider —
-  the `RoleRow` calls in the `Model Router` group, and
-  `defaultModeProviderType` in `SettingsView.jsx`
-- the server-rejection limitation — `_translate_tool_choice` in
-  `anton/core/llm/openai.py` sends a named `tool_choice` with no unforced
-  fallback; remove that bullet when the verifier gains one
 If the app and this file disagree, the app is right and this file is stale.
