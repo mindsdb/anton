@@ -137,10 +137,10 @@ class TurnCost:
     # Size of the spend-ceiling grace actually granted, 0 if none. Queryable
     # alongside `grace_granted` so the size of the concession is visible.
     grace_tokens: int = 0
-    # The turn answered a spend-ceiling hand-back, so it ran under the raised
-    # ceiling. Measures whether one reply now carries the work to the end, or
-    # whether `ended_by=spend_ceiling` still repeats turn after turn.
-    after_spend_ceiling: bool = False
+    # Times the user answered "Keep going" when this turn reached its spend
+    # ceiling or round cap. With `ended_by`, says whether one answer carried
+    # the work to the end or the turn still stopped.
+    limit_continues: int = 0
     # WHY the completion verifier produced no verdict this turn (ENG-1858).
     # `ended_by="handback_verifier_failure"` and `verification_skipped=True`
     # both say only THAT it failed; 343 such turns / 14 days (5.3% of real

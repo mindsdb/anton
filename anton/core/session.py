@@ -668,13 +668,11 @@ _SPEND_CEILING_GRACE_FLOOR = 100_000
 # repeatedly: see the grant sites for the one-shot guard.
 _ROUND_CAP_GRACE_ROUNDS = 3
 
-# Ceiling multiplier for the turn that answers a spend-ceiling hand-back. That
-# hand-back asked the user whether the work is worth more spend, so their reply
-# is the answer; stopping again at the same ceiling re-asks a question they just
-# answered (39% of replies to a ceiling stop hit it again before this existed).
-# Bounded rather than lifted so a runaway on the answered turn still stops, and
-# each further reply buys another bounded window.
-_CONSENTED_CEILING_MULTIPLIER = 4
+# What one "Keep going" at a turn limit buys: the limit rises by this many times
+# its configured size. Replayed against 30 days of limit stops, 4x let 116 of
+# 120 interrupted-then-finished runs complete after one question; one more
+# equal window removed none of the repeat stops.
+_LIMIT_CONTINUE_MULTIPLIER = 4
 
 # Closes every hand-back notice. The notices reach the model as user-role
 # messages, so without this it reads the pause as the user's request and tells
@@ -1502,14 +1500,6 @@ class ChatSession:
         # older settings object doesn't break — absent means "no ceiling",
         # matching the pre-ENG-1286 behaviour rather than silently applying one.
         self._max_turn_tokens = getattr(s, "max_turn_tokens", 0)
-        # Raised for a turn that answers a ceiling hand-back; set per turn in
-        # turn_stream. See `_turn_token_ceiling`.
-        self._ceiling_multiplier = 1
-        # How the previous turn ended, so a long-lived session (the CLI) knows
-        # when the user is answering a ceiling hand-back. Hosts that rebuild the
-        # session per turn persist `last_turn_ended_by` and pass it back as
-        # turn_stream's `after_spend_ceiling`.
-        self._last_turn_ended_by: str | None = None
         # One-time exception to the always-ask ceiling (ENG-1893): granted at
         # most once per turn, and only when the verifier reports the
         # remaining work as small. Reset per turn in turn_stream, not here —
@@ -1517,6 +1507,10 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
+        # Headroom the user granted this turn by answering "Keep going" at a
+        # limit. Reset per turn in turn_stream.
+        self._spend_ceiling_continued_tokens = 0
+        self._round_cap_continued_rounds = 0
         # Memory section by user message, reused within one turn. None outside a turn.
         self._turn_memory: dict[str, str] | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
@@ -3383,10 +3377,6 @@ class ChatSession:
             # so "error" covered a parse failure, a tool crash, a bad config
             # and an anton bug alike — indistinguishable in any query.
             tc.error_type = _safe_error_type(exc)
-        # Owner only: a late finalizer for an abandoned turn must not overwrite
-        # how the newer turn ended.
-        if is_owner:
-            self._last_turn_ended_by = tc.ended_by
 
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
@@ -3556,9 +3546,9 @@ class ChatSession:
                 # consistent with how other unset string properties go out.
                 grace_granted=tc.grace_granted,
                 grace_tokens=str(tc.grace_tokens),
-                # This turn answered a ceiling hand-back and ran under the
-                # raised ceiling — see `TurnCost.after_spend_ceiling`.
-                after_spend_ceiling=str(tc.after_spend_ceiling).lower(),
+                # "Keep going" answers at a turn limit — see
+                # `TurnCost.limit_continues`.
+                limit_continues=str(tc.limit_continues),
                 # WHY the verifier produced no verdict (ENG-1858): the loop's
                 # own truncated/transient/hard/denied class plus the content-
                 # free exception type. Empty on verified turns. See
@@ -3824,20 +3814,6 @@ class ChatSession:
         """
         return self._spend_ceiling_reached()
 
-    @property
-    def last_turn_ended_by(self) -> str | None:
-        """How the most recent turn ended (`TurnCost.ended_by`), None before
-        the first. A host that rebuilds the session per turn persists this and
-        passes `after_spend_ceiling=True` to the next turn_stream when it reads
-        "spend_ceiling"."""
-        return self._last_turn_ended_by
-
-    @property
-    def _turn_token_ceiling(self) -> int:
-        """The ceiling this turn enforces: `max_turn_tokens`, raised for a turn
-        that answers a ceiling hand-back."""
-        return self._max_turn_tokens * self._ceiling_multiplier
-
     def _spend_ceiling_reached(self) -> bool:
         """True when this turn has spent enough that it must stop and ask.
 
@@ -3858,7 +3834,7 @@ class ChatSession:
         site carries the progress condition explicitly — see
         `_spend_ceiling_stops_the_tool_loop`.
         """
-        if self._turn_token_ceiling <= 0 or self._turn_cost is None:
+        if self._max_turn_tokens <= 0 or self._turn_cost is None:
             return False
         return self._turn_cost.total_tokens >= self._spend_ceiling_gate()
 
@@ -3926,10 +3902,14 @@ class ChatSession:
         peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
         reserve = min(
             max(_SPEND_CEILING_RESERVE, 2 * peak),
-            max(self._turn_token_ceiling // 2, 1),
+            max(self._max_turn_tokens // 2, 1),
         )
         return max(
-            self._turn_token_ceiling + self._spend_ceiling_grace_tokens - reserve, 1
+            self._max_turn_tokens
+            + self._spend_ceiling_grace_tokens
+            + self._spend_ceiling_continued_tokens
+            - reserve,
+            1,
         )
 
     def _grant_spend_ceiling_grace(self) -> None:
@@ -3951,12 +3931,77 @@ class ChatSession:
         peak = self._turn_cost.peak_context_tokens if self._turn_cost else 0
         self._spend_ceiling_grace_tokens = min(
             max(_SPEND_CEILING_GRACE_FLOOR, peak),
-            max(self._turn_token_ceiling // 4, 1),
+            max(self._max_turn_tokens // 4, 1),
         )
         self._spend_ceiling_grace_used = True
         if self._turn_cost is not None:
             self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
         _record_grace(self._turn_cost, "ceiling")
+
+    async def _ask_to_continue_past_limit(self, limit: str):
+        """Ask the user whether to keep going past a turn limit.
+
+        `limit` is "spend_ceiling" or "round_cap". Yields ``("event", ev)``
+        for the question's own events, then ``("result", granted)``. A
+        "Keep going" raises that limit by `_LIMIT_CONTINUE_MULTIPLIER` times
+        its configured size for the rest of the turn; anything else —
+        "Stop here", Skip, a timeout, or a host that cannot ask — returns
+        False and the caller hands back as before.
+
+        Asking inside the turn keeps the user's answer with the work it
+        applies to. Ending the turn instead made the reply a new turn with a
+        fresh limit, so work bigger than one limit stopped again and again.
+        """
+        inner = self._run_draining(self._continue_question(limit))
+        try:
+            async for kind, item in inner:
+                if kind == "event":
+                    yield kind, item
+                    continue
+                if item:
+                    if limit == "spend_ceiling":
+                        self._spend_ceiling_continued_tokens += (
+                            _LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens
+                        )
+                    else:
+                        self._round_cap_continued_rounds += (
+                            _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
+                        )
+                    if self._turn_cost is not None:
+                        self._turn_cost.limit_continues += 1
+                yield kind, item
+        finally:
+            await inner.aclose()
+
+    async def _continue_question(self, limit: str) -> bool:
+        """The "Keep going / Stop here" question itself; True on Keep going."""
+        from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+        if limit == "spend_ceiling":
+            spent = self._turn_cost.total_tokens if self._turn_cost else 0
+            prompt = (
+                f"This task has used {spent:,} tokens, which is a lot of work "
+                "for one request and counts against your plan. Keep going?"
+            )
+            more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens:,} more tokens"
+        else:
+            steps = self._turn_cost.rounds if self._turn_cost else self._max_tool_rounds
+            prompt = f"This task has taken {steps} steps without finishing. Keep going?"
+            more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds} more steps"
+        request = AskRequest(
+            prompt=prompt,
+            options=(
+                AskOption(value="continue", label="Keep going", detail=more, style="primary"),
+                AskOption(
+                    value="stop", label="Stop here",
+                    detail="Summarize what is done and what remains",
+                ),
+            ),
+            allow_custom=False,
+            timeout_s=getattr(self.elicitor, "timeout_s", None),
+        )
+        answer = await elicit(self, f"limit:{uuid.uuid4().hex}", request)
+        return answer.status == "answered" and answer.values == ("continue",)
 
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
@@ -3974,29 +4019,15 @@ class ChatSession:
         spent and asked to be honest that it was a lot.
         """
         spent = self._turn_cost.total_tokens if self._turn_cost is not None else 0
-        if self._turn_cost is not None and self._turn_cost.after_spend_ceiling:
-            # The user already said to continue, so asking again whether it is
-            # worth it would re-ask the question they answered.
-            ask = (
-                "The user already asked you to continue, and this request ran "
-                "under a raised token limit; it has reached that limit too. Say "
-                "so plainly, and tell them that replying will continue from "
-                "here. "
-            )
-        else:
-            ask = (
-                "Be straightforward that this has already taken a lot of "
-                "work, so the user can decide whether it is worth continuing. "
-                "If you are on a good track and can finish, say so and ask if "
-                "they'd like you to continue. "
-            )
         return (
             f"SYSTEM: This turn has used {spent:,} tokens, which is a large amount "
             "of work for a single request and counts against the user's plan. "
             "Pause here. Summarize what you have accomplished so far and what "
-            "remains. "
-            + ask
-            + "Do NOT retry automatically — wait for the user's response. "
+            "remains. Be straightforward that this has already taken a lot of "
+            "work, so the user can decide whether it is worth continuing. "
+            "If you are on a good track and can finish, say so and ask if they'd "
+            "like you to continue. "
+            "Do NOT retry automatically — wait for the user's response. "
             + _HANDBACK_NOT_USER_CLAUSE
         )
 
@@ -4419,13 +4450,30 @@ class ChatSession:
         return ""
 
     async def _dispatch_draining(self, tc):
-        """Run one tool while forwarding whatever it emits out of band.
+        """Run one tool through `_run_draining`. The final item is
+        ``("result", outcome)``, the ``ToolOutcome`` ``dispatch_tool`` returns,
+        so the caller reads ``.content`` and ``.ok`` off it rather than
+        receiving bare text. Callers must ``aclose()`` this generator."""
+        inner = self._run_draining(
+            self.tool_registry.dispatch_tool(
+                self, tc.name, tc.input, tool_call_id=tc.id,
+            )
+        )
+        try:
+            async for item in inner:
+                yield item
+        finally:
+            # Same-task close, so the inner `finally` cancels the dispatch on
+            # a Stop rather than waiting for GC (hazard 4 below).
+            await inner.aclose()
+
+    async def _run_draining(self, coro):
+        """Run *coro* while forwarding whatever it emits out of band.
 
         Yields ``("event", ev)`` for each out-of-band event, then
-        ``("result", outcome)`` — the ``ToolOutcome`` ``dispatch_tool``
-        returns, so the caller reads ``.content`` and ``.ok`` off it rather
-        than receiving bare text. "Out of band" covers both an ``ask_user``
-        question (ENG-1276, #292) and a streaming tool's ``ToolProgress``
+        ``("result", value)`` with what *coro* returned. "Out of band" covers
+        both an ``ask_user`` question (ENG-1276, #292), a turn-limit question
+        (`_ask_to_continue_past_limit`) and a streaming tool's ``ToolProgress``
         markers (ENG-763) — ``dispatch_tool`` relays the latter through
         ``session.emitter`` too, since it has no other way to reach the
         caller while running inside this method's background task; both
@@ -4457,11 +4505,7 @@ class ChatSession:
            cancelled while we are suspended at a ``yield``, our ``finally``
            only runs on finalization, which GC would otherwise defer.
         """
-        task = asyncio.create_task(
-            self.tool_registry.dispatch_tool(
-                self, tc.name, tc.input, tool_call_id=tc.id,
-            )
-        )
+        task = asyncio.create_task(coro)
         # Bound before the try: the `finally` cancels it, and if the first
         # `ensure_future` below raised, an unbound name there would turn the
         # real cause into a NameError.
@@ -4507,17 +4551,11 @@ class ChatSession:
         trace_tags: list[str] | None = None,
         trace_metadata: dict[str, str] | None = None,
         enable_interaction: bool = True,
-        after_spend_ceiling: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming turn. Owns the out-of-band emitter's lifetime.
 
         `enable_interaction=False` skips creating the emitter (used by
         `turn()`, which has no listener for a mid-turn question).
-
-        `after_spend_ceiling` says the previous turn ended on the spend
-        ceiling, so this input answers its hand-back and the turn runs under a
-        raised ceiling. None reads it from this session's own last turn, which
-        only a session reused across turns knows; see `last_turn_ended_by`.
         """
         # Before any tool task is spawned, so a connect made mid-turn registers
         # into a container this turn still holds.
@@ -4545,7 +4583,6 @@ class ChatSession:
             turn_id=turn_id,
             trace_tags=trace_tags,
             trace_metadata=trace_metadata,
-            after_spend_ceiling=after_spend_ceiling,
         )
         try:
             async for event in inner:
@@ -4561,7 +4598,6 @@ class ChatSession:
         turn_id: int | None = None,
         trace_tags: list[str] | None = None,
         trace_metadata: dict[str, str] | None = None,
-        after_spend_ceiling: bool | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """The turn implementation. Yields events as they arrive.
 
@@ -4598,11 +4634,8 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
-        if after_spend_ceiling is None:
-            after_spend_ceiling = self._last_turn_ended_by == "spend_ceiling"
-        self._ceiling_multiplier = (
-            _CONSENTED_CEILING_MULTIPLIER if after_spend_ceiling else 1
-        )
+        self._spend_ceiling_continued_tokens = 0
+        self._round_cap_continued_rounds = 0
         self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
@@ -4659,8 +4692,7 @@ class ChatSession:
         # would name different turns, which is the defect this stamping exists
         # to prevent. Consistent by construction, not by coincidence.
         self._turn_cost = TurnCost(
-            turn_index=turn_id if turn_id is not None else self._turn_count + 1,
-            after_spend_ceiling=bool(after_spend_ceiling),
+            turn_index=turn_id if turn_id is not None else self._turn_count + 1
         )
         _turn_cost_books = self._turn_cost
         self._llm.usage_listener = self._turn_cost.add
@@ -5438,9 +5470,23 @@ class ChatSession:
                     self._round_cap_grace_used = True
                     _round_cap_grace_active = True
                     _record_grace(self._turn_cost, "round")
-                effective_round_cap = self._max_tool_rounds + (
-                    _ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0
+                effective_round_cap = (
+                    self._max_tool_rounds
+                    + (_ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0)
+                    + self._round_cap_continued_rounds
                 )
+                if tool_round > effective_round_cap and self._max_tool_rounds > 0:
+                    agen = self._ask_to_continue_past_limit("round_cap")
+                    try:
+                        async for _kind, _payload in agen:
+                            if _kind == "event":
+                                yield _payload
+                            elif _payload:
+                                effective_round_cap += (
+                                    _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
+                                )
+                    finally:
+                        await agen.aclose()
                 # Accumulate, don't assign: `tool_round` is loop-local and
                 # resets to 0 on every verifier-forced continuation, so
                 # assigning reported only the last continuation's rounds —
@@ -5508,6 +5554,14 @@ class ChatSession:
                     if not self._spend_ceiling_grace_used:
                         self._grant_spend_ceiling_grace()
                     if self._spend_ceiling_stops_the_tool_loop():
+                        agen = self._ask_to_continue_past_limit("spend_ceiling")
+                        try:
+                            async for _kind, _payload in agen:
+                                if _kind == "event":
+                                    yield _payload
+                        finally:
+                            await agen.aclose()
+                    if self._spend_ceiling_stops_the_tool_loop():
                         _spend_ceiling_hit = True
                         if self._turn_cost is not None:
                             self._turn_cost.ended_by = "spend_ceiling"
@@ -5515,7 +5569,7 @@ class ChatSession:
                             "spend ceiling reached: tokens=%d ceiling=%d gate=%d "
                             "tool_round=%d continuation=%d — pausing to ask the user",
                             self._turn_cost.total_tokens if self._turn_cost else 0,
-                            self._turn_token_ceiling, self._spend_ceiling_gate(),
+                            self._max_turn_tokens, self._spend_ceiling_gate(),
                             tool_round, continuation,
                         )
                         self._append_history(
@@ -6606,6 +6660,14 @@ class ChatSession:
                 if verdict.close_to_done and not self._spend_ceiling_grace_used:
                     self._grant_spend_ceiling_grace()
                 if self._spend_ceiling_reached():
+                    agen = self._ask_to_continue_past_limit("spend_ceiling")
+                    try:
+                        async for _kind, _payload in agen:
+                            if _kind == "event":
+                                yield _payload
+                    finally:
+                        await agen.aclose()
+                if self._spend_ceiling_reached():
                     _spend_ceiling_hit = True
                     if self._turn_cost is not None:
                         self._turn_cost.ended_by = "spend_ceiling"
@@ -6613,7 +6675,7 @@ class ChatSession:
                         "spend ceiling reached at the continuation gate: tokens=%d "
                         "ceiling=%d continuation=%d — pausing to ask the user",
                         self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._turn_token_ceiling, continuation,
+                        self._max_turn_tokens, continuation,
                     )
                     self._append_history(
                         {"role": "user", "content": self._spend_ceiling_notice()}
