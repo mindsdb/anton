@@ -60,3 +60,9 @@ def test_tools_no_longer_seen_live_are_not_in_the_table():
     it's just no longer specifically classified read."""
     for removed_tool in ("render_landing_page_ui", "render_asset", "manage_blog_post"):
         assert allowed_for_mode("hubspot", removed_tool, "read") is False
+
+
+def test_unrestricted_engine_allows_every_tool_except_in_none_mode():
+    assert allowed_for_mode("notion", "notion-update-page", "read") is True
+    assert allowed_for_mode("notion", "a_tool_added_later", "read") is True
+    assert allowed_for_mode("notion", "notion-search", "none") is False
