@@ -16,6 +16,7 @@ from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, Usage
 from anton.core.tools.generate_artifact.discovery import prd
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _response(content: str) -> LLMResponse:
@@ -30,7 +31,7 @@ def _state(artifact_path: Path, **over) -> PrdState:
     # reach that branch.
     base = dict(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock()),
+            _llm=StreamingLLM(plan=AsyncMock()),
             question_count=0,
             elicitor=None,
             emit=AsyncMock(),

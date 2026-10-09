@@ -19,6 +19,7 @@ from anton.core.interaction.elicit import AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief, checkpoint as cp, orchestrator
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _text_response(content: str) -> LLMResponse:
@@ -38,7 +39,7 @@ def _make_state(tmp_path: Path, **over) -> PrdState:
     artifact = store.create(name="Clock", description="d", type="html-app")
     artifact_dir = store.folder_for(artifact.slug)
     base = dict(
-        session=SimpleNamespace(_llm=SimpleNamespace(), question_count=0, elicitor=None, emit=AsyncMock()),
+        session=SimpleNamespace(_llm=StreamingLLM(), question_count=0, elicitor=None, emit=AsyncMock()),
         slug=artifact.slug,
         artifact_path=artifact_dir,
         artifact_type="html-app",
