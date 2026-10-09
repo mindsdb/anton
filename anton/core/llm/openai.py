@@ -1430,10 +1430,17 @@ class OpenAIProvider(LLMProvider):
                 # `reasoning_content` is the de facto convention several
                 # OpenAI-compatible reasoning gateways use (DeepSeek, vLLM's
                 # reasoning parser, and possibly the mdb.ai passthrough for
-                # non-Anthropic reasoning models). Read defensively via
-                # getattr since the SDK's Delta model doesn't declare it.
-                reasoning_delta = getattr(delta, "reasoning_content", None)
-                if reasoning_delta:
+                # non-Anthropic reasoning models). OpenRouter and Ollama name
+                # the same field `reasoning`. Read both: thinking under either
+                # name shows in the thinking block, and it restarts the
+                # model-call deadline, which only an event resets. Read
+                # defensively via getattr since the SDK's Delta model doesn't
+                # declare either.
+                reasoning_delta = (
+                    getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                )
+                if isinstance(reasoning_delta, str) and reasoning_delta:
                     yield StreamReasoningDelta(text=reasoning_delta)
 
                 # Tool call deltas

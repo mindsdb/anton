@@ -1562,6 +1562,56 @@ class RequestRefusedError(Exception):
         self.status_code = status_code
 
 
+def _describe_seconds(*, seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+    if seconds == int(seconds):
+        whole = int(seconds)
+        return f"{whole} second" if whole == 1 else f"{whole} seconds"
+    return f"{seconds:g} seconds"
+
+
+class ModelCallTimeoutError(Exception):
+    """A model call sent no output for its whole idle deadline, so
+    ``LLMClient`` stopped it.
+
+    The deadline restarts with every event the provider sends and runs across
+    the SDK's own retries, so a model that is slow but writing is never cut.
+    The turn ends on the first one with no auto-retry: a provider that stayed
+    silent for the whole deadline would make a re-send wait it out again.
+
+    A plain ``Exception``, not a ``ConnectionError``: callers read that base as
+    a network blip a retry may fix (the verifier's transient catch, the
+    generate_artifact stream-drop retry), and this one is not.
+
+    ``code`` is the wire code the host maps to its card. The class NAME is what
+    survives a hosted turn (``cloud_turn.__main__._scrub``).
+    """
+
+    code = "model_timeout"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        role: str = "",
+        model: str = "",
+        idle_timeout_s: float | None = None,
+    ) -> None:
+        if message is None:
+            waited = (
+                _describe_seconds(seconds=idle_timeout_s)
+                if idle_timeout_s is not None
+                else "too long"
+            )
+            message = f"The model sent no output for {waited}, so the call was stopped."
+        super().__init__(message)
+        self.role = role
+        self.model = model
+        self.idle_timeout_s = idle_timeout_s
+
+
 # Phrases that identify a permanent, content-SHAPED rejection (ENG-1992) in the
 # two dialects we have actually observed. Matched on the provider's prose
 # because no provider gives this a structured code.
@@ -1965,6 +2015,7 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     ContentTooLargeError,
     EndpointConfigurationError,
     RequestRefusedError,
+    ModelCallTimeoutError,
 )
 
 
@@ -1981,6 +2032,7 @@ PROVIDER_FAILURE_KINDS: frozenset[str] = frozenset({
     "http_5xx",            # request-time 5xx status
     "connection_failure",  # never reached it, or the connection dropped
     "bad_response",        # a 200 whose body was unusable
+    "no_output",           # the call sent nothing for its whole idle deadline
 })
 
 # Codes that mean "we got a 200 and the body was unusable": an unclassifiable
@@ -2010,6 +2062,8 @@ def provider_failure_kind(code: str | None) -> str:
         return "rate_limit"
     if code == "connection_error":
         return "connection_failure"
+    if code == ModelCallTimeoutError.code:
+        return "no_output"
     if code.startswith("http_"):
         # Only 5xx is minted with this prefix (`classify_transient`), but parse
         # rather than trust it: a future 4xx would otherwise be mislabelled as a

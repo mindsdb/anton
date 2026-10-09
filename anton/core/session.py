@@ -24,6 +24,7 @@ from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
+from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -48,6 +49,7 @@ from anton.core.llm.provider import (
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
+    ModelCallTimeoutError,
     ModelUnavailableError,
     ProviderAuthError,
     ProviderOverloadedError,
@@ -857,6 +859,12 @@ def _verifier_error_type(exc: BaseException | None) -> str:
     name = _safe_error_type(exc)
     if isinstance(exc, StructuredOutputError):
         return name + (":unusable_call" if exc.reached_tool_call else ":no_call")
+    if isinstance(exc, ModelCallTimeoutError) and exc.role:
+        # The role of the call that ran out its deadline, a closed set. The
+        # verdict call's own expiry reads `:coding`; `:router` means compaction
+        # ran out earlier in the turn and the latch failed the verdict call
+        # before it was sent.
+        return f"{name}:{exc.role}"
     return name
 
 
@@ -1538,6 +1546,15 @@ class ChatSession:
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._llm = config.llm_client
+        # The open model calls of the current turn: None before the first
+        # turn, and a closed tracker that reports nothing once a turn ends.
+        # Hosts poll `model_calls.snapshot()` to keep a turn alive while a
+        # model call is silent (see anton.core.llm.liveness).
+        self.model_calls: ModelCallTracker | None = None
+        # Applied here, not only in LLMClient.from_settings: hosts that build
+        # the client themselves (cowork-server) pass their settings to the
+        # session, and this is how the deadline setting reaches their client.
+        self._llm.model_call_idle_timeout_s = s.model_call_idle_timeout_s
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -4597,6 +4614,12 @@ class ChatSession:
         )
         _turn_cost_books = self._turn_cost
         self._llm.usage_listener = self._turn_cost.add
+        # The turn's open model calls, armed at the same narrow waist. Every
+        # call this turn issues registers here, and the first one that runs
+        # out its idle deadline latches so later calls fail at once.
+        _turn_calls = ModelCallTracker()
+        self.model_calls = _turn_calls
+        _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
         try:
@@ -4815,6 +4838,18 @@ class ChatSession:
                     if isinstance(_agent_exc, RequestRefusedError):
                         _stamp_retry_terminal(
                             self._turn_cost, _agent_exc, "request_refused"
+                        )
+                        raise
+
+                    # A model call sent nothing for its whole deadline. A
+                    # re-send, the recovery note's retry or the wrap-up call
+                    # would each wait out another deadline against the same
+                    # silent provider, and the latch fails them anyway. So the
+                    # turn ends here and the host shows its no-response card.
+                    # After the seal, as for the refusal above.
+                    if isinstance(_agent_exc, ModelCallTimeoutError):
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "model_call_timeout"
                         )
                         raise
 
@@ -5046,6 +5081,18 @@ class ChatSession:
             raise
         finally:
             self._turn_memory = None
+            # Closed before the books, with no await in between, so work that
+            # outlives the turn (memory consolidation, a late finalizer) can
+            # neither keep a host's wait line alive nor latch a deadline.
+            # Disarmed too, so the tasks started below see no tracker and
+            # cannot reach the next turn's on this session.
+            _turn_calls.close()
+            try:
+                disarm_turn_tracker(_calls_token)
+            except ValueError:
+                # Cross-context finalizer of an abandoned turn: the ContextVar
+                # copy dies with that task, and the newer turn keeps its own.
+                pass
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
@@ -6190,6 +6237,20 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except ModelCallTimeoutError as exc:
+                    # The verdict call sent nothing for its whole deadline, or
+                    # an earlier call in the turn did and the latch failed this
+                    # one before it was sent; exc.role names which. The answer
+                    # already streamed, so the turn ends quietly on it,
+                    # unverified, below. A retry would wait out another
+                    # deadline, and a hand-back would need the same provider.
+                    verdict_failure = "timeout"
+                    verdict_exc = exc
+                    logger.warning(
+                        "completion-verifier verdict=TIMEOUT budget=%d role=%s model=%s",
+                        budget, exc.role, exc.model,
+                    )
+                    break
                 except ProviderAuthError:
                     # The client already made the one bounded confirmation
                     # attempt. ProviderAuthError subclasses ConnectionError,
@@ -6276,6 +6337,15 @@ class ChatSession:
                     self._turn_cost.verifier_error_type = _verifier_error_type(
                         verdict_exc
                     )
+                if verdict_failure == "timeout":
+                    # A silent provider says nothing about whether this model
+                    # can produce a verdict, so the verifier latch is left
+                    # alone. Unverified turn, as for the latched skip above.
+                    # The deadline did latch the turn's model calls, so this
+                    # must end the turn: any model call after it fails at once.
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
+                    break
                 if verdict_failure == "denied":
                     # A denied verdict recurs every turn by construction, so
                     # don't wait for a second sample: latch NOW and end the

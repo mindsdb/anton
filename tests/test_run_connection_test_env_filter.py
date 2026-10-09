@@ -94,10 +94,10 @@ async def test_hung_snippet_times_out_instead_of_blocking_forever(tmp_path):
 
 @pytest.mark.asyncio
 async def test_timeout_message_survives_a_backend_that_swallows_cancellation(tmp_path):
-    """LocalScratchpadRuntime.execute_streaming catches its own
-    CancelledError and returns a Cell instead of re-raising it, so a bare
-    `asyncio.wait_for(pad.execute(...))` would silently hand back that
-    Cell's generic kill-tree message rather than raising TimeoutError. The
+    """A cancelled execute() can still hand back a Cell, from a test that
+    finished as it was cancelled or a backend that turns the cancel into a
+    cell, so a bare `asyncio.wait_for(pad.execute(...))` would hand back
+    that Cell's generic kill message rather than raising TimeoutError. The
     friendly "timed out after Ns" message must still win."""
     vault = LocalDataVault(vault_dir=tmp_path / "vault")
     engine_def = DatasourceEngine(
@@ -116,8 +116,8 @@ async def test_timeout_message_survives_a_backend_that_swallows_cancellation(tmp
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
-            # What the real local backend does on cancellation: catch it and
-            # return a Cell instead of letting it propagate.
+            # A backend that turns the cancel into a Cell instead of letting
+            # it propagate.
             return MagicMock(stdout="", stderr="", error="Killed: cancelled by caller.")
         raise AssertionError("should have been cancelled by the timeout")
 
