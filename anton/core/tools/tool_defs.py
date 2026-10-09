@@ -177,7 +177,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "Claim a folder for a user-facing output (HTML dashboard, document, "
         "dataset, image, fullstack app, etc.). Call this BEFORE writing the "
         "files — the tool returns the absolute folder path you should write "
-        "into. Each artifact gets its own subfolder under `<workspace>/artifacts/`, "
+        "into. Each artifact gets its own folder, "
         "with a `metadata.json` + `README.md` written automatically.\n\n"
         "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
         "or fullstack-stateful-app): a report the user has fully specified you "

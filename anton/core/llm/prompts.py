@@ -228,8 +228,8 @@ ARTIFACTS_PROMPT = """\
 ARTIFACTS (applies to all user-facing output):
 Any file you create that the user is meant to open, view, download, or run \
 is an ARTIFACT. Artifacts MUST be registered with `create_artifact` BEFORE \
-any file is written. The tool claims a dedicated folder under \
-`<workspace>/artifacts/<slug>/`, writes `metadata.json` + `README.md` for you, \
+any file is written. The tool claims a dedicated folder for the artifact, \
+writes `metadata.json` + `README.md` for you, \
 and returns the absolute folder path. Write ALL of the artifact's files into \
 that returned path.
 
