@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import httpx2
+
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
 
@@ -848,6 +850,39 @@ class TransientProviderError(ConnectionError):
         # retried those with backoff, so the session fails fast (still with the
         # honest typed message) instead of stacking another 30s on top.
         self.session_backoff = session_backoff
+
+
+# Transport errors a stream raises while its body is read. The SDKs wrap
+# transport failures only while they open the request; once the 200 is in,
+# a dying connection surfaces as the raw httpx2 error and the SDK never
+# retried it.
+STREAM_DROP_ERRORS: tuple[type[BaseException], ...] = (
+    httpx2.RemoteProtocolError,
+    httpx2.ReadError,
+    httpx2.ReadTimeout,
+)
+
+
+def stream_drop_error(*, provider: str, target: str, model: str) -> TransientProviderError:
+    """The error a provider raises for a connection that died mid-stream.
+
+    ``target`` names who the connection was to, in the message the user sees.
+    """
+    return TransientProviderError(
+        f"Lost the connection to {target} mid-response — try again in a moment.",
+        provider=provider, code="connection_error", session_backoff=True, model=model,
+    )
+
+
+def is_stream_drop(exc: BaseException) -> bool:
+    """True for a connection that died mid-stream, raw or already classified."""
+    if isinstance(exc, STREAM_DROP_ERRORS):
+        return True
+    return (
+        isinstance(exc, TransientProviderError)
+        and exc.code == "connection_error"
+        and exc.session_backoff
+    )
 
 
 class ProviderOverloadedError(ConnectionError):
