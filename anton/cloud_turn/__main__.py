@@ -6,7 +6,7 @@ Contract (matches scratchpad-controller + cowork-server):
           never closes stdin.
   stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
           then exactly one terminal
-  stderr: diagnostic logs + tracebacks without provider error bodies
+  stderr: diagnostic logs; logged tracebacks omit provider error bodies
   exit  : 0 (the controller detects the terminal from the event, not the code)
 
 stdout is isolated at the OS file-descriptor level: the real FD 1 is duplicated
@@ -102,7 +102,7 @@ MAX_ERROR_MESSAGE_CHARS = 300
 
 def _scrub(exc: Exception) -> str:
     """Short, credential-scrubbed error string for the wire. ProviderErrorFilter
-    separately removes provider bodies from stderr diagnostics."""
+    separately removes provider bodies from logged diagnostics."""
     from anton.utils.datasources import scrub_credentials
 
     text = scrub_credentials(f"{type(exc).__name__}: {exc}")
@@ -112,8 +112,8 @@ def _scrub(exc: Exception) -> str:
 
 
 def _stderr_log_handler(*, stream: TextIO) -> logging.Handler:
-    """The pod's root stderr handler. Its filter sees every record that reaches
-    stderr from any logger, so no traceback prints a provider error body."""
+    """The pod's root stderr handler. Its filter sees every record any logger
+    sends to it, so no logged traceback prints a provider error body."""
     handler = logging.StreamHandler(stream)
     handler.addFilter(ProviderErrorFilter())
     return handler

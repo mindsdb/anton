@@ -437,20 +437,22 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
         # names the decoder's message and position, never the arguments: they
         # are model-authored and can hold SQL values or credentials. The
         # exception stays out of the args too, because its `doc` is the whole
-        # raw body.
+        # raw body. Streamed deltas can split a surrogate pair, and
+        # "surrogatepass" counts a lone half instead of raising.
+        raw_bytes = len(raw_json.encode("utf-8", "surrogatepass"))
         repair = _try_repair_tool_json(raw_json)
         if repair is not None:
             repaired, truncated = repair
             _logging.getLogger(__name__).info(
                 "Tool-use input JSON was malformed (%s: line %d column %d (char %d)) "
                 "but repaired successfully. Raw bytes: %d, truncated: %s.",
-                exc.msg, exc.lineno, exc.colno, exc.pos, len(raw_json), truncated,
+                exc.msg, exc.lineno, exc.colno, exc.pos, raw_bytes, truncated,
             )
             return repaired, None, truncated
         _logging.getLogger(__name__).warning(
             "Tool-use input JSON was malformed and unrecoverable "
             "(%s: line %d column %d (char %d)). Raw bytes: %d",
-            exc.msg, exc.lineno, exc.colno, exc.pos, len(raw_json),
+            exc.msg, exc.lineno, exc.colno, exc.pos, raw_bytes,
         )
         return {}, str(exc), False
     # Anthropic occasionally emits a top-level scalar (e.g. a string
@@ -871,19 +873,19 @@ def log_transient_provider_error(*, logger: logging.Logger, error: TransientProv
     )
 
 
-# `http_<status>` exactly as classify_transient mints it. provider_failure_kind
-# parses the digits with int(), which also accepts whitespace, signs and
-# underscores.
+# `http_<status>` exactly as classify_transient mints it: a 5xx status in ASCII
+# digits. provider_failure_kind matches codes against it, so analytics and the
+# log line accept the same shapes.
 _MINTED_HTTP_CODE = re.compile(r"http_5[0-9]{2}")
 
 
 def _loggable_transient_code(*, code: object) -> str:
-    """Return `code` when it is a transient code anton mints, else `unrecognized`."""
-    if not isinstance(code, str) or not provider_failure_kind(code):
-        return "unrecognized"
-    if code.startswith("http_") and _MINTED_HTTP_CODE.fullmatch(code) is None:
-        return "unrecognized"
-    return code
+    """Return `code` when it is a transient code anton mints, else `unrecognized`.
+
+    Only an exact str counts: a subclass could override `__eq__` to match the
+    vocabulary or `__str__` to render other text in the log line.
+    """
+    return code if type(code) is str and provider_failure_kind(code) else "unrecognized"
 
 
 def _log_status(*, status: object) -> int | str:
@@ -2177,14 +2179,11 @@ def provider_failure_kind(code: str | None) -> str:
     if code == ModelCallTimeoutError.code:
         return "no_output"
     if code.startswith("http_"):
-        # Only 5xx is minted with this prefix (`classify_transient`), but parse
-        # rather than trust it: a future 4xx would otherwise be mislabelled as a
-        # server fault, which is the one direction that misleads an operator.
-        try:
-            status = int(code[len("http_"):])
-        except ValueError:
-            return ""
-        return "http_5xx" if 500 <= status < 600 else ""
+        # Only 5xx is minted with this prefix (`classify_transient`), and the
+        # pattern accepts only that exact shape: a future 4xx maps to "" rather
+        # than to a server fault, which is the one direction that misleads an
+        # operator.
+        return "http_5xx" if _MINTED_HTTP_CODE.fullmatch(code) else ""
     return ""
 
 

@@ -165,15 +165,36 @@ class _TextStatus(int):
     __repr__ = __str__
 
 
+class _TextCode(str):
+    """A known code whose rendering carries private text."""
+
+    def __str__(self) -> str:
+        return _PRIVATE_VALUES[0]
+
+    __repr__ = __str__
+
+
+class _MatchingCode(str):
+    """Private text that claims to equal every code."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    __hash__ = str.__hash__
+
+
 @pytest.mark.parametrize("code,status,expected", [
     ("rate_limited", 429, "error_code=rate_limited status=429"),
     ("overloaded_error", None, "error_code=overloaded_error status=unknown"),
     ("http_503", 503, "error_code=http_503 status=503"),
     # A Responses failure takes its code from the provider's body.
     (_PRIVATE_VALUES[0], None, "error_code=unrecognized status=unknown"),
-    # int() accepts these digits, so the kind mapping alone would let them through.
+    # Only the exact `http_5xx` shape classify_transient mints is an HTTP code.
     ("http_\n503", 503, "error_code=unrecognized status=503"),
     ("http_5_03", 503, "error_code=unrecognized status=503"),
+    # A str subclass can render anything or match anything, so it is not a code.
+    (_TextCode("rate_limited"), 429, "error_code=unrecognized status=429"),
+    (_MatchingCode(_PRIVATE_VALUES[0]), 429, "error_code=unrecognized status=429"),
     # Some providers send an integer code.
     (503, 503, "error_code=unrecognized status=503"),
     (None, "503 " + _PRIVATE_VALUES[1], "error_code=unrecognized status=unknown"),
@@ -202,10 +223,11 @@ def test_transient_warning_logs_only_known_codes_and_real_statuses(
 
 
 # The model sends credentials in tool arguments, for example a datasource's
-# known variables. A missing comma leaves them unrepairable.
+# known variables. A missing comma leaves them unrepairable. The non-ASCII name
+# makes the UTF-8 byte count differ from the character count.
 _TOOL_SECRET = "private-key-passphrase-3304"
 _MALFORMED_TOOL_ARGUMENTS = (
-    '{"known_variables": {"private_key_passphrase": "%s" "user": "analyst"}}' % _TOOL_SECRET
+    '{"known_variables": {"private_key_passphrase": "%s" "user": "andré"}}' % _TOOL_SECRET
 )
 _TOOLS = [{"name": "connect_datasource", "description": "Connect.", "input_schema": {"type": "object"}}]
 
@@ -297,18 +319,39 @@ async def test_unrecoverable_tool_arguments_log_position_without_text(
     assert len(records) == 1
     assert records[0].getMessage() == (
         "Tool-use input JSON was malformed and unrecoverable "
-        f"(Expecting ',' delimiter: line 1 column 78 (char 77)). Raw bytes: {len(_MALFORMED_TOOL_ARGUMENTS)}"
+        "(Expecting ',' delimiter: line 1 column 78 (char 77)). "
+        f"Raw bytes: {len(_MALFORMED_TOOL_ARGUMENTS.encode('utf-8'))}"
     )
     assert _TOOL_SECRET not in repr(records[0].args)
 
 
 def test_repaired_tool_arguments_log_position_without_text(caplog: pytest.LogCaptureFixture) -> None:
-    raw = '{"private_key_passphrase": "%s"' % _TOOL_SECRET  # Cut off before the closing brace.
+    # Cut off before the closing brace.
+    raw = '{"user": "andré", "private_key_passphrase": "%s"' % _TOOL_SECRET
     with caplog.at_level(logging.INFO, logger="anton.core.llm.provider"):
-        assert safe_parse_tool_input(raw) == ({"private_key_passphrase": _TOOL_SECRET}, None, True)
+        assert safe_parse_tool_input(raw) == (
+            {"user": "andré", "private_key_passphrase": _TOOL_SECRET}, None, True)
     records = [record for record in caplog.records
                if record.name == "anton.core.llm.provider" and record.levelno == logging.INFO]
     assert len(records) == 1
     assert _TOOL_SECRET not in records[0].getMessage()
+    assert records[0].getMessage().endswith(
+        f"Raw bytes: {len(raw.encode('utf-8'))}, truncated: True.")
     # The decoder's exception keeps the whole raw body in `doc`, so it must not ride in the args.
     assert all(isinstance(arg, (str, int, bool)) for arg in records[0].args)
+
+
+def test_tool_arguments_with_a_split_surrogate_pair_log_without_raising(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Streamed deltas joined as str can hold one half of a surrogate pair.
+    raw = '{"note": "\ud83d" "user": "analyst"}'
+    with caplog.at_level(logging.WARNING, logger="anton.core.llm.provider"):
+        parsed, parse_error, truncated = safe_parse_tool_input(raw)
+    assert (parsed, truncated) == ({}, False)
+    assert parse_error is not None
+    records = [record for record in caplog.records
+               if record.name == "anton.core.llm.provider" and record.levelno == logging.WARNING]
+    assert len(records) == 1
+    assert records[0].getMessage().endswith(
+        f"Raw bytes: {len(raw.encode('utf-8', 'surrogatepass'))}")
