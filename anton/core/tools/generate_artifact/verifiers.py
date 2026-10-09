@@ -95,6 +95,26 @@ def _fetch_path_key(raw: str) -> str | None:
     key = normalise_api_path(target)
     return None if key == _HEALTH_PATH else key
 _BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
+# A `src`/`href` attribute inside a tag whose value starts with exactly one
+# `/`: a path from the root. `(?<![\w-])` keeps `data-src`/`data-href` out;
+# `(?![/\\])` lets a protocol-relative `//host` through (and `/\host`, which
+# browsers read the same way). Quoted or not; leading spaces are tolerated
+# because the browser strips them. The tag body is `[^<>]`, not `[^>]`: with
+# `[^>]` every `<b` in embedded data scans on to the next `>`, which is
+# quadratic in the page size (12.8 s on 60 KB of `1<b,`).
+_ROOT_RELATIVE_REF = re.compile(
+    r"""<[a-z][^<>]*?(?<![\w-])(?P<name>src|href)\s*=\s*['"]?\s*(?P<value>/(?![/\\])[^\s'"<>]*)""",
+    re.I,
+)
+# A `fetch()` or `new EventSource()` whose first argument is a string literal
+# from the root, i.e. not wrapped in `api()`. `(?<![\w$])` keeps `prefetch(`
+# out and lets `window.fetch(` in; `re.S` for multi-line template literals.
+_ROOT_RELATIVE_CALL = re.compile(
+    r"""(?<![\w$])(?P<name>fetch|EventSource)\s*\(\s*(?P<quote>['"`])(?P<value>/(?![/\\]).*?)(?P=quote)""",
+    re.S,
+)
+_ROOT_RELATIVE_SHOWN = 5
+_ROOT_RELATIVE_VALUE_MAX = 80
 # Libraries the design rules let a page load from the network. Matched as
 # substrings of the script URL so a different CDN host or version still
 # passes; anything else is advisory-flagged, since the prompt allows other
@@ -133,6 +153,65 @@ def _exempt_media_spans(html: str) -> list[tuple[int, int]]:
             i += 1
         spans.append((m.start(), i))
     return spans
+
+
+def _shown_value(value: str) -> str:
+    """A value for the message: one line, at most `_ROOT_RELATIVE_VALUE_MAX`
+    characters, in single quotes whatever quote the page used."""
+    value = re.sub(r"\s+", " ", value)
+    if len(value) > _ROOT_RELATIVE_VALUE_MAX:
+        value = value[: _ROOT_RELATIVE_VALUE_MAX - 1] + "…"
+    return f"'{value}'"
+
+
+def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
+    """The rest of rule 4a's message after its fixed head, or None when the
+    page has no root-relative path.
+
+    Every finding goes into the one message, in page order and without
+    repeats: a retry that is shown only the first one fixes only that one
+    and fails again. The hints follow what was found: a relative path for
+    files and links, `api()` for a fullstack page's calls and for an API
+    address in an attribute, embedded data for an html-app page's calls
+    (the published html-app bundle carries no file a `fetch()` names).
+    """
+    hits = [(m.start(), True, m) for m in _ROOT_RELATIVE_REF.finditer(html)]
+    hits += [(m.start(), False, m) for m in _ROOT_RELATIVE_CALL.finditer(html)]
+    if not hits:
+        return None
+    hits.sort(key=lambda hit: hit[0])
+
+    entries = [
+        f"{m.group('name').lower()}={_shown_value(m.group('value'))}"
+        if in_attr
+        else f"{m.group('name')}({_shown_value(m.group('value'))})"
+        for _, in_attr, m in hits
+    ]
+    shown = list(dict.fromkeys(entries))
+    listed = ", ".join(shown[:_ROOT_RELATIVE_SHOWN])
+    if len(shown) > _ROOT_RELATIVE_SHOWN:
+        listed += f" and {len(shown) - _ROOT_RELATIVE_SHOWN} more"
+
+    attr_values = [m.group("value") for _, in_attr, m in hits if in_attr]
+    hints = []
+    if attr_values:
+        hints.append("Use a relative path for files and links, e.g. logo.png.")
+        if is_fullstack and any(v.startswith("/api/") for v in attr_values):
+            hints.append(
+                "Set an API address in an attribute from JS: a.href = api('/api/export')."
+            )
+    if len(attr_values) < len(hits):
+        hints.append(
+            "Call the API through api(): fetch(api('/api/items')), "
+            "new EventSource(api('/api/stream'))."
+            if is_fullstack
+            else "Embed the data in the page instead of fetching it."
+        )
+    hints.append("Moving the same root-relative path into a JS string does not fix it.")
+    return (
+        f"{listed}. The page is served under a path prefix, in the app preview "
+        "and once published, and a path from the root drops it. " + " ".join(hints)
+    )
 
 
 def verify_frontend(
@@ -174,6 +253,20 @@ def verify_frontend(
     for m in re.finditer(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]?https?://""", html, re.I):
         errors.append(f"Absolute URL is not allowed in fetch(): ...{html[m.start():m.start()+60]!r}")
         break
+
+    # 4a. No root-relative path: a `src`/`href` value, or a literal `fetch()`
+    #     / `new EventSource()` target, that starts with exactly one `/`,
+    #     `/api/...` included. The page is served under a path prefix (the
+    #     app preview's proxy route, the published host's `/_t/<…>/`) that
+    #     such a path drops: a file or call gets 401 or 404, a link reloads
+    #     the frame. `verify_app_live` loads the fullstack page from the
+    #     backend's root, where the path works, so only this text check sees
+    #     it there. This does not reopen rule 4's decision on ABSOLUTE URLs:
+    #     `https://`, `//`, `data:`, `blob:`, `#`, `mailto:` and relative
+    #     paths all pass. An address assembled in JS is not seen.
+    root_relative = _root_relative_detail(html, is_fullstack=is_fullstack)
+    if root_relative:
+        errors.append("Root-relative path is not allowed: " + root_relative)
 
     # 5. All backend calls under /api/* (fullstack only).
     if is_fullstack:

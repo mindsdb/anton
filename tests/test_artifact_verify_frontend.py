@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
+
+import pytest
 
 from anton.core.artifacts.html_lint import HtmlFinding
 from anton.core.tools.generate_artifact import verifiers
@@ -387,3 +390,179 @@ def test_served_check_words_a_failed_request_as_a_url_not_a_local_file(monkeypat
     assert verdict.warnings == [
         "Loaded in a headless browser, the page rendered no visible text or elements."
     ]
+
+
+# ── Root-relative paths ──────────────────────────────────────────────────────
+
+_ROOT_RELATIVE = "Root-relative path is not allowed: "
+
+
+def _with_markup(markup: str) -> str:
+    return GOOD.replace('<div id="kpi-revenue"></div>', f'<div id="kpi-revenue"></div>{markup}')
+
+
+def _with_script(script: str) -> str:
+    return GOOD.replace("fetch(api('/api/items'));", f"fetch(api('/api/items'));\n{script}")
+
+
+def _root_relative_error(html: str, *, is_fullstack: bool) -> str:
+    r = verify_frontend(html, is_fullstack=is_fullstack)
+    [err] = [e for e in r.errors if e.startswith(_ROOT_RELATIVE)]
+    return err
+
+
+@pytest.mark.parametrize(
+    "markup, shown",
+    [
+        ('<img src="/logo.png">', "src='/logo.png'"),
+        ('<IMG SRC="/logo.png">', "src='/logo.png'"),
+        ("<a href='/about'>About</a>", "href='/about'"),
+        ('<a href="/">Home</a>', "href='/'"),
+        ('<base href="/">', "href='/'"),
+        ('<link rel="stylesheet" href="/styles.css">', "href='/styles.css'"),
+        ('<script src="/app.js"></script>', "src='/app.js'"),
+        ("<img src=/logo.png>", "src='/logo.png'"),
+        ('<a\n  class="nav"\n  href="/docs">Docs</a>', "href='/docs'"),
+        ('<svg><use xlink:href="/sprite.svg#icon"></use></svg>', "href='/sprite.svg#icon'"),
+    ],
+)
+def test_root_relative_src_or_href_is_error(markup, shown):
+    """A path from the root drops the path prefix the page is served under."""
+    for is_fullstack in (True, False):
+        assert shown in _root_relative_error(_with_markup(markup), is_fullstack=is_fullstack)
+
+
+@pytest.mark.parametrize(
+    "script, shown",
+    [
+        ("fetch('/api/items');", "fetch('/api/items')"),
+        ("fetch(`/api/rooms/${code}`);", "fetch('/api/rooms/${code}')"),
+        ('fetch(\n  "/data.json"\n);', "fetch('/data.json')"),
+        ("window.fetch('/x');", "fetch('/x')"),
+        ("const es = new EventSource('/api/stream');", "EventSource('/api/stream')"),
+    ],
+)
+def test_root_relative_call_is_error(script, shown):
+    """A literal from the root instead of `api()` misses the same prefix."""
+    for is_fullstack in (True, False):
+        assert shown in _root_relative_error(_with_script(script), is_fullstack=is_fullstack)
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<img src="https://images.example.com/a.png">',
+        '<a href="http://example.com/">Source</a>',
+        '<script src="//cdn.example.com/lib.js"></script>',
+        '<img src="data:image/png;base64,iVBORw0KGgo=">',
+        '<img src="blob:https://example.com/0f4c">',
+        '<a href="#top">Top</a>',
+        '<a href="mailto:team@example.com">Mail</a>',
+        '<img src="logo.png">',
+        '<img src="./logo.png">',
+        '<a href="../other/index.html">Other</a>',
+        '<script src="static/app.js"></script>',
+        '<img data-src="/lazy.png" src="lazy.png">',
+    ],
+)
+def test_allowed_src_and_href_values_pass(markup):
+    for is_fullstack in (True, False):
+        r = verify_frontend(_with_markup(markup), is_fullstack=is_fullstack)
+        assert r.ok, r.errors
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "fetch(api('/api/items'));",
+        "fetch(`${API_BASE}/api/items`);",
+        "fetch('data.json');",
+        "fetch('//cdn.example.com/x.json');",
+        "router.prefetch('/page');",
+        "new EventSource(api('/api/stream'));",
+    ],
+)
+def test_allowed_calls_pass(script):
+    """Other rules may still object (rule 5 to `//cdn` on a fullstack page);
+    this one does not."""
+    for is_fullstack in (True, False):
+        r = verify_frontend(_with_script(script), is_fullstack=is_fullstack)
+        assert not [e for e in r.errors if e.startswith(_ROOT_RELATIVE)], r.errors
+
+
+def test_api_address_set_from_js_passes():
+    html = _with_script(
+        "document.getElementById('export').href = api('/api/export');"
+    ).replace('<div id="kpi-revenue"></div>', '<div id="kpi-revenue"></div><a id="export">Export</a>')
+    r = verify_frontend(html, is_fullstack=True)
+    assert r.ok, r.errors
+
+
+def test_message_lists_each_value_once_in_page_order():
+    html = _with_script("fetch('/api/x');").replace(
+        '<div id="kpi-revenue"></div>',
+        '<div id="kpi-revenue"></div><img src="/b.png"><img src="/a.png"><img src="/b.png">',
+    ).replace("</body>", '<img src="/late.png"></body>')
+    err = _root_relative_error(html, is_fullstack=True)
+    assert err.startswith(
+        _ROOT_RELATIVE + "src='/b.png', src='/a.png', fetch('/api/x'), src='/late.png'. "
+    )
+
+
+def test_message_shows_five_values_and_counts_the_rest():
+    html = _with_markup("".join(f'<img src="/{i}.png">' for i in range(7)))
+    err = _root_relative_error(html, is_fullstack=False)
+    assert "src='/4.png' and 2 more. " in err
+    assert "'/5.png'" not in err and "'/6.png'" not in err
+
+
+def test_message_cuts_a_long_value():
+    long = "/" + "a" * 120
+    err = _root_relative_error(_with_script(f"fetch(`{long}`);"), is_fullstack=True)
+    shown = err[len(_ROOT_RELATIVE):].split(". The page", 1)[0]
+    assert shown == "fetch('" + long[:79] + "…')"
+
+
+def test_fullstack_hints_point_at_api():
+    html = _with_script("fetch('/api/items');").replace(
+        '<div id="kpi-revenue"></div>', '<div id="kpi-revenue"></div><a href="/api/export">Export</a>'
+    )
+    err = _root_relative_error(html, is_fullstack=True)
+    assert "Use a relative path for files and links, e.g. logo.png." in err
+    assert "Set an API address in an attribute from JS: a.href = api('/api/export')." in err
+    assert (
+        "Call the API through api(): fetch(api('/api/items')), "
+        "new EventSource(api('/api/stream'))."
+    ) in err
+    assert "Embed the data" not in err
+
+
+def test_api_attribute_hint_only_for_an_api_address():
+    err = _root_relative_error(_with_markup('<img src="/logo.png">'), is_fullstack=True)
+    assert "Use a relative path for files and links, e.g. logo.png." in err
+    assert "api(" not in err
+
+
+def test_html_app_call_hint_is_to_embed_the_data():
+    """The published html-app bundle carries no file a `fetch()` names."""
+    err = _root_relative_error(_with_script("fetch('/data.json');"), is_fullstack=False)
+    assert "Embed the data in the page instead of fetching it." in err
+    assert "Use a relative path" not in err
+    assert "api(" not in err
+
+
+def test_message_says_moving_the_path_into_js_does_not_fix_it():
+    """I-17: a retry once passed a text check by moving URLs into JS strings."""
+    for is_fullstack in (True, False):
+        err = _root_relative_error(_with_markup('<img src="/logo.png">'), is_fullstack=is_fullstack)
+        assert err.endswith("Moving the same root-relative path into a JS string does not fix it.")
+
+
+def test_large_page_with_embedded_data_is_checked_quickly():
+    """The tag scan stops at the next `<` as well as `>`. With `[^>]` alone
+    every `<b` in embedded data scanned on to the next `>`: 12.8 s on 60 KB."""
+    html = _with_markup("<script>var d=[" + "1<b," * 262_144 + "];</script>")  # 1 MB, no `>`
+    started = time.perf_counter()
+    for is_fullstack in (True, False):
+        verify_frontend(html, is_fullstack=is_fullstack)
+    assert time.perf_counter() - started < 2

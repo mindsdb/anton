@@ -199,6 +199,14 @@ step and costs a regeneration:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - No absolute URL in any `fetch()` call — relative paths only.
+- No root-relative path in `src`, `href`, `fetch()` or `new EventSource()`
+  (a value that starts with a single `/`, `/api/...` included): the page is
+  served under a path prefix, in the app preview and once published, and
+  such a path drops it, so the file, link or call fails. Use a relative
+  path for files and links (`logo.png`, or the relative name listed under
+  `## Attached files`); `https://`, `//`, `data:`, `blob:`, `#` and
+  `mailto:` values are fine. Moving the same root-relative path into a JS
+  string does not fix it.
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
