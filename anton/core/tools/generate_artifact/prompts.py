@@ -500,10 +500,11 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
   const api = (path) => `${API_BASE}${path}`;
   // usage: fetch(api('/api/items'))
   ```
-- API addresses go ONLY through `api()`. When one is needed in an attribute
-  (a download link, an `<img>`), set it from JS:
-  `a.href = api('/api/export')`. Never write `href="/api/export"` in the
-  markup: a root-relative path fails the step (see the verifier contract).
+- API addresses go ONLY through `api()`, with the path's leading `/` kept:
+  `api('/api/items')`. When one is needed in an attribute (a download link,
+  an `<img>`), set it from JS: `a.href = api('/api/export')`. Never write
+  `href="/api/export"` in the markup: a root-relative path fails the step
+  (see the verifier contract).
 - NEVER hardcode an absolute URL in the source.
 - Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
 - Call ONLY the paths listed under `## API Specification`, spelled as the

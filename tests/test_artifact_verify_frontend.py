@@ -395,6 +395,10 @@ def test_served_check_words_a_failed_request_as_a_url_not_a_local_file(monkeypat
 # ── Root-relative paths ──────────────────────────────────────────────────────
 
 _ROOT_RELATIVE = "Root-relative path is not allowed: "
+_RELATIVE_HINT = (
+    "Use a relative path for files and links, e.g. logo.png, "
+    "or a full https:// URL for an external page."
+)
 
 
 def _with_markup(markup: str) -> str:
@@ -424,12 +428,21 @@ def _root_relative_error(html: str, *, is_fullstack: bool) -> str:
         ("<img src=/logo.png>", "src='/logo.png'"),
         ('<a\n  class="nav"\n  href="/docs">Docs</a>', "href='/docs'"),
         ('<svg><use xlink:href="/sprite.svg#icon"></use></svg>', "href='/sprite.svg#icon'"),
+        ('<a href=" /x">X</a>', "href='/x'"),
     ],
 )
 def test_root_relative_src_or_href_is_error(markup, shown):
     """A path from the root drops the path prefix the page is served under."""
     for is_fullstack in (True, False):
         assert shown in _root_relative_error(_with_markup(markup), is_fullstack=is_fullstack)
+
+
+def test_every_root_relative_attribute_of_one_tag_is_listed():
+    """A second `src`/`href` in the same tag is reported, not only the first."""
+    markup = '<svg><image href="/a.png" xlink:href="/b.png"/></svg>'
+    for is_fullstack in (True, False):
+        err = _root_relative_error(_with_markup(markup), is_fullstack=is_fullstack)
+        assert "href='/a.png', href='/b.png'" in err
 
 
 @pytest.mark.parametrize(
@@ -463,6 +476,8 @@ def test_root_relative_call_is_error(script, shown):
         '<a href="../other/index.html">Other</a>',
         '<script src="static/app.js"></script>',
         '<img data-src="/lazy.png" src="lazy.png">',
+        '<a data-href="/x" href="x">X</a>',
+        '<img src="/\\evil.example/a.png">',
     ],
 )
 def test_allowed_src_and_href_values_pass(markup):
@@ -478,6 +493,7 @@ def test_allowed_src_and_href_values_pass(markup):
         "fetch(`${API_BASE}/api/items`);",
         "fetch('data.json');",
         "fetch('//cdn.example.com/x.json');",
+        "fetch('/\\evil.example/x');",
         "router.prefetch('/page');",
         "new EventSource(api('/api/stream'));",
     ],
@@ -528,7 +544,7 @@ def test_fullstack_hints_point_at_api():
         '<div id="kpi-revenue"></div>', '<div id="kpi-revenue"></div><a href="/api/export">Export</a>'
     )
     err = _root_relative_error(html, is_fullstack=True)
-    assert "Use a relative path for files and links, e.g. logo.png." in err
+    assert _RELATIVE_HINT in err
     assert "Set an API address in an attribute from JS: a.href = api('/api/export')." in err
     assert (
         "Call the API through api(): fetch(api('/api/items')), "
@@ -539,7 +555,7 @@ def test_fullstack_hints_point_at_api():
 
 def test_api_attribute_hint_only_for_an_api_address():
     err = _root_relative_error(_with_markup('<img src="/logo.png">'), is_fullstack=True)
-    assert "Use a relative path for files and links, e.g. logo.png." in err
+    assert _RELATIVE_HINT in err
     assert "api(" not in err
 
 
@@ -548,6 +564,16 @@ def test_html_app_call_hint_is_to_embed_the_data():
     err = _root_relative_error(_with_script("fetch('/data.json');"), is_fullstack=False)
     assert "Embed the data in the page instead of fetching it." in err
     assert "Use a relative path" not in err
+    assert "api(" not in err
+
+
+def test_html_app_page_with_an_attribute_and_a_call_gets_both_hints():
+    html = _with_markup('<img src="/logo.png">').replace(
+        "fetch(api('/api/items'));", "fetch('/data.json');"
+    )
+    err = _root_relative_error(html, is_fullstack=False)
+    assert _RELATIVE_HINT in err
+    assert "Embed the data in the page instead of fetching it." in err
     assert "api(" not in err
 
 

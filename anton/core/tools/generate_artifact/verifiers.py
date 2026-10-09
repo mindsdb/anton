@@ -95,15 +95,18 @@ def _fetch_path_key(raw: str) -> str | None:
     key = normalise_api_path(target)
     return None if key == _HEALTH_PATH else key
 _BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
-# A `src`/`href` attribute inside a tag whose value starts with exactly one
-# `/`: a path from the root. `(?<![\w-])` keeps `data-src`/`data-href` out;
-# `(?![/\\])` lets a protocol-relative `//host` through (and `/\host`, which
-# browsers read the same way). Quoted or not; leading spaces are tolerated
-# because the browser strips them. The tag body is `[^<>]`, not `[^>]`: with
+# The body of a tag, scanned for attributes in a second step so that every
+# `src`/`href` of one tag is seen. The body is `[^<>]`, not `[^>]`: with
 # `[^>]` every `<b` in embedded data scans on to the next `>`, which is
 # quadratic in the page size (12.8 s on 60 KB of `1<b,`).
-_ROOT_RELATIVE_REF = re.compile(
-    r"""<[a-z][^<>]*?(?<![\w-])(?P<name>src|href)\s*=\s*['"]?\s*(?P<value>/(?![/\\])[^\s'"<>]*)""",
+_TAG_BODY = re.compile(r"<[a-z][^<>]*", re.I)
+# A `src`/`href` attribute inside a tag body whose value starts with exactly
+# one `/`: a path from the root. `(?<![\w-])` keeps `data-src`/`data-href` out;
+# `(?![/\\])` lets a protocol-relative `//host` through (and `/\host`, which
+# browsers read the same way). Quoted or not; leading spaces are tolerated
+# because the browser strips them.
+_ROOT_RELATIVE_ATTR = re.compile(
+    r"""(?<![\w-])(?P<name>src|href)\s*=\s*['"]?\s*(?P<value>/(?![/\\])[^\s'"<>]*)""",
     re.I,
 )
 # A `fetch()` or `new EventSource()` whose first argument is a string literal
@@ -175,7 +178,11 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
     address in an attribute, embedded data for an html-app page's calls
     (the published html-app bundle carries no file a `fetch()` names).
     """
-    hits = [(m.start(), True, m) for m in _ROOT_RELATIVE_REF.finditer(html)]
+    hits = [
+        (tag.start() + m.start(), True, m)
+        for tag in _TAG_BODY.finditer(html)
+        for m in _ROOT_RELATIVE_ATTR.finditer(tag.group())
+    ]
     hits += [(m.start(), False, m) for m in _ROOT_RELATIVE_CALL.finditer(html)]
     if not hits:
         return None
@@ -195,12 +202,15 @@ def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
     attr_values = [m.group("value") for _, in_attr, m in hits if in_attr]
     hints = []
     if attr_values:
-        hints.append("Use a relative path for files and links, e.g. logo.png.")
+        hints.append(
+            "Use a relative path for files and links, e.g. logo.png, "
+            "or a full https:// URL for an external page."
+        )
         if is_fullstack and any(v.startswith("/api/") for v in attr_values):
             hints.append(
                 "Set an API address in an attribute from JS: a.href = api('/api/export')."
             )
-    if len(attr_values) < len(hits):
+    if any(not in_attr for _, in_attr, _ in hits):
         hints.append(
             "Call the API through api(): fetch(api('/api/items')), "
             "new EventSource(api('/api/stream'))."
@@ -263,7 +273,10 @@ def verify_frontend(
     #     backend's root, where the path works, so only this text check sees
     #     it there. This does not reopen rule 4's decision on ABSOLUTE URLs:
     #     `https://`, `//`, `data:`, `blob:`, `#`, `mailto:` and relative
-    #     paths all pass. An address assembled in JS is not seen.
+    #     paths all pass. Only literal `src`/`href` values and literal call
+    #     targets are checked: `srcset`, `action`, CSS `url()`, an attribute
+    #     after a ">" inside an earlier quoted value, and most addresses built
+    #     in JS are not seen.
     root_relative = _root_relative_detail(html, is_fullstack=is_fullstack)
     if root_relative:
         errors.append("Root-relative path is not allowed: " + root_relative)
