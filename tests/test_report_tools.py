@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from html.parser import HTMLParser
@@ -216,7 +217,28 @@ def test_insert_keeps_inline_content_next_to_its_anchor(tmp_path):
     original = '<html lang="en"><body>\n<p>See <span id="ref">the table</span>\nbelow.</p>\n</body></html>\n'
     out.write_text(original)
     rt.insert(out, rt.inline(" (", rt.link("t.csv", "csv"), ")"), after="ref")
-    assert out.read_text() == original.replace("</span>", '</span> (<a href="t.csv">csv</a>)')
+    rt.insert(out, "[1]\n", after="ref")  # plain text is never a block, even with a trailing line break
+    assert out.read_text() == original.replace("</span>", '</span>[1]\n (<a href="t.csv">csv</a>)')
+
+
+def test_edits_on_a_crlf_page_add_no_bare_line_feeds(tmp_path):
+    out = tmp_path / "crlf.html"
+    built = _page(rt.section("Summary", rt.para("Old."), id="summary"), rt.section("Detail", id="detail"))
+    out.write_bytes(built.replace("\n", "\r\n").encode())
+    rt.update(out, {"summary": rt.section("Summary", rt.para("New."), id="summary"), "detail": rt.para("Rows.")})
+    rt.insert(out, rt.filter_table(COLS, ROWS, key="Region", label="Region", region_name="Items"), after="detail")
+    data = out.read_bytes()
+    assert re.search(rb"(?<!\r)\n", data) is None and b"\r\r" not in data
+    assert data.replace(b"\r\n", b"\n").decode().count(rt._FILTER_SCRIPT) == 1
+    assert b'<section id="summary"><h2>Summary</h2>\r\n<p>New.</p>\r\n</section>\r\n<section id="detail">' in data
+    assert b"<h2>Detail</h2>\r\n<p>Rows.</p>\r\n</section>\r\n<div class=\"filter\"" in data
+
+
+def test_a_crlf_inside_text_does_not_make_new_markup_crlf(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Notes", rt.para("line 1\r\nline 2"), id="notes")))
+    rt.insert(out, rt.section("More", rt.para("x"), id="more"), after="notes")
+    rt.update(out, {"more": rt.section("More", rt.para("y"), id="more")})
+    assert out.read_bytes().count(b"\r\n") == 1
 
 
 def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path):
@@ -239,6 +261,10 @@ def test_update_with_a_whole_element_of_the_same_id_replaces_the_element(tmp_pat
     assert text.count('id="summary-section"') == 1 and "Old." not in text
     seen = rt.check(out)  # no duplicate ids, no table nested in a table
     assert [t["rows"] for t in seen["tables"]] == [[[str(c) for c in r] for r in ROWS]]
+    # The table's scroll wrapper is replaced too, not nested again on every update.
+    rt.update(out, {"detail": rt.table(COLS, ROWS[1:], id="detail")})
+    assert out.read_text() == _page(rt.section("Summary", rt.para("New.")),
+                                    rt.section("Detail", rt.table(COLS, ROWS[1:], id="detail")))
 
 
 def test_update_refuses_new_content_with_the_id_twice(tmp_path):

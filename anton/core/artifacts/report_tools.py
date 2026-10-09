@@ -152,11 +152,14 @@ def _tds(cells, numeric) -> str:
     return "".join(f'<td{" class=num" if n else ""}>{_esc(v)}</td>' for v, n in zip(cells, numeric))
 
 
+_TABLE_WRAP = '<div class="table-wrap">'
+
+
 def _table_wrap(columns, numeric, trs, *, table_attrs: str = "", caption: str = "") -> str:
     """A scrollable table, one row per line. ``trs`` are whole ``<tr>`` elements."""
     head = "<thead><tr>" + "".join(
         f'<th scope="col"{" class=num" if n else ""}>{_esc(c)}</th>' for c, n in zip(columns, numeric)) + "</tr></thead>"
-    return (f'<div class="table-wrap"><table{table_attrs}>{caption}\n{head}\n<tbody>\n'
+    return (f"{_TABLE_WRAP}<table{table_attrs}>{caption}\n{head}\n<tbody>\n"
             + "".join(tr + "\n" for tr in trs) + "</tbody></table></div>\n")
 
 
@@ -462,9 +465,17 @@ def _newline_at(text: str, at: int) -> str:
     return "\n" if text.startswith("\n", at) else ""
 
 
-def _in_page_line_endings(markup: str, page: str) -> str:
-    """``markup`` with "\\r\\n" line breaks when the page uses them."""
-    return re.sub(r"\r?\n", "\r\n", markup) if "\r\n" in page else markup
+def _page_eol(text: str) -> str:
+    """The page's line break, taken from its first one.
+
+    Not "any \\r\\n in the page": a value shown as text may carry one.
+    """
+    first = re.search(r"\r?\n", text)
+    return first.group() if first else "\n"
+
+
+def _with_eol(markup: str, eol: str) -> str:
+    return re.sub(r"\r?\n", eol, markup) if eol != "\n" else markup
 
 
 def _locate(text: str) -> _Locator:
@@ -492,7 +503,7 @@ def _with_filter_script(text: str) -> str:
         return text
     body_ends = list(re.finditer(r"</body\s*>", text, re.I))
     at = body_ends[-1].start() if body_ends else len(text)
-    return text[:at] + _in_page_line_endings(_FILTER_SCRIPT, text) + text[at:]
+    return text[:at] + _with_eol(_FILTER_SCRIPT, _page_eol(text)) + text[at:]
 
 
 def _carries_id(markup: str, id_: str) -> bool:
@@ -512,26 +523,31 @@ def update(path, changes: dict) -> dict:
     is kept unless the new content starts with a heading of its own. Markup
     that itself carries an element with the same id, such as a whole
     ``rt.section(..., id=)`` or ``rt.table(..., id=)``, replaces the element
-    rather than its content, so the id is never duplicated. Each id must match
-    exactly one element. A filter added to a page without the filter script
-    also adds the script. Returns a receipt of the ids changed and the old and
-    new file sizes.
+    rather than its content, so the id is never duplicated; a table's scroll
+    wrapper is replaced along with it. Each id must match exactly one element.
+    A filter added to a page without the filter script also adds the script.
+    Line breaks in new markup follow the page's ("\\n" or "\\r\\n"). Returns a
+    receipt of the ids changed and the old and new file sizes.
     """
     path = Path(path)
     text = _read(path)
+    eol = _page_eol(text)
     locator = _locate(text)
     edits = []
     for id_, content in changes.items():
         if isinstance(content, Html) and _carries_id(content, id_):
             start, end = _one(locator.outer, id_)
-            new = _in_page_line_endings(str(content), text)
+            new = _with_eol(str(content), eol)
+            # rt.table brings its own wrapper; replacing only the <table> would nest it in the old one.
+            if new.startswith(_TABLE_WRAP) and text.endswith(_TABLE_WRAP, 0, start) and text.startswith("</div>", end):
+                start, end = start - len(_TABLE_WRAP), end + len("</div>")
             # The page already breaks the line after the element.
-            eol = _newline_at(text, end)
-            if eol and new.endswith(eol):
-                new = new[:-len(eol)]
+            after = _newline_at(text, end)
+            if after and new.endswith(after):
+                new = new[:-len(after)]
         elif isinstance(content, str):
             start, end = _one(locator.spans, id_)
-            new = _in_page_line_endings(_esc(content), text)
+            new = _with_eol(_esc(content), eol)
             heading = _LEADING_HEADING.match(text, start, end)
             if heading and not re.match(r"\s*<h[1-6]\b", new, re.I):
                 new = heading.group(0) + new
@@ -557,21 +573,22 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
 
     For new parts of an existing page, e.g. a decision summary above the
     detail: ``rt.insert(path, rt.section("Decision summary", rt.para(...)),
-    before="detail-section")``. Every other byte is unchanged, except that a
-    filter added to a page without the filter script also adds the script.
-    Plain text is escaped, as elsewhere. Returns a receipt like ``update``.
+    before="detail-section")``. A block from these helpers inserted after an
+    element goes after the line break that ends it, so it gets a line of its
+    own; other content goes right next to the element. Every other byte is
+    unchanged, except that a filter added to a page without the filter script
+    also adds the script. Plain text is escaped, as elsewhere. Line breaks in
+    new markup follow the page's. Returns a receipt like ``update``.
     """
     if (before is None) == (after is None):
         raise ValueError("give exactly one of before= or after=")
     path = Path(path)
     text = _read(path)
     start, end = _one(_locate(text).outer, before or after)
-    new = _in_page_line_endings(_esc(content), text)
-    at = start
-    if after is not None:
-        # A block goes after the line break that ends the element, so it gets a
-        # line of its own; inline content stays right next to the element.
-        at = end + (len(_newline_at(text, end)) if new.endswith("\n") else 0)
+    new = _with_eol(_esc(content), _page_eol(text))
+    at = start if before is not None else end
+    if after is not None and isinstance(content, Html) and new.endswith("\n"):
+        at += len(_newline_at(text, end))
     out = text[:at] + new + text[at:]
     if "data-rt-filter" in new:
         out = _with_filter_script(out)
