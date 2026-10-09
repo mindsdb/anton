@@ -87,6 +87,12 @@ GEN_WRITE_MAX_TOKENS: int = 20480
 # end marker writes nothing), undershooting costs one extra round.
 REPLY_BODY_CHARS: int = 30_000
 
+# Effort ceiling for every model call the pipeline makes. At the top efforts the
+# model spends up to 23k tokens thinking before a two-thousand-character brief,
+# which costs minutes per step and runs non-streamed calls past the gateway's
+# time budget; the pipeline's steps are bounded and do not need that depth.
+ARTIFACT_EFFORT_CEILING = "high"
+
 # Reserved out of MAX_QUESTIONS_PER_TURN for the brief phase: one
 # `show_and_confirm` call plus up to two "revise brief, show again" cycles.
 # Not a separate hard cap — the shared budget itself is what eventually stops
