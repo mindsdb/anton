@@ -123,11 +123,12 @@ paragraph each.
   First-run setup offers the same thing: choose "Custom" and enter a Base URL.
 - Limitations. Mention them so the user is not surprised:
   - Cowork is an agent and calls tools on most turns, so the model must support
-    tool (function) calling through the server's OpenAI-compatible API. Small
-    local models often handle this poorly.
-  - Some local servers refuse a request Cowork makes, so a turn can stop
-    early. It is a known limitation of those servers, not a setup mistake, and a
-    larger model does not fix it.
+    tool (function) calling through the server's OpenAI-compatible API. Many
+    local models handle this poorly.
+  - Always mention: some local servers refuse a request Cowork makes, so a turn
+    can stop early with a message that an internal check failed. It is a known
+    limitation of those servers, not a setup mistake, and a larger model does
+    not fix it.
   - Speed and answer quality depend on the model and the user's hardware.
 - Do not invent other routes. There is no built-in model download, no model
   catalogue to browse inside Cowork, and no local-model option in the browser.
