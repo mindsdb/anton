@@ -1,6 +1,7 @@
-"""CREATE_ARTIFACT_TOOL's description drives the agent into
-`generate_artifact` for a web artifact — without this text the pipeline is
-never entered and the agent writes the files by hand."""
+"""Agent-facing artifact texts: CREATE_ARTIFACT_TOOL's description drives the
+agent into `generate_artifact` for a web artifact, and none of the artifact
+texts sends the agent to a project-root `artifacts/` folder that does not
+exist."""
 from __future__ import annotations
 
 import pytest
