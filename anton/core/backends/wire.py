@@ -5,6 +5,10 @@ Neither side should redefine them — import from here.
 """
 
 CELL_DELIM = "__ANTON_CELL_END__"
+# Optional first line of a cell: the running turn's trace context as JSON, so
+# the cell's model calls carry the same session and question ids. Per cell,
+# not at spawn, because a pad outlives its turn on long-lived hosts.
+CELL_TRACE_MARKER = "__ANTON_CELL_TRACE__"
 RESULT_START = "__ANTON_RESULT__"
 RESULT_END = "__ANTON_RESULT_END__"
 PROGRESS_MARKER = "__ANTON_PROGRESS__"
