@@ -395,22 +395,11 @@ def test_served_check_words_a_failed_request_as_a_url_not_a_local_file(monkeypat
 # ── Root-relative paths ──────────────────────────────────────────────────────
 
 _ROOT_RELATIVE = "Root-relative path is not allowed: "
-_RELATIVE_HINT = (
-    "Use a relative path for files and links, e.g. logo.png, "
-    "or a full https:// URL for an external page."
-)
-_STATIC_HINT = (
-    "A fullstack page is itself served from static/, "
-    "so a file in static/ is app.js, not static/app.js."
-)
+_PAGE_KINDS = pytest.mark.parametrize("is_fullstack", [True, False])
 
 
-def _with_markup(markup: str) -> str:
-    return GOOD.replace('<div id="kpi-revenue"></div>', f'<div id="kpi-revenue"></div>{markup}')
-
-
-def _with_script(script: str) -> str:
-    return GOOD.replace("fetch(api('/api/items'));", f"fetch(api('/api/items'));\n{script}")
+def _with_markup(markup: str, html: str = GOOD) -> str:
+    return html.replace('<div id="kpi-revenue"></div>', f'<div id="kpi-revenue"></div>{markup}')
 
 
 def _root_relative_error(html: str, *, is_fullstack: bool) -> str:
@@ -419,6 +408,7 @@ def _root_relative_error(html: str, *, is_fullstack: bool) -> str:
     return err
 
 
+@_PAGE_KINDS
 @pytest.mark.parametrize(
     "markup, shown",
     [
@@ -428,29 +418,30 @@ def _root_relative_error(html: str, *, is_fullstack: bool) -> str:
         ('<a href="/">Home</a>', "href='/'"),
         ('<base href="/">', "href='/'"),
         ('<link rel="stylesheet" href="/styles.css">', "href='/styles.css'"),
+        ('<link rel="preload" href="/font.woff2" as="font">', "href='/font.woff2'"),
         ('<script src="/app.js"></script>', "src='/app.js'"),
         ("<img src=/logo.png>", "src='/logo.png'"),
         ('<a\n  class="nav"\n  href="/docs">Docs</a>', "href='/docs'"),
         ('<svg><use xlink:href="/sprite.svg#icon"></use></svg>', "href='/sprite.svg#icon'"),
         ('<a href=" /x">X</a>', "href='/x'"),
+        ('<img alt="a < b" src="/x.png">', "src='/x.png'"),
         # HTML held in a JS string, which innerHTML turns into a real link.
         ('<script>const s = "<a href=\\"/wiki/Foo\\">Foo</a>";</script>', "href='/wiki/Foo'"),
     ],
 )
-def test_root_relative_src_or_href_is_error(markup, shown):
+def test_root_relative_src_or_href_is_error(markup, shown, is_fullstack):
     """A path from the root drops the path prefix the page is served under."""
-    for is_fullstack in (True, False):
-        assert shown in _root_relative_error(_with_markup(markup), is_fullstack=is_fullstack)
+    assert shown in _root_relative_error(_with_markup(markup), is_fullstack=is_fullstack)
 
 
-def test_every_root_relative_attribute_of_one_tag_is_listed():
-    """A second `src`/`href` in the same tag is reported, not only the first."""
+@_PAGE_KINDS
+def test_every_root_relative_attribute_of_one_tag_is_listed(is_fullstack):
     markup = '<svg><image href="/a.png" xlink:href="/b.png"/></svg>'
-    for is_fullstack in (True, False):
-        err = _root_relative_error(_with_markup(markup), is_fullstack=is_fullstack)
-        assert "href='/a.png', href='/b.png'" in err
+    err = _root_relative_error(_with_markup(markup), is_fullstack=is_fullstack)
+    assert "href='/a.png', href='/b.png'" in err
 
 
+@_PAGE_KINDS
 @pytest.mark.parametrize(
     "script, shown",
     [
@@ -462,12 +453,12 @@ def test_every_root_relative_attribute_of_one_tag_is_listed():
         ("const es = new EventSource('/api/stream');", "EventSource('/api/stream')"),
     ],
 )
-def test_root_relative_call_is_error(script, shown):
+def test_root_relative_call_is_error(script, shown, is_fullstack):
     """A literal from the root instead of `api()` misses the same prefix."""
-    for is_fullstack in (True, False):
-        assert shown in _root_relative_error(_with_script(script), is_fullstack=is_fullstack)
+    assert shown in _root_relative_error(_page(script), is_fullstack=is_fullstack)
 
 
+@_PAGE_KINDS
 @pytest.mark.parametrize(
     "markup",
     [
@@ -485,20 +476,21 @@ def test_root_relative_call_is_error(script, shown):
         '<img data-src="/lazy.png" src="lazy.png">',
         '<a data-href="/x" href="x">X</a>',
         '<img src="/\\evil.example/a.png">',
-        # Icons and the manifest load for the top-level page only.
+        # <link>s that load nothing into a framed page.
         '<link rel="icon" href="/favicon.ico">',
         '<link rel="shortcut icon" href="/favicon.ico">',
         '<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
         '<link rel="manifest" href="/site.webmanifest">',
+        '<link rel="canonical" href="/">',
         "<link rel=icon href=/favicon.ico>",
     ],
 )
-def test_allowed_src_and_href_values_pass(markup):
-    for is_fullstack in (True, False):
-        r = verify_frontend(_with_markup(markup), is_fullstack=is_fullstack)
-        assert r.ok, r.errors
+def test_allowed_src_and_href_values_pass(markup, is_fullstack):
+    r = verify_frontend(_with_markup(markup), is_fullstack=is_fullstack)
+    assert r.ok, r.errors
 
 
+@_PAGE_KINDS
 @pytest.mark.parametrize(
     "script",
     [
@@ -512,26 +504,25 @@ def test_allowed_src_and_href_values_pass(markup):
         "new EventSource(api('/api/stream'));",
     ],
 )
-def test_allowed_calls_pass(script):
+def test_allowed_calls_pass(script, is_fullstack):
     """Other rules may still object (rule 5 to `//cdn` on a fullstack page);
     this one does not."""
-    for is_fullstack in (True, False):
-        r = verify_frontend(_with_script(script), is_fullstack=is_fullstack)
-        assert not [e for e in r.errors if e.startswith(_ROOT_RELATIVE)], r.errors
+    r = verify_frontend(_page(script), is_fullstack=is_fullstack)
+    assert not [e for e in r.errors if e.startswith(_ROOT_RELATIVE)], r.errors
 
 
 def test_api_address_set_from_js_passes():
-    html = _with_script(
-        "document.getElementById('export').href = api('/api/export');"
-    ).replace('<div id="kpi-revenue"></div>', '<div id="kpi-revenue"></div><a id="export">Export</a>')
+    html = _with_markup(
+        '<a id="export">Export</a>',
+        _page("document.getElementById('export').href = api('/api/export');"),
+    )
     r = verify_frontend(html, is_fullstack=True)
     assert r.ok, r.errors
 
 
 def test_message_lists_each_value_once_in_page_order():
-    html = _with_script("fetch('/api/x');").replace(
-        '<div id="kpi-revenue"></div>',
-        '<div id="kpi-revenue"></div><img src="/b.png"><img src="/a.png"><img src="/b.png">',
+    html = _with_markup(
+        '<img src="/b.png"><img src="/a.png"><img src="/b.png">', _page("fetch('/api/x');")
     ).replace("</body>", '<img src="/late.png"></body>')
     err = _root_relative_error(html, is_fullstack=True)
     assert err.startswith(
@@ -540,8 +531,6 @@ def test_message_lists_each_value_once_in_page_order():
 
 
 def test_message_shows_twenty_values_and_counts_the_rest():
-    """The page gets one retry, so the message names enough paths to fix
-    a page full of copied links in one go."""
     html = _with_markup("".join(f'<img src="/{i}.png">' for i in range(22)))
     err = _root_relative_error(html, is_fullstack=False)
     assert "src='/19.png' and 2 more. " in err
@@ -549,7 +538,6 @@ def test_message_shows_twenty_values_and_counts_the_rest():
 
 
 def test_message_keeps_values_that_differ_only_after_the_cut():
-    """Repeats are dropped by the full value, not by the shortened one."""
     long = "/" + "a" * 100
     html = _with_markup(f'<img src="{long}1"><img src="{long}2">')
     err = _root_relative_error(html, is_fullstack=False)
@@ -558,80 +546,68 @@ def test_message_keeps_values_that_differ_only_after_the_cut():
 
 def test_message_cuts_a_long_value():
     long = "/" + "a" * 120
-    err = _root_relative_error(_with_script(f"fetch(`{long}`);"), is_fullstack=True)
-    shown = err[len(_ROOT_RELATIVE):].split(". The page", 1)[0]
-    assert shown == "fetch('" + long[:79] + "…')"
+    err = _root_relative_error(_page(f"fetch(`{long}`);"), is_fullstack=True)
+    assert "fetch('" + long[:79] + "…')" in err
 
 
 def test_fullstack_hints_point_at_api():
-    html = _with_script("fetch('/api/items');").replace(
-        '<div id="kpi-revenue"></div>', '<div id="kpi-revenue"></div><a href="/api/export">Export</a>'
-    )
+    html = _with_markup('<a href="/api/export">Export</a>', _page("fetch('/api/items');"))
     err = _root_relative_error(html, is_fullstack=True)
-    assert _RELATIVE_HINT in err
-    assert "Set an API address in an attribute from JS: a.href = api('/api/export')." in err
-    assert (
-        "Call the API through api(): fetch(api('/api/items')), "
-        "new EventSource(api('/api/stream'))."
-    ) in err
-    assert "Embed the data" not in err
+    for hint in (verifiers._HINT_RELATIVE, verifiers._HINT_API_ATTR, verifiers._HINT_API_CALL):
+        assert hint in err
+    assert verifiers._HINT_EMBED not in err
+    assert verifiers._HINT_STATIC not in err
 
 
-def test_fullstack_attribute_hint_names_the_static_folder():
+def test_fullstack_static_hint_only_for_a_file_in_static():
     """`static/app.js` from a page served out of static/ is a 404."""
-    html = _with_markup('<script src="/static/app.js"></script>')
-    assert _STATIC_HINT in _root_relative_error(html, is_fullstack=True)
-    assert "static/" not in _root_relative_error(
-        _with_markup('<img src="/logo.png">'), is_fullstack=False
-    )
+    in_static = _with_markup('<script src="/static/app.js"></script>')
+    assert verifiers._HINT_STATIC in _root_relative_error(in_static, is_fullstack=True)
+    assert verifiers._HINT_STATIC not in _root_relative_error(in_static, is_fullstack=False)
 
 
 def test_api_attribute_hint_only_for_an_api_address():
     err = _root_relative_error(_with_markup('<img src="/logo.png">'), is_fullstack=True)
-    assert _RELATIVE_HINT in err
+    assert verifiers._HINT_RELATIVE in err
     assert "api(" not in err
 
 
-def test_html_app_call_hint_is_to_embed_the_data():
+def test_html_app_hints_embed_the_data_and_never_mention_api():
     """The published html-app bundle carries no file a `fetch()` names."""
-    err = _root_relative_error(_with_script("fetch('/data.json');"), is_fullstack=False)
-    assert "Embed the data in the page instead of fetching it." in err
-    assert "Use a relative path" not in err
-    assert "api(" not in err
-
-
-def test_html_app_page_with_an_attribute_and_a_call_gets_both_hints():
-    html = _with_markup('<img src="/logo.png">').replace(
-        "fetch(api('/api/items'));", "fetch('/data.json');"
+    call_only = _root_relative_error(_page("fetch('/data.json');"), is_fullstack=False)
+    assert verifiers._HINT_EMBED in call_only
+    assert verifiers._HINT_RELATIVE not in call_only
+    both = _root_relative_error(
+        _with_markup('<img src="/logo.png">', _page("fetch('/data.json');")), is_fullstack=False
     )
-    err = _root_relative_error(html, is_fullstack=False)
-    assert _RELATIVE_HINT in err
-    assert "Embed the data in the page instead of fetching it." in err
-    assert "api(" not in err
+    assert verifiers._HINT_RELATIVE in both and verifiers._HINT_EMBED in both
+    assert "api(" not in call_only + both
 
 
-def test_message_says_moving_the_path_into_js_does_not_fix_it():
+@_PAGE_KINDS
+def test_message_says_moving_the_path_into_js_does_not_fix_it(is_fullstack):
     """I-17: a retry once passed a text check by moving URLs into JS strings."""
-    for is_fullstack in (True, False):
-        err = _root_relative_error(_with_markup('<img src="/logo.png">'), is_fullstack=is_fullstack)
-        assert err.endswith("Moving the same root-relative path into a JS string does not fix it.")
+    err = _root_relative_error(_with_markup('<img src="/logo.png">'), is_fullstack=is_fullstack)
+    assert err.endswith("Moving the same root-relative path into a JS string does not fix it.")
 
 
-def test_large_page_with_embedded_data_is_checked_quickly():
-    """The tag scan stops at the next `<` as well as `>`. With `[^>]` alone
-    every `<b` in embedded data scanned on to the next `>`: 12.8 s on 60 KB,
-    minutes on this page. The limit leaves room for a slow CI runner."""
-    html = _with_markup("<script>var d=[" + "1<b," * 65_536 + "];</script>")  # 256 KB, no `>`
+@_PAGE_KINDS
+def test_large_page_with_embedded_data_is_checked_quickly(is_fullstack):
+    """A single tag-and-attribute pattern took 12.8 s on 60 KB of `1<b,`,
+    minutes on this page. The link opens the page-level gate, so the tag
+    scan runs; the limit leaves room for a slow CI runner."""
+    data = "1<b," * 65_536  # 256 KB, no `>`
+    html = _with_markup(f'<a href="/y">Y</a><script>var d=[{data}];</script>')
     started = time.perf_counter()
-    for is_fullstack in (True, False):
-        verify_frontend(html, is_fullstack=is_fullstack)
+    verify_frontend(html, is_fullstack=is_fullstack)
     assert time.perf_counter() - started < 10
 
 
 def test_long_whitespace_after_an_attribute_name_is_checked_quickly():
     """Two `\\s*` around an optional quote backtracked quadratically: 4.5 s
-    on 40 000 spaces."""
-    html = _with_markup("<a src=" + " " * 40_000 + "x>")
+    on 40 000 spaces with no path after them. The first link opens the
+    page-level gate, so the per-tag scan runs over the long one."""
+    html = _with_markup('<a href="/y">Y</a><a src=' + " " * 40_000 + "x>")
     started = time.perf_counter()
     verify_frontend(html, is_fullstack=False)
     assert time.perf_counter() - started < 2

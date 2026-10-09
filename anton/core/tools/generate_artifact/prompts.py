@@ -239,9 +239,8 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
-# Rules the verifier does not check. They come after the browser-gate bullet,
-# so neither they nor the gate read as the other kind; both follow from the
-# page running inside a frame.
+# Rules the verifier does not check, kept after the browser-gate bullet so the
+# list above holds only what is checked.
 _FRAME_NOTES = """\
 Not checked by the verifier, but the page breaks inside the frame without them:
 - BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
@@ -258,14 +257,9 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 
 
 def _verifier_contract(*, served: bool) -> str:
-    return (
-        "## Verifier contract\n"
-        + _VERIFIER_CONTRACT
-        + "\n"
-        + (_BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML)
-        + "\n\n"
-        + _FRAME_NOTES
-    )
+    return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
+        _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
+    ) + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +487,7 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
   ```
   Empty `content` is the local default: `api('/api/items')` is then
   `/api/items` on the same FastAPI process. The publisher and the host
-  rewrite it; never call `/api/...` without `api()`.
+  rewrite it.
 - Read the meta tag ONCE at startup and use the `api()` helper everywhere:
   ```js
   const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";

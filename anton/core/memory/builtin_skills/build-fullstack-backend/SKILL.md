@@ -212,7 +212,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     ```html
     <meta name="api-base" content="">
     ```
-    Empty `content` is the local default: `api('/api/items')` is then `/api/items` on the same FastAPI process that serves the page; never call `/api/...` without `api()`. At deploy time the publisher rewrites `content=""` to the real API root (e.g. `content="https://abc123.execute-api.us-east-1.amazonaws.com"`).
+    Empty `content` is the local default: `api('/api/items')` is then `/api/items` on the same FastAPI process that serves the page. At deploy time the publisher rewrites `content=""` to the real API root (e.g. `content="https://abc123.execute-api.us-east-1.amazonaws.com"`).
   - Read the meta tag once at startup and prepend it to every API call. Use this exact pattern (or an equivalent helper) — do NOT scatter `document.querySelector` calls across the codebase:
     ```js
     const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
