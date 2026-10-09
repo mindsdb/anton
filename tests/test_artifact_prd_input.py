@@ -16,6 +16,7 @@ from anton.core.artifacts.internal_files import PRD_FILENAME
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import GenState
+from tests.streaming_llm import StreamingLLM
 
 
 def _state(tmp_path, **kw):
@@ -327,7 +328,7 @@ async def test_what_generate_prd_writes_is_what_generate_artifact_reads(tmp_path
     body = "## Goal\nShow the orders table.\n\n## Data model\nthe `orders` scratchpad, cell 1"
     prd_state = PrdState(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock(return_value=LLMResponse(
+            _llm=StreamingLLM(plan=AsyncMock(return_value=LLMResponse(
                 content=body, tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
             ))),
             question_count=0, elicitor=None, emit=AsyncMock(),
@@ -362,7 +363,7 @@ async def test_write_prd_settles_the_type_the_gathering_chose(tmp_path: Path, mo
     monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: store)
     prd_state = PrdState(
         session=SimpleNamespace(
-            _llm=SimpleNamespace(plan=AsyncMock(return_value=LLMResponse(
+            _llm=StreamingLLM(plan=AsyncMock(return_value=LLMResponse(
                 content="## Goal\nA room-based game.", tool_calls=[],
                 usage=Usage(input_tokens=1, output_tokens=1),
             ))),

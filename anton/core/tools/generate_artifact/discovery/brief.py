@@ -194,6 +194,7 @@ async def redraw_brief(state: PrdState) -> None:
     the same result the correction would have had without the new source.
     """
     from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+    from anton.core.llm.structured import usable_tool_call
 
     brief, response = await sub_tools.plan_step(
         state, sub_tools.STEP_REDRAW_BRIEF, doing="redrawing the brief"
@@ -201,7 +202,10 @@ async def redraw_brief(state: PrdState) -> None:
 
     declared = None
     new_type = ""
-    for tc in getattr(response, "tool_calls", None) or []:
+    # A reply cut off while the run winds down is kept for its text, but a
+    # damaged call in it must not overwrite the declared sources.
+    calls = response.tool_calls if usable_tool_call(response) else []
+    for tc in calls:
         if tc.name != "finish_gathering":
             continue
         inp = tc.input or {}

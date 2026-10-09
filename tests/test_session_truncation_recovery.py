@@ -29,6 +29,8 @@ What must hold now:
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,6 +38,7 @@ import pytest
 
 from tests.conftest import make_mock_llm
 
+from anton.core.llm.effort import TRUNCATION_RETRY_NOTE
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
@@ -630,3 +633,96 @@ async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
     assert not [
         e for e in events if isinstance(e, StreamToolResult) and e.id == "tc_ok"
     ], "a non-scratchpad call has no cell to fail"
+
+
+async def test_output_below_the_stream_budget_is_not_a_truncation(workspace):
+    mock_llm = make_mock_llm()
+    mock_llm.stream_budget = MagicMock(return_value=65536)
+    script = _ScriptedPlanStream([_response("Done.", output_tokens=20000, stop_reason="end_turn")])
+    mock_llm.plan_stream = script
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 1
+
+
+async def test_retry_never_goes_past_the_stream_ceiling(workspace):
+    mock_llm = make_mock_llm()
+    mock_llm.stream_budget = MagicMock(return_value=65536)
+    script = _ScriptedPlanStream(
+        [_response(content="", output_tokens=65536, stop_reason="length"), _response("ok", output_tokens=5)]
+    )
+    mock_llm.plan_stream = script
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 2
+    assert script.calls[1].get("max_tokens") == 65536
+
+
+async def test_retry_is_announced_with_a_model_wait_line_and_carries_the_note(workspace):
+    session, script = _make_session(
+        [_silent_at_cap(), _response("Done.", output_tokens=10)], workspace,
+    )
+
+    events = await _run_turn(session)
+
+    waits = [e for e in events if isinstance(e, StreamTaskProgress) and e.phase == "model_wait"]
+    assert [w.message for w in waits] == [TRUNCATION_RETRY_NOTE]
+    assert script.calls[1].get("wait_note") == TRUNCATION_RETRY_NOTE
+    assert "wait_note" not in script.calls[0]
+
+
+async def test_retry_at_the_stream_ceiling_keeps_the_budget_and_says_so(workspace, caplog):
+    mock_llm = make_mock_llm()
+    mock_llm.stream_budget = MagicMock(return_value=65536)
+    script = _ScriptedPlanStream(
+        [_response(content="", output_tokens=65536, stop_reason="length"), _response("ok", output_tokens=5)]
+    )
+    mock_llm.plan_stream = script
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    with caplog.at_level(logging.WARNING, logger="anton.core.session"):
+        await _run_turn(session)
+
+    assert len(script.calls) == 2
+    assert script.calls[1].get("max_tokens") == 65536
+    assert "retrying once at the same max_tokens=65536" in caplog.text
+
+
+async def test_verifier_runs_under_the_high_effort_ceiling(workspace, monkeypatch):
+    # One tool round is enough to reach the verifier, and the LLM verifier decides alone.
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
+    monkeypatch.setenv("ANTON_VERIFIER_JEV", "off")
+    tool_call = ToolCall(id="tc_1", name="scratchpad", input={"action": "exec", "name": "main", "code": "print(1)"})
+    session, _ = _make_session(
+        [_response(content="", output_tokens=20, tool_calls=[tool_call]), _response("Done.", output_tokens=30)],
+        workspace,
+    )
+    levels: list[str] = []
+    inside: list[bool] = []
+    depth: list[int] = [0]
+
+    @contextlib.contextmanager
+    def ceiling(level):
+        levels.append(level)
+        depth[0] += 1
+        try:
+            yield
+        finally:
+            depth[0] -= 1
+
+    async def verdict(*args, **kwargs):
+        inside.append(depth[0] > 0)
+        return _VerifierVerdict(status="COMPLETE", reason="done")
+
+    session._llm.effort_ceiling = MagicMock(side_effect=ceiling)
+    session._llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    await _run_turn(session)
+
+    assert inside and all(inside), "every verdict call must run inside the ceiling"
+    assert set(levels) == {"high"}
+    assert depth[0] == 0

@@ -16,6 +16,7 @@ from .provider import (
     ProviderAuthError,
     ProviderConnectionInfo,
     ProviderErrorBody,
+    STREAM_DROP_ERRORS,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -30,6 +31,7 @@ from .provider import (
     classify_404,
     classify_content_rejection,
     classify_transient,
+    stream_drop_error,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
@@ -245,6 +247,10 @@ class AnthropicProvider(LLMProvider):
             await client.close()
         unregister_provider(self)
 
+    @property
+    def accepts_large_output(self) -> bool:
+        return True
+
     def native_web_tools(self) -> set[str]:
         # Anthropic's Messages API ships both server-side web_search and
         # web_fetch tools; we route both through the provider when enabled.
@@ -280,6 +286,7 @@ class AnthropicProvider(LLMProvider):
         tool_choice: dict | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         web_entries, beta_headers = _build_native_web_tools(native_web_tools)
         merged_tools = list(tools or []) + web_entries
@@ -294,8 +301,9 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
-        if self._reasoning_effort:
-            kwargs["extra_body"] = {"output_config": {"effort": self._reasoning_effort}}
+        effort = reasoning_effort or self._reasoning_effort
+        if effort:
+            kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:
             # Anthropic accepts a comma-separated list of beta features.
             kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
@@ -372,6 +380,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict] | None = None,
         max_tokens: int = 4096,
         native_web_tools: set[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         web_entries, beta_headers = _build_native_web_tools(native_web_tools)
         merged_tools = list(tools or []) + web_entries
@@ -384,8 +393,9 @@ class AnthropicProvider(LLMProvider):
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
-        if self._reasoning_effort:
-            kwargs["extra_body"] = {"output_config": {"effort": self._reasoning_effort}}
+        effort = reasoning_effort or self._reasoning_effort
+        if effort:
+            kwargs["extra_body"] = {"output_config": {"effort": effort}}
         if beta_headers:
             kwargs["extra_headers"] = {"anthropic-beta": ",".join(beta_headers)}
 
@@ -446,7 +456,7 @@ class AnthropicProvider(LLMProvider):
                                 yield StreamToolUseStart(id=block.id, name=block.name)
                         elif block.type in ("thinking", "redacted_thinking"):
                             # Adaptive thinking (triggered by output_config.effort,
-                            # set above when self._reasoning_effort is configured)
+                            # set above when the call has an effort)
                             # — the model's own reasoning, not the final answer.
                             blocks[idx] = {"type": "thinking"}
                         else:
@@ -510,6 +520,10 @@ class AnthropicProvider(LLMProvider):
                 else "Could not reach Anthropic — check your connection or try again in a moment.",
                 provider="Anthropic", code="connection_error",
                 session_backoff=stream_started, model=model,
+            ) from exc
+        except STREAM_DROP_ERRORS as exc:
+            raise stream_drop_error(
+                provider="Anthropic", target="Anthropic", model=model,
             ) from exc
 
         # Missing stop_reason is a genuine truncation only when the stream

@@ -728,25 +728,35 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         if isinstance(raw_attachments, list) else []
 
     folder = store.folder_for(slug)
+    from anton.core.llm.effort import effort_ceiling_of
     from anton.core.tools.generate_artifact import generate
+    from anton.core.tools.generate_artifact.state import ARTIFACT_EFFORT_CEILING
+
+    async def _at_artifact_effort(coro):
+        # Entered inside the task, so the cap lives in the task's own context
+        # and never reaches the agent loop draining this handler.
+        with effort_ceiling_of(getattr(session, "_llm", None), ARTIFACT_EFFORT_CEILING):
+            return await coro
 
     queue: "asyncio.Queue[str | None]" = asyncio.Queue()
     task = asyncio.create_task(
-        _generate_with_progress_close(
-            generate(
-                session=session,
-                slug=slug,
-                artifact_path=folder,
-                artifact_type=artifact.type,
-                user_request=user_request,
-                agent_understanding=agent_understanding,
-                known_data=(tc_input.get("known_data") or "").strip(),
-                user_preferences=(tc_input.get("user_preferences") or "").strip(),
-                primary=artifact.primary,
-                progress=queue,
-                attachments=attachments,
-            ),
-            queue,
+        _at_artifact_effort(
+            _generate_with_progress_close(
+                generate(
+                    session=session,
+                    slug=slug,
+                    artifact_path=folder,
+                    artifact_type=artifact.type,
+                    user_request=user_request,
+                    agent_understanding=agent_understanding,
+                    known_data=(tc_input.get("known_data") or "").strip(),
+                    user_preferences=(tc_input.get("user_preferences") or "").strip(),
+                    primary=artifact.primary,
+                    progress=queue,
+                    attachments=attachments,
+                ),
+                queue,
+            )
         )
     )
     try:

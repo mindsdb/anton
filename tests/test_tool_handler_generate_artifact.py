@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 
 import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
+from anton.core.llm.client import LLMClient
+from anton.core.llm.provider import LLMProvider, LLMResponse, StreamComplete, Usage
 from anton.core.tools.progress import ToolProgress
 from anton.core.tools.tool_handlers import handle_generate_artifact
 
@@ -729,3 +731,39 @@ def test_the_attachments_field_tells_the_agent_what_qualifies():
     assert "outside the workspace" in desc and "`.anton/`" in desc
     assert "Only files the user actually provided" in desc
     assert "`attachments` (optional)" in GENERATE_ARTIFACT_TOOL.description
+
+
+class _RecordingProvider(LLMProvider):
+    name = "fake"
+
+    def __init__(self):
+        self._reasoning_effort = "max"
+        self.efforts: list[str | None] = []
+
+    async def complete(self, **kw):
+        self.efforts.append(kw.get("reasoning_effort"))
+        return LLMResponse(content="ok", usage=Usage(output_tokens=1))
+
+    async def stream(self, **kw):
+        self.efforts.append(kw.get("reasoning_effort"))
+        yield StreamComplete(response=LLMResponse(content="ok", usage=Usage(output_tokens=1)))
+
+
+async def test_generation_runs_every_model_call_at_high_effort(tmp_path: Path, monkeypatch):
+    slug = _make_artifact(tmp_path)
+    provider = _RecordingProvider()
+    llm = LLMClient(planning_provider=provider, planning_model="p", coding_provider=provider, coding_model="c")
+    session = SimpleNamespace(_workspace=SimpleNamespace(artifacts_dir=tmp_path / "artifacts"), _llm=llm)
+
+    async def fake_generate(**kw):
+        await llm.plan(system="s", messages=[])
+        async for _ in llm.code_stream(system="s", messages=[]):
+            pass
+        return "Backend verification failed after retry: stop here"
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    await _collect(session, {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
+
+    assert provider.efforts == ["high", "high"]
+    await llm.plan(system="s", messages=[])
+    assert provider.efforts[-1] is None, "the cap must not outlive the generation task"

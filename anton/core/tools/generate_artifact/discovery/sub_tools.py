@@ -17,9 +17,10 @@ orchestrator to tell "the user declined" apart from "we ran out of budget".
 
 from __future__ import annotations
 
+import functools
 import uuid
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
 
@@ -179,6 +180,89 @@ def _web_fetch_schema() -> dict:
     return tool_schema(WEB_FETCH_FALLBACK_TOOL)
 
 
+class RoomResult(NamedTuple):
+    """One discovery model call after `call_with_room`.
+
+    ``truncated`` is True when the final reply still hit the output budget
+    without a usable tool call, so neither its text nor its calls are whole.
+    """
+
+    response: object
+    budget: int
+    retried: bool
+    truncated: bool
+
+
+async def call_with_room(
+    state,
+    step: str,
+    *,
+    role: str,
+    system: str,
+    messages: list[dict],
+    tools: list[dict] | None,
+    round_idx: int | None = None,
+) -> RoomResult:
+    """One streamed discovery call, retried once if the output budget cut it off.
+
+    The retry gets a larger budget, a note for the host's status line and a
+    nudge appended to its own messages only; ``messages`` is not changed, so
+    the shared conversation prefix stays cacheable. A connection that drops
+    during the retry is retried by `_call_with_stream_retry` at half the
+    budget, which can bring it back to the first try's size; that rare case
+    may truncate again and is reported as such.
+    """
+    from anton.core.llm.effort import TRUNCATION_RETRY_NOTE, client_stream_budget, retry_budget
+    from anton.core.llm.structured import looks_truncated, usable_tool_call
+
+    from ..streaming import _call_with_stream_retry
+    from . import prompts
+
+    llm = state.session._llm
+    stream = llm.plan_stream if role == "planning" else llm.code_stream
+    method = "plan_stream" if role == "planning" else "code_stream"
+    on_text = state.peek_for(step)
+
+    def cut_off(response, used: int) -> bool:
+        return looks_truncated(response, used) and not usable_tool_call(response)
+
+    async def attempt(call, msgs, budget: int, number: int):
+        try:
+            response, used = await _call_with_stream_retry(
+                call, system=system, messages=msgs, tools=tools,
+                max_tokens=budget, default_cap=budget, on_text=on_text,
+            )
+        finally:
+            state.peek_done(step)
+        state.trace_log.llm_call(
+            node=step, method=method, system=system, messages=msgs,
+            response=response, attempt=number, round=round_idx,
+        )
+        return response, used or budget
+
+    response, used = await attempt(stream, messages, client_stream_budget(llm, role), 0)
+    if not cut_off(response, used):
+        return RoomResult(response, used, retried=False, truncated=False)
+    if state.winding_down():
+        state.trace_log.node(step, "truncated", detail="no retry: the run is winding down")
+        return RoomResult(response, used, retried=False, truncated=True)
+
+    if step not in state.retry_announced:
+        state.retry_announced.add(step)
+        state.step_started(step, attempt=1)
+    bigger = retry_budget(used)
+    state.trace_log.node(
+        step, "retry_truncated",
+        detail=f"output_tokens={response.usage.output_tokens} budget={used} -> {bigger}",
+    )
+    response, used = await attempt(
+        functools.partial(stream, wait_note=TRUNCATION_RETRY_NOTE),
+        [*messages, {"role": "user", "content": prompts.DISCOVERY_TRUNCATED_NUDGE}],
+        bigger, 1,
+    )
+    return RoomResult(response, used, retried=True, truncated=cut_off(response, used))
+
+
 async def plan_step(state, step: str, *, doing: str) -> tuple[str, object]:
     """One text-only step of phases B-C: announce it, append its instruction,
     make the planning call on the shared history, log it, and return the
@@ -191,21 +275,26 @@ async def plan_step(state, step: str, *, doing: str) -> tuple[str, object]:
     propagates up through `discovery.generate()` into
     `handle_generate_artifact`'s `except Exception`, which already wraps it
     with `_generation_failed` — no new error-reporting path needed.
+
+    A reply the output budget cut off is retried once by `call_with_room`;
+    while the run winds down, cut text is kept rather than failing the run.
     """
     from . import prompts
 
     state.step_started(step)
     state.messages.append({"role": "user", "content": prompts.step_message(step, state)})
     await signal_thinking(state.session)
-    system = state.pipeline_system
-    response = await state.session._llm.plan(
-        system=system, messages=state.messages, tools=state.pipeline_tools,
+    room = await call_with_room(
+        state, step, role="planning", system=state.pipeline_system,
+        messages=state.messages, tools=state.pipeline_tools,
     )
-    state.trace_log.llm_call(
-        node=step, method="plan", system=system,
-        messages=state.messages, response=response,
-    )
+    response = room.response
     text = (response.content or "").strip()
+    if room.truncated and room.retried:
+        state.trace_log.node(step, "fail", detail="cut off twice")
+        raise RuntimeError(
+            f"{step}: the model's answer was cut off twice — it ran out of output budget."
+        )
     if not text:
         state.trace_log.node(step, "fail", detail="model replied with no text")
         raise RuntimeError(
@@ -218,7 +307,7 @@ async def plan_step(state, step: str, *, doing: str) -> tuple[str, object]:
 async def signal_thinking(session: "ChatSession") -> None:
     """Restart the host's spinner before a direct LLM call.
 
-    Every direct `session._llm.plan/code/generate_object` call in phase 1
+    Every direct model call in phase 1
     (engine.py) and phase 2 (orchestrator.py) happens outside the outer
     agent loop's own tool-round machinery, so it never sees that loop's
     `StreamTaskProgress(phase="reasoning_start")` emission. `elicit()`, in
