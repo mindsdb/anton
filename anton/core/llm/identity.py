@@ -191,7 +191,8 @@ _SURFACE_LINES: dict[str, str] = {
 
 _PRODUCT_RULE_LINE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
-    "which platforms or editions exist, where a setting or feature lives, or what it "
+    "which platforms or editions exist, where a setting or feature lives, which models "
+    "it can use (including local models such as Ollama or LM Studio), or what it "
     "costs, call `recall_skill(\"cowork-product\")` and answer from it. Do not answer "
     "those from general knowledge, and do not guess or web-search for them. If it "
     "does not cover the question, say so plainly and point the user at "

@@ -516,6 +516,58 @@ class TestCoworkProductSkill:
         assert "browser only" in body
         assert "Coding Mode: **desktop only**" in body
 
+    def test_local_models_are_answered_per_surface(self, store):
+        """Three new users asked how to use local models and were told the
+        product information did not say, or were sent to the docs homepage.
+        The hosted browser build runs in org mode, which hides the LLM
+        Providers group, so the honest browser answer is "not here, use
+        desktop"; desktop takes any OpenAI-compatible base URL."""
+        body = store.load("cowork-product").declarative_md
+        section = body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0]
+        assert "**not available**" in section
+        assert "https://mindshub.ai/download" in section
+        assert "**supported**" in section
+        assert "Settings → Agent → LLM Providers" in section
+        assert "OpenAI-compatible" in section
+        assert "http://localhost:11434/v1" in section
+        assert "Model Router" in section
+        # Cowork does not fetch models; the steps must not imply it does.
+        assert "Cowork does not download" in section
+        assert "tool (function) calling" in section
+
+    def test_local_models_name_every_router_role(self, store):
+        """Model Router has three independent roles, and one left alone keeps
+        its provider: with MindsHub signed in, that role stays on cloud models
+        while the user believes they are running locally."""
+        body = store.load("cowork-product").declarative_md
+        section = " ".join(body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0].split())
+        for role in ("Planning model", "Routing and summarization model", "Coding model"):
+            assert role in section
+        assert "set all three" in section
+
+    def test_local_models_blame_the_server_not_the_model_size(self, store):
+        """Local servers reject the verifier's named tool_choice before the
+        model runs, so "use a larger model" is advice that cannot help."""
+        body = store.load("cowork-product").declarative_md
+        section = " ".join(body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0].split())
+        assert "not a setup mistake" in section
+        assert "larger model does not fix it" in section
+
+    def test_maintainer_provenance_stays_out_of_the_loaded_body(self, store):
+        """The body ships to the model on every recall; notes on which code
+        each fact came from are for maintainers and live in SOURCES.md."""
+        body = store.load("cowork-product").declarative_md
+        assert "WHERE THESE FACTS COME FROM" not in body
+        assert "SettingsView.jsx" not in body
+
+    def test_fallback_answers_what_it_can_before_pointing_at_docs(self, store):
+        """A docs-homepage referral on its own is the failure, not the fix."""
+        body = store.load("cowork-product").declarative_md
+        fallback = body.split("IF THIS FILE DOES NOT ANSWER THE QUESTION")[1]
+        assert fallback.index("First give whatever part") < fallback.index(
+            "https://docs.mindshub.ai"
+        )
+
     def test_forbids_answering_from_general_knowledge(self, store):
         body = store.load("cowork-product").declarative_md
         assert "Never answer a question about Cowork from general" in body
@@ -594,10 +646,11 @@ class TestHermesIsNotStatedAsFact:
         for wrong in ("nous research", "third-party harness", "external agent"):
             assert wrong not in body
 
-    def test_the_maintenance_note_says_how_to_settle_it(self, store):
+    def test_the_maintenance_note_says_how_to_settle_it(self):
         """So the next reader resolves the disagreement instead of guessing."""
-        body = store.load("cowork-product").declarative_md
-        assert "cowork/harnesses/" in body
+        skill_dir = Path(skills_mod.__file__).parent / "builtin_skills" / "cowork-product"
+        sources = (skill_dir / "SOURCES.md").read_text()
+        assert "cowork/harnesses/" in sources
 
 
 class TestPipelineContractMirrored:
