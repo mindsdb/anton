@@ -560,3 +560,15 @@ async def test_a_cells_model_calls_carry_its_turns_trace_and_role(
         ("q2 on a worker thread", "conv-1", "q2", 2, "coding"),
         ("q2 on the cell thread", "conv-1", "q2", 2, "coding"),
     ]
+
+
+def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):
+    """Only the marker followed by a JSON object is a trace line."""
+    (cell,) = _run_cells(
+        ["__ANTON_CELL_TRACE__ = 1\nprint(__ANTON_CELL_TRACE__)"],
+        tmp_path,
+        base_url="http://127.0.0.1:9/v1",
+    )
+
+    assert cell.error is None, cell.error
+    assert cell.stdout.strip() == "1"

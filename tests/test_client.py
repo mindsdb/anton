@@ -512,6 +512,12 @@ class TestCallRole:
             "planning", "coding", "router",
         )
 
+    def test_a_provider_shared_by_two_roles_gets_no_default(self):
+        _, planning, coding, _ = self._client(router=False)
+
+        assert planning.trace_role == "planning"
+        assert coding.trace_role is None
+
 
 class TestLLMClientFromSettings:
     def test_from_settings_creates_client(self):

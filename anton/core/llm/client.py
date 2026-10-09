@@ -135,13 +135,15 @@ class LLMClient:
         self._router_model = router_model or coding_model
         # Calls through this client name their role per call (call_role). This
         # default covers calls a host makes on a provider directly. A provider
-        # shared by two roles keeps the first.
-        for provider, role in (
+        # shared by two roles gets none: no role beats a wrong one.
+        roles = (
             (planning_provider, "planning"),
             (coding_provider, "coding"),
-            (router_provider, "router"),
-        ):
-            if provider is not None and getattr(provider, "trace_role", None) is None:
+            (self._router_provider, "router"),
+        )
+        for provider, role in roles:
+            shared = sum(other is provider for other, _ in roles) > 1
+            if provider is not None and not shared and getattr(provider, "trace_role", None) is None:
                 with contextlib.suppress(AttributeError):
                     provider.trace_role = role
         self._max_tokens = max_tokens

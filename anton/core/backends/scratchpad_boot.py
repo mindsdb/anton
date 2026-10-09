@@ -1399,7 +1399,8 @@ while True:
         break
 
     _cell_trace = None
-    if lines and lines[0].startswith(CELL_TRACE_MARKER):
+    # The JSON object's "{" keeps a cell line like `__ANTON_CELL_TRACE__ = 1` code.
+    if lines and lines[0].startswith(CELL_TRACE_MARKER + " {"):
         from anton.core.llm.tracing import trace_context_from_json
 
         _cell_trace = trace_context_from_json(lines.pop(0)[len(CELL_TRACE_MARKER):])
