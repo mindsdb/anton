@@ -630,3 +630,30 @@ async def test_one_damaged_call_among_intact_ones_still_retries(workspace):
     assert not [
         e for e in events if isinstance(e, StreamToolResult) and e.id == "tc_ok"
     ], "a non-scratchpad call has no cell to fail"
+
+
+async def test_output_below_the_stream_budget_is_not_a_truncation(workspace):
+    mock_llm = make_mock_llm()
+    mock_llm.stream_budget = MagicMock(return_value=65536)
+    script = _ScriptedPlanStream([_response("Done.", output_tokens=20000, stop_reason="end_turn")])
+    mock_llm.plan_stream = script
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 1
+
+
+async def test_retry_never_goes_past_the_stream_ceiling(workspace):
+    mock_llm = make_mock_llm()
+    mock_llm.stream_budget = MagicMock(return_value=65536)
+    script = _ScriptedPlanStream(
+        [_response(content="", output_tokens=65536, stop_reason="length"), _response("ok", output_tokens=5)]
+    )
+    mock_llm.plan_stream = script
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
+
+    await _run_turn(session)
+
+    assert len(script.calls) == 2
+    assert script.calls[1].get("max_tokens") == 65536

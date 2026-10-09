@@ -22,6 +22,7 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
+from anton.core.llm.effort import client_stream_budget, retry_budget
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
 from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
@@ -2809,11 +2810,13 @@ class ChatSession:
             # smaller `max_tokens` (or a distinct router model with a lower
             # output cap) would otherwise get a 400 on every compaction, and the
             # handler below logs only the exception type — proactive compaction
-            # would be dead and invisible. Read through `_turn_max_tokens` for
+            # would be dead and invisible. Read through `_client_max_tokens` for
             # its defensive fallback: a client that doesn't expose the attribute
             # would otherwise make `min()` raise, and the raise lands in that
-            # same blind `except`.
-            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._turn_max_tokens())
+            # same blind `except`. Not `_turn_max_tokens`: that is the
+            # streamed-call budget, which can be larger than what a non-streamed
+            # call may ask for.
+            output_budget_tokens = min(_SUMMARY_OUTPUT_BUDGET, self._client_max_tokens())
             summary_response = await self._llm.summarize(
                 system=_SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
@@ -5123,10 +5126,18 @@ class ChatSession:
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
 
-        `looks_truncated` compares output tokens against the budget the
-        call was given; the main loop never overrides ``max_tokens``, so
-        that is the client default. Falls back to LLMClient's own default
-        when the client doesn't expose one (mocks, exotic hosts).
+        `looks_truncated` compares output tokens against the budget the call
+        was given. The main loop never passes ``max_tokens``, so that is the
+        client's streamed-call budget for the planning role, which follows the
+        reasoning effort.
+        """
+        return client_stream_budget(self._llm, "planning", default=self._client_max_tokens())
+
+    def _client_max_tokens(self) -> int:
+        """The client's own ceiling for non-streamed calls.
+
+        Falls back to LLMClient's default when the client doesn't expose one
+        (mocks, exotic hosts).
         """
         budget = getattr(self._llm, "max_tokens", None)
         return budget if isinstance(budget, int) and budget > 0 else 8192
@@ -5167,7 +5178,8 @@ class ChatSession:
         identically (measured: three unchanged retries 14 minutes apart,
         all silent):
 
-        - the output budget is doubled for this one call, and
+        - the output budget is raised for this one call, up to the streamed-call
+          ceiling; at the ceiling only the nudge changes, and
         - a corrective nudge is injected into history, matching how the round
           died — "continue where you left off" when partial text arrived,
           "answer now, deliberate less" when the whole budget went to internal
@@ -5211,7 +5223,7 @@ class ChatSession:
             {"role": "assistant", "content": llm_response.content or ""}
         )
         self._append_history({"role": "user", "content": nudge})
-        retry_budget = budget * 2
+        bigger = retry_budget(budget)
         logger.warning(
             "Response truncated at the output budget without a usable tool call "
             "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s, "
@@ -5221,12 +5233,12 @@ class ChatSession:
             llm_response.stop_reason,
             silent,
             cut_tool_call,
-            retry_budget,
+            bigger,
         )
 
         retry: StreamComplete | None = None
         async for event in self.plan_stream_with_recovery(
-            system=system, tools=tools, max_tokens=retry_budget
+            system=system, tools=tools, max_tokens=bigger
         ):
             if isinstance(event, StreamComplete):
                 retry = event
@@ -5240,14 +5252,14 @@ class ChatSession:
         if (
             not retried.tool_calls
             and not (retried.content or "").strip()
-            and looks_truncated(retried, retry_budget)
+            and looks_truncated(retried, bigger)
         ):
             logger.error(
                 "Truncation retry also burned its whole budget with no "
                 "visible output (output_tokens=%s, retry_budget=%s) — "
                 "surfacing failure to the user",
                 retried.usage.output_tokens,
-                retry_budget,
+                bigger,
             )
             self._append_history(
                 {"role": "assistant", "content": _TRUNCATION_FAILURE_NOTICE}
