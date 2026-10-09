@@ -41,12 +41,10 @@ JOURNAL_DETAIL_MAX: int = 300
 # their internal thinking from the same budget (a 25 842-character spec was
 # measured dying at 8192 output tokens).
 #
-# The two values are what the MindsHub gateway actually accepts, not round
-# numbers: measured 2026-08-24 against `api.mindshub.ai/v1`, alias `opus` —
-# 8192/16384/20480 answer normally, 24576 and above return HTTP 500. That 500
-# is classified as a transient provider error, so an over-large budget does not
-# fail fast; it burns the retry ladder first. Raise both together, and re-measure
-# before doing so.
+# The gateway used to answer HTTP 500 above 20480 output tokens for a
+# non-streamed call; it now assembles such calls from an internal stream, so
+# that limit is gone. These calls are streamed anyway. Re-measure before
+# raising them.
 SPEC_MAX_TOKENS: int = 16384
 SPEC_MAX_TOKENS_RETRY: int = 20480
 

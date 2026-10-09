@@ -5,6 +5,7 @@ import httpx2
 import pytest
 
 from anton.core.llm.provider import LLMResponse, StreamComplete, TransientProviderError, Usage
+from anton.core.tools.generate_artifact import engine, streaming
 from anton.core.tools.generate_artifact.engine import _call_with_stream_retry
 
 
@@ -53,3 +54,8 @@ async def test_other_transient_errors_propagate():
             llm_call, system="s", messages=[], tools=None, max_tokens=16384, default_cap=16384,
         )
     assert len(calls) == 1
+
+
+def test_streaming_module_owns_the_helpers():
+    assert engine._call_with_stream_retry is streaming._call_with_stream_retry
+    assert engine._drain_stream is streaming._drain_stream
