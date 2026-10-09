@@ -29,6 +29,7 @@ What must hold now:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -689,3 +690,39 @@ async def test_retry_at_the_stream_ceiling_keeps_the_budget_and_says_so(workspac
     assert len(script.calls) == 2
     assert script.calls[1].get("max_tokens") == 65536
     assert "retrying once at the same max_tokens=65536" in caplog.text
+
+
+async def test_verifier_runs_under_the_high_effort_ceiling(workspace, monkeypatch):
+    # One tool round is enough to reach the verifier, and the LLM verifier decides alone.
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
+    monkeypatch.setenv("ANTON_VERIFIER_JEV", "off")
+    tool_call = ToolCall(id="tc_1", name="scratchpad", input={"action": "exec", "name": "main", "code": "print(1)"})
+    session, _ = _make_session(
+        [_response(content="", output_tokens=20, tool_calls=[tool_call]), _response("Done.", output_tokens=30)],
+        workspace,
+    )
+    levels: list[str] = []
+    inside: list[bool] = []
+    depth: list[int] = [0]
+
+    @contextlib.contextmanager
+    def ceiling(level):
+        levels.append(level)
+        depth[0] += 1
+        try:
+            yield
+        finally:
+            depth[0] -= 1
+
+    async def verdict(*args, **kwargs):
+        inside.append(depth[0] > 0)
+        return _VerifierVerdict(status="COMPLETE", reason="done")
+
+    session._llm.effort_ceiling = MagicMock(side_effect=ceiling)
+    session._llm.generate_object_code = AsyncMock(side_effect=verdict)
+
+    await _run_turn(session)
+
+    assert inside and all(inside), "every verdict call must run inside the ceiling"
+    assert set(levels) == {"high"}
+    assert depth[0] == 0

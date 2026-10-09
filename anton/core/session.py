@@ -22,7 +22,12 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
-from anton.core.llm.effort import TRUNCATION_RETRY_NOTE, client_stream_budget, retry_budget
+from anton.core.llm.effort import (
+    TRUNCATION_RETRY_NOTE,
+    client_stream_budget,
+    effort_ceiling_of,
+    retry_budget,
+)
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
 from anton.core.llm.liveness import (
@@ -6212,12 +6217,16 @@ class ChatSession:
             # Skipped when Jev decided; otherwise exactly the LLM verifier as before.
             for attempt, budget in enumerate(() if jev_decided else _VERIFIER_TOKEN_BUDGETS):
                 try:
-                    verdict = await self._llm.generate_object_code(
-                        _VerifierVerdict,
-                        system=verifier_system,
-                        messages=verify_messages,
-                        max_tokens=budget,
-                    )
+                    # A verdict is a short decision. At the turn's own top
+                    # efforts the model can think past both verdict budgets
+                    # before it reaches the tool call.
+                    with effort_ceiling_of(self._llm, "high"):
+                        verdict = await self._llm.generate_object_code(
+                            _VerifierVerdict,
+                            system=verifier_system,
+                            messages=verify_messages,
+                            max_tokens=budget,
+                        )
                     break
                 except StructuredOutputError as exc:
                     # A truncated verdict is a budget problem, not a verdict: the
