@@ -178,6 +178,7 @@ PHASE_LABELS = {
     "complete": "Complete",
     "failed": "Failed",
     "scratchpad": "Scratchpad",
+    "model_wait": "",
 }
 
 
@@ -557,7 +558,7 @@ class StreamDisplay:
 
         label = PHASE_LABELS.get(phase, phase)
         eta_str = f"  ~{int(eta)}s" if eta else ""
-        self._line2_status = f"{label}  {message}{eta_str}"
+        self._line2_status = f"{label}  {message}{eta_str}" if label else f"{message}{eta_str}"
         self._set_status(self._line2_status)
         self._update_spinner()
 

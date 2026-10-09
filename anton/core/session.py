@@ -22,10 +22,15 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
-from anton.core.llm.effort import client_stream_budget, retry_budget
+from anton.core.llm.effort import TRUNCATION_RETRY_NOTE, client_stream_budget, retry_budget
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
-from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
+from anton.core.llm.liveness import (
+    MODEL_WAIT_PHASE,
+    ModelCallTracker,
+    arm_turn_tracker,
+    disarm_turn_tracker,
+)
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -4067,6 +4072,7 @@ class ChatSession:
         system: str,
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        wait_note: str | None = None,
         messages_factory: Callable[[], list[dict]] | None = None,
         allow_native_web_tools: bool = True,
     ) -> AsyncIterator[StreamEvent]:
@@ -4100,6 +4106,8 @@ class ChatSession:
             kwargs["tools"] = tools
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if wait_note is not None:
+            kwargs["wait_note"] = wait_note
         if allow_native_web_tools and self._native_web_tools:
             kwargs["native_web_tools"] = self._native_web_tools
 
@@ -5227,18 +5235,26 @@ class ChatSession:
         logger.warning(
             "Response truncated at the output budget without a usable tool call "
             "(output_tokens=%s, budget=%s, stop_reason=%s, silent=%s, "
-            "cut_tool_call=%s) — retrying once with max_tokens=%s",
+            "cut_tool_call=%s) — retrying once %s max_tokens=%s",
             llm_response.usage.output_tokens,
             budget,
             llm_response.stop_reason,
             silent,
             cut_tool_call,
+            "with" if bigger > budget else "at the same",
             bigger,
         )
 
         retry: StreamComplete | None = None
+        # The retry can think as long as the first try did. Hosts render this
+        # phase as the live status line, and the note keeps it there once their
+        # own still-working ticks take over.
+        yield StreamTaskProgress(phase=MODEL_WAIT_PHASE, message=TRUNCATION_RETRY_NOTE)
         async for event in self.plan_stream_with_recovery(
-            system=system, tools=tools, max_tokens=bigger
+            system=system,
+            tools=tools,
+            max_tokens=bigger,
+            wait_note=TRUNCATION_RETRY_NOTE,
         ):
             if isinstance(event, StreamComplete):
                 retry = event
