@@ -660,6 +660,14 @@ async def _generate_api_spec(
     else:
         system, user = build_api_spec_prompt(context, stateless=stateless)
     declared = _declared_api_paths(context)
+    if declared:
+        # Naming the paths up front: told only to copy them from spec.md, the
+        # model renamed them on the first attempt in most live runs.
+        listed = ", ".join(f"`{p}`" for p in declared.values())
+        user += (
+            f"\n\n`paths` must be exactly these, character for character: {listed} "
+            "(plus optional `/api/health`)."
+        )
     extra = ""
     for attempt in range(2):
         if attempt and on_retry is not None:
@@ -695,7 +703,7 @@ async def _generate_api_spec(
 
 
 _API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
-_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)]+)")
+_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)*?]+)")
 _HEALTH_PATH = "/api/health"
 
 
@@ -717,7 +725,9 @@ def _declared_api_paths(context: str) -> dict[str, str]:
     if not match:
         return {}
     found: dict[str, str] = {}
-    for path in _DECLARED_PATH_RE.findall(match.group(1)):
+    for raw in _DECLARED_PATH_RE.findall(match.group(1)):
+        # A sentence's full stop; dots inside a path segment stay.
+        path = raw.rstrip(".")
         if _normalise_api_path(path) != _HEALTH_PATH:
             found.setdefault(_normalise_api_path(path), path)
     return found

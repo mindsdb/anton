@@ -305,6 +305,23 @@ def test_declared_api_paths_come_from_the_backend_section_only():
     assert engine._declared_api_paths("## Product requirements\nX") == {}
 
 
+def test_declared_api_paths_drop_markdown_punctuation_and_query():
+    """The paths are quoted back to the model to copy character for
+    character, so bold markers, a sentence's full stop and a query string
+    must not become part of a path."""
+    section = (
+        "## Backend\n"
+        "- **GET /api/poll**: current results.\n"
+        "- Then GET /api/results.\n"
+        "- POST /api/vote?option=Pizza records a vote.\n"
+    )
+    assert engine._declared_api_paths(section) == {
+        "/api/poll": "/api/poll",
+        "/api/results": "/api/results",
+        "/api/vote": "/api/vote",
+    }
+
+
 def _doc(*paths: str) -> dict:
     return {"paths": {p: {"get": {"responses": {"200": {}}}} for p in paths}}
 
@@ -345,6 +362,29 @@ async def test_a_renamed_path_is_sent_back_with_spec_md_quoted():
     assert "## Previous reply rejected" in calls[1]
     assert "`spec.md` lists `/api/rooms/{code}/state`" in calls[1]
     assert '"/api/rooms/{code}/state"' in out
+
+
+async def test_the_first_api_spec_request_already_names_the_exact_paths():
+    """Told only to copy the paths from spec.md, the model renamed them on the
+    first attempt in most live runs; the list must not wait for a rejection."""
+    calls: list[str] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        calls.append(messages[-1]["content"])
+        doc = _doc("/api/rooms", "/api/rooms/{code}/state", "/api/rooms/{code}/action")
+        return _one_event_stream(_response(json.dumps(doc), output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    out = await engine._generate_api_spec(
+        session, _BACKEND_SECTION, messages=[{"role": "user", "content": "kickoff"}],
+        system_override="pipeline-system",
+    )
+    assert not out.startswith("Error:")
+    assert len(calls) == 1
+    assert (
+        "`paths` must be exactly these, character for character: `/api/rooms`, "
+        "`/api/rooms/{code}/state`, `/api/rooms/{code}/action`"
+    ) in calls[0]
 
 
 async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):
