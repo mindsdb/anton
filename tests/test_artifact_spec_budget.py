@@ -347,6 +347,29 @@ async def test_a_renamed_path_is_sent_back_with_spec_md_quoted():
     assert '"/api/rooms/{code}/state"' in out
 
 
+async def test_the_first_api_spec_request_already_names_the_exact_paths():
+    """Told only to copy the paths from spec.md, the model renamed them on the
+    first attempt in most live runs; the list must not wait for a rejection."""
+    calls: list[str] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        calls.append(messages[-1]["content"])
+        doc = _doc("/api/rooms", "/api/rooms/{code}/state", "/api/rooms/{code}/action")
+        return _one_event_stream(_response(json.dumps(doc), output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    out = await engine._generate_api_spec(
+        session, _BACKEND_SECTION, messages=[{"role": "user", "content": "kickoff"}],
+        system_override="pipeline-system",
+    )
+    assert not out.startswith("Error:")
+    assert len(calls) == 1
+    assert (
+        "`paths` must be exactly these, character for character: `/api/rooms`, "
+        "`/api/rooms/{code}/state`, `/api/rooms/{code}/action`"
+    ) in calls[0]
+
+
 async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):
     st = _state(tmp_path)
     st.session._llm.plan_stream = _stream_mock(
