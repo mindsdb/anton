@@ -893,6 +893,9 @@ def build_cloud_chat_session(
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
         elicitor=elicitor,                  # interactive turns only; None = no ask_user
+        # Whether cowork renders a tool's message to the user (UI turns do,
+        # channel turns do not); only the request can say.
+        tool_messages=request.tool_messages,
         cortex=cortex,                      # org memory; writes are reported, not stored
         episodic=None,
         self_awareness=None,

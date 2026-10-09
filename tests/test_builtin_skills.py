@@ -295,7 +295,7 @@ class TestNoPathStillNamesASeparatePrdStep:
     `generate_prd` was a separate tool with no `ToolDef.prompt` of its own, so
     these always-on blocks were the only place the model could learn the step
     existed — which is why an ordering lock was worth having. There is one
-    tool now and it agrees the requirements itself, so a block still naming a
+    tool now and it settles the requirements itself, so a block still naming a
     PRD step would be sending the agent to call something that does not exist.
     """
 
@@ -322,13 +322,64 @@ class TestNoPathStillNamesASeparatePrdStep:
         for name, text in self._blocks().items():
             assert "generate_artifact" in text, name
 
-    def test_the_artifacts_block_says_the_tool_agrees_the_requirements_itself(self):
+    def test_the_artifacts_block_says_the_tool_handles_the_brief_itself(self):
         """The agent must not pre-interview the user for something the tool
         will ask about anyway, nor write a PRD by hand."""
         from anton.core.llm.prompts import ARTIFACTS_PROMPT
 
-        assert "agrees a short brief" in ARTIFACTS_PROMPT
+        assert "shows them a short brief" in ARTIFACTS_PROMPT
         assert "Do NOT write a PRD yourself" in ARTIFACTS_PROMPT
+
+
+class TestNoTextPromisesABriefAgreement:
+    """When the agent acts first nobody confirms the brief, so no text the
+    agents read may say the requirements are agreed with the user."""
+
+    STALE = (
+        "agrees a short brief",
+        "agrees the requirements",
+        "agreeing a brief",
+        "read and accept",
+        "the user agreed to",
+        "agreed requirements",
+        "reviewed and accepted",
+    )
+
+    def _texts(self) -> dict[str, str]:
+        from pathlib import Path
+
+        from anton.core.llm import prompts
+        from anton.core.tools import tool_defs
+        from anton.core.tools.generate_artifact import prompts as gen_prompts
+        from anton.core.tools.generate_artifact.discovery.prd import _WRITE_PRD_INSTRUCTION
+        from anton.core.tools.generate_artifact.discovery.prompts import build_pipeline_system_prompt
+        from anton.core.tools.generate_artifact.progress import STEP_LABELS
+        from anton.core.tools.generate_artifact.state import GenState
+
+        state = GenState(session=None, artifact_type="html-app", artifact_path=Path("/tmp/x"), slug="x")
+        texts = {
+            name: getattr(prompts, name)
+            for name in (
+                "ARTIFACTS_PROMPT",
+                "BACKEND_GENERATION_PROMPT",
+                "VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT",
+                "VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT",
+            )
+        }
+        for td in (tool_defs.CREATE_ARTIFACT_TOOL, tool_defs.GENERATE_ARTIFACT_TOOL):
+            texts[f"{td.name}.description"] = td.description
+            texts[f"{td.name}.prompt"] = td.prompt or ""
+        texts["pipeline_system"] = build_pipeline_system_prompt(state)
+        texts["prd_section_header"] = gen_prompts.PRD_SECTION_HEADER
+        texts["gen_html_inputs"] = gen_prompts._GEN_HTML_INPUTS
+        texts["write_prd"] = _WRITE_PRD_INSTRUCTION
+        texts["step_labels"] = "\n".join(STEP_LABELS.values())
+        return texts
+
+    def test_no_text_promises_an_agreement(self):
+        for name, text in self._texts().items():
+            for phrase in self.STALE:
+                assert phrase not in text, (name, phrase)
 
 
 class TestRecallIsConditionalNow:

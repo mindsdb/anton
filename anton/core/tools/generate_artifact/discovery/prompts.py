@@ -33,10 +33,10 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "artifact reads (each source verified with a real sample), and the "
         "points only the user can decide. No requirements, no feature lists, "
         "no design.\n"
-        "- `draft_brief` — a short proposal shown to the user for "
-        "confirmation. Anything decided without the user appears there as a "
-        "proposal, not as a fact.\n"
-        "- `write_prd` — the requirements the user agreed to.\n"
+        "- `draft_brief` — a short brief shown to the user. Anything decided "
+        "without the user appears there as a proposal or an assumption, not "
+        "as a fact.\n"
+        "- `write_prd` — the requirements from the latest brief.\n"
         "- `tech_spec` — what the build needs beyond the PRD: implementation "
         "notes and the exact values to reproduce, not a retelling.\n\n"
         f"Artifact slug: {state.slug}\n"
@@ -134,7 +134,7 @@ def restored_context(state: PrdState) -> str:
     """
     parts = [build_call_kickoff(state)]
     if state.brief.strip():
-        parts.append(f"## Brief agreed earlier\n{state.brief.strip()}")
+        parts.append(f"## Brief shown earlier\n{state.brief.strip()}")
     if state.declared_sources:
         parts.append(
             "## Data sources declared earlier\n"
@@ -163,7 +163,7 @@ GATHERING_CONTINUE = (
     "Continue gathering: call `finish_gathering` again once ready."
 )
 
-_GATHERING_INSTRUCTION = (
+_GATHERING_TEMPLATE = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
     "1. Artifact type — confirm or correct the current one.\n"
@@ -191,11 +191,7 @@ _GATHERING_INSTRUCTION = (
     "- Every decision is recorded once: either as an `assumption` (you "
     "chose) or as an `open_point` (the user chooses, with your default) — "
     "never in both lists.\n"
-    "- When the request leaves something open, either ask the user or write "
-    "your choice as ONE line under `assumptions`. Ask only when the answer "
-    "changes the artifact type or a data source, or the artifact would be "
-    "useless if guessed wrong. Taste and style are never worth a question. "
-    "One question with options beats several.\n"
+    "{when_to_ask}"
     "- A source is verified only if you ran code against it or fetched the "
     "page in this step. A source you name in `data_sources` but did not "
     "touch is fetched before generation starts — naming one is how you "
@@ -208,30 +204,75 @@ _GATHERING_INSTRUCTION = (
     "description of the page."
 )
 
-_REDRAW_SUFFIX = (
+_WHEN_TO_ASK = (
+    "- When the request leaves something open, either ask the user or write "
+    "your choice as ONE line under `assumptions`. Ask only when the answer "
+    "changes the artifact type or a data source, or the artifact would be "
+    "useless if guessed wrong. Taste and style are never worth a question. "
+    "One question with options beats several.\n"
+)
+
+_WHEN_TO_ASK_ACT_FIRST = (
+    "- When the request leaves something open, write your choice as ONE "
+    "line under `assumptions` and keep going. Ask the user only when the "
+    "artifact cannot be built without the answer and no reasonable "
+    "assumption exists — never for taste, style or scope you can pick "
+    "yourself. Leave `open_points` empty: nobody confirms the brief, so a "
+    "point left open is decided by its default anyway — record that "
+    "default as an assumption. One question with options beats several.\n"
+)
+
+
+def _gathering_instruction(act_first: bool) -> str:
+    return _GATHERING_TEMPLATE.format(
+        when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
+    )
+
+
+_GATHERING_INSTRUCTION = _gathering_instruction(False)
+
+_REDRAW_CORRECTION = (
     "\n\nThe user has already seen a brief and asked for a change; the "
     "correction is in this call's updated understanding. Redraw the brief "
     "with the correction applied. A correction can accept or reject a "
     "proposal or answer a question: whatever it settles leaves Proposals "
     "or Questions and, if kept, becomes a requirement.\n\n"
+)
+
+_REDRAW_RESTATE = (
     "Then call `finish_gathering` to re-state the artifact type and the data "
     "sources the corrected artifact needs. This is REQUIRED: if the "
     "correction introduces a source nobody has fetched yet, that call is the "
     "only thing that will cause it to be fetched."
 )
 
+_REDRAW_CORRECTION_ACT_FIRST = (
+    "\n\nThe user has seen the brief or the finished artifact and called "
+    "again; any correction is in this call's updated understanding. Redraw "
+    "the brief with it applied. If the updated understanding only restates "
+    "the request, keep the brief as it is — do not invent a change. A "
+    "correction can accept or reject an assumption: whatever it settles "
+    "leaves Assumptions and, if kept, becomes a requirement.\n\n"
+)
 
-def _step_instructions() -> dict[str, str]:
+
+def _redraw_suffix(act_first: bool) -> str:
+    return (_REDRAW_CORRECTION_ACT_FIRST if act_first else _REDRAW_CORRECTION) + _REDRAW_RESTATE
+
+
+def _step_instructions(act_first: bool = False) -> dict[str, str]:
     """Built lazily so the instruction texts stay in the modules that own
-    them — brief.py and prd.py — rather than being copied here."""
-    from .brief import _DRAFT_BRIEF_INSTRUCTION
+    them — brief.py and prd.py — rather than being copied here. `act_first`
+    picks the variants for the no-confirmation flow; they live in step
+    messages, so the cached prefix is the same in both modes."""
+    from .brief import draft_brief_instruction
     from .prd import _WRITE_PRD_INSTRUCTION
     from . import sub_tools
 
     return {
-        sub_tools.STEP_GATHERING: _GATHERING_INSTRUCTION,
-        sub_tools.STEP_DRAFT_BRIEF: _DRAFT_BRIEF_INSTRUCTION,
-        sub_tools.STEP_REDRAW_BRIEF: _DRAFT_BRIEF_INSTRUCTION + _REDRAW_SUFFIX,
+        sub_tools.STEP_GATHERING: _gathering_instruction(act_first),
+        sub_tools.STEP_DRAFT_BRIEF: draft_brief_instruction(act_first),
+        sub_tools.STEP_REDRAW_BRIEF: draft_brief_instruction(act_first) + _redraw_suffix(act_first),
         sub_tools.STEP_WRITE_PRD: _WRITE_PRD_INSTRUCTION,
     }
 
@@ -252,9 +293,9 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
     if step == sub_tools.STEP_GATHERING:
         header += (
             "Questions you may still ask the user: "
-            f"{gathering_question_budget(state.session)}\n"
+            f"{gathering_question_budget(state.session, act_first=state.act_first)}\n"
         )
-    body = _step_instructions()[step]
+    body = _step_instructions(state.act_first)[step]
     # No history to continue → the step is handed the restored material
     # instead. The redraw suffix in particular refers to a correction that is
     # only "above" when there is a conversation above.

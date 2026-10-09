@@ -24,10 +24,12 @@ class FeedbackVerdict(BaseModel):
     reasoning: str
 
 
-_DRAFT_BRIEF_INSTRUCTION = (
+# One template for both modes; the slots are the only places where acting
+# first differs from asking for confirmation.
+_DRAFT_BRIEF_TEMPLATE = (
     "## Your task\n"
     "Turn what the gathering step recorded into a SHORT proposal for the "
-    "user to confirm. Your input is what the gathering step recorded above "
+    "{audience}. Your input is what the gathering step recorded above "
     "— its `constraints`, `assumptions`, `open_points` and `data_findings` "
     "— or, when this conversation has no such record, the `## Assumptions "
     "recorded earlier` / `## Open points recorded earlier` sections. Do not "
@@ -54,27 +56,66 @@ _DRAFT_BRIEF_INSTRUCTION = (
     "the `constraints`, as plain-language behavior and look. Do NOT add "
     "anything from `assumptions` here. Omit the section if there is nothing "
     "beyond the goal.\n"
-    "- Proposals — one line per `assumption`, phrased as a proposal. This "
-    "is where everything decided without the user goes, so they can see it "
-    "and object. Omit only if there are no assumptions.\n"
-    "- Questions — one line per `open_point`, each ending with the default "
-    "that applies if the user simply continues (e.g. \"(default: no)\"). "
-    "Omit if there are none.\n\n"
-    "Every section is short: a summary before confirmation, not the final "
-    "document. Sections legitimately end up short or missing when the user "
-    "asked for little — do not pad them. No code, CSS/JS syntax, hex "
-    "colors, exact pixel/unit sizes, or library/framework names; that level "
-    "of detail belongs in the full PRD, after acceptance.\n\n"
-    "End with two short lines: one saying that if the user continues, the "
-    "proposals and the defaults above are used as they are; then one "
-    "closing line asking the user to continue or say what to change. Do "
-    "NOT describe how to answer: no key names, no button names, no option "
-    "numbers, and do not invent your own accept/cancel option labels — the "
-    "host renders the actual choices.\n\n"
+    "{sections}"
+    "Every section is short: {shortness}. Sections legitimately end up "
+    "short or missing when the user asked for little — do not pad them. No "
+    "code, CSS/JS syntax, hex colors, exact pixel/unit sizes, or "
+    "library/framework names; that level of detail belongs in the full "
+    "PRD{after_prd}.\n\n"
+    "{closing}"
     "Write everything — lead-in, sections, closing line — in the same "
     "language as the user request. Keep the whole reply under about 25 "
     "lines. Reply with the brief only, no other text."
 )
+
+_CONFIRM_SLOTS = dict(
+    audience="user to confirm",
+    sections=(
+        "- Proposals — one line per `assumption`, phrased as a proposal. This "
+        "is where everything decided without the user goes, so they can see it "
+        "and object. Omit only if there are no assumptions.\n"
+        "- Questions — one line per `open_point`, each ending with the default "
+        "that applies if the user simply continues (e.g. \"(default: no)\"). "
+        "Omit if there are none.\n\n"
+    ),
+    shortness="a summary before confirmation, not the final document",
+    after_prd=", after acceptance",
+    closing=(
+        "End with two short lines: one saying that if the user continues, the "
+        "proposals and the defaults above are used as they are; then one "
+        "closing line asking the user to continue or say what to change. Do "
+        "NOT describe how to answer: no key names, no button names, no option "
+        "numbers, and do not invent your own accept/cancel option labels — the "
+        "host renders the actual choices.\n\n"
+    ),
+)
+
+_ACT_FIRST_SLOTS = dict(
+    audience="user to read while it is being built",
+    sections=(
+        "- Assumptions — one line per `assumption` and per `open_point`, each "
+        "stating the choice being used (for an open point, its default). This "
+        "is where everything decided without the user goes, so they can see it "
+        "and ask for a change later. Omit only if there are none.\n\n"
+    ),
+    shortness="a summary of what is being built, not the final document",
+    after_prd="",
+    closing=(
+        "End with one short line saying the artifact is being built with these "
+        "assumptions now and the user can ask for changes once it is ready. Do "
+        "NOT ask the user anything and do NOT ask them to confirm or continue: "
+        "the brief is shown while the build is already running.\n\n"
+    ),
+)
+
+
+def draft_brief_instruction(act_first: bool = False) -> str:
+    """The brief step's instruction: confirm-first unless acting first."""
+    return _DRAFT_BRIEF_TEMPLATE.format(**(_ACT_FIRST_SLOTS if act_first else _CONFIRM_SLOTS))
+
+
+_DRAFT_BRIEF_INSTRUCTION = draft_brief_instruction(False)
+
 
 async def draft_brief(state: PrdState) -> None:
     """Phase 2 step 1: draft the short brief. Continues `state.messages` —
@@ -85,6 +126,28 @@ async def draft_brief(state: PrdState) -> None:
     )
     state.messages.append({"role": "assistant", "content": state.brief})
     state.trace_log.node("draft_brief", "done", detail=state.brief[:200])
+
+
+def announce_brief(state: PrdState) -> None:
+    """Act-first: show the brief as an agent message and do not wait.
+
+    It goes out on the progress channel so it keeps its place among the step
+    lines. Sent only where the registry will relay it (`renders_tool_messages`);
+    elsewhere `brief_shown` stays False, which tells the calling agent to
+    relay the assumptions itself.
+    """
+    from anton.core.tools.progress import renders_tool_messages
+
+    from ..progress import MESSAGE_PREFIX
+
+    deliverable = state.progress is not None and renders_tool_messages(state.session)
+    if state.brief.strip() and deliverable:
+        state.progress.put_nowait(MESSAGE_PREFIX + state.brief)
+        state.brief_shown = True
+        outcome = "shown"
+    else:
+        outcome = "not_rendered"
+    state.trace_log.node("announce_brief", outcome, detail=state.brief[:200])
 
 
 async def show_and_confirm(state: PrdState) -> str:

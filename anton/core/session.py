@@ -220,6 +220,18 @@ def _discarded_call_reason(tc: ToolCall) -> str:
     return "Discarded: the round it belonged to was cut off"
 
 
+def _known_scratchpad_action(tc: ToolCall) -> str | None:
+    """The call's `action` if it is one the scratchpad schema allows, else None.
+
+    A cut-off call carries whatever the model wrote, and a consumer reads
+    `StreamToolResult.action` as ours: `"message"`, for one, means a tool's
+    message to the user.
+    """
+    action = tc.input.get("action") if isinstance(tc.input, dict) else None
+    allowed = SCRATCHPAD_TOOL.input_schema["properties"]["action"]["enum"]
+    return action if action in allowed else None
+
+
 def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
     """Everything a consumer needs to retire the step of a call we refuse to run.
 
@@ -256,7 +268,7 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         StreamToolResult(
             name="scratchpad",
             content=f"[error] exec failed — {reason}",
-            action=tc.input.get("action") if isinstance(tc.input, dict) else None,
+            action=_known_scratchpad_action(tc),
             id=tc.id,
         ),
     ]
@@ -1377,6 +1389,12 @@ class ChatSessionConfig:
     # capability the host declares, like `elicitor`, never inferred from
     # `surface` or `console`: those answer different questions.
     live_tool_peek: bool = False
+    # Whether this host renders a tool's message to the user — a
+    # `StreamToolResult(action="message")`, e.g. generate_artifact's brief when
+    # the agent acts first — as an agent message. Declared by the host like
+    # `live_tool_peek`; without it the relay drops the message and the tool
+    # hands the content to the agent instead.
+    tool_messages: bool = False
     # WHO the user is, for analytics attribution only (ENG-2121): the Keycloak
     # ``sub`` and the active organisation id, both UUIDs. ``turn_completed``
     # is keyed on ``user_id`` when it is set, which is the same distinct_id the
@@ -1608,6 +1626,7 @@ class ChatSession:
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
         self.live_tool_peek = config.live_tool_peek
+        self.tool_messages = config.tool_messages
         self._user_id = _validated_account_id(config.user_id)
         self._organization_id = _validated_account_id(config.organization_id)
         # Per-turn token cost books (ENG-1288). Created and armed at each
@@ -1771,6 +1790,11 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    @property
+    def act_first(self) -> bool:
+        """The "act first, ask later" setting this session was built with."""
+        return self._act_first
 
     @property
     def artifacts_touched(self) -> set[str]:

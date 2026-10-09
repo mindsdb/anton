@@ -534,6 +534,7 @@ async def generate(
         trace_log=trace,
         progress=progress,
         spend=SpendGuard(session=session),
+        act_first=bool(getattr(session, "act_first", False)),
     )
     # The fence in `resolve_attachments` needs the workspace the paths are
     # supposed to be inside of; a session without one (bench, some tests)

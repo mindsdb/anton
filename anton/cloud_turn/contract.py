@@ -79,6 +79,9 @@ Events written back on stdout (JSONL):
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
 `round_end`. A `heartbeat` only resets the controller's stall timer.
+A `tool_result` with `action: "message"` is a tool's message to the user,
+rendered as an agent message; the pod sends it only when the request set
+`tool_messages`.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
@@ -212,6 +215,12 @@ class TurnRequestV1:
     #: answer lines from stdin. Anything but a JSON `true` reads as False, so a
     #: controller that does not know the field leaves every turn non-interactive.
     interactive: bool = False
+    #: Whether the client watching this turn renders a tool's message to the
+    #: user (a `tool_result` with `action: "message"`) as an agent message —
+    #: the cowork UI does, channel bots do not. Without it the pod drops those
+    #: messages and the tool hands the content to the agent instead. Anything
+    #: but a JSON `true` reads as False.
+    tool_messages: bool = False
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
@@ -246,6 +255,7 @@ class TurnRequestV1:
                 d.get("started_at") if isinstance(d.get("started_at"), str) else None
             ),
             interactive=d.get("interactive") is True,
+            tool_messages=d.get("tool_messages") is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None

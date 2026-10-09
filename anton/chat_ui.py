@@ -221,6 +221,18 @@ class QuestionRenderTracker:
             self._rendered.pop(question_id, None)
 
 
+def is_displayed_tool_result(event) -> bool:
+    """Whether the CLI prints this `StreamToolResult` permanently.
+
+    A scratchpad dump is the user's own request to see the cells; a tool's
+    `message` is written for the user. Every other result is the agent's
+    input and stays off the screen.
+    """
+    if event.action == "message":
+        return True
+    return event.name == "scratchpad" and event.action == "dump"
+
+
 class StreamDisplay:
     """Manages streaming LLM output with permanent prints and a tiny Live spinner.
 

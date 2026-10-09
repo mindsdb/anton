@@ -23,7 +23,7 @@ STEP_LABELS: dict[str, str] = {
     "gathering": "Gathering what the artifact needs",
     "draft_brief": "Preparing a short brief for you",
     "redraw_brief": "Updating the brief with your changes",
-    "write_prd": "Writing down the agreed requirements",
+    "write_prd": "Writing down the requirements",
     "define_required_data": "Working out what data is still missing",
     "is_possible_to_fetch": "Checking whether the missing data can be obtained",
     "fetch_data_sample": "Fetching a data sample",
@@ -152,6 +152,11 @@ def label_for(
 # printed on top of a live prompt.
 QUESTION_OPEN = "\x00question-open"
 QUESTION_CLOSED = "\x00question-closed"
+
+# A message for the user (the brief, when the agent acts first) rides the same
+# queue so it keeps its place among the step lines. The text after the prefix
+# is markdown; the handler relays it as `ToolProgress(kind="message")`.
+MESSAGE_PREFIX = "\x00message:"
 
 # A live tail of the reply being streamed rides on the same queue, prefixed so
 # the handler can tell it from a step line: a step line is printed once and

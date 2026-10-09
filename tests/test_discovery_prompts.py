@@ -210,6 +210,12 @@ def test_restored_context_carries_assumptions_and_open_points():
     assert "count cancelled orders?" in text
 
 
+def test_restored_context_labels_the_brief_as_shown_not_agreed():
+    text = restored_context(_state(brief="## Goal\nA clock."))
+    assert "## Brief shown earlier" in text
+    assert "agreed" not in text
+
+
 def test_restored_context_omits_empty_assumption_sections():
     text = restored_context(_state())
     assert "Assumptions recorded earlier" not in text
@@ -262,3 +268,51 @@ def test_the_pads_context_comes_from_where_the_guard_looks():
     assert "launcher-slug" not in text
     assert engine._scratchpads_context(N()) == ""
     assert engine._scratchpads_context(N(_agent_scratchpad_names=set(), _scratchpads=None)) == ""
+
+
+def test_gathering_in_act_first_asks_only_what_blocks_the_build():
+    message = step_message(sub_tools.STEP_GATHERING, _state(act_first=True))
+    assert "no reasonable assumption" in message
+    assert "Leave `open_points` empty" in message
+    assert "Ask only when the answer changes the artifact type" not in message
+
+
+def test_gathering_keeps_the_confirm_rule_by_default():
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "Ask only when the answer changes the artifact type" in message
+    assert "no reasonable assumption" not in message
+
+
+def test_act_first_gives_gathering_the_questions_reserved_for_the_brief():
+    from anton.core.tools.generate_artifact.state import gathering_question_budget
+
+    session = SimpleNamespace(question_count=0)
+    assert gathering_question_budget(session) == 5
+    assert gathering_question_budget(session, act_first=True) == 8
+    message = step_message(sub_tools.STEP_GATHERING, _state(act_first=True))
+    assert "Questions you may still ask the user: 8" in message
+
+
+def test_brief_steps_use_the_act_first_variants():
+    state = _state(act_first=True)
+    draft = step_message(sub_tools.STEP_DRAFT_BRIEF, state)
+    redraw = step_message(sub_tools.STEP_REDRAW_BRIEF, state)
+    assert "- Assumptions — one line per" in draft
+    assert "seen the brief or the finished artifact" in redraw
+    assert "leaves Assumptions" in redraw
+    assert "finish_gathering" in redraw
+
+
+def test_brief_steps_keep_the_confirm_variants_by_default():
+    state = _state()
+    assert "- Proposals — one line per" in step_message(sub_tools.STEP_DRAFT_BRIEF, state)
+    assert "has already seen a brief" in step_message(sub_tools.STEP_REDRAW_BRIEF, state)
+
+
+def test_the_pipeline_prompt_does_not_promise_a_confirmation():
+    """The system prompt is shared by both modes; in act-first nothing is
+    confirmed, so it must not say the brief is."""
+    text = build_pipeline_system_prompt(_state())
+    assert "for confirmation" not in text
+    assert "the user agreed to" not in text
+    assert "`draft_brief` — a short brief shown to the user" in text

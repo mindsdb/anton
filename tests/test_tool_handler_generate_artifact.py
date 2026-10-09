@@ -47,11 +47,9 @@ def _session(tmp_path: Path):
     )
 
 
-def _make_artifact(tmp_path: Path) -> str:
+def _make_artifact(tmp_path: Path, type: str = "fullstack-stateless-app") -> str:
     store = ArtifactStore(tmp_path / "artifacts")
-    return store.create(
-        name="Clock", description="d", type="fullstack-stateless-app"
-    ).slug
+    return store.create(name="Clock", description="d", type=type).slug
 
 
 async def test_fsm_failure_is_wrapped_with_report_instruction(tmp_path: Path, monkeypatch):
@@ -406,6 +404,29 @@ async def test_nested_question_sentinels_do_not_unmute_early():
     assert lines == ["Designing the API"]
 
 
+async def test_a_message_line_becomes_a_message_marker_in_place():
+    import asyncio
+
+    from anton.core.tools.generate_artifact.progress import MESSAGE_PREFIX
+    from anton.core.tools.tool_handlers import _drain_progress
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for item in (
+        "Preparing a short brief for you",
+        MESSAGE_PREFIX + "## Brief\nline two",
+        "Writing down the requirements",
+        None,
+    ):
+        queue.put_nowait(item)
+
+    markers = [(m.kind, m.text) async for m in _drain_progress(queue)]
+    assert markers == [
+        ("step", "Preparing a short brief for you"),
+        ("message", "## Brief\nline two"),
+        ("step", "Writing down the requirements"),
+    ]
+
+
 async def test_the_brief_confirmation_mutes_progress(tmp_path):
     """The longest question of the run goes through `show_and_confirm`, which
     reaches `elicit` on its own path. Wrapping only the `ask_user` sub-tool
@@ -729,3 +750,62 @@ def test_the_attachments_field_tells_the_agent_what_qualifies():
     assert "outside the workspace" in desc and "`.anton/`" in desc
     assert "Only files the user actually provided" in desc
     assert "`attachments` (optional)" in GENERATE_ARTIFACT_TOOL.description
+
+
+async def test_act_first_relays_the_brief_between_the_steps_and_reports_it(
+    tmp_path, monkeypatch, make_llm_response,
+):
+    """The whole chain: the session flag reaches `GenState` in
+    `engine.generate`, the brief goes out as a message marker between the
+    step lines, and the result tells the agent the user saw it."""
+    import json
+
+    from anton.core.llm.provider import ToolCall
+    from anton.core.tools.generate_artifact import orchestrator as fsm
+
+    slug = _make_artifact(tmp_path, type="html-app")
+    session = _session(tmp_path)
+    session.__dict__.update(
+        _llm=SimpleNamespace(plan=AsyncMock(side_effect=[
+            make_llm_response(tool_calls=[ToolCall(
+                id="tc1", name="finish_gathering",
+                input={"summary": "ok", "artifact_type": "html-app"},
+            )]),
+            make_llm_response("## Goal\nAn analog clock."),       # draft_brief
+            make_llm_response("## Goal\nAn analog clock, full."),  # write_prd
+        ])),
+        question_count=0, elicitor=None, emit=AsyncMock(),
+        act_first=True, tool_messages=True, emitter=object(),
+        # Not the developer's own vault: its connections would leak into the kickoff.
+        _data_vault=SimpleNamespace(list_connections=lambda: []),
+    )
+    monkeypatch.delenv("ANTON_DEBUG_ARTIFACT_GENERATE_TOOL", raising=False)
+
+    async def skipped(state, *args, **kwargs):
+        return None
+
+    for name in ("_data_phase", "_write_tech_spec", "_gen_verify_frontend"):
+        monkeypatch.setattr(fsm, name, skipped)
+
+    markers, result = [], None
+    async for item in handle_generate_artifact(session, {
+        "slug": slug, "user_request": "a clock", "agent_understanding": "an analog clock",
+    }):
+        if isinstance(item, ToolProgress):
+            markers.append((item.kind, item.text))
+        else:
+            result = item
+
+    kinds = [k for k, _ in markers]
+    assert kinds.count("message") == 1
+    at = kinds.index("message")
+    assert markers[at][1] == "## Goal\nAn analog clock."
+    assert any(t.startswith("Preparing a short brief") for k, t in markers[:at] if k == "step")
+    assert any(t.startswith("Writing down the") for k, t in markers[at + 1:] if k == "step")
+
+    payload = json.loads(result.content)
+    assert payload["status"] == "generated"
+    assert payload["brief_shown"] is True
+    # Already shown: the text is not resent into the agent's history.
+    assert "brief_summary" not in payload
+    assert "brief_shown" in payload["instruction"]

@@ -507,7 +507,7 @@ HTML_APP_DEFAULT_PRIMARY = "index.html"
 _GEN_HTML_INPUTS = """\
 ## What you receive
 The user message carries these sections, in this order (some may be absent):
-- `## Product requirements` (prd.md) — reviewed and accepted by the user.
+- `## Product requirements` (prd.md) — written from the latest brief.
   This is the authoritative source; where anything else disagrees with it,
   the PRD wins. It ends at `{prd_footer}`.
 - `## Brief` — only when there is no PRD: the request as the calling agent
@@ -1123,7 +1123,7 @@ _DATA_CONTEXT_HEADER = (
 
 
 PRD_SECTION_HEADER = (
-    "## Product requirements (prd.md — reviewed and accepted by the user; "
+    "## Product requirements (prd.md — written from the latest brief; "
     "this is the authoritative requirements source)"
 )
 PRD_SECTION_FOOTER = "--- end of prd.md ---"
@@ -1134,7 +1134,7 @@ def prd_section(state) -> str:
 
     The header states the document's standing rather than leaving the node to
     infer it from position: the same context carries `spec.md` and the data
-    record, and on any disagreement the accepted PRD wins. (The brief travels
+    record, and on any disagreement the PRD wins. (The brief travels
     only when there is no PRD — see `orchestrator._spec_context`.) One
     renderer for every node, so no node reads a differently-framed PRD.
 
