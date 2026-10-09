@@ -155,7 +155,7 @@ def _tds(cells, numeric) -> str:
 _TABLE_WRAP = '<div class="table-wrap">'
 
 
-def _table_wrap(columns, numeric, trs, *, table_attrs: str = "", caption: str = "") -> str:
+def _table_html(columns, numeric, trs, *, table_attrs: str = "", caption: str = "") -> str:
     """A scrollable table, one row per line. ``trs`` are whole ``<tr>`` elements."""
     head = "<thead><tr>" + "".join(
         f'<th scope="col"{" class=num" if n else ""}>{_esc(c)}</th>' for c, n in zip(columns, numeric)) + "</tr></thead>"
@@ -170,7 +170,7 @@ def table(columns, rows, *, caption: str | None = None, id: str | None = None) -
     numeric = _numeric_columns(body, len(columns))
     cap = f"<caption>{_esc(caption)}</caption>" if caption else ""
     trs = [f"<tr>{_tds(r, numeric)}</tr>" for r in body]
-    return Html(_table_wrap(columns, numeric, trs, table_attrs=_attr_id(id), caption=cap))
+    return Html(_table_html(columns, numeric, trs, table_attrs=_attr_id(id), caption=cap))
 
 
 def bar_chart(labels, values, *, name: str, value_label: str = "Value", threshold: float | None = None,
@@ -244,7 +244,7 @@ def filter_table(columns, rows, *, key: str, label: str, region_name: str, value
         + "".join(f'<option value="{_esc(o)}">{_esc(o) or "(blank)"}</option>\n' for o in options) + "</select>\n"
         f'<div role="region" aria-label="{_esc(region_name)}"><h3>{_esc(region_name)}</h3>\n{total_html}'
         f'<p data-rt-empty{" hidden" if shown else ""}>{_esc(empty_text)}</p>\n'
-        + _table_wrap(columns, numeric, trs) + "</div>\n</div>\n"
+        + _table_html(columns, numeric, trs) + "</div>\n</div>\n"
     )
 
 
@@ -458,11 +458,13 @@ class _Locator(HTMLParser):
 _LEADING_HEADING = re.compile(r"\s*<h([1-6])\b[^>]*>.*?</h\1\s*>(?:\r?\n)?", re.I | re.S)
 
 
-def _newline_at(text: str, at: int) -> str:
-    """The line break that starts at ``at``, or ""."""
-    if text.startswith("\r\n", at):
-        return "\r\n"
-    return "\n" if text.startswith("\n", at) else ""
+_EOL = re.compile(r"\r?\n")
+
+
+def _block_end(text: str, end: int) -> int:
+    """``end`` moved past the line break that ends a block there, if any."""
+    found = _EOL.match(text, end)
+    return found.end() if found else end
 
 
 def _page_eol(text: str) -> str:
@@ -470,12 +472,12 @@ def _page_eol(text: str) -> str:
 
     Not "any \\r\\n in the page": a value shown as text may carry one.
     """
-    first = re.search(r"\r?\n", text)
+    first = _EOL.search(text)
     return first.group() if first else "\n"
 
 
 def _with_eol(markup: str, eol: str) -> str:
-    return re.sub(r"\r?\n", eol, markup) if eol != "\n" else markup
+    return _EOL.sub(eol, markup) if eol != "\n" else markup
 
 
 def _locate(text: str) -> _Locator:
@@ -537,24 +539,22 @@ def update(path, changes: dict) -> dict:
     for id_, content in changes.items():
         if isinstance(content, Html) and _carries_id(content, id_):
             start, end = _one(locator.outer, id_)
-            new = _with_eol(str(content), eol)
+            new = str(content)
             # rt.table brings its own wrapper; replacing only the <table> would nest it in the old one.
             if new.startswith(_TABLE_WRAP) and text.endswith(_TABLE_WRAP, 0, start) and text.startswith("</div>", end):
                 start, end = start - len(_TABLE_WRAP), end + len("</div>")
-            # The page already breaks the line after the element.
-            after = _newline_at(text, end)
-            if after and new.endswith(after):
-                new = new[:-len(after)]
+            if new.endswith("\n"):
+                end = _block_end(text, end)  # the new block brings its own line break
         elif isinstance(content, str):
             start, end = _one(locator.spans, id_)
-            new = _with_eol(_esc(content), eol)
+            new = _esc(content)
             heading = _LEADING_HEADING.match(text, start, end)
             if heading and not re.match(r"\s*<h[1-6]\b", new, re.I):
                 new = heading.group(0) + new
         else:
             start, end = _one(locator.spans, id_)
             new = _json_text(content)
-        edits.append((start, end, new))
+        edits.append((start, end, _with_eol(new, eol)))
     edits.sort()
     for (s1, e1, _), (s2, _e2, _) in zip(edits, edits[1:]):
         if s2 < e1:
@@ -586,9 +586,9 @@ def insert(path, content, *, before: str | None = None, after: str | None = None
     text = _read(path)
     start, end = _one(_locate(text).outer, before or after)
     new = _with_eol(_esc(content), _page_eol(text))
-    at = start if before is not None else end
-    if after is not None and isinstance(content, Html) and new.endswith("\n"):
-        at += len(_newline_at(text, end))
+    at = start
+    if after is not None:
+        at = _block_end(text, end) if isinstance(content, Html) and new.endswith("\n") else end
     out = text[:at] + new + text[at:]
     if "data-rt-filter" in new:
         out = _with_filter_script(out)

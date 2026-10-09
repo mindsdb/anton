@@ -36,7 +36,7 @@ def test_blocks_and_rows_are_on_their_own_lines_and_text_has_no_line_breaks():
                  rt.data("state", {"v": 1}), subtitle="Week 41")
     body = page[page.index("</style>"):].replace(rt._FILTER_SCRIPT, "")
     # A line break inside text would show as a space.
-    assert all(body[i - 1] == ">" and body[i + 1:i + 2] in ("<", "") for i, c in enumerate(body) if c == "\n")
+    assert not re.search(r"[^>]\n|\n[^<]", body)
     lines = body.splitlines()
     for line in ("<p>One.</p>", "<li>y</li>", "<tr><td>C-300</td><td>North</td><td class=num>25</td></tr>",
                  "</section>", "</main>", '<option value="South">South</option>'):
