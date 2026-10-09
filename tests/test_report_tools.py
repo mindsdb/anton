@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from html.parser import HTMLParser
@@ -26,6 +27,26 @@ def test_page_is_a_complete_offline_document(tmp_path):
     assert 'name="viewport"' in text and "<title>Weekly review</title>" in text
     assert "http" not in text.split("<style>")[0]
     assert rt.check(out)["title"] == "Weekly review"
+
+
+def test_blocks_and_rows_are_on_their_own_lines_and_text_has_no_line_breaks():
+    page = _page(rt.section("Summary", rt.para("One.", "Two."), rt.bullets(["x", "y"])),
+                 rt.section("Detail", rt.table(COLS, ROWS, caption="Gaps"), rt.bar_chart(["a", "b"], [1, 2], name="n")),
+                 rt.filter_table(COLS, ROWS, key="Region", label="Region", region_name="Items", value="Gap"),
+                 rt.data("state", {"v": 1}), subtitle="Week 41")
+    body = page[page.index("</style>"):].replace(rt._FILTER_SCRIPT, "")
+    # A line break inside text would show as a space.
+    assert not re.search(r"[^>]\n|\n[^<]", body)
+    lines = body.splitlines()
+    for line in ("<p>One.</p>", "<li>y</li>", "<tr><td>C-300</td><td>North</td><td class=num>25</td></tr>",
+                 "</section>", "</main>", '<option value="South">South</option>'):
+        assert line in lines
+    assert sum(line.startswith('<tr data-rt-key="') for line in lines) == len(ROWS)
+    assert sum(line.startswith('<text x="') for line in lines) == 2
+    # Inline neighbours stay together: the filter's label and select, text and a link in a section.
+    assert '</label><select id="items-filter-select">' in body
+    assert '<h2>Sources</h2>\nSee <a href="a.csv">a</a>.</section>\n' in rt.section(
+        "Sources", "See ", rt.link("a.csv", "a"), ".")
 
 
 def test_text_from_data_is_escaped_everywhere(tmp_path):
@@ -162,7 +183,7 @@ def test_update_and_insert_find_elements_after_non_newline_line_breaks(tmp_path,
     out.write_text(original, encoding="utf-8")
     rt.update(out, {"detail": rt.para("new")})
     rt.insert(out, rt.para("note"), after="detail")
-    expected = original.replace("\n<p>old</p>\n", "<p>new</p>").replace("</section>", "</section><p>note</p>")
+    expected = original.replace("<p>old</p>", "<p>new</p>").replace("</section>\n", "</section>\n<p>note</p>\n")
     assert out.read_text(encoding="utf-8") == expected
 
 
@@ -173,8 +194,51 @@ def test_update_and_insert_keep_line_endings(tmp_path):
     out.write_bytes(original)
     receipt = rt.update(out, {"total": "12"})
     rt.insert(out, rt.para("added"), after="note")
-    assert out.read_bytes() == original.replace(b">10<", b">12<").replace(b"x</p>", b"x</p><p>added</p>")
+    assert out.read_bytes() == original.replace(b">10<", b">12<").replace(b"x</p>\r\n", b"x</p>\r\n<p>added</p>\r\n")
     assert receipt["bytes_before"] == len(original)
+
+
+def test_update_and_insert_keep_one_block_per_line(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Summary", rt.para("Old."), id="summary"),
+                                             rt.section("Detail", rt.para("Rows."), id="detail")))
+    rt.update(out, {"summary": rt.para("New.")})
+    rt.update(out, {"detail": rt.section("Detail", rt.para("More rows."), id="detail")})
+    rt.insert(out, rt.section("Notes", rt.para("A."), id="notes"), after="summary")
+    rt.insert(out, rt.section("Audit", rt.para("B."), id="audit"), before="detail")
+    rebuilt = _page(rt.section("Summary", rt.para("New."), id="summary"),
+                    rt.section("Notes", rt.para("A."), id="notes"),
+                    rt.section("Audit", rt.para("B."), id="audit"),
+                    rt.section("Detail", rt.para("More rows."), id="detail"))
+    assert out.read_text() == rebuilt
+
+
+def test_insert_keeps_inline_content_next_to_its_anchor(tmp_path):
+    out = tmp_path / "legacy.html"
+    original = '<html lang="en"><body>\n<p>See <span id="ref">the table</span>\nbelow.</p>\n</body></html>\n'
+    out.write_text(original)
+    rt.insert(out, rt.inline(" (", rt.link("t.csv", "csv"), ")"), after="ref")
+    rt.insert(out, "[1]\n", after="ref")  # plain text is never a block, even with a trailing line break
+    assert out.read_text() == original.replace("</span>", '</span>[1]\n (<a href="t.csv">csv</a>)')
+
+
+def test_edits_on_a_crlf_page_add_no_bare_line_feeds(tmp_path):
+    out = tmp_path / "crlf.html"
+    built = _page(rt.section("Summary", rt.para("Old."), id="summary"), rt.section("Detail", id="detail"))
+    out.write_bytes(built.replace("\n", "\r\n").encode())
+    rt.update(out, {"summary": rt.section("Summary", rt.para("New."), id="summary"), "detail": rt.para("Rows.")})
+    rt.insert(out, rt.filter_table(COLS, ROWS, key="Region", label="Region", region_name="Items"), after="detail")
+    data = out.read_bytes()
+    assert re.search(rb"(?<!\r)\n", data) is None and b"\r\r" not in data
+    assert data.replace(b"\r\n", b"\n").decode().count(rt._FILTER_SCRIPT) == 1
+    assert b'<section id="summary"><h2>Summary</h2>\r\n<p>New.</p>\r\n</section>\r\n<section id="detail">' in data
+    assert b"<h2>Detail</h2>\r\n<p>Rows.</p>\r\n</section>\r\n<div class=\"filter\"" in data
+
+
+def test_a_crlf_inside_text_does_not_make_new_markup_crlf(tmp_path):
+    out = rt.save(tmp_path / "r.html", _page(rt.section("Notes", rt.para("line 1\r\nline 2"), id="notes")))
+    rt.insert(out, rt.section("More", rt.para("x"), id="more"), after="notes")
+    rt.update(out, {"more": rt.section("More", rt.para("y"), id="more")})
+    assert out.read_bytes().count(b"\r\n") == 1
 
 
 def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path):
@@ -182,8 +246,8 @@ def test_update_keeps_a_section_heading_unless_the_new_content_has_one(tmp_path)
                                              rt.section("Detail", rt.para("Rows."), id="detail")))
     rt.update(out, {"conclusion": rt.para("New."), "detail": rt.inline(rt.Html("<h2>Row detail</h2>"), rt.para("R."))})
     text = out.read_text()
-    assert '<section id="conclusion"><h2>Conclusion</h2><p>New.</p></section>' in text
-    assert '<section id="detail"><h2>Row detail</h2><p>R.</p></section>' in text
+    assert rt.section("Conclusion", rt.para("New."), id="conclusion") in text
+    assert '<section id="detail"><h2>Row detail</h2><p>R.</p>\n</section>' in text
     assert rt.check(out)["text"].count("Conclusion") == 1
 
 
@@ -193,10 +257,14 @@ def test_update_with_a_whole_element_of_the_same_id_replaces_the_element(tmp_pat
     rt.update(out, {"summary-section": rt.section("Summary", rt.para("New.")),
                     "detail": rt.table(COLS, ROWS, id="detail")})
     text = out.read_text()
-    assert '<section id="summary-section"><h2>Summary</h2><p>New.</p></section>' in text
+    assert rt.section("Summary", rt.para("New.")) + '<section id="detail-section">' in text
     assert text.count('id="summary-section"') == 1 and "Old." not in text
     seen = rt.check(out)  # no duplicate ids, no table nested in a table
     assert [t["rows"] for t in seen["tables"]] == [[[str(c) for c in r] for r in ROWS]]
+    # The table's scroll wrapper is replaced too, not nested again on every update.
+    rt.update(out, {"detail": rt.table(COLS, ROWS[1:], id="detail")})
+    assert out.read_text() == _page(rt.section("Summary", rt.para("New.")),
+                                    rt.section("Detail", rt.table(COLS, ROWS[1:], id="detail")))
 
 
 def test_update_refuses_new_content_with_the_id_twice(tmp_path):
@@ -230,7 +298,7 @@ def test_insert_adds_new_parts_to_a_page_not_made_with_these_helpers(tmp_path):
     rt.insert(out, rt.para("Checked."), after="audit")
     assert receipt["inserted"] == "before detail"
     assert out.read_text() == original.replace('<section id="detail">', summary + '<section id="detail">').replace(
-        '<h2>Audit</h2></section>', '<h2>Audit</h2></section><p>Checked.</p>')
+        '<h2>Audit</h2></section>\n', '<h2>Audit</h2></section>\n<p>Checked.</p>\n')
     assert "Cover 30 &lt;units&gt;." in out.read_text()
     assert [s for s in rt.check(out)["text"].split() if s in ("Decision", "Detail", "Audit")] == ["Decision", "Detail", "Audit"]
 
@@ -328,7 +396,7 @@ def test_a_filter_added_to_a_page_brings_its_script_once(tmp_path):
     text = out.read_text()
     assert text.count(rt._FILTER_SCRIPT) == 1
     assert text.index(rt._FILTER_SCRIPT) > text.index("south-items-filter")  # runs after both filters
-    assert text.endswith(rt._FILTER_SCRIPT + "</body></html>\n")
+    assert text.endswith(rt._FILTER_SCRIPT + "</body>\n</html>\n")
     rt.check(out)
 
     legacy = tmp_path / "legacy.html"
