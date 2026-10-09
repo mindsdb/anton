@@ -493,14 +493,17 @@ def test_design_rules_forbid_content_nobody_asked_for():
     footers that neither the request nor the PRD mentioned. Both page
     prompts carry the scope rule."""
     rules = prompts._DESIGN_RULES
-    assert "render ONLY what the request and the PRD ask for" in rules
+    assert "render ONLY what the request, the PRD, `spec.md` and the API" in rules
     assert "invented brand" in rules
-    assert "they never add content" in rules
+    assert "they never add other content" in rules
+    # error states and the notes other design rules demand are not extras
+    assert "functional states (loading, empty, error and API error messages)" in rules
+    assert "chart subtitles, units, estimated or converted" in rules
     for text in (
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
-        assert "render ONLY what the request and the PRD ask for" in text
+        assert "render ONLY what the request, the PRD, `spec.md` and the API" in text
 
 
 def test_design_rules_recommend_tailwind_but_keep_hand_written_css():

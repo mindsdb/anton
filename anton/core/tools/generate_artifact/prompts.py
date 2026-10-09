@@ -134,10 +134,13 @@ USING DATA:
 # (html-app and the fullstack `static/index.html`).
 _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
-- SCOPE: render ONLY what the request and the PRD ask for. No invented brand
-  or company names, logos, taglines, marketing copy or intro paragraphs,
-  status pills or badges, footers or disclaimers unless asked. The layout
-  rules below arrange the requested content; they never add content.
+- SCOPE: render ONLY what the request, the PRD, `spec.md` and the API
+  specification ask for. No invented brand or company names, logos,
+  taglines, marketing copy or intro paragraphs, status pills or badges,
+  footers or disclaimers unless asked. Requested content includes the
+  functional states (loading, empty, error and API error messages) and what
+  the rules below require: chart subtitles, units, estimated or converted
+  notes. The layout rules arrange that content; they never add other content.
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
