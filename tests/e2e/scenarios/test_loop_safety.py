@@ -15,6 +15,11 @@ _MAX_TOOL_ROUNDS = 25
 _EFFECTIVE_CAP = _MAX_TOOL_ROUNDS + _ROUND_CAP_GRACE_ROUNDS  # ENG-1893 grace
 
 
+def _verified_env(stub):
+    # These scenarios script a verdict after a single-tool-round turn.
+    return {**base_env(stub), "ANTON_VERIFY_MIN_TOOL_ROUNDS": "1"}
+
+
 @pytest.mark.stub_only
 def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
     # Backstop fires at effective_cap + 1 — the one-time grace extension
@@ -46,7 +51,7 @@ def test_continuation_limit_respected(cfg, stub, tmp_path):
     stub.queue_text("Round 3 done.")
     stub.queue_text("BUDGET_EXHAUSTED")
     result = run_anton(["--folder", str(tmp_path)], ["do continuations", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(60))
+                       env=_verified_env(stub), timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
@@ -71,7 +76,7 @@ def test_truncated_verdict_is_retried_not_silently_dropped(cfg, stub, tmp_path):
     stub.queue_text("Finished the summary table. RETRY_VERDICT_HONOURED")
     stub.queue_verification_ok()
     result = run_anton(["--folder", str(tmp_path)], ["build me a summary", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(60))
+                       env=_verified_env(stub), timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
@@ -106,14 +111,14 @@ def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
     stub.queue_text("Which format would you like — PDF or HTML? WAITING_ON_USER")
     stub.queue_verification_waiting("assistant asked the user a question it needs answered")
     result = run_anton(["--folder", str(tmp_path)], ["make me a report", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(30))
+                       env=_verified_env(stub), timeout=cfg.timeout(30))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
     assert_output(result, "WAITING_ON_USER")
     # WAITING is a valid stop: no continuation injection may be sent.
     assert not any(
-        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        "judged the answer above unfinished" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "WAITING verdict must not trigger a continuation injection"
     # The verifier must receive truncated tool-result evidence (not just a flag),
@@ -141,7 +146,7 @@ def test_stuck_verdict_diagnoses_without_continuation(cfg, stub, tmp_path):
     stub.queue_verification_stuck("no database credentials are configured")
     stub.queue_text("STUCK_DIAGNOSIS: no DB credentials — set DB_URL and I'll retry.")
     result = run_anton(["--folder", str(tmp_path)], ["query my database", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(30))
+                       env=_verified_env(stub), timeout=cfg.timeout(30))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
@@ -149,11 +154,11 @@ def test_stuck_verdict_diagnoses_without_continuation(cfg, stub, tmp_path):
     assert_output(result, "STUCK_DIAGNOSIS")
     # STUCK is a stop, not unfinished work.
     assert not any(
-        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        "judged the answer above unfinished" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "STUCK verdict must not trigger a continuation injection"
     assert any(
-        "determined this task is stuck" in json.dumps(r.get("messages", []))
+        "judged this task stuck" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), f"STUCK diagnosis request not found. Request count: {stub.request_count}"
 
@@ -174,7 +179,7 @@ def test_stuck_diagnosis_reaches_the_next_turns_history(cfg, stub, tmp_path):
     stub.queue_text("Understood. SECOND_TURN_DONE")
     result = run_anton(["--folder", str(tmp_path)],
                        ["query my database", "ok thanks", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(40))
+                       env=_verified_env(stub), timeout=cfg.timeout(40))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")

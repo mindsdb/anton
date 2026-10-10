@@ -11,6 +11,10 @@ Modes (env ``CLOUD_TURN_FAKE_MODE``):
 * ``stray`` — replace the session builder with one whose turn writes stray
   output to stdout/FD 1/logging, then completes (proves FD isolation).
 * ``stray_fail`` — like ``stray`` but the turn raises after the stray output.
+* ``provider_fail``: the turn logs a provider error from loggers other than
+  the entrypoint's, then raises one, so stderr must hold no provider body.
+* ``provider_fail_root_configured``: like ``provider_fail``, but an unfiltered
+  root stderr handler is installed before main() runs.
 """
 
 from __future__ import annotations
@@ -92,6 +96,42 @@ def _install_stray_session(fail: bool) -> None:
     entry_mod.build_cloud_chat_session = lambda request: _StraySession()
 
 
+#: Echoed in the provider error's message and body; must never reach stderr.
+PROVIDER_PRIVATE = "provider-body-private-marker-3304"
+
+
+def _install_provider_failure_session() -> None:
+    import httpx2 as httpx
+    import openai
+
+    import anton.cloud_turn.__main__ as entry_mod
+
+    class _ProviderFailureSession:
+        def __init__(self) -> None:
+            self.history = []
+
+        async def turn_stream(self, user_input, **kwargs):
+            request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+            provider_error = openai.RateLimitError(
+                PROVIDER_PRIVATE, response=httpx.Response(429, request=request),
+                body={"message": PROVIDER_PRIVATE},
+            )
+            try:
+                raise RuntimeError("could not finish the turn") from provider_error
+            except RuntimeError as error:
+                # A sibling and a child of the entrypoint's logger, both reaching stderr.
+                logging.getLogger("anton.core.session").warning("history write failed", exc_info=True)
+                logging.getLogger("anton.cloud_turn.__main__.child").error("child failed: %s", error.__cause__)
+                raise
+            if False:  # make this an async generator
+                yield
+
+        def close(self):
+            pass
+
+    entry_mod.build_cloud_chat_session = lambda request: _ProviderFailureSession()
+
+
 def main() -> int:
     mode = os.environ.get("CLOUD_TURN_FAKE_MODE", "model")
     if mode == "model":
@@ -100,6 +140,11 @@ def main() -> int:
         _install_stray_session(fail=False)
     elif mode == "stray_fail":
         _install_stray_session(fail=True)
+    elif mode == "provider_fail":
+        _install_provider_failure_session()
+    elif mode == "provider_fail_root_configured":
+        _install_provider_failure_session()
+        logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
     else:
         raise SystemExit(f"unknown CLOUD_TURN_FAKE_MODE={mode!r}")
 

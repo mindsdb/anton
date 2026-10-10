@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -16,14 +17,25 @@ class CoreSettings(BaseSettings):
     # retries one-off at double this value.
     max_tokens: int = 8192
 
+    # How long one model call may send nothing before LLMClient stops it with
+    # ModelCallTimeoutError and the turn ends (ANTON_MODEL_CALL_IDLE_TIMEOUT_S).
+    # It restarts with every piece of text, thinking or tool-call arguments a
+    # streamed call sends; a non-streamed call is bounded over its whole
+    # duration, across the SDK's retries. 0 or less turns it off, and then a
+    # model call that never answers keeps the turn alive until the SDK, the
+    # gateway or a Stop ends it. Above 600, also raise the SDKs' 600 s read
+    # timeout: on an endpoint with no keepalives, a streamed call that goes
+    # quiet after its response starts ends at 600 s with a read-timeout error
+    # instead. Must be a finite number.
+    model_call_idle_timeout_s: float = Field(600.0, allow_inf_nan=False)
+
     # Session orchestration tuning
     max_tool_rounds: int = 25
     max_continuations: int = 3
     # Skip the completion verifier when a turn used fewer than this many tool
-    # rounds. Default 1 preserves today's behavior (only pure Q&A, tool_round==0,
-    # is skipped). Raise to 2 to also skip trivial single-tool-round turns once
-    # verdict logs confirm they're rarely INCOMPLETE (ENG-716).
-    verify_min_tool_rounds: int = 1
+    # rounds. At 2, pure Q&A and single-tool-round turns skip it: prod data showed
+    # it sent back fewer than 2.5% of single-round turns, so the call rarely pays.
+    verify_min_tool_rounds: int = 2
     # Jev settles confident COMPLETE/WAITING verdicts on MindsHub; everything else,
     # and every BYOK setup, uses the LLM verifier as before. "off" is the kill switch.
     verifier_jev: Literal["on", "off"] = "on"

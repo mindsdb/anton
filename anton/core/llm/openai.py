@@ -12,8 +12,6 @@ from contextlib import aclosing
 
 from openai import AsyncAzureOpenAI
 
-from anton.utils.datasources import scrub_credentials
-
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -40,6 +38,7 @@ from .provider import (
     classify_request_refusal,
     classify_responses_failure,
     classify_transient,
+    log_transient_provider_error,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
@@ -88,6 +87,49 @@ def _rejects_reasoning_summary(exc: "openai.BadRequestError") -> bool:
     return message.startswith(
         "your organization must be verified to generate reasoning summaries."
     )
+
+
+def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
+    """True when a 400 refuses the explicit ``prompt_cache_breakpoint`` field,
+    e.g. a model or endpoint that does not support explicit breakpoints."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    text = f"{err.get('param') or ''} {err.get('message') or ''}"
+    return "prompt_cache_breakpoint" in text
+
+
+# (base_url, model) pairs that refused an explicit cache breakpoint. Process-wide
+# because Cowork builds a provider per turn: one refusal is enough.
+_CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
+
+
+def _shared_prompt_input(static: str, session: str) -> list[dict]:
+    """The system prompt as two developer messages, the shared part cacheable."""
+    return [
+        {"role": "developer", "type": "message", "content": [
+            {"type": "input_text", "text": static,
+             "prompt_cache_breakpoint": {"mode": "explicit"}},
+        ]},
+        {"role": "developer", "type": "message", "content": session},
+    ]
+
+
+def _has_cache_breakpoint(kwargs: dict) -> bool:
+    first = (kwargs.get("input") or [None])[0]
+    content = first.get("content") if isinstance(first, dict) else None
+    return (
+        isinstance(content, list) and bool(content)
+        and isinstance(content[0], dict) and "prompt_cache_breakpoint" in content[0]
+    )
+
+
+def _without_cache_breakpoint(kwargs: dict) -> dict:
+    """``kwargs`` with the shared-prompt split undone: back to ``instructions``."""
+    static = kwargs["input"][0]["content"][0]["text"]
+    session = kwargs["input"][1]["content"]
+    return dict(kwargs, instructions=static + session, input=kwargs["input"][2:])
 
 
 def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
@@ -338,11 +380,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         velocity_confirmed=_velocity,
     )
     if transient is not None:
-        logger.warning(
-            "transient provider error (%s): status=%s retry_after=%s body=%s",
-            transient.code, exc.status_code, transient.retry_after,
-            scrub_credentials(str(exc.body))[:500],
-        )
+        log_transient_provider_error(logger=logger, error=transient)
         raise transient from exc
 
     raise ConnectionError(
@@ -1125,7 +1163,7 @@ class OpenAIProvider(LLMProvider):
         """
         if not self._emit_trace_headers:
             return None
-        from .tracing import get_trace_context, surface_tag
+        from .tracing import get_call_role, get_trace_context, surface_tag
 
         ctx = get_trace_context()
         if ctx is None:
@@ -1163,6 +1201,10 @@ class OpenAIProvider(LLMProvider):
         # tag convention. The tag is what a cheap population count uses.
         if ctx.surface:
             extra["surface"] = ctx.surface
+        # So usage can be summed per role even when roles share a model.
+        role = get_call_role() or self.trace_role
+        if role:
+            extra["role"] = role
         # Our own build (ENG-1279). The router lifts this onto the trace's
         # native `version` field, the only form the Langfuse metrics API can
         # group by — so "did this fix change behaviour in production?" becomes
@@ -1387,10 +1429,17 @@ class OpenAIProvider(LLMProvider):
                 # `reasoning_content` is the de facto convention several
                 # OpenAI-compatible reasoning gateways use (DeepSeek, vLLM's
                 # reasoning parser, and possibly the mdb.ai passthrough for
-                # non-Anthropic reasoning models). Read defensively via
-                # getattr since the SDK's Delta model doesn't declare it.
-                reasoning_delta = getattr(delta, "reasoning_content", None)
-                if reasoning_delta:
+                # non-Anthropic reasoning models). OpenRouter and Ollama name
+                # the same field `reasoning`. Read both: thinking under either
+                # name shows in the thinking block, and it restarts the
+                # model-call deadline, which only an event resets. Read
+                # defensively via getattr since the SDK's Delta model doesn't
+                # declare either.
+                reasoning_delta = (
+                    getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                )
+                if isinstance(reasoning_delta, str) and reasoning_delta:
                     yield StreamReasoningDelta(text=reasoning_delta)
 
                 # Tool call deltas
@@ -1489,10 +1538,7 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                logger.warning(
-                    "transient mid-stream provider error (%s): %s",
-                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
-                )
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
@@ -1597,7 +1643,18 @@ class OpenAIProvider(LLMProvider):
             "input": responses_input,
             "max_output_tokens": max_tokens,
         }
-        if system:
+        from .prompt_builder import SESSION_CONTEXT_MARKER
+
+        if (
+            self._flavor == self.FLAVOR_OPENAI
+            and system.count(SESSION_CONTEXT_MARKER) == 1
+            and (self._base_url or "", model) not in _CACHE_BREAKPOINT_REFUSED
+        ):
+            # The shared part ends in an explicit cache breakpoint, so it is read
+            # from cache by every session, not only by later turns of this one.
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            kwargs["input"] = _shared_prompt_input(static, SESSION_CONTEXT_MARKER + session) + responses_input
+        elif system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
             # "summary": "auto" asks the Responses API to also stream a
@@ -1642,6 +1699,11 @@ class OpenAIProvider(LLMProvider):
         try:
             return await self._client.responses.create(**kwargs)
         except openai.BadRequestError as exc:
+            if _has_cache_breakpoint(kwargs) and _rejects_cache_breakpoint(exc):
+                logger.warning("explicit prompt cache breakpoints refused for %s; continuing without them",
+                               kwargs.get("model"))
+                _CACHE_BREAKPOINT_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
+                return await self._create_response(_without_cache_breakpoint(kwargs))
             reasoning = kwargs.get("reasoning") or {}
             if "summary" not in reasoning or not _rejects_reasoning_summary(exc):
                 raise
@@ -1901,10 +1963,7 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                logger.warning(
-                    "transient mid-stream provider error (%s): %s",
-                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
-                )
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",

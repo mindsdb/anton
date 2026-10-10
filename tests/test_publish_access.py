@@ -1,12 +1,22 @@
 """Tests for the publish access spec (ENG-322): build_access_payload + publish()."""
 
 import base64
+import http.client
+import io
 import json
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from anton import publisher
-from anton.publisher import build_access_payload, publish
+from anton.publisher import (
+    ArtifactOwnedByOtherUserError,
+    build_access_payload,
+    hash_access_password,
+    publish,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -50,19 +60,25 @@ def test_restricted_mode_defaults():
 # ---------------------------------------------------------------------------
 
 
-def _capture_publish(tmp_path: Path, **publish_kwargs) -> dict:
+def _publish_with(tmp_path: Path, fake_request, **publish_kwargs) -> dict:
     f = tmp_path / "index.html"
     f.write_text("<html>hi</html>", encoding="utf-8")
-    captured: dict = {}
+    with mock.patch.object(publisher, "minds_request", fake_request):
+        return publish(f, api_key="k", **publish_kwargs)
 
+
+def _accepting_request(captured: dict):
     def fake_request(url, api_key, *, method="POST", payload=None, verify=True, timeout=30):
         captured["payload"] = json.loads(payload.decode())
         return json.dumps(
             {"user_prefix": "u", "report_id": "r", "md5": "m", "view_url": "url", "version": 1, "files": []}
         )
+    return fake_request
 
-    with mock.patch.object(publisher, "minds_request", fake_request):
-        publish(f, api_key="k", **publish_kwargs)
+
+def _capture_publish(tmp_path: Path, **publish_kwargs) -> dict:
+    captured: dict = {}
+    _publish_with(tmp_path, _accepting_request(captured), **publish_kwargs)
     return captured["payload"]
 
 
@@ -101,3 +117,173 @@ def test_publish_back_compat_password(tmp_path: Path):
     assert payload["access"]["pwd_version"] == 3
     assert payload["access"]["password_hash"].startswith("pbkdf2_sha256$")
     assert "password" not in payload["access"]
+
+
+# ---------------------------------------------------------------------------
+# The previous hash is sent again while the password is unchanged
+# ---------------------------------------------------------------------------
+
+
+def _password_entry(password: str, password_hash: str | None) -> dict:
+    """An owner-side `.published.json` entry as the publish callers write it."""
+    entry = {
+        "mode": "password", "requires_password": True,
+        "access_password": password, "pwd_version": 1,
+        "report_id": "r", "url": "u", "last_md5": "m",
+    }
+    if password_hash is not None:
+        entry["password_hash"] = password_hash
+    return entry
+
+
+_HUNTER2_HASH = hash_access_password("hunter2")
+_ITERATIONS = publisher._PBKDF2_ITERATIONS
+
+
+def _hunter2_hash_at(iterations: int) -> str:
+    with mock.patch.object(publisher, "_PBKDF2_ITERATIONS", iterations):
+        return hash_access_password("hunter2")
+
+
+def test_same_password_reuses_the_previous_hash():
+    out = build_access_payload(
+        {"mode": "password", "password": "hunter2"},
+        previous=_password_entry("hunter2", _HUNTER2_HASH),
+    )
+    assert out["password_hash"] == _HUNTER2_HASH
+
+
+def test_changed_password_gets_a_new_hash():
+    out = build_access_payload(
+        {"mode": "password", "password": "correct-horse"},
+        previous=_password_entry("hunter2", _HUNTER2_HASH),
+    )
+    assert out["password_hash"] != _HUNTER2_HASH
+    assert out["password_hash"].startswith("pbkdf2_sha256$")
+
+
+def test_legacy_entry_without_mode_still_reuses_the_hash():
+    previous = {"requires_password": True, "access_password": "hunter2", "password_hash": _HUNTER2_HASH}
+    out = build_access_payload({"mode": "password", "password": "hunter2"}, previous=previous)
+    assert out["password_hash"] == _HUNTER2_HASH
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [
+        None,
+        "not-a-dict",
+        {"mode": "public", "requires_password": False},
+        # Left password mode in between, but the plaintext and hash survived.
+        {"mode": "restricted", "requires_password": False, "emails": ["a@x.com"],
+         "access_password": "hunter2", "password_hash": _HUNTER2_HASH},
+        {"mode": "public", "requires_password": False,
+         "access_password": "hunter2", "password_hash": _HUNTER2_HASH},
+        # Written before the hash was stored: plaintext only.
+        _password_entry("hunter2", None),
+        _password_entry("hunter2", ""),
+        _password_entry("hunter2", "sha1$not-ours"),
+        # A well-formed hash of another password: the entry disagrees with itself.
+        _password_entry("hunter2", hash_access_password("correct-horse")),
+        # Another iteration count, even with a valid digest for that count.
+        _password_entry("hunter2", _hunter2_hash_at(1_000)),
+        # The right digest, but the iteration count is not written the way
+        # `hash_access_password` writes it.
+        _password_entry("hunter2", _HUNTER2_HASH.replace(f"${_ITERATIONS}$", f"$0{_ITERATIONS}$", 1)),
+        # Malformed values.
+        _password_entry("hunter2", "pbkdf2_sha256$200000$c2FsdA==$ZGs="),
+        _password_entry("hunter2", "pbkdf2_sha256$many$c2FsdA==$ZGs="),
+        _password_entry("hunter2", "pbkdf2_sha256$200000$c2FsdA=="),
+        _password_entry("hunter2", f"{_HUNTER2_HASH}$extra"),
+        _password_entry("hunter2", "pbkdf2_sha256$200000$@@@@$@@@@"),
+        _password_entry("hunter2", 12345),
+    ],
+)
+def test_no_reusable_hash_means_a_fresh_one(previous):
+    out = build_access_payload({"mode": "password", "password": "hunter2"}, previous=previous)
+    assert out["password_hash"].startswith(f"pbkdf2_sha256${_ITERATIONS}$")
+    if isinstance(previous, dict):
+        assert out["password_hash"] != previous.get("password_hash")
+
+
+def test_publish_sends_the_previous_hash_and_returns_it(tmp_path: Path):
+    captured: dict = {}
+    result = _publish_with(
+        tmp_path, _accepting_request(captured),
+        access={"mode": "password", "password": "hunter2"},
+        previous_access=_password_entry("hunter2", _HUNTER2_HASH),
+    )
+    assert captured["payload"]["access"]["password_hash"] == _HUNTER2_HASH
+    assert result["password_hash"] == _HUNTER2_HASH
+
+
+def test_publish_returns_the_fresh_hash_it_sent(tmp_path: Path):
+    captured: dict = {}
+    result = _publish_with(
+        tmp_path, _accepting_request(captured), access={"mode": "password", "password": "hunter2"},
+    )
+    assert result["password_hash"] == captured["payload"]["access"]["password_hash"]
+
+
+def test_publish_returns_no_hash_outside_password_mode(tmp_path: Path):
+    result = _publish_with(
+        tmp_path, _accepting_request({}),
+        access={"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False},
+    )
+    assert "password_hash" not in result
+
+
+# ---------------------------------------------------------------------------
+# 409 artifact_owned_by_other_user
+# ---------------------------------------------------------------------------
+
+
+def _http_error(status: int, body) -> urllib.error.HTTPError:
+    raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return urllib.error.HTTPError("https://view.test/upload", status, "Rejected", {}, io.BytesIO(raw))
+
+
+def test_publish_raises_a_typed_error_for_another_owner(tmp_path: Path):
+    def reject(url, api_key, **kwargs):
+        raise _http_error(409, {"error": "Report belongs to another user", "code": "artifact_owned_by_other_user"})
+
+    with pytest.raises(ArtifactOwnedByOtherUserError) as err:
+        _publish_with(tmp_path, reject, report_id="r")
+    assert str(err.value) == "This artifact was published by another owner."
+    assert isinstance(err.value, RuntimeError)
+    assert isinstance(err.value.__cause__, urllib.error.HTTPError)
+
+
+class _UnreadableBody(io.BytesIO):
+    def read(self, *args):
+        raise http.client.IncompleteRead(b"")
+
+
+def test_a_409_with_an_unreadable_body_propagates_the_original_error(tmp_path: Path):
+    """A body that cannot be read is "not recognised", never a different exception."""
+    conflict = urllib.error.HTTPError("https://view.test/upload", 409, "Conflict", {}, _UnreadableBody())
+
+    def reject(url, api_key, **kwargs):
+        raise conflict
+
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _publish_with(tmp_path, reject, report_id="r")
+    assert err.value is conflict
+    assert err.value.code == 409
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (409, {"error": "Artifact key is owned by another user"}),  # auth's artifact_key conflict: no code
+        (409, b"not json"),
+        (500, {"error": "boom", "code": "artifact_owned_by_other_user"}),
+    ],
+)
+def test_other_http_errors_propagate_unchanged(tmp_path: Path, status, body):
+    def reject(url, api_key, **kwargs):
+        raise _http_error(status, body)
+
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _publish_with(tmp_path, reject, report_id="r")
+    assert err.value.code == status

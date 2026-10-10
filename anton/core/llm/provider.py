@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
+import re
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -431,20 +433,26 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     try:
         parsed = _json.loads(raw_json)
     except _json.JSONDecodeError as exc:
-        # Try the repair pass before giving up entirely.
+        # Try the repair pass before giving up entirely. Either way the log
+        # names the decoder's message and position, never the arguments: they
+        # are model-authored and can hold SQL values or credentials. The
+        # exception stays out of the args too, because its `doc` is the whole
+        # raw body. Streamed deltas can split a surrogate pair, and
+        # "surrogatepass" counts a lone half instead of raising.
+        raw_bytes = len(raw_json.encode("utf-8", "surrogatepass"))
         repair = _try_repair_tool_json(raw_json)
         if repair is not None:
             repaired, truncated = repair
             _logging.getLogger(__name__).info(
-                "Tool-use input JSON was malformed (%s) but repaired "
-                "successfully. Raw bytes: %d, truncated: %s.",
-                exc, len(raw_json), truncated,
+                "Tool-use input JSON was malformed (%s: line %d column %d (char %d)) "
+                "but repaired successfully. Raw bytes: %d, truncated: %s.",
+                exc.msg, exc.lineno, exc.colno, exc.pos, raw_bytes, truncated,
             )
             return repaired, None, truncated
         _logging.getLogger(__name__).warning(
-            "Tool-use input JSON was malformed and unrecoverable (%s). "
-            "Raw bytes: %d, head: %r",
-            exc, len(raw_json), raw_json[:160],
+            "Tool-use input JSON was malformed and unrecoverable "
+            "(%s: line %d column %d (char %d)). Raw bytes: %d",
+            exc.msg, exc.lineno, exc.colno, exc.pos, raw_bytes,
         )
         return {}, str(exc), False
     # Anthropic occasionally emits a top-level scalar (e.g. a string
@@ -848,6 +856,41 @@ class TransientProviderError(ConnectionError):
         # retried those with backoff, so the session fails fast (still with the
         # honest typed message) instead of stacking another 30s on top.
         self.session_backoff = session_backoff
+
+
+def log_transient_provider_error(*, logger: logging.Logger, error: TransientProviderError) -> None:
+    """Log classified retry metadata without provider bodies or exception text.
+
+    Provider error bodies can echo credentials, prompts and tool arguments, and
+    a Responses failure builds its TransientProviderError from the body's own
+    `code`. So the line names a code only from the closed transient vocabulary
+    and logs `unrecognized` for anything else.
+    """
+    logger.warning(
+        "transient provider error error_code=%s status=%s retry_after=%s session_backoff=%s",
+        _loggable_transient_code(code=error.code), _log_status(status=error.status_code),
+        error.retry_after, error.session_backoff,
+    )
+
+
+# `http_<status>` exactly as classify_transient mints it: a 5xx status in ASCII
+# digits. provider_failure_kind matches codes against it, so analytics and the
+# log line accept the same shapes.
+_MINTED_HTTP_CODE = re.compile(r"http_5[0-9]{2}")
+
+
+def _loggable_transient_code(*, code: object) -> str:
+    """Return `code` when it is a transient code anton mints, else `unrecognized`.
+
+    Only an exact str counts: a subclass could override `__eq__` to match the
+    vocabulary or `__str__` to render other text in the log line.
+    """
+    return code if type(code) is str and provider_failure_kind(code) else "unrecognized"
+
+
+def _log_status(*, status: object) -> int | str:
+    """An HTTP status for a log line: a real status code, else `unknown`."""
+    return status if type(status) is int and 100 <= status <= 599 else "unknown"
 
 
 class ProviderOverloadedError(ConnectionError):
@@ -1562,6 +1605,56 @@ class RequestRefusedError(Exception):
         self.status_code = status_code
 
 
+def _describe_seconds(*, seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+    if seconds == int(seconds):
+        whole = int(seconds)
+        return f"{whole} second" if whole == 1 else f"{whole} seconds"
+    return f"{seconds:g} seconds"
+
+
+class ModelCallTimeoutError(Exception):
+    """A model call sent no output for its whole idle deadline, so
+    ``LLMClient`` stopped it.
+
+    The deadline restarts with every event the provider sends and runs across
+    the SDK's own retries, so a model that is slow but writing is never cut.
+    The turn ends on the first one with no auto-retry: a provider that stayed
+    silent for the whole deadline would make a re-send wait it out again.
+
+    A plain ``Exception``, not a ``ConnectionError``: callers read that base as
+    a network blip a retry may fix (the verifier's transient catch, the
+    generate_artifact stream-drop retry), and this one is not.
+
+    ``code`` is the wire code the host maps to its card. The class NAME is what
+    survives a hosted turn (``cloud_turn.__main__._scrub``).
+    """
+
+    code = "model_timeout"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        role: str = "",
+        model: str = "",
+        idle_timeout_s: float | None = None,
+    ) -> None:
+        if message is None:
+            waited = (
+                _describe_seconds(seconds=idle_timeout_s)
+                if idle_timeout_s is not None
+                else "too long"
+            )
+            message = f"The model sent no output for {waited}, so the call was stopped."
+        super().__init__(message)
+        self.role = role
+        self.model = model
+        self.idle_timeout_s = idle_timeout_s
+
+
 # Phrases that identify a permanent, content-SHAPED rejection (ENG-1992) in the
 # two dialects we have actually observed. Matched on the provider's prose
 # because no provider gives this a structured code.
@@ -1965,7 +2058,79 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     ContentTooLargeError,
     EndpointConfigurationError,
     RequestRefusedError,
+    ModelCallTimeoutError,
 )
+
+
+def _exception_chain(*, exc: BaseException) -> Iterator[BaseException]:
+    """Yield `exc`, then its cause, its context and its group members, depth first.
+
+    Each exception is yielded once, so a cycle ends the walk. `__context__` is
+    followed even when `__suppress_context__` is set: a wrapper raised
+    `from None` can still repeat the provider error's text in its own message.
+    """
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        # Pushed in reverse so the walk pops the cause first and the members last.
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(reversed(current.exceptions))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+
+
+def _provider_error(*, exc: BaseException) -> BaseException | None:
+    """The first provider error in `exc`'s chain, found by type alone."""
+    from anthropic import AnthropicError
+    from openai import OpenAIError
+
+    provider_types = (OpenAIError, AnthropicError, *CURATED_PROVIDER_ERRORS)
+    return next((error for error in _exception_chain(exc=exc) if isinstance(error, provider_types)), None)
+
+
+class ProviderErrorFilter(logging.Filter):
+    """Keep provider diagnostics while omitting exception bodies and cause traces.
+
+    SDK errors can echo prompts, tool arguments and credentials. Typed errors
+    retain those SDK errors as causes, so logging their traceback would undo
+    the adapters' safe warnings. Filter only records holding a provider error;
+    callers' propagated exceptions and unrelated tracebacks stay unchanged.
+
+    The replacement names the record's own exception class, the provider
+    error's class and the provider error's own HTTP status. Class names come
+    from code, and a status is logged only when it is a real HTTP status code.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        candidates: list[BaseException] = []
+        if record.exc_info and record.exc_info[1] is not None:
+            candidates.append(record.exc_info[1])
+        if isinstance(record.msg, BaseException):
+            candidates.append(record.msg)
+        args = record.args.values() if isinstance(record.args, dict) else (record.args or ())
+        candidates.extend(arg for arg in args if isinstance(arg, BaseException))
+        for exc in candidates:
+            provider_error = _provider_error(exc=exc)
+            if provider_error is None:
+                continue
+            record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
+            record.args = (
+                type(exc).__name__, type(provider_error).__name__,
+                _log_status(status=getattr(provider_error, "status_code", None)),
+            )
+            record.message = record.getMessage()
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+            break
+        return True
 
 
 # The analytics vocabulary for WHY the provider failed, kept deliberately small
@@ -1981,6 +2146,7 @@ PROVIDER_FAILURE_KINDS: frozenset[str] = frozenset({
     "http_5xx",            # request-time 5xx status
     "connection_failure",  # never reached it, or the connection dropped
     "bad_response",        # a 200 whose body was unusable
+    "no_output",           # the call sent nothing for its whole idle deadline
 })
 
 # Codes that mean "we got a 200 and the body was unusable": an unclassifiable
@@ -2010,15 +2176,14 @@ def provider_failure_kind(code: str | None) -> str:
         return "rate_limit"
     if code == "connection_error":
         return "connection_failure"
+    if code == ModelCallTimeoutError.code:
+        return "no_output"
     if code.startswith("http_"):
-        # Only 5xx is minted with this prefix (`classify_transient`), but parse
-        # rather than trust it: a future 4xx would otherwise be mislabelled as a
-        # server fault, which is the one direction that misleads an operator.
-        try:
-            status = int(code[len("http_"):])
-        except ValueError:
-            return ""
-        return "http_5xx" if 500 <= status < 600 else ""
+        # Only 5xx is minted with this prefix (`classify_transient`), and the
+        # pattern accepts only that exact shape: a future 4xx maps to "" rather
+        # than to a server fault, which is the one direction that misleads an
+        # operator.
+        return "http_5xx" if _MINTED_HTTP_CODE.fullmatch(code) else ""
     return ""
 
 
@@ -2043,6 +2208,9 @@ class LLMProvider(ABC):
         return None
     # Human-readable provider id (e.g. "anthropic", "openai-compatible").
     name: str = ""
+    # Role reported for a call made on this provider outside LLMClient, such
+    # as cowork-server's route gate. LLMClient sets it.
+    trace_role: str | None = None
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.

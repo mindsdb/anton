@@ -30,6 +30,7 @@ from anton.core.llm.provider import (
     EndpointConfigurationError,
     FreeServingPausedError,
     MindsHubBillingStop,
+    ModelCallTimeoutError,
     ModelRestrictedError,
     ModelUnavailableError,
     ProviderAuthError,
@@ -326,6 +327,9 @@ _CURATED_SAMPLES = {
     RequestRefusedError: lambda: RequestRefusedError(
         "refused reasoning effort", code="parameter_refused", status_code=400,
     ),
+    ModelCallTimeoutError: lambda: ModelCallTimeoutError(
+        role="planning", model="latest:sonnet", idle_timeout_s=600.0,
+    ),
 }
 
 
@@ -535,6 +539,7 @@ def test_classify_transient_carries_the_status_it_classified_from(status, body, 
         ("connection_error", "connection_failure"),
         ("http_500", "http_5xx"),
         ("http_503", "http_5xx"),
+        ("model_timeout", "no_output"),
     ],
 )
 def test_every_code_anton_mints_maps_to_a_kind(code, expected_kind):
@@ -544,10 +549,14 @@ def test_every_code_anton_mints_maps_to_a_kind(code, expected_kind):
     assert expected_kind in PROVIDER_FAILURE_KINDS
 
 
-@pytest.mark.parametrize("code", [None, "", "something_new", "http_404", "http_abc"])
+@pytest.mark.parametrize("code", [
+    None, "", "something_new", "http_404", "http_abc",
+    "http_ 503", "http_5_03", "http_0503", "http_503\n", "http_٥٠٣",
+])
 def test_an_unknown_code_is_blank_not_guessed(code):
     """Blank is a prompt to extend the vocabulary; a wrong value is invisible.
-    `http_404` specifically must NOT read as a server fault."""
+    `http_404` specifically must NOT read as a server fault, and only the exact
+    `http_5xx` shape `classify_transient` mints counts as one."""
     assert provider_failure_kind(code) == ""
 
 
