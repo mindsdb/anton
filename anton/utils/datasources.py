@@ -561,8 +561,9 @@ def collect_datasource_catalog(
     # for a Picker-only connection exactly as it always has.
     #
     # One registry per call, and one lookup per engine: DatasourceRegistry()
-    # parses the full built-in + user datasources.md on every construction
-    # (no caching), and this runs on every chat turn.
+    # re-reads the built-in and user datasources.md and builds every engine on
+    # each construction (only the YAML parse is cached), and this runs on
+    # every chat turn.
     registry = DatasourceRegistry()
     engine_names: dict[str, str] = {}
     notes: dict[str, str] = {}
