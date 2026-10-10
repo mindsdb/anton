@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 
 from unittest.mock import AsyncMock, MagicMock
 
@@ -409,6 +410,28 @@ def _no_user_registry(tmp_path_factory, monkeypatch):
 
     empty = tmp_path_factory.mktemp("no-user-registry")
     monkeypatch.setattr(DatasourceRegistry, "_USER_PATH", empty / "datasources.md")
+
+
+@pytest.fixture()
+def yaml_parses(monkeypatch) -> Iterator[list[str]]:
+    """Every text PyYAML actually parses during the test, from an empty parse cache.
+
+    `safe_load_cached` keeps parses for the whole process, so a text an earlier
+    test parsed would otherwise not be parsed, or counted, here.
+    """
+    from anton.core.utils import yaml_cache
+
+    yaml_cache._parse.cache_clear()
+    seen: list[str] = []
+    real = yaml_cache._load
+
+    def counting(text):
+        seen.append(text)
+        return real(text)
+
+    monkeypatch.setattr(yaml_cache, "_load", counting)
+    yield seen
+    yaml_cache._parse.cache_clear()
 
 
 @pytest.fixture(autouse=True)

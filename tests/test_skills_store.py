@@ -175,6 +175,24 @@ class TestListing:
             "description": "Load a CSV, infer schema, compute summary stats.",
         }
 
+    def test_list_summaries_parses_unchanged_frontmatter_once(
+        self, store: SkillStore, yaml_parses: list[str]
+    ):
+        """The prompt lists skills every turn; an unchanged SKILL.md is parsed once."""
+        store.save(_make_skill())
+        first = store.list_summaries()
+        second = store.list_summaries()
+
+        assert first == second
+        assert len(yaml_parses) == 1
+
+    def test_list_summaries_sees_an_edited_frontmatter(self, store: SkillStore):
+        store.save(_make_skill())
+        assert store.list_summaries()[0]["description"].startswith("Load a CSV")
+
+        store.save(_make_skill(description="Profile a CSV file."))
+        assert store.list_summaries()[0]["description"] == "Profile a CSV file."
+
     def test_delete_removes_directory(self, store: SkillStore, store_root: Path):
         store.save(_make_skill())
         assert (store_root / "csv-summary").is_dir()

@@ -32,6 +32,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from anton.core.utils.yaml_cache import safe_load_cached
+
 logger = logging.getLogger(__name__)
 
 # ─── spec constraints (used by validators, not enforced on read) ──────────────
@@ -41,6 +43,16 @@ DESC_MAX = 1024
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 _NAME_MAX = 64
 _COMPAT_MAX = 500
+
+# The longest frontmatter parse_skill_dir parses. PyYAML takes about 300 bytes
+# per character to parse, and a shipped skill's frontmatter is under 900
+# characters.
+_FRONTMATTER_MAX_CHARS = 64 * 1024
+
+# A line that opens or closes the frontmatter: "---" and any trailing
+# whitespace, up to the newline or the end of the text. Matched at the start of
+# a line, it accepts the lines whose rstrip() is "---".
+_DELIMITER_LINE = re.compile(r"---[^\S\n]*(?:\n|\Z)")
 
 # canonical YAML keys defined by the spec
 _SPEC_KEYS = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
@@ -126,28 +138,50 @@ def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
         text = md_path.read_text(encoding="utf-8")
     except OSError:
         return None
+    except UnicodeDecodeError as exc:
+        logger.warning(
+            "parse_skill_md: SKILL.md is not UTF-8: error_type=%s", type(exc).__name__
+        )
+        return None
 
-    lines = text.split("\n")
-    if not lines or lines[0].rstrip() != "---":
+    opening = _DELIMITER_LINE.match(text)
+    if opening is None:
         logger.debug("parse_skill_md: no opening '---' delimiter")
         return None
 
-    close_idx: int | None = None
-    for i, line in enumerate(lines[1:], 1):
-        if line.rstrip() == "---":
-            close_idx = i
+    # Look for the closing line only as far as the longest frontmatter this
+    # reads, a line at a time, so a long file is never split into lines.
+    yaml_start = opening.end()
+    last_line_start = yaml_start + _FRONTMATTER_MAX_CHARS + 1
+    line_start = yaml_start
+    closing = _DELIMITER_LINE.match(text, line_start)
+    while closing is None:
+        newline = text.find("\n", line_start, last_line_start)
+        if newline == -1:
             break
+        line_start = newline + 1
+        closing = _DELIMITER_LINE.match(text, line_start)
 
-    if close_idx is None:
-        logger.debug("parse_skill_md: no closing '---' delimiter")
+    if closing is None:
+        if last_line_start < len(text):
+            logger.warning(
+                "parse_skill_md: frontmatter is longer than %d characters",
+                _FRONTMATTER_MAX_CHARS,
+            )
+        else:
+            logger.debug("parse_skill_md: no closing '---' delimiter")
         return None
 
-    yaml_text = "\n".join(lines[1:close_idx])
-    body = "\n".join(lines[close_idx + 1 :])
+    yaml_text = text[yaml_start : closing.start()].removesuffix("\n")
+    body = text[closing.end() :]
 
+    # safe_load_cached raises YAMLError when aliases would expand the
+    # frontmatter without bound, so every str() below stays small. PyYAML
+    # raises ValueError on a date or time zone out of range, or an integer too
+    # long to read, and RecursionError on nesting deeper than the stack.
     try:
-        props = yaml.safe_load(yaml_text)
-    except yaml.YAMLError as exc:
+        props = safe_load_cached(yaml_text)
+    except (yaml.YAMLError, ValueError, RecursionError) as exc:
         # PyYAML's message quotes the offending frontmatter lines, which can
         # hold a token, so the log names only the error class and position.
         # The mark counts from 0 within the frontmatter, which starts on the
@@ -165,24 +199,34 @@ def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
         logger.warning("parse_skill_md: frontmatter is not a YAML mapping")
         return None
 
-    # Collect metadata from the spec field, then fold in unknown top-level keys
-    meta: dict[str, str] = {}
-    spec_meta = props.get("metadata")
-    if isinstance(spec_meta, dict):
-        meta = {str(k): str(v) for k, v in spec_meta.items()}
-    for k, v in props.items():
-        if k not in _SPEC_KEYS:
-            meta.setdefault(str(k), str(v))
+    # Collect metadata from the spec field, then fold in unknown top-level keys.
+    # str() raises ValueError on an integer too long to print in decimal.
+    try:
+        meta: dict[str, str] = {}
+        spec_meta = props.get("metadata")
+        if isinstance(spec_meta, dict):
+            meta = {str(k): str(v) for k, v in spec_meta.items()}
+        for k, v in props.items():
+            if k not in _SPEC_KEYS:
+                meta.setdefault(str(k), str(v))
 
-    # check name
-    name = props.get("name")
-    if not name:
-        name = folder_name
+        # check name
+        name = props.get("name")
+        if not name:
+            name = folder_name
+        name = str(name)
+        description = str(props.get("description", ""))
+    except ValueError as exc:
+        logger.warning(
+            "parse_skill_md: frontmatter value cannot be read as text: error_type=%s",
+            type(exc).__name__,
+        )
+        return None
 
     return AgentSkill.model_construct(
         name=normalize_name(name),
         instructions=body,
-        description=str(props.get("description", "")),
+        description=description,
         license=props.get("license"),
         compatibility=props.get("compatibility"),
         allowed_tools=props.get("allowed-tools"),
