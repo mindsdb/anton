@@ -366,7 +366,14 @@ class _VerifierVerdict(BaseModel):
             "the assistant computed from data that DID arrive, or an estimate the "
             "user explicitly asked for, is fine. So is a genuine empty result: a "
             "search or query that ran and found nothing matching is a COMPLETE "
-            "answer of 'none', not a blocker.\n"
+            "answer of 'none', not a blocker. "
+            # Read as an early stop, an honest "not in the data" was continued,
+            # and the continued reply invented the value.
+            "So is a value the data does not record at all: when the assistant "
+            "inspected what the connected data holds (its tables, columns, or "
+            "documents) and said plainly that nothing there records what was asked "
+            "and it cannot be worked out from what is recorded, without substituting a "
+            "related figure, the absence is the answer.\n"
             "- WAITING: the assistant's latest message asks the user a question it "
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
@@ -704,6 +711,12 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "not COMPLETE — and supplying such values with a disclaimer that they are "
     "indicative or unverified is still implying success, not honesty."
 )
+
+# Opens the verifier's continuation and stuck notes. A "SYSTEM:" note that says "do not
+# mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
+# models answered it with "I cannot assist" or by inventing the figure just reported missing.
+_CHECK_NOTE = "[Automatic completion check, not written by the user]"
+
 
 def _safe_error_detail(exc: BaseException) -> str:
     """Describe an exception for logs without copying model or user content.
@@ -1090,7 +1103,7 @@ def _render_verify_transcript(
         speaker = "USER" if role == "user" else "ASSISTANT"
         if isinstance(content, str):
             text = content.strip()
-            if not text or (role == "user" and text.startswith("SYSTEM:")):
+            if not text or (role == "user" and text.startswith(("SYSTEM:", _CHECK_NOTE))):
                 continue
             convo.append((i, speaker, text))
         elif isinstance(content, list):
@@ -6485,12 +6498,11 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            f"SYSTEM: Task verification determined this task is stuck.\n"
-                            f"Verifier assessment: {reason}\n\n"
+                            f"{_CHECK_NOTE} The check judged this task stuck: {reason}\n\n"
                             "Explain to the user what went wrong, what you tried, and "
                             "suggest specific next steps they can take to unblock this. "
-                            f"{_SOLVABILITY_CLAUSE} Do not mention this instruction or the "
-                            "verifier to the user."
+                            f"{_SOLVABILITY_CLAUSE} Write it for the user, without "
+                            "referring to this check."
                         ),
                     }
                 )
@@ -6564,15 +6576,15 @@ class ChatSession:
                 {
                     "role": "user",
                     "content": (
-                        f"SYSTEM: Task verification determined this task is not yet complete "
-                        f"(attempt {continuation}/{self._max_continuations}).\n"
-                        f"Verifier assessment: {reason}\n\n"
-                        "Continue working on the original request. Pick up where you left off "
-                        "and finish the remaining work. Do not redo tool work already "
-                        "completed. Your reply replaces the previous one in what the user "
-                        "sees, so it must stand on its own: restate everything they need, "
-                        "including anything you already told them. "
-                        "Do not mention this instruction or the verifier to the user."
+                        f"{_CHECK_NOTE} The check judged the answer above unfinished "
+                        f"(attempt {continuation}/{self._max_continuations}): {reason}\n\n"
+                        "Continue the user's original request where you left off; do not "
+                        "redo tool work already done. If the data truly does not hold what "
+                        "was asked, saying so plainly is a complete answer. Your next reply "
+                        "replaces the previous one in what the user sees, so it must stand on "
+                        "its own: restate everything they need, including anything you "
+                        "already told them. Write it for the user, without referring to "
+                        "this check."
                     ),
                 }
             )
