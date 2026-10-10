@@ -14,8 +14,10 @@ from anton.core.llm.provider import (
     ProviderAuthError,
     StreamComplete,
     StreamTextDelta,
+    ToolCall,
     Usage,
 )
+from anton.core.llm.tracing import get_call_role
 
 
 async def _stream_of(response):
@@ -435,6 +437,86 @@ class TestStructuredOutputRole:
 
         assert coding.complete.await_count == 2
         assert err.value.role == "coding"
+
+
+class _RoleRecordingProvider(LLMProvider):
+    """Records the call role in effect when each call reaches the provider."""
+
+    def __init__(self) -> None:
+        self.roles: list[str | None] = []
+
+    async def complete(self, *, tools=None, **kwargs) -> LLMResponse:
+        self.roles.append(get_call_role())
+        calls = [ToolCall(id="c1", name=tools[0]["name"], input={"answer": "a"})] if tools else []
+        return LLMResponse(content="", tool_calls=calls, usage=Usage())
+
+    async def stream(self, **kwargs):
+        self.roles.append(get_call_role())
+        yield StreamTextDelta(text="a")
+        yield StreamComplete(response=LLMResponse(content="a", usage=Usage()))
+
+
+class TestCallRole:
+    """Each call names its role, so usage can be summed per role even when
+    two roles run the same model."""
+
+    def _client(self, *, router: bool = True):
+        planning, coding = _RoleRecordingProvider(), _RoleRecordingProvider()
+        router_provider = _RoleRecordingProvider() if router else None
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="same-model",
+            coding_provider=coding,
+            coding_model="same-model",
+            router_provider=router_provider,
+            router_model="same-model" if router else None,
+        )
+        return client, planning, coding, router_provider
+
+    async def test_every_entry_point_names_its_role(self):
+        client, planning, coding, router = self._client()
+
+        await client.plan(system="s", messages=[])
+        async for _ in client.plan_stream(system="s", messages=[]):
+            pass
+        await client.generate_object(_Schema, system="s", messages=[])
+        await client.code(system="s", messages=[])
+        async for _ in client.code_stream(system="s", messages=[]):
+            pass
+        await client.generate_object_code(_Schema, system="s", messages=[])
+        await client.summarize(system="s", messages=[])
+
+        assert planning.roles == ["planning"] * 3
+        assert coding.roles == ["coding"] * 3
+        assert router.roles == ["router"]
+
+    async def test_summarize_on_the_coding_fallback_is_still_router(self):
+        client, _, coding, _ = self._client(router=False)
+
+        await client.summarize(system="s", messages=[])
+
+        assert coding.roles == ["router"]
+
+    async def test_role_does_not_leak_into_the_stream_consumer(self):
+        client, *_ = self._client()
+
+        seen = [get_call_role() async for _ in client.plan_stream(system="s", messages=[])]
+
+        assert seen == [None, None]
+        assert get_call_role() is None
+
+    def test_providers_get_a_default_role_for_direct_calls(self):
+        _, planning, coding, router = self._client()
+
+        assert (planning.trace_role, coding.trace_role, router.trace_role) == (
+            "planning", "coding", "router",
+        )
+
+    def test_a_provider_shared_by_two_roles_gets_no_default(self):
+        _, planning, coding, _ = self._client(router=False)
+
+        assert planning.trace_role == "planning"
+        assert coding.trace_role is None
 
 
 class TestLLMClientFromSettings:

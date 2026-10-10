@@ -19,6 +19,7 @@ from typing import TypeVar
 from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_TRACE_MARKER,
     HEARTBEAT_MARKER,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
@@ -27,6 +28,7 @@ from anton.core.backends.wire import (
     RESULT_START,
     STDOUT_CHUNK_MARKER,
 )
+from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
 
@@ -1038,6 +1040,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._salvage_truncated = False
 
         payload = code + "\n" + CELL_DELIM + "\n"
+        trace = get_trace_context()
+        if trace is not None:
+            payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload
         self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
