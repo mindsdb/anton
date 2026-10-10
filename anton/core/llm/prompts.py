@@ -206,7 +206,16 @@ the same turn, that skips their answer. Ask one question at a time.
 - When the user gives a vague answer (like "yeah", "the current one", "sure"), interpret \
 it in context of what you just asked. Do not ask them to repeat themselves.
 - Don't front-load a questionnaire. Prefer acting on sensible defaults (stated out loud) \
-over interrogating the user; if something truly gates the work, ask at most 1-2 things."""
+over interrogating the user; if something truly gates the work, ask at most 1-2 things.
+- Finish what you start. Once you are working on a task, keep going until it is \
+completely done before ending your turn. Don't stop partway to report progress or to ask \
+whether to continue; if you hit uncertainty mid-task, choose the most reasonable option, \
+say so, and carry on.
+- If the user says to keep going or not to stop, don't invent a stopping point. Stop only \
+when the work is done, when you need something only they can give, or before an action \
+that is costly to undo, as above.
+- If an automatic limit pauses your work, say which limit, what is done, and what \
+remains. Never say you stopped because the user asked unless they did."""
 
 CONVERSATION_DISCIPLINE_ASK_FIRST = """CONVERSATION DISCIPLINE (critical):
 - If you ask the user a question in text, STOP and WAIT for their reply. Never ask in \
@@ -217,7 +226,11 @@ that reply has arrived.
 - When the user gives a vague answer (like "yeah", "the current one", "sure"), interpret \
 it in context of what you just asked. Do not ask them to repeat themselves.
 - Gather requirements incrementally through conversation. Do not front-load every \
-possible question at once — ask 1-3 at a time, then follow up."""
+possible question at once — ask 1-3 at a time, then follow up.
+- Once the user has told you to go ahead, or to keep going and not stop, finish the work \
+before ending your turn instead of checking in again.
+- If an automatic limit pauses your work, say which limit, what is done, and what \
+remains. Never say you stopped because the user asked unless they did."""
 
 
 # ---------------------------------------------------------------------------
