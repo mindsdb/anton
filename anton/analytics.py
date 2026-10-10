@@ -179,7 +179,11 @@ _pending_lock = threading.Lock()
 #                    error_type, grace_granted + grace_tokens ("", "round",
 #                    "ceiling", or "ceiling,round" — the one-time round-cap /
 #                    spend-ceiling extensions granted this turn, and the
-#                    ceiling one's size), verifier_failure + verifier_error_type
+#                    ceiling one's size), limit_continues (times the user
+#                    answered "Keep going" at the spend ceiling or round
+#                    cap), limit_message_continues (times the turn's own
+#                    message carried it past one of those limits without
+#                    asking), verifier_failure + verifier_error_type
 #                    (WHY the completion verifier produced no verdict — the
 #                    loop's truncated/transient/hard/denied class, or
 #                    latched_{hard,truncated,denied,mixed} for a turn that made

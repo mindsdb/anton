@@ -212,6 +212,28 @@ class StubServer:
         ))
         return self
 
+    def queue_finish_authorization(self, authorized: bool = False) -> "StubServer":
+        """Queue the answer to the turn-limit check "did the user already say
+        keep going?" (`_FinishAuthorization`).
+
+        A turn that reaches its round cap or spend ceiling makes this forced
+        structured call before it asks, so a scenario that drives a turn to a
+        limit queues one here — otherwise the call takes the next queued
+        response, typically the hand-back text the scenario asserts on.
+        """
+        self._queue.put(_Response(
+            tool_calls=[{
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "name": "_FinishAuthorization",
+                "arguments": {
+                    "quote": "keep going" if authorized else "",
+                    "authorized": authorized,
+                },
+            }],
+            force_streaming=False,
+        ))
+        return self
+
     def queue_verification_truncated(self, output_tokens: int = 2048) -> "StubServer":
         """Queue a verdict call that narrated instead of calling the tool and ran
         out of budget doing it (ENG-1081).
