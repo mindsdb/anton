@@ -87,8 +87,19 @@ def _parse_file(
         except yaml.YAMLError as exc:
             import sys
 
+            # PyYAML's message quotes the offending line, which can hold a
+            # token, so the warning names only the error class and position.
+            # The mark counts from 0 within the block, so the block's own
+            # offset turns it into a line of the file.
+            mark = getattr(exc, "problem_mark", None)
+            if mark is not None:
+                line = text.count("\n", 0, match.start(3)) + mark.line + 1
+                column = mark.column + 1
+            else:
+                line = column = "unknown"
             print(
-                f"[anton] Warning: skipping malformed YAML block in {path}: {exc}",
+                f"[anton] Warning: skipping malformed YAML block in {path}: "
+                f"error_type={type(exc).__name__} line={line} column={column}",
                 file=sys.stderr,
             )
             continue

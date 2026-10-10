@@ -6,7 +6,7 @@ Contract (matches scratchpad-controller + cowork-server):
           never closes stdin.
   stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
           then exactly one terminal
-  stderr: diagnostic logs + full tracebacks
+  stderr: diagnostic logs; logged tracebacks omit provider error bodies
   exit  : 0 (the controller detects the terminal from the event, not the code)
 
 stdout is isolated at the OS file-descriptor level: the real FD 1 is duplicated
@@ -27,7 +27,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from typing import BinaryIO
+from typing import BinaryIO, TextIO
 
 from anton.cloud_turn.contract import TurnRequestV1
 from anton.cloud_turn.elicitor import (
@@ -45,6 +45,7 @@ from anton.cloud_turn.session import (
 )
 from anton.cloud_turn.stdin import start_answer_reader
 from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
+from anton.core.llm.provider import ProviderErrorFilter
 
 logger = logging.getLogger(__name__)
 
@@ -100,14 +101,22 @@ MAX_ERROR_MESSAGE_CHARS = 300
 
 
 def _scrub(exc: Exception) -> str:
-    """Short, credential-scrubbed error string for the wire. Full traceback
-    stays on stderr (logged by the caller)."""
+    """Short, credential-scrubbed error string for the wire. ProviderErrorFilter
+    separately removes provider bodies from logged diagnostics."""
     from anton.utils.datasources import scrub_credentials
 
     text = scrub_credentials(f"{type(exc).__name__}: {exc}")
     if len(text) > MAX_ERROR_MESSAGE_CHARS:
         text = text[: MAX_ERROR_MESSAGE_CHARS - 1] + "…"
     return text
+
+
+def _stderr_log_handler(*, stream: TextIO) -> logging.Handler:
+    """The pod's root stderr handler. Its filter sees every record any logger
+    sends to it, so no logged traceback prints a provider error body."""
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(ProviderErrorFilter())
+    return handler
 
 
 @contextlib.contextmanager
@@ -123,7 +132,9 @@ def _isolated_protocol_stdout():
     os.dup2(stderr_fd, 1)                   # any write to fd 1 now lands on stderr
     saved_sys_stdout = sys.stdout
     sys.stdout = sys.stderr
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+    # The entrypoint owns the pod's logging. `force` replaces any root handler
+    # configured before main(), so the filtered handler is the only one on stderr.
+    logging.basicConfig(handlers=[_stderr_log_handler(stream=sys.stderr)], level=logging.INFO, force=True)
 
     def emit(event: dict) -> None:
         data = (json.dumps(event) + "\n").encode("utf-8")
@@ -442,7 +453,7 @@ async def stream_turn(
         wire({"kind": "turn_completed"})
         terminal_emitted = True
     except Exception as exc:
-        # Full traceback -> stderr only; wire carries a short scrubbed string.
+        # ProviderErrorFilter omits provider bodies from diagnostics; the wire is unchanged.
         logger.exception("cloud turn failed")
         failed = {"kind": "turn_failed", "error": _scrub(exc)}
         # A billing stop's reset instant rides beside the string, so the host
