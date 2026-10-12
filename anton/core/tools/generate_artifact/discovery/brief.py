@@ -63,8 +63,9 @@ _DRAFT_BRIEF_TEMPLATE = (
     "library/framework names; that level of detail belongs in the full "
     "PRD{after_prd}.\n\n"
     "{closing}"
-    "Write everything — lead-in, sections, closing line — in the same "
-    "language as the user request. Keep the whole reply under about 25 "
+    "Write everything — lead-in, section headings, sections, closing line "
+    "— in the same language as the user request; translate the section "
+    "names above. Keep the whole reply under about 25 "
     "lines. Reply with the brief only, no other text."
 )
 

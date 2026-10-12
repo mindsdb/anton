@@ -1,6 +1,6 @@
 # minds-anton-scratchpad: the sandbox pod image (anton + scratchpad boot + cloud_turn entrypoint).
 # Consumed by scratchpad-controller (SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE) and Minds.
-# The controller execs `python -m anton.cloud_turn` (whole turn) or
+# The controller execs `python -m anton.cloud_turn` or `/usr/local/bin/cloud-turn` (whole turn) or
 # `/usr/local/bin/scratchpad-boot.sh` (single cell) inside a gVisor pod running as UID 1000.
 FROM python:3.12-slim
 
@@ -68,6 +68,18 @@ RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
 RUN printf '#!/bin/sh\nexec python -m anton.core.backends.scratchpad_boot\n' \
       > /usr/local/bin/scratchpad-boot.sh \
     && chmod 0755 /usr/local/bin/scratchpad-boot.sh
+
+# cloud-turn-resident: the pod's main process when the controller enables it; it
+# preloads the turn and forks one process per turn. cloud-turn: what the
+# controller then execs for a turn, handing it to the resident or running it
+# directly when there is none. The launcher is standard library only, so it runs
+# isolated and without site-packages, by the path of the installed module.
+RUN printf '#!/bin/sh\nexec python -m anton.cloud_turn.resident\n' \
+      > /usr/local/bin/cloud-turn-resident \
+    && printf '#!/bin/sh\nexec %s -I -S %s "$@"\n' "$VIRTUAL_ENV/bin/python" \
+      "$(python -c 'import anton.cloud_turn.launcher as m; print(m.__file__)')" \
+      > /usr/local/bin/cloud-turn \
+    && chmod 0755 /usr/local/bin/cloud-turn-resident /usr/local/bin/cloud-turn
 
 # Non-root, matching the pod securityContext (drop ALL caps, no service-account token, fs_group 1000, gVisor).
 RUN useradd -u 1000 -m -s /bin/sh scratchpad
