@@ -332,6 +332,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # Set once the pad runs on the app's own interpreter; the venvs base
         # stays blocked for the process, so the pad never leaves this mode.
         self._in_fallback = False
+        # A uv that Windows refused at install time, skipped by later installs.
+        self._refused_uv: str | None = None
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -1591,29 +1593,69 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         uv = self._find_uv()
         if self._in_fallback:
-            # --target keeps every install in the packages folder; without it
-            # this would install into the app's own environment.
-            target = ["--target", self._venv_dir]
-            blocked = self._base_policy_block()
-            if uv is not None and blocked is not None and blocked.filename == uv:
-                uv = None  # Windows refused this uv; pip on the allowed Python may still work.
-            if uv:
-                cmd = [uv, "pip", "install", "--python", self._venv_python, *target, *needed]
-            elif importlib.util.find_spec("pip") is None:
-                return (
-                    "Install failed: no installer is available for the app's Python "
-                    "(uv was not found and pip is not installed)."
-                )
-            else:
-                cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *target, *needed]
+            command = self._fallback_install_command(uv, needed)
+            if isinstance(command, str):
+                return command
+            cmd = command
         elif uv:
             cmd = [uv, "pip", "install", "--python", self._venv_python, *needed]
         else:
             cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *needed]
 
         _install_timeout = CoreSettings().cell_install_timeout
+        launched = await self._launch_installer(cmd)
+        if isinstance(launched, str) and self._in_fallback and uv is not None and cmd[0] == uv:
+            # Remember the refused uv and retry once through pip on the allowed Python.
+            self._refused_uv = uv
+            retry = self._fallback_install_command(None, needed)
+            if not isinstance(retry, str):
+                launched = await self._launch_installer(retry)
+        if isinstance(launched, str):
+            return launched
+        proc = launched
         try:
-            proc = await asyncio.create_subprocess_exec(
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=_install_timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return f"Install timed out after {_install_timeout}s."
+        output = stdout.decode("utf-8", errors="replace")
+        if proc.returncode != 0:
+            return f"Install failed (exit {proc.returncode}):\n{output}"
+        for p in needed:
+            self._installed_packages.add(p.lower())
+        return output
+
+    def _fallback_install_command(self, uv: str | None, needed: list[str]) -> list[str] | str:
+        """The install command for fallback mode, or the reason no installer can run.
+
+        --target keeps every install in the packages folder; without it this
+        would install into the app's own environment. A uv that Windows refused,
+        for this pad or for its venvs base, is skipped in favour of pip.
+        """
+        blocked = self._base_policy_block()
+        refused = {self._refused_uv, blocked.filename if blocked is not None else None}
+        if uv in refused:
+            uv = None
+        target = ["--target", self._venv_dir]
+        if uv:
+            return [uv, "pip", "install", "--python", self._venv_python, *target, *needed]
+        if importlib.util.find_spec("pip") is None:
+            return (
+                "Install failed: no installer is available for the app's Python "
+                "(uv was not found or was blocked, and pip is not installed)."
+            )
+        return [self._venv_python, "-m", "pip", "install", "--no-input", *target, *needed]
+
+    async def _launch_installer(self, cmd: list[str]) -> asyncio.subprocess.Process | str:
+        """Start an install command, or return the failure when Windows refuses it by policy.
+
+        Other launch errors propagate unchanged.
+        """
+        try:
+            return await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -1629,20 +1671,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 f"Install failed: Windows blocked {cmd[0]} (WinError {code}: "
                 f"{exc.strerror}) by an Application Control policy on this computer."
             )
-        try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=_install_timeout
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return f"Install timed out after {_install_timeout}s."
-        output = stdout.decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            return f"Install failed (exit {proc.returncode}):\n{output}"
-        for p in needed:
-            self._installed_packages.add(p.lower())
-        return output
 
     async def _stop_process(self) -> None:
         if self._proc is not None and self._proc.returncode is None:

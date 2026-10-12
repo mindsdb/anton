@@ -539,8 +539,50 @@ async def test_fallback_installs_skip_a_uv_that_windows_refused(tmp_path, monkey
     ]
 
 
-async def test_an_install_refused_by_policy_names_the_installer(tmp_path, monkeypatch):
+async def test_a_uv_refused_at_install_time_falls_back_to_pip_and_is_remembered(
+    tmp_path, monkeypatch
+):
+    # Fallback entered on a blocked venv Python never ran uv, so the first
+    # install is where Windows refuses it; pip on the allowed Python still works.
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: object() if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+    recorded_exec = local.asyncio.create_subprocess_exec
+
+    async def refuse_uv(*cmd, **kwargs):
+        if cmd[0] == "/usr/bin/uv":
+            commands.append(cmd)
+            raise _policy_error(4551)
+        return await recorded_exec(*cmd, **kwargs)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_uv)
+
+    first = await pad.install_packages(["requests"])
+    second = await pad.install_packages(["rich"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    pip = (sys.executable, "-m", "pip", "install", "--no-input", "--target", packages)
+    assert first == second == "installed"
+    assert commands == [
+        ("/usr/bin/uv", "pip", "install", "--python", sys.executable, "--target", packages, "requests"),
+        (*pip, "requests"),
+        (*pip, "rich"),
+    ]
+
+
+async def test_an_install_refused_by_policy_names_the_installer(tmp_path, monkeypatch):
+    # No pip to retry with, so the uv refusal is what the model sees.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: None if name == "pip" else real_find_spec(name, *a),
+    )
     pad = _fallback_pad(tmp_path)
 
     async def refuse(*_args, **_kwargs):
