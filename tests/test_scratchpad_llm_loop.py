@@ -562,31 +562,70 @@ async def test_a_cells_model_calls_carry_its_turns_trace_and_role(
     ]
 
 
+_ASK_CELL = 'print(get_llm().complete(system="s", messages=[{"role": "user", "content": "hi"}]).content)'
+
+
+async def _run_on_pad(tmp_path, base_url, code):
+    pad = LocalScratchpadRuntime(
+        name="usage",
+        coding_provider="openai-compatible",
+        coding_model="stub-model",
+        coding_api_key="test-key",
+        coding_base_url=base_url,
+        _venvs_base=tmp_path / "venvs",
+    )
+    await pad.start()
+    token = set_trace_context(TraceContext(session_id="conv-1", metadata={"turn": "1"}))
+    try:
+        return await pad.execute(code)
+    finally:
+        reset_trace_context(token)
+        await pad.cleanup()
+
+
+def _usage_lines(caplog):
+    return [json.loads(r.getMessage().removeprefix("llm_usage "))
+            for r in caplog.records if r.name == "anton.usage"]
+
+
 @pytest.mark.slow
-async def test_the_usage_log_never_reaches_a_cells_output(tmp_path, monkeypatch):
-    """The pad's log is the cell output the model reads, so the host's usage
-    switch is not passed down to it."""
+async def test_a_cells_model_call_is_logged_by_the_host_not_in_its_output(tmp_path, monkeypatch, caplog):
+    """The pad's log is the cell output the model reads, so a cell's call sends
+    its usage to the host, which logs it with the cell's turn."""
     monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO", logger="anton.usage")
     with _serving() as server:
-        pad = LocalScratchpadRuntime(
-            name="usage",
-            coding_provider="openai-compatible",
-            coding_model="stub-model",
-            coding_api_key="test-key",
-            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
-            _venvs_base=tmp_path / "venvs",
-        )
-        await pad.start()
-        try:
-            cell = await pad.execute(
-                'print(get_llm().complete(system="s", messages=[{"role": "user", "content": "hi"}]).content)'
-            )
-        finally:
-            await pad.cleanup()
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1", _ASK_CELL)
 
     assert cell.error is None, cell.error
-    assert len(server.seen) == 1
     assert "llm_usage" not in cell.stdout + cell.stderr + cell.logs
+    (line,) = _usage_lines(caplog)
+    assert (line["conversation"], line["turn"], line["role"]) == ("conv-1", "1", "coding")
+    assert (line["model"], line["input"], line["output"]) == ("stub-model", 1, 1)
+
+
+@pytest.mark.slow
+async def test_a_killed_cell_keeps_the_usage_of_the_calls_it_made(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "3")
+    caplog.set_level("INFO", logger="anton.usage")
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1",
+                                 _ASK_CELL + "\nimport time\ntime.sleep(60)")
+
+    assert cell.error and "timed out" in cell.error
+    assert len(_usage_lines(caplog)) == 1
+
+
+@pytest.mark.slow
+async def test_a_cell_sends_no_usage_when_the_host_log_is_off(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    caplog.set_level("INFO", logger="anton.usage")
+    with _serving() as server:
+        cell = await _run_on_pad(tmp_path, f"http://127.0.0.1:{server.server_port}/v1", _ASK_CELL)
+
+    assert cell.error is None, cell.error
+    assert _usage_lines(caplog) == []
 
 
 def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):

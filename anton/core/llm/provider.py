@@ -6,7 +6,7 @@ import os
 import re
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -21,6 +21,15 @@ if TYPE_CHECKING:
 # host's log instead of Langfuse. Off by default: production logs nothing new.
 USAGE_LOG_ENV = "ANTON_USAGE_LOG"
 _usage_logger = logging.getLogger("anton.usage")
+
+
+def usage_log_enabled() -> bool:
+    return os.environ.get(USAGE_LOG_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def log_usage_record(record: dict) -> None:
+    # default=str: an odd value from a host or an SDK must not fail the call.
+    _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
 
 
 # Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
@@ -2221,14 +2230,17 @@ class LLMProvider(ABC):
     # Role reported for a call made on this provider outside LLMClient, such
     # as cowork-server's route gate. LLMClient sets it.
     trace_role: str | None = None
+    # Receives each call's usage record instead of the log. A scratchpad sets
+    # it to send the record to its host.
+    usage_sink: Callable[[dict], None] | None = None
 
     def log_usage(self, *, model: str, usage: Usage, served_model: str | None) -> None:
-        """Log one call's usage when `ANTON_USAGE_LOG` is on.
+        """Report one call's usage to `usage_sink`, or log it when `ANTON_USAGE_LOG` is on.
 
         Called where the usage is first known, before any check on the reply
         can raise, so a billed call that then fails is still counted.
         """
-        if os.environ.get(USAGE_LOG_ENV, "").strip().lower() not in {"1", "true", "yes", "on"}:
+        if self.usage_sink is None and not usage_log_enabled():
             return
         ctx = get_trace_context()
         record = {
@@ -2243,8 +2255,10 @@ class LLMProvider(ABC):
             "cache_read": usage.cache_read_tokens,
             "cache_creation": usage.cache_creation_tokens,
         }
-        # default=str: an odd value from a host or an SDK must not fail the call.
-        _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
+        if self.usage_sink is not None:
+            self.usage_sink(record)
+        else:
+            log_usage_record(record)
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
