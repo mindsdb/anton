@@ -497,6 +497,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         packages.mkdir(parents=True, exist_ok=True)
         self._venv_dir = str(packages)
+        if not self._in_fallback:
+            self._pending_recovery_note = (
+                f"Note: this scratchpad runs on the app's own Python ({sys.executable}) "
+                f"because Windows blocked the scratchpad's Python "
+                f"({blocked.filename or 'its venv'}, WinError "
+                f"{_policy_block_code(blocked)}: {blocked.strerror}) by an Application "
+                f"Control policy. Installed packages go to {packages}. A package with "
+                "compiled parts may be blocked by the same policy."
+            )
         self._in_fallback = True
 
     def _policy_blocked_message(self, blocked: OSError) -> str:
@@ -926,6 +935,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["PYTHONPATH"] = _anton_root + (
                 os.pathsep + python_path if python_path else ""
             )
+        if self._in_fallback and self._venv_dir is not None:
+            # After the anton root, so an install cannot shadow what the boot
+            # script imports; PIP_TARGET keeps a cell's pip off the app's own env.
+            parts = env["PYTHONPATH"].split(os.pathsep)
+            at = parts.index(_anton_root) + 1 if _anton_root in parts else len(parts)
+            parts.insert(at, self._venv_dir)
+            env["PYTHONPATH"] = os.pathsep.join(parts)
+            env["PIP_TARGET"] = self._venv_dir
 
         # Pin the subprocess cwd to the workspace root so bare-relative
         # paths in scratchpad code (`open("data.csv")`, `os.listdir(".")`,
@@ -1126,7 +1143,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         estimated_seconds: int = 0,
     ):
         """Async generator: yields progress strings then a final Cell."""
-        recovery_note: str | None = None
         if self._proc is None or self._proc.returncode is not None:
             # ENG-1273: a dead process (watchdog kill, crash, or anything
             # else) recovers automatically here rather than making the agent
@@ -1147,12 +1163,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     estimated_time=estimated_time,
                 )
                 return
-            # Grabbed once and cleared immediately: whatever happens to THIS
-            # cell (succeeds, errors, or is killed again), the note must
-            # reach the agent exactly once, attached to this cell's result —
-            # never left dangling on a later, unrelated one.
-            recovery_note = self._pending_recovery_note
-            self._pending_recovery_note = None
+        # Grabbed once and cleared immediately: whatever happens to THIS
+        # cell (succeeds, errors, or is killed again), the note must
+        # reach the agent exactly once, attached to this cell's result —
+        # never left dangling on a later, unrelated one. Read on every
+        # cell, because a fallback start leaves one without any recovery.
+        recovery_note = self._pending_recovery_note
+        self._pending_recovery_note = None
 
         # Fresh salvage state per cell: _read_result accumulates the worker's
         # stdout chunks here so a kill/crash can still report partial output.

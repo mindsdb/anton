@@ -488,6 +488,68 @@ async def test_a_failed_fallback_spawn_never_deletes_the_app_environment(
     assert Path(sys.executable).exists()
 
 
+async def test_a_fallback_pad_reads_a_zip_of_workbooks(tmp_path):
+    # The ticket's upload: a ZIP of Excel reports. zipfile and openpyxl ship
+    # with the app's own Python, so no install is needed to read it.
+    pad = _fallback_pad(tmp_path)
+    archive = tmp_path / "reports.zip"
+    code = (
+        "import io, zipfile, openpyxl\n"
+        "book = openpyxl.Workbook(); book.active['A1'] = 'March'\n"
+        "data = io.BytesIO(); book.save(data)\n"
+        f"with zipfile.ZipFile({str(archive)!r}, 'w') as z: z.writestr('march.xlsx', data.getvalue())\n"
+        f"with zipfile.ZipFile({str(archive)!r}) as z:\n"
+        "    sheet = openpyxl.load_workbook(io.BytesIO(z.read('march.xlsx'))).active\n"
+        "print(sheet['A1'].value)\n"
+    )
+    await pad.start()
+    try:
+        cell = await pad.execute(code)
+    finally:
+        await pad.close()
+
+    assert cell.error is None, cell.error
+    assert cell.stdout.strip() == "March"
+
+
+async def test_fallback_child_env_keeps_the_anton_root_first(tmp_path, monkeypatch):
+    pad = _fallback_pad(tmp_path)
+    envs: list[dict[str, str]] = []
+    real_exec = local.asyncio.create_subprocess_exec
+
+    async def recording_exec(*args, **kwargs):
+        envs.append(kwargs["env"])
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", recording_exec)
+    await pad.start()
+    await pad.close()
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    parts = envs[0]["PYTHONPATH"].split(os.pathsep)
+    anton_root = str(Path(local.__file__).resolve().parents[3])
+    assert parts.index(anton_root) < parts.index(packages)
+    assert envs[0]["PIP_TARGET"] == packages
+
+
+async def test_the_fallback_note_reaches_the_model_once(tmp_path):
+    pad = _fallback_pad(tmp_path)
+    await pad.start()
+    try:
+        first = await pad.execute("print(1)")
+        await pad.resume()
+        after_resume = await pad.execute("print(2)")
+        await pad.reset()
+        after_reset = await pad.execute("print(3)")
+    finally:
+        await pad.close()
+
+    assert "runs on the app's own Python" in first.logs
+    assert "WinError 4551" in first.logs
+    assert "runs on the app's own Python" not in after_resume.logs
+    assert "runs on the app's own Python" not in after_reset.logs
+
+
 def _in_daemon_thread(*, fn, timeout: float = 30.0):
     """Run ``fn`` on a daemon thread, then return its result or raise its error.
 
