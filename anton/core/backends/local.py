@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import hashlib
+import importlib.util
 import re
 import shutil
 import sys
@@ -497,6 +498,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         packages.mkdir(parents=True, exist_ok=True)
         self._venv_dir = str(packages)
+        self._load_requirements()
         if not self._in_fallback:
             self._pending_recovery_note = (
                 f"Note: this scratchpad runs on the app's own Python ({sys.executable}) "
@@ -1542,7 +1544,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         await self._run_venv_work(self._ensure_venv)
 
         uv = self._find_uv()
-        if uv:
+        if self._in_fallback:
+            # --target keeps every install in the packages folder; without it
+            # this would install into the app's own environment.
+            target = ["--target", self._venv_dir]
+            if uv:
+                cmd = [uv, "pip", "install", "--python", self._venv_python, *target, *needed]
+            elif importlib.util.find_spec("pip") is None:
+                return (
+                    "Install failed: no installer is available for the app's Python "
+                    "(uv was not found and pip is not installed)."
+                )
+            else:
+                cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *target, *needed]
+        elif uv:
             cmd = [uv, "pip", "install", "--python", self._venv_python, *needed]
         else:
             cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *needed]

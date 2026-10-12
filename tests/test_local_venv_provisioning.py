@@ -550,6 +550,84 @@ async def test_the_fallback_note_reaches_the_model_once(tmp_path):
     assert "runs on the app's own Python" not in after_reset.logs
 
 
+def _record_install_commands(monkeypatch) -> list[tuple[str, ...]]:
+    """Capture install commands and answer each with a successful fake process."""
+    commands: list[tuple[str, ...]] = []
+
+    class _Done:
+        returncode = 0
+
+        async def communicate(self):
+            return b"installed", None
+
+    async def fake_exec(*cmd, **_kwargs):
+        commands.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", fake_exec)
+    return commands
+
+
+async def test_fallback_installs_go_to_the_packages_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    await pad.install_packages(["requests"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    assert commands == [
+        ("/usr/bin/uv", "pip", "install", "--python", sys.executable, "--target", packages, "requests")
+    ]
+
+
+async def test_fallback_installs_without_uv_use_pip_with_a_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: object() if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    await pad.install_packages(["requests"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    assert commands == [
+        (sys.executable, "-m", "pip", "install", "--no-input", "--target", packages, "requests")
+    ]
+
+
+async def test_fallback_without_any_installer_names_the_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: None if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    result = await pad.install_packages(["requests"])
+
+    assert commands == []
+    assert result.startswith("Install failed")
+    assert "no installer is available" in result
+
+
+async def test_fallback_installs_are_remembered_in_the_packages_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    pad = _fallback_pad(tmp_path)
+    _record_install_commands(monkeypatch)
+    await pad.install_packages(["requests"])
+    await pad.close()
+
+    assert (tmp_path / "scratchpad-packages" / "probe" / "requirements.txt").read_text() == "requests\n"
+    again = _fallback_pad(tmp_path)
+    assert await again.install_packages(["requests"]) == "All packages already installed."
+
+
 def _in_daemon_thread(*, fn, timeout: float = 30.0):
     """Run ``fn`` on a daemon thread, then return its result or raise its error.
 
