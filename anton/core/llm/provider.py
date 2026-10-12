@@ -972,7 +972,7 @@ _MINDSHUB_BILLING_CTA = (
 # every environment and vanity host is a subdomain of one of them:
 # prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
 # per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
-# `llm.mdb.ai`, `llm.staging.mdb.ai`, `writer.mdb.ai`, `terabase.dev.mdb.ai`,
+# `llm.mdb.ai`, `llm.staging.mdb.ai`, vanity hosts under `*.mdb.ai` and `*.dev.mdb.ai`,
 # `view.mindshub.ai`. Terraform declares no other apex zone, and the wildcards
 # `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
 # positive cases are pinned in tests/test_status_error_mapper.py so this

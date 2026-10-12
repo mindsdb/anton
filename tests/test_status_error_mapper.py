@@ -1419,8 +1419,8 @@ def test_a_request_less_response_does_not_shadow_a_foreign_host():
     "api-pr123.dev.mindshub.ai",    # ephemeral per-PR env
     "llm.mdb.ai",                   # legacy vanity gateway
     "llm.staging.mdb.ai",
-    "writer.mdb.ai",                # white-label surfaces
-    "terabase.dev.mdb.ai",
+    "example.mdb.ai",               # vanity host shapes
+    "example.dev.mdb.ai",
     "view.mindshub.ai",
 ])
 def test_every_real_gateway_host_is_trusted(host):
