@@ -71,8 +71,9 @@ _DRAFT_BRIEF_INSTRUCTION = (
     "NOT describe how to answer: no key names, no button names, no option "
     "numbers, and do not invent your own accept/cancel option labels — the "
     "host renders the actual choices.\n\n"
-    "Write everything — lead-in, sections, closing line — in the same "
-    "language as the user request. Keep the whole reply under about 25 "
+    "Write everything — lead-in, section headings, sections, closing line "
+    "— in the same language as the user request; translate the section "
+    "names above. Keep the whole reply under about 25 "
     "lines. Reply with the brief only, no other text."
 )
 

@@ -163,6 +163,11 @@ GATHERING_CONTINUE = (
     "Continue gathering: call `finish_gathering` again once ready."
 )
 
+# No language rule here on purpose. With an all-English context, "write in
+# the language of the user request" made the model pick an unrelated language
+# (Russian, Spanish) for these notes, and the brief and the PRD continued in
+# it. The brief carries its own language rule and follows the request without
+# this one.
 _GATHERING_INSTRUCTION = (
     "## Your task\n"
     "Answer three questions and record the answers with `finish_gathering`:\n"
@@ -200,8 +205,6 @@ _GATHERING_INSTRUCTION = (
     "page in this step. A source you name in `data_sources` but did not "
     "touch is fetched before generation starts — naming one is how you "
     "request that.\n"
-    "- Write `summary`, `constraints`, `assumptions` and `open_points` in "
-    "the language of the user request.\n"
     "- Keep the whole `finish_gathering` call under about 30 lines.\n\n"
     "## When there is no external data\n"
     "Call `finish_gathering` at once: no scratchpad, no web search, no "

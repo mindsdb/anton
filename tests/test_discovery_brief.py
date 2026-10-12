@@ -310,6 +310,14 @@ def test_draft_brief_instruction_pins_the_language_to_the_request():
     assert "same language as the user request" in brief._DRAFT_BRIEF_INSTRUCTION
 
 
+def test_draft_brief_instruction_translates_the_section_headings():
+    """Seen live: a Spanish request got a Spanish brief under the English
+    section names the instruction lists (Goal, Artifact type, ...)."""
+    text = brief._DRAFT_BRIEF_INSTRUCTION
+    assert "section headings" in text
+    assert "translate the section names" in text
+
+
 async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):
     """A bare Enter (no selection, no free text) must resolve to "accept",
     not the channel's own default of "cancelled" — accepting the brief as
