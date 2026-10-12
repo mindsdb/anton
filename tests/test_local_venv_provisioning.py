@@ -33,6 +33,14 @@ def make_pad(tmp_path, name="probe"):
     return LocalScratchpadRuntime(name=name, _venvs_base=tmp_path, **_DEFAULTS)
 
 
+@pytest.fixture(autouse=True)
+def _forget_policy_blocks():
+    """A recorded policy block lasts for the process, so isolate each test."""
+    local._POLICY_BLOCKED_BASES.clear()
+    yield
+    local._POLICY_BLOCKED_BASES.clear()
+
+
 @pytest.mark.parametrize(
     "expected_path",
     [
@@ -266,6 +274,70 @@ def test_recycling_an_existing_venv_records_a_policy_block(tmp_path, monkeypatch
 
     assert pad._try_recycle_venv(existing) is False
     assert pad._policy_block is blocked
+
+
+def _count_builds(pad, monkeypatch, *, verify):
+    """Replace the venv build with a counter and verification with ``verify``."""
+    builds: list[str] = []
+    monkeypatch.setattr(pad, "_create_venv", lambda: builds.append(pad.name))
+    monkeypatch.setattr(pad, "_verify_venv_python", verify)
+    return builds
+
+
+def _blocked_verify(pad):
+    def verify():
+        pad._last_verify_error = "[WinError 4551] An Application Control policy has blocked this file"
+        pad._policy_block = _policy_error(4551)
+        return False
+
+    return verify
+
+
+def test_a_policy_block_stops_the_build_after_one_attempt(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    builds = _count_builds(pad, monkeypatch, verify=_blocked_verify(pad))
+
+    with pytest.raises(RuntimeError, match="4551"):
+        pad._ensure_venv()
+    assert builds == ["probe"]
+
+
+def test_a_renamed_pad_under_a_blocked_base_skips_the_build(tmp_path, monkeypatch):
+    first = make_pad(tmp_path, name="probe")
+    _count_builds(first, monkeypatch, verify=_blocked_verify(first))
+    with pytest.raises(RuntimeError):
+        first._ensure_venv()
+
+    renamed = make_pad(tmp_path, name="probe_retry")
+    builds = _count_builds(renamed, monkeypatch, verify=lambda: True)
+
+    with pytest.raises(RuntimeError, match="Application Control policy"):
+        renamed._ensure_venv()
+    assert builds == []
+
+
+def test_a_policy_block_leaves_other_venvs_bases_building(tmp_path, monkeypatch):
+    blocked_pad = make_pad(tmp_path / "blocked")
+    _count_builds(blocked_pad, monkeypatch, verify=_blocked_verify(blocked_pad))
+    with pytest.raises(RuntimeError):
+        blocked_pad._ensure_venv()
+
+    other = make_pad(tmp_path / "other")
+    builds = _count_builds(other, monkeypatch, verify=lambda: True)
+    monkeypatch.setattr(other, "_setup_parent_site_packages", lambda: None)
+    monkeypatch.setattr(other, "_save_python_version", lambda: None)
+
+    other._ensure_venv()
+    assert builds == ["probe"]
+
+
+def test_a_failure_that_is_not_a_policy_block_still_retries(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    builds = _count_builds(pad, monkeypatch, verify=lambda: False)
+
+    with pytest.raises(RuntimeError):
+        pad._ensure_venv()
+    assert len(builds) == LocalScratchpadRuntime._MAX_VENV_RETRIES
 
 
 def _in_daemon_thread(*, fn, timeout: float = 30.0):

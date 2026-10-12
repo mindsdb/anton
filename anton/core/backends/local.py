@@ -252,6 +252,13 @@ def _venv_lock(*, venv_path: Path) -> threading.RLock:
         return _VENV_LOCKS.setdefault(key, threading.RLock())
 
 
+# Venvs bases where Windows refused a venv's Python by policy, with the refusal.
+# Kept per base, not per process: one server serves every workspace, and a
+# policy path rule can block one workspace folder and not another.
+_POLICY_BLOCKED_BASES: dict[str, OSError] = {}
+_POLICY_BLOCKED_GUARD = threading.Lock()
+
+
 class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
@@ -395,36 +402,47 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
 
         venv_path = self._venvs_base / self.name
-        if venv_path.is_dir() and self._try_recycle_venv(venv_path):
+        last_error: Exception | None = None
+        blocked = self._base_policy_block()
+        if blocked is None and venv_path.is_dir() and self._try_recycle_venv(venv_path):
             return
+        blocked = self._base_policy_block()
 
-        # Only one thread at a time deletes and rebuilds this directory. A
-        # thread that waited here recycles the venv the first one built, so
-        # concurrent first starts create it once.
-        with _venv_lock(venv_path=venv_path):
-            if venv_path.is_dir() and self._try_recycle_venv(venv_path):
-                return
+        if blocked is None:
+            # Only one thread at a time deletes and rebuilds this directory. A
+            # thread that waited here recycles the venv the first one built, so
+            # concurrent first starts create it once.
+            with _venv_lock(venv_path=venv_path):
+                if venv_path.is_dir() and self._try_recycle_venv(venv_path):
+                    return
 
-            if venv_path.is_dir():
-                self._nuke_venv()
-
-            last_error: Exception | None = None
-            for attempt in range(1, self._MAX_VENV_RETRIES + 1):
-                try:
-                    self._create_venv()
-                    if self._verify_venv_python():
-                        self._setup_parent_site_packages()
-                        self._save_python_version()
-                        return
-                    detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
-                    raise RuntimeError(
-                        f"venv Python binary at {self._venv_python} is not functional{detail}"
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    if _policy_block_code(exc) is not None:
-                        self._policy_block = exc
+                if venv_path.is_dir():
                     self._nuke_venv()
+
+                for attempt in range(1, self._MAX_VENV_RETRIES + 1):
+                    try:
+                        self._create_venv()
+                        if self._verify_venv_python():
+                            self._setup_parent_site_packages()
+                            self._save_python_version()
+                            return
+                        detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
+                        raise RuntimeError(
+                            f"venv Python binary at {self._venv_python} is not functional{detail}"
+                        )
+                    except Exception as exc:
+                        last_error = exc
+                        if _policy_block_code(exc) is not None:
+                            self._policy_block = exc
+                        self._nuke_venv()
+                    if self._policy_block is not None:
+                        break
+            blocked = self._base_policy_block()
+
+        if blocked is not None:
+            self._venv_dir = None
+            self._venv_python = None
+            last_error = last_error or blocked
 
         # The model reads this message and relays it to the user, so it states
         # facts only: a generic fix hint here gets repeated as a diagnosis.
@@ -435,6 +453,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             f"{venv_path} from {sys.executable} using {method} after "
             f"{self._MAX_VENV_RETRIES} attempts. Last error: {last_error}"
         )
+
+    def _base_policy_block(self) -> OSError | None:
+        """Return the policy refusal recorded for this pad's venvs base, if any.
+
+        First records this pad's own refusal (``_policy_block``) for the base,
+        so every pad under it skips the venv build until the process restarts.
+        """
+        key = os.path.realpath(self._venvs_base)
+        if sys.platform in ("darwin", "win32"):
+            key = key.casefold()
+        with _POLICY_BLOCKED_GUARD:
+            if self._policy_block is not None:
+                _POLICY_BLOCKED_BASES.setdefault(key, self._policy_block)
+            return _POLICY_BLOCKED_BASES.get(key)
 
     @staticmethod
     def _find_uv() -> str | None:
