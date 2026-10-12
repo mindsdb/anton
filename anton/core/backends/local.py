@@ -437,7 +437,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     except Exception as exc:
                         last_error = exc
                         if _policy_block_code(exc) is not None:
-                            self._policy_block = exc
+                            self._record_policy_block(exc, program=None)
                         self._nuke_venv()
                     if self._policy_block is not None:
                         break
@@ -457,19 +457,30 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             f"{self._MAX_VENV_RETRIES} attempts. Last error: {last_error}"
         )
 
-    def _base_policy_block(self) -> OSError | None:
-        """Return the policy refusal recorded for this pad's venvs base, if any.
-
-        First records this pad's own refusal (``_policy_block``) for the base,
-        so every pad under it skips the venv build until the process restarts.
-        """
+    def _policy_blocked_key(self) -> str:
+        """The key of this pad's venvs base in ``_POLICY_BLOCKED_BASES``."""
         key = os.path.realpath(self._venvs_base)
         if sys.platform in ("darwin", "win32"):
             key = key.casefold()
+        return key
+
+    def _record_policy_block(self, exc: OSError, program: str | None) -> None:
+        """Keep a launch Windows refused by policy, and mark this venvs base blocked.
+
+        Windows leaves ``filename`` empty on a refused launch, so ``program``
+        is stamped on it for the message. Side effect: writes the process-wide
+        map, so every pad under this base skips the venv build until restart.
+        """
+        if exc.filename is None:
+            exc.filename = program
+        self._policy_block = exc
         with _POLICY_BLOCKED_GUARD:
-            if self._policy_block is not None:
-                _POLICY_BLOCKED_BASES.setdefault(key, self._policy_block)
-            return _POLICY_BLOCKED_BASES.get(key)
+            _POLICY_BLOCKED_BASES.setdefault(self._policy_blocked_key(), exc)
+
+    def _base_policy_block(self) -> OSError | None:
+        """Return the policy refusal recorded for this pad's venvs base, if any."""
+        with _POLICY_BLOCKED_GUARD:
+            return _POLICY_BLOCKED_BASES.get(self._policy_blocked_key())
 
     def _enter_fallback(self, blocked: OSError) -> None:
         """Run this pad on the app's own interpreter, which the policy already allows.
@@ -645,9 +656,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         except Exception as exc:
             self._last_verify_error = str(exc)
             if _policy_block_code(exc) is not None:
-                if exc.filename is None:
-                    exc.filename = self._venv_python
-                self._policy_block = exc
+                self._record_policy_block(exc, program=self._venv_python)
             return False
 
     def _nuke_venv(self) -> None:
@@ -989,10 +998,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         except (FileNotFoundError, PermissionError, OSError) as exc:
             if _policy_block_code(exc) is not None:
                 # Rebuilding cannot help, so keep the venv and stop other pads trying.
-                if exc.filename is None:
-                    exc.filename = self._venv_python
-                self._policy_block = exc
-                self._base_policy_block()
+                self._record_policy_block(exc, program=self._venv_python)
                 raise RuntimeError(self._policy_blocked_message(exc)) from exc
             await self._run_venv_work(self._nuke_venv)
             raise RuntimeError(

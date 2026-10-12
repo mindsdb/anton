@@ -288,7 +288,7 @@ def _count_builds(pad, monkeypatch, *, verify):
 def _blocked_verify(pad):
     def verify():
         pad._last_verify_error = "[WinError 4551] An Application Control policy has blocked this file"
-        pad._policy_block = _policy_error(4551)
+        pad._record_policy_block(_policy_error(4551), program=pad._venv_python)
         return False
 
     return verify
@@ -397,8 +397,7 @@ async def test_a_spawn_refused_by_policy_reports_it_and_keeps_the_venv(tmp_path,
 def _fallback_pad(tmp_path):
     """A pad whose venvs base Windows has refused, so it runs on sys.executable."""
     pad = make_pad(tmp_path / "venvs")
-    pad._policy_block = _policy_error(4551)
-    pad._base_policy_block()
+    pad._record_policy_block(_policy_error(4551), program=None)
     pad._ensure_venv()
     return pad
 
@@ -432,8 +431,7 @@ def test_fallback_runs_on_the_app_interpreter_with_a_packages_folder(tmp_path):
 
 def test_fallback_is_refused_when_the_app_interpreter_is_blocked_too(tmp_path, monkeypatch):
     pad = make_pad(tmp_path / "venvs")
-    pad._policy_block = _policy_error(4551)
-    pad._base_policy_block()
+    pad._record_policy_block(_policy_error(4551), program=None)
     monkeypatch.setattr(subprocess, "run", _raise_on_run(_policy_error(4551)))
 
     with pytest.raises(RuntimeError, match=f"Windows blocked {re.escape(sys.executable)}"):
