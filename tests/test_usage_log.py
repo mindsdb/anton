@@ -6,6 +6,7 @@ when the reply then fails a check.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,8 +15,16 @@ import pytest
 
 from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import OpenAIProvider
-from anton.core.llm.provider import LLMProvider, TransientProviderError, Usage
-from anton.core.llm.tracing import TraceContext, call_role, reset_trace_context, set_trace_context
+from anton.core.llm.provider import LLMProvider, LLMResponse, TransientProviderError, Usage
+from anton.core.llm.tracing import (
+    TraceContext,
+    call_role,
+    get_trace_context,
+    reset_trace_context,
+    set_trace_context,
+)
+from anton.core.session import ChatSession, ChatSessionConfig
+from tests.conftest import make_mock_llm
 
 MESSAGES = [{"role": "user", "content": "hi"}]
 
@@ -182,3 +191,34 @@ async def test_a_streamed_anthropic_call_is_logged_even_when_it_ends_empty(usage
 
     (line,) = usage_log()
     assert (line["model"], line["input"]) == ("claude-alias", 30)
+
+
+async def _trace_seen_by_end_of_turn_work(monkeypatch):
+    """Run one turn and return the trace a task scheduled by the end-of-turn
+    memory passes sees."""
+    llm = make_mock_llm()
+    llm.plan.return_value = LLMResponse(content="hi", usage=Usage(input_tokens=1))
+    session = ChatSession(ChatSessionConfig(llm_client=llm))
+    seen = []
+
+    async def _record():
+        seen.append(get_trace_context())
+
+    tasks = []
+    monkeypatch.setattr(session, "_schedule_cerebellum_flush", lambda: tasks.append(asyncio.create_task(_record())))
+    async for _ in session.turn_stream("one", trace_metadata={"turn": "0"}):
+        pass
+    await asyncio.gather(*tasks)
+    (trace,) = seen
+    return trace
+
+
+async def test_end_of_turn_work_keeps_the_turns_trace_when_the_usage_log_is_on(monkeypatch):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    trace = await _trace_seen_by_end_of_turn_work(monkeypatch)
+    assert trace is not None and trace.metadata == {"turn": "0"}
+
+
+async def test_end_of_turn_work_runs_without_a_trace_when_the_usage_log_is_off(monkeypatch):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    assert await _trace_seen_by_end_of_turn_work(monkeypatch) is None
