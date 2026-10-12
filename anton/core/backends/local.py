@@ -493,7 +493,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # covers exactly the pads that share it.
         packages_root = self._venvs_base.parent / "scratchpad-packages"
         packages = packages_root / self.name
-        if not packages.resolve().is_relative_to(packages_root.resolve()):
+        # A direct child only: "." or "" would make the root itself the folder
+        # that cleanup() deletes, taking every pad's packages with it.
+        if packages.resolve().parent != packages_root.resolve():
             raise RuntimeError(
                 f"Scratchpad failed to start: the scratchpad name {self.name!r} "
                 f"points outside {packages_root}."

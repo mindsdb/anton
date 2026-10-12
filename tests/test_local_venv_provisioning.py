@@ -451,12 +451,14 @@ def test_fallback_packages_folders_follow_the_venv_names(tmp_path):
     assert underscored._venv_dir == str(tmp_path / "scratchpad-packages" / "a_b")
 
 
-def test_fallback_refuses_a_pad_name_that_leaves_the_packages_folder(tmp_path):
-    pad = make_pad(tmp_path / "venvs", name="../escape")
+@pytest.mark.parametrize("name", ["../escape", ".", ""])
+def test_fallback_refuses_a_pad_name_that_is_not_a_folder_of_its_own(tmp_path, name):
+    pad = make_pad(tmp_path / "venvs", name=name)
     pad._record_policy_block(_policy_error(4551), program=None)
 
     with pytest.raises(RuntimeError, match="points outside"):
         pad._ensure_venv()
+    assert pad._venv_dir is None
     assert not (tmp_path / "escape").exists()
 
 
