@@ -523,7 +523,8 @@ class TurnKeyDataVault:
             try:
                 self._cache[(engine, name)] = future.result()
             except Exception:
-                # Left uncached, so the first real read retries it on the old path.
+                # Only an unexpected error lands here; auth and parse failures already
+                # came back as None and are cached. Left uncached so a later read retries.
                 logger.warning("turn-key prefetch failed for %s/%s", engine, name, exc_info=True)
 
     def _fetch(self, engine: str, name: str) -> dict[str, str] | None:
