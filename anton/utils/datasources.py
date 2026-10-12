@@ -604,7 +604,7 @@ def collect_datasource_catalog(
 
         # An unnamed connection shows its engine, not "(none)": evals found the
         # bare "(none)" made the model likelier to estimate figures it lacks.
-        lines = [f"\n### Slug: `{slug}` — Label: {user_label or engine}"]
+        lines = [f"\n### Slug: `{slug}` — Label: {user_label or engine or slug}"]
         lines.append(f"Engine: {engine_name}")
         # Same non-secret allowlist `_connection_identity()` encodes
         # (host/database/email, secure_keys-gated) — inlined here as

@@ -8,7 +8,12 @@ fields.
 import json
 
 from anton.core.datasources.data_vault import LocalDataVault
-from anton.utils.datasources import _connection_identity, _parse_picked_files, build_datasource_context
+from anton.utils.datasources import (
+    _connection_identity,
+    _parse_picked_files,
+    build_datasource_context,
+    collect_datasource_catalog,
+)
 
 
 class TestConnectionIdentity:
@@ -108,13 +113,28 @@ class TestUserLabelInPrompt:
         assert "Label: Support" in ctx
 
     def test_no_label_falls_back_to_the_engine(self, tmp_path):
-        # A connection nobody named reads as its engine, the same text the
-        # model saw when the host used to store the engine id as the label.
+        # A connection nobody named reads as its engine.
         v = LocalDataVault(tmp_path)
         v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo"})
         ctx = build_datasource_context(v)
         assert "Label: postgres" in ctx
         assert "(none)" not in ctx
+
+    def test_the_engine_fallback_stays_out_of_the_catalog_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo"})
+        assert collect_datasource_catalog(v).connections[0].label == ""
+
+    def test_a_record_with_no_engine_still_gets_a_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "db.example.com"})
+        record = next(tmp_path.glob("*a1b2c3*"))
+        data = json.loads(record.read_text())
+        data.pop("engine", None)
+        record.write_text(json.dumps(data))
+        ctx = build_datasource_context(v)
+        assert "— Label: \n" not in ctx
+        assert "— Label: " in ctx and "(none)" not in ctx
 
     def test_slug_leads_the_block_in_backticks(self, tmp_path):
         v = LocalDataVault(tmp_path)
