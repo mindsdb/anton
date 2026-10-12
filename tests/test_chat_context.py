@@ -469,7 +469,7 @@ class TestMindsSetupRecovery:
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
 
-        prompts = iter(["https://terabase.dev.mdb.ai", "", "2", "1"])
+        prompts = iter(["https://example.dev.mdb.ai", "", "2", "1"])
 
         async def fake_prompt(*args, **kwargs):
             return next(prompts)
@@ -515,8 +515,8 @@ class TestMindsSetupRecovery:
 
         assert result is rebuilt
         assert calls == [
-            ("https://terabase.dev.mdb.ai", "minds-key", True),
-            ("https://terabase.dev.mdb.ai", "minds-key", False),
+            ("https://example.dev.mdb.ai", "minds-key", True),
+            ("https://example.dev.mdb.ai", "minds-key", False),
         ]
         assert settings.minds_ssl_verify is False
         assert "ANTON_MINDS_SSL_VERIFY=false" in (home / ".anton" / ".env").read_text()
