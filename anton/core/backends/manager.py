@@ -4,12 +4,56 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from anton.core.backends.base import Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
 from anton.core.datasources.data_vault import DataVault
 
 logger = logging.getLogger(__name__)
+
+
+class _PathStamp(NamedTuple):
+    """A sys.path entry and its mtime, or None when it cannot be stat'ed."""
+
+    entry: str
+    mtime_ns: int | None
+
+
+@dataclass(frozen=True)
+class _PackageProbe:
+    """One probe's distribution names and the sys.path state they were read from."""
+
+    stamps: tuple[_PathStamp, ...]
+    names: tuple[str, ...]
+
+
+# A host that builds a ChatSession per turn (cowork-server) builds a manager,
+# and so a probe, per turn, and importlib.metadata re-reads every installed
+# distribution's METADATA on each call. The last probe is reused while
+# `_sys_path_stamps()` is unchanged.
+_last_probe: _PackageProbe | None = None
+
+
+def _sys_path_stamps() -> tuple[_PathStamp, ...]:
+    """sys.path with each entry's mtime.
+
+    Installers add or remove a whole *.dist-info directory in a sys.path entry,
+    which moves that entry's mtime. importlib.metadata keys its own listing of
+    each entry on the same mtime (FastPath.lookup), so a probe keyed on it sees
+    every install and removal a fresh probe would.
+    """
+    stamps: list[_PathStamp] = []
+    for entry in sys.path:
+        try:
+            mtime_ns: int | None = os.stat(entry or ".").st_mtime_ns
+        except OSError:
+            mtime_ns = None
+        stamps.append(_PathStamp(entry, mtime_ns))
+    return tuple(stamps)
 
 
 class ScratchpadManager:
@@ -155,10 +199,25 @@ class ScratchpadManager:
 
     @staticmethod
     def probe_packages() -> list[str]:
-        """Return sorted list of installed package distribution names."""
+        """Return sorted list of installed package distribution names.
+
+        These are the host interpreter's distributions on sys.path, not a
+        scratchpad venv's. Reuses the last probe while sys.path and each
+        entry's mtime are unchanged.
+        """
+        global _last_probe
         from importlib.metadata import distributions
 
-        return sorted({d.metadata["Name"] for d in distributions()})
+        # Stamped before probing, so a change made during the probe is seen next time.
+        stamps = _sys_path_stamps()
+        probe = _last_probe
+        if probe is None or probe.stamps != stamps:
+            probe = _PackageProbe(
+                stamps=stamps,
+                names=tuple(sorted({d.metadata["Name"] for d in distributions()})),
+            )
+            _last_probe = probe
+        return list(probe.names)
 
     def _derive_ds_env(self) -> dict[str, str] | None:
         """DS_* env values from the current vault state, fresh each call; None without a vault."""

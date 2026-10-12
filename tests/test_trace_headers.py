@@ -14,9 +14,12 @@ from anton.core.llm.tracing import (
     SURFACE_DESKTOP,
     SURFACE_WEB,
     TraceContext,
+    call_role,
     reset_trace_context,
     set_trace_context,
     surface_tag,
+    trace_context_from_json,
+    trace_context_to_json,
 )
 
 
@@ -160,3 +163,48 @@ def test_a_caller_cannot_smuggle_a_second_surface_through_metadata():
                      metadata={"surface": "desktop"})
     )
     assert json.loads(headers["Langfuse-Metadata"])["surface"] == "web"
+
+
+# ---------------------------------------------------------------------------
+# Each call names its role, so usage can be summed per role even when two
+# roles run the same model.
+# ---------------------------------------------------------------------------
+
+
+def _metadata_for(provider: OpenAIProvider, ctx: TraceContext) -> dict:
+    token = set_trace_context(ctx)
+    try:
+        return json.loads(provider._build_trace_headers()["Langfuse-Metadata"])
+    finally:
+        reset_trace_context(token)
+
+
+def test_the_call_role_rides_in_metadata_and_wins_over_the_caller():
+    with call_role("router"):
+        meta = _metadata_for(_provider(), TraceContext(metadata={"role": "spoof"}))
+    assert meta["role"] == "router"
+
+
+def test_a_direct_call_reports_the_providers_default_role():
+    provider = _provider()
+    provider.trace_role = "router"
+    assert _metadata_for(provider, TraceContext())["role"] == "router"
+    with call_role("planning"):
+        assert _metadata_for(provider, TraceContext())["role"] == "planning"
+
+
+def test_no_role_emits_no_role_key():
+    assert "role" not in _metadata_for(_provider(), TraceContext())
+
+
+def test_trace_context_survives_the_trip_to_a_scratchpad():
+    ctx = TraceContext(
+        session_id="s1", turn_id=2, harness="anton", surface=SURFACE_WEB,
+        tags=("eval",), metadata={"question_id": "q1"},
+    )
+    assert trace_context_from_json(trace_context_to_json(ctx)) == ctx
+
+
+def test_an_unreadable_trace_line_yields_no_context():
+    assert trace_context_from_json("not json") is None
+    assert trace_context_from_json('{"unknown": 1}') is None
