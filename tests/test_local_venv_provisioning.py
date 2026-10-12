@@ -508,6 +508,30 @@ async def test_an_install_refused_by_policy_names_the_installer(tmp_path, monkey
     assert "WinError 4551" in result
 
 
+async def test_a_spawn_refused_by_policy_starts_on_the_app_interpreter(tmp_path, monkeypatch):
+    # The venv's Python passed its check but Windows refused the spawn; the
+    # same start moves to the app's own Python instead of reporting a block.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    real_exec = local.asyncio.create_subprocess_exec
+
+    async def refuse_the_venv(program, *args, **kwargs):
+        if program != sys.executable:
+            raise _policy_error(4551)
+        return await real_exec(program, *args, **kwargs)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_the_venv)
+    pad = make_pad(tmp_path / "venvs")
+    try:
+        await pad.start()
+        cell = await pad.execute("import sys; print(sys.executable)")
+    finally:
+        await pad.close()
+
+    assert pad._in_fallback
+    assert cell.stdout.strip() == sys.executable
+    assert "WinError 4551" in cell.logs
+
+
 async def test_fallback_cleanup_deletes_only_the_packages_folder(tmp_path, monkeypatch):
     pad = _fallback_pad(tmp_path)
     await pad.start()
