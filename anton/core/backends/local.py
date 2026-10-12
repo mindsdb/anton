@@ -28,6 +28,7 @@ from anton.core.backends.wire import (
     RESULT_START,
     STDOUT_CHUNK_MARKER,
 )
+from anton.core.llm.provider import USAGE_LOG_ENV
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
@@ -701,6 +702,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         env = _utf8_env(os.environ)
         # Before the DS_* strip, so a project .env cannot smuggle a credential.
         _apply_workspace_overlay(env, self._workspace_env_overlay)
+        # The pad's log is the cell output the model reads; usage lines must not land there.
+        env.pop(USAGE_LOG_ENV, None)
         if self._scratchpad_ds_env is not None:
             # Never trust inherited DS_* values — strip them, then overlay
             # exactly what this pad should see.

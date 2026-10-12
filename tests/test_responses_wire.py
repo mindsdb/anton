@@ -458,3 +458,35 @@ async def test_an_unrelated_bad_request_is_not_mistaken_for_a_refused_breakpoint
     with pytest.raises(openai.BadRequestError):
         await _stream_system(endpoint.provider(), SPLIT_SYSTEM, tools=TOOLS)
     assert len(endpoint.requests) == 1
+
+
+def _usage_lines(caplog):
+    return [json.loads(r.getMessage().removeprefix("llm_usage "))
+            for r in caplog.records if r.name == "anton.usage"]
+
+
+async def test_a_streamed_responses_call_logs_its_usage(endpoint, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO", logger="anton.usage")
+    endpoint.replies.append(_done())
+    token = set_trace_context(TraceContext(session_id="conv-1", metadata={"turn": "0"}))
+    try:
+        await _stream(endpoint.provider())
+    finally:
+        reset_trace_context(token)
+
+    (line,) = _usage_lines(caplog)
+    assert (line["conversation"], line["turn"], line["served_model"]) == ("conv-1", "0", "gpt-test")
+    assert (line["input"], line["cache_read"], line["output"]) == (20, 100, 16)
+
+
+async def test_a_failed_responses_call_is_logged_before_it_raises(endpoint, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO", logger="anton.usage")
+    endpoint.replies.append((200, "json", _response("failed", error={"code": "server_error", "message": "boom"})))
+    with pytest.raises(TransientProviderError):
+        await endpoint.provider().complete(model="gpt-test", system="s",
+                                           messages=[{"role": "user", "content": "hi"}], max_tokens=16)
+
+    (line,) = _usage_lines(caplog)
+    assert (line["model"], line["input"], line["output"]) == ("gpt-test", 20, 16)

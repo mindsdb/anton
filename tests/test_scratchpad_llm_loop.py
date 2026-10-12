@@ -562,6 +562,33 @@ async def test_a_cells_model_calls_carry_its_turns_trace_and_role(
     ]
 
 
+@pytest.mark.slow
+async def test_the_usage_log_never_reaches_a_cells_output(tmp_path, monkeypatch):
+    """The pad's log is the cell output the model reads, so the host's usage
+    switch is not passed down to it."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    with _serving() as server:
+        pad = LocalScratchpadRuntime(
+            name="usage",
+            coding_provider="openai-compatible",
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            _venvs_base=tmp_path / "venvs",
+        )
+        await pad.start()
+        try:
+            cell = await pad.execute(
+                'print(get_llm().complete(system="s", messages=[{"role": "user", "content": "hi"}]).content)'
+            )
+        finally:
+            await pad.cleanup()
+
+    assert cell.error is None, cell.error
+    assert len(server.seen) == 1
+    assert "llm_usage" not in cell.stdout + cell.stderr + cell.logs
+
+
 def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):
     """Only the marker followed by a JSON object is a trace line."""
     (cell,) = _run_cells(

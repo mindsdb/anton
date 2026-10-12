@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import weakref
 from abc import ABC, abstractmethod
@@ -9,8 +11,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from .tracing import get_call_role, get_trace_context
+
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
+
+
+# Turns on one `llm_usage` log line per model call, for an eval that reads the
+# host's log instead of Langfuse. Off by default: production logs nothing new.
+USAGE_LOG_ENV = "ANTON_USAGE_LOG"
+_usage_logger = logging.getLogger("anton.usage")
 
 
 # Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
@@ -2211,6 +2221,30 @@ class LLMProvider(ABC):
     # Role reported for a call made on this provider outside LLMClient, such
     # as cowork-server's route gate. LLMClient sets it.
     trace_role: str | None = None
+
+    def log_usage(self, *, model: str, usage: Usage, served_model: str | None) -> None:
+        """Log one call's usage when `ANTON_USAGE_LOG` is on.
+
+        Called where the usage is first known, before any check on the reply
+        can raise, so a billed call that then fails is still counted.
+        """
+        if os.environ.get(USAGE_LOG_ENV, "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
+        ctx = get_trace_context()
+        record = {
+            "conversation": ctx.session_id if ctx else None,
+            "turn": (ctx.metadata or {}).get("turn") if ctx else None,
+            "tags": list(ctx.tags) if ctx else [],
+            "role": get_call_role() or self.trace_role,
+            "model": model,
+            "served_model": served_model,
+            "input": usage.input_tokens,
+            "output": usage.output_tokens,
+            "cache_read": usage.cache_read_tokens,
+            "cache_creation": usage.cache_creation_tokens,
+        }
+        # default=str: an odd value from a host or an SDK must not fail the call.
+        _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
