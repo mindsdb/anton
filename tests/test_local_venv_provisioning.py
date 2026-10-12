@@ -196,6 +196,78 @@ def test_verify_captures_an_exception_reason(tmp_path):
     assert pad._last_verify_error
 
 
+def _policy_error(code: int) -> OSError:
+    """An ``OSError`` shaped like Windows refusing a launch with ``code``."""
+    exc = OSError(13, "An Application Control policy has blocked this file")
+    exc.winerror = code
+    return exc
+
+
+def _raise_on_run(exc: OSError):
+    def run(*args, **kwargs):
+        raise exc
+
+    return run
+
+
+@pytest.mark.parametrize("code", [4551, 1260])
+def test_verify_records_a_launch_refused_by_policy(tmp_path, monkeypatch, code):
+    pad = make_pad(tmp_path)
+    pad._venv_python = sys.executable
+    blocked = _policy_error(code)
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(blocked))
+
+    assert pad._verify_venv_python() is False
+    assert pad._policy_block is blocked
+    assert "Application Control policy" in pad._last_verify_error
+
+
+def test_verify_does_not_record_other_windows_errors_as_policy(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    pad._venv_python = sys.executable
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(_policy_error(5)))
+
+    assert pad._verify_venv_python() is False
+    assert pad._policy_block is None
+
+
+def test_verify_clears_a_recorded_policy_block_on_success(tmp_path):
+    pad = make_pad(tmp_path)
+    pad._policy_block = _policy_error(4551)
+    pad._venv_python = sys.executable
+
+    assert pad._verify_venv_python() is True
+    assert pad._policy_block is None
+
+
+def test_a_venv_build_refused_by_policy_is_recorded(tmp_path, monkeypatch):
+    # uv.exe can sit in a folder the same policy covers, so the build itself
+    # may be the launch Windows refuses.
+    pad = make_pad(tmp_path)
+    blocked = _policy_error(4551)
+
+    def blocked_build():
+        raise blocked
+
+    monkeypatch.setattr(pad, "_create_venv", blocked_build)
+
+    with pytest.raises(RuntimeError):
+        pad._ensure_venv()
+    assert pad._policy_block is blocked
+
+
+def test_recycling_an_existing_venv_records_a_policy_block(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    existing = tmp_path / "probe"
+    existing.mkdir()
+    monkeypatch.setattr(local.os.path, "exists", lambda p: True)
+    blocked = _policy_error(4551)
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(blocked))
+
+    assert pad._try_recycle_venv(existing) is False
+    assert pad._policy_block is blocked
+
+
 def _in_daemon_thread(*, fn, timeout: float = 30.0):
     """Run ``fn`` on a daemon thread, then return its result or raise its error.
 

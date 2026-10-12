@@ -52,6 +52,23 @@ _QUIET_NOTICE_EVERY = 60.0
 # error to win the race against a generic kill (ENG-1275).
 _INSTALL_GRACE = 30.0
 
+# Windows refusing to launch a file by policy: 4551 is Application Control
+# (WDAC, Smart App Control), 1260 is AppLocker / Software Restriction Policies.
+# A rebuilt venv produces the same kind of file, so retrying cannot succeed.
+_POLICY_BLOCK_WINERRORS = frozenset({4551, 1260})
+
+
+def _policy_block_code(exc: BaseException) -> int | None:
+    """Return the Windows error code when ``exc`` is a launch refused by policy.
+
+    Takes any exception; returns the ``winerror`` of an ``OSError`` carrying
+    one of ``_POLICY_BLOCK_WINERRORS``, otherwise None. No side effects.
+    """
+    if not isinstance(exc, OSError):
+        return None
+    code = getattr(exc, "winerror", None)
+    return code if code in _POLICY_BLOCK_WINERRORS else None
+
 
 def _read_boot_script() -> str:
     """Read the boot script as UTF-8 explicitly.
@@ -301,6 +318,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._pending_recovery_note: str | None = None
         self._last_resume_error: str | None = None
         self._last_verify_error: str | None = None
+        # The launch Windows refused by policy, kept with its code so the
+        # venv build can stop retrying.
+        self._policy_block: OSError | None = None
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -402,6 +422,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     )
                 except Exception as exc:
                     last_error = exc
+                    if _policy_block_code(exc) is not None:
+                        self._policy_block = exc
                     self._nuke_venv()
 
         # The model reads this message and relays it to the user, so it states
@@ -505,6 +527,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     def _verify_venv_python(self) -> bool:
         self._last_verify_error = None
+        self._policy_block = None
         if self._venv_python is None:
             return False
         if not os.path.exists(self._venv_python):
@@ -524,6 +547,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return ok
         except Exception as exc:
             self._last_verify_error = str(exc)
+            if _policy_block_code(exc) is not None:
+                self._policy_block = exc
             return False
 
     def _nuke_venv(self) -> None:
