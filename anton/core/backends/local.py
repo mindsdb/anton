@@ -522,7 +522,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 f"because Windows blocked {blocked.filename or 'the scratchpad venv'} "
                 f"(WinError {_policy_block_code(blocked)}: {blocked.strerror}) by an "
                 f"Application Control policy. Installed packages go to {packages}. A "
-                "package with compiled parts may be blocked by the same policy."
+                "package the app already ships keeps the app's version, so installing "
+                "another version of it has no effect. A package with compiled parts "
+                "may be blocked by the same policy."
             )
         self._in_fallback = True
 

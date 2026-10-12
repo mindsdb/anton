@@ -658,6 +658,7 @@ async def test_the_fallback_note_reaches_the_model_once(tmp_path):
 
     assert "runs on the app's own Python" in first.logs
     assert "WinError 4551" in first.logs
+    assert "keeps the app's version" in first.logs
     assert "runs on the app's own Python" not in after_resume.logs
     assert "runs on the app's own Python" not in after_reset.logs
 
