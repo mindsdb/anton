@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from anton.config.settings import AntonSettings
+    from anton.core.backends.base import Cell, ScratchpadRuntime
     from anton.core.memory.episodes import EpisodicMemory
     from anton.workspace import Workspace
 
@@ -502,7 +503,7 @@ async def _handle_publish(
         resolve_access,
         resolve_publish_target,
     )
-    from anton.publisher import publish
+    from anton.publisher import ArtifactOwnedByOtherUserError, publish
 
     console.print()
 
@@ -783,10 +784,18 @@ async def _handle_publish(
                 access=eff_access,
                 pwd_version=pwd_version,
                 access_version=access_version,
+                previous_access=prev,
             )
         except Exception as e:
             import urllib.error
-            if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+            if isinstance(e, ArtifactOwnedByOtherUserError):
+                console.print(f"  [anton.error]{e}[/]")
+                console.print(
+                    "  [anton.muted]Nothing was published; the existing link belongs "
+                    "to another account. Run /publish again and choose 'new' to "
+                    "publish your own copy.[/]"
+                )
+            elif isinstance(e, urllib.error.HTTPError) and e.code == 401:
                 rejected = settings.minds_api_key
                 settings.minds_api_key = None
                 # Clear it where it is WRITTEN — but only if the global vault is
@@ -856,6 +865,9 @@ async def _handle_publish(
     # 5. Save mapping (owner-side; new unified location + key).
     if returned_report_id:
         entry = dict(owner_side)
+        if result.get("password_hash"):
+            # Sent again by the next publish while the password is unchanged.
+            entry["password_hash"] = result["password_hash"]
         entry.update({
             "report_id": returned_report_id,
             "url": view_url,
@@ -1033,6 +1045,53 @@ async def _handle_unpublish(
                 pass
 
 
+async def _run_demo_cell(
+    *, console: Console, pad: ScratchpadRuntime, code: str
+) -> Cell | None:
+    """Run the first-run demo's script in ``pad`` behind a spinner and return its Cell.
+
+    During the cell, Ctrl+C kills it and returns its error Cell, as it does
+    in a normal CLI turn. If a runtime propagates cancellation, this demo
+    consumer takes it back after the kill. Cancellation before this helper
+    runs, during the demo's wait or dependency installation, still exits.
+    """
+    from rich.live import Live
+    from rich.spinner import Spinner
+    from rich.text import Text
+
+    from anton.core.backends.base import Cell
+
+    cells_before = len(pad.cells)
+    spinner_text = Text("  Scratchpad(Building NVDA vs BTC dashboard...)", style="anton.muted")
+    cell = None
+    try:
+        with Live(
+            Spinner("dots", text=spinner_text, style="anton.cyan"),
+            console=console,
+            refresh_per_second=10,
+            transient=True,
+        ):
+            async for item in pad.execute_streaming(
+                code,
+                description="Build NVDA vs BTC investment dashboard",
+                estimated_time="~2 min",
+                estimated_seconds=120,
+            ):
+                if isinstance(item, str):
+                    # Progress message from the script: update the spinner.
+                    spinner_text = Text(f"  Scratchpad({item})", style="anton.muted")
+                elif isinstance(item, Cell):
+                    cell = item
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is None or not task.cancelling():
+            raise
+        task.uncancel()
+        if len(pad.cells) > cells_before:
+            cell = pad.cells[-1]
+    return cell
+
+
 async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
     """First-run staged demo. Runs the backup script in a real scratchpad cell.
 
@@ -1169,7 +1228,6 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         f'OUTPUT_PATH = {output_html!r}',
     )
 
-    from anton.core.backends.base import Cell
     from anton.core.utils.scratchpad import cell_error_headline
     from rich.live import Live
     from rich.spinner import Spinner
@@ -1188,25 +1246,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         await pad.install_packages(["yfinance", "pandas", "numpy"])
     console.print(f"  [anton.success]\u2714[/] [anton.muted]Dependencies ready[/]")
 
-    spinner_text = Text("  Scratchpad(Building NVDA vs BTC dashboard...)", style="anton.muted")
-    cell = None
-    with Live(
-        Spinner("dots", text=spinner_text, style="anton.cyan"),
-        console=console,
-        refresh_per_second=10,
-        transient=True,
-    ):
-        async for item in pad.execute_streaming(
-            code,
-            description="Build NVDA vs BTC investment dashboard",
-            estimated_time="~2 min",
-            estimated_seconds=120,
-        ):
-            if isinstance(item, str):
-                # Progress message from the script — update spinner
-                spinner_text = Text(f"  Scratchpad({item})", style="anton.muted")
-            elif isinstance(item, Cell):
-                cell = item
+    cell = await _run_demo_cell(console=console, pad=pad, code=code)
 
     if cell is None or cell.error:
         err = cell.error if cell else "No result"
@@ -1519,7 +1559,7 @@ async def _chat_loop(
 
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
-        runtime_factory=get_runtime_factory(settings),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
         settings=settings,
         self_awareness=self_awareness,
         cortex=cortex,

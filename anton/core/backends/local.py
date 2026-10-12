@@ -10,12 +10,16 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import venv
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from anton.core.backends.base import Cell, ScratchpadRuntime
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_TRACE_MARKER,
     HEARTBEAT_MARKER,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
@@ -24,6 +28,7 @@ from anton.core.backends.wire import (
     RESULT_START,
     STDOUT_CHUNK_MARKER,
 )
+from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
 
@@ -206,6 +211,30 @@ def snapshot_file(venvs_base: Path, session_id: str | None, pad_name: str) -> Pa
     return path
 
 
+# Pads with the same name in one workspace share one venv directory, and they
+# provision it on worker threads (concurrent turns in a project, or a host
+# calling _ensure_venv through asyncio.to_thread). Creating and deleting that
+# directory therefore happens under one lock per directory, held by the thread
+# doing the work. The map keeps each small lock for the life of the process.
+# Reentrant, because _ensure_venv deletes a broken venv while it holds the lock.
+_VENV_LOCKS: dict[str, threading.RLock] = {}
+_VENV_LOCKS_GUARD = threading.Lock()
+_VenvResult = TypeVar("_VenvResult")
+
+
+def _venv_lock(*, venv_path: Path) -> threading.RLock:
+    """The process-wide lock for one venv directory."""
+    key = os.path.realpath(venv_path)
+    # macOS and Windows filesystems usually ignore case, so pads named `Report`
+    # and `report` share one directory and must share its lock. On a
+    # case-sensitive volume, those two pads share a lock they do not need,
+    # which only makes one wait for the other.
+    if sys.platform in ("darwin", "win32"):
+        key = key.casefold()
+    with _VENV_LOCKS_GUARD:
+        return _VENV_LOCKS.setdefault(key, threading.RLock())
+
+
 class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
@@ -229,6 +258,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         session_id: str | None = None,
         scratchpad_ds_env: dict[str, str] | None = None,
         workspace_env_overlay: dict[str, str] | None = None,
+        cancel_ends_turn: bool = True,
         _venvs_base: Path | None = None,
     ) -> None:
         super().__init__(
@@ -255,6 +285,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # DS_* overlay for this pad's subprocess; None keeps legacy full-copy behaviour.
         self._scratchpad_ds_env: dict[str, str] | None = scratchpad_ds_env
         self._workspace_env_overlay: dict[str, str] | None = workspace_env_overlay
+        # Hosts need Stop to end the turn; the CLI preserves cell-only Ctrl+C.
+        self._cancel_ends_turn = cancel_ends_turn
+        self._venv_workers: set[asyncio.Task[object]] = set()
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
         self._venv_dir: str | None = None
@@ -345,24 +378,31 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if venv_path.is_dir() and self._try_recycle_venv(venv_path):
             return
 
-        if venv_path.is_dir():
-            self._nuke_venv()
+        # Only one thread at a time deletes and rebuilds this directory. A
+        # thread that waited here recycles the venv the first one built, so
+        # concurrent first starts create it once.
+        with _venv_lock(venv_path=venv_path):
+            if venv_path.is_dir() and self._try_recycle_venv(venv_path):
+                return
 
-        last_error: Exception | None = None
-        for attempt in range(1, self._MAX_VENV_RETRIES + 1):
-            try:
-                self._create_venv()
-                if self._verify_venv_python():
-                    self._setup_parent_site_packages()
-                    self._save_python_version()
-                    return
-                detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
-                raise RuntimeError(
-                    f"venv Python binary at {self._venv_python} is not functional{detail}"
-                )
-            except Exception as exc:
-                last_error = exc
+            if venv_path.is_dir():
                 self._nuke_venv()
+
+            last_error: Exception | None = None
+            for attempt in range(1, self._MAX_VENV_RETRIES + 1):
+                try:
+                    self._create_venv()
+                    if self._verify_venv_python():
+                        self._setup_parent_site_packages()
+                        self._save_python_version()
+                        return
+                    detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
+                    raise RuntimeError(
+                        f"venv Python binary at {self._venv_python} is not functional{detail}"
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    self._nuke_venv()
 
         # The model reads this message and relays it to the user, so it states
         # facts only: a generic fix hint here gets repeated as a diagnosis.
@@ -487,13 +527,49 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return False
 
     def _nuke_venv(self) -> None:
-        if self._venv_dir is not None:
+        with _venv_lock(venv_path=self._venvs_base / self.name):
+            if self._venv_dir is not None:
+                try:
+                    shutil.rmtree(self._venv_dir)
+                except OSError:
+                    pass
+            self._venv_dir = None
+            self._venv_python = None
+
+    def _remove_broken_venv(self) -> None:
+        # Check after any shared-directory build finishes, rather than deleting
+        # the healthy venv that replaced the missing interpreter we observed.
+        with _venv_lock(venv_path=self._venvs_base / self.name):
+            if not self._verify_venv_python():
+                self._nuke_venv()
+
+    async def _drain_venv_workers(self) -> asyncio.CancelledError | None:
+        """Finish venv work and return any cancellation for the caller to raise."""
+        if not self._venv_workers:
+            return None
+        waiter = asyncio.gather(*self._venv_workers, return_exceptions=True)
+        cancelled: asyncio.CancelledError | None = None
+        while not waiter.done():
             try:
-                shutil.rmtree(self._venv_dir)
-            except OSError:
-                pass
-        self._venv_dir = None
-        self._venv_python = None
+                await asyncio.shield(waiter)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        return cancelled
+
+    async def _run_venv_work(self, work: Callable[[], _VenvResult]) -> _VenvResult:
+        """Offload venv work without leaving it running after cancellation."""
+        worker = asyncio.create_task(asyncio.to_thread(work))
+        self._venv_workers.add(worker)
+        try:
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # A thread cannot be cancelled. Finish its mutations before the
+                # caller's finally closes this runtime and clears its paths.
+                await self._drain_venv_workers()
+                raise
+        finally:
+            self._venv_workers.discard(worker)
 
     def _add_windows_firewall_rule(self) -> None:
         if self._venv_python is None or not os.path.isfile(self._venv_python):
@@ -610,7 +686,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def start(self) -> None:
         """Write the boot script to a temp file and launch the subprocess."""
-        self._ensure_venv()
+        # _ensure_venv runs a subprocess on every start and may build the venv,
+        # so it runs on a worker thread. On the event loop it would stall every
+        # other turn and request the host serves until it finished.
+        await self._run_venv_work(self._ensure_venv)
 
         boot_code = _read_boot_script()
         fd, path = tempfile.mkstemp(suffix=".py", prefix="anton_scratchpad_")
@@ -752,8 +831,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if self._explicit_workspace_path is not None
             else None
         )
-        try:
-            self._proc = await asyncio.create_subprocess_exec(
+
+        async def spawn() -> asyncio.subprocess.Process:
+            return await asyncio.create_subprocess_exec(
                 self._venv_python,
                 path,
                 stdin=asyncio.subprocess.PIPE,
@@ -763,8 +843,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 cwd=proc_cwd,
                 start_new_session=(sys.platform != "win32"),
             )
+
+        try:
+            try:
+                self._proc = await spawn()
+            except FileNotFoundError:
+                # Pads with this name in this workspace share the venv, and a
+                # healthy check holds no lock. Another pad's cleanup() can
+                # delete the venv between that check and this spawn, so check
+                # again (rebuilding if it is gone) and spawn once more.
+                await self._run_venv_work(self._ensure_venv)
+                self._proc = await spawn()
         except (FileNotFoundError, PermissionError, OSError) as exc:
-            self._nuke_venv()
+            await self._run_venv_work(self._nuke_venv)
             raise RuntimeError(
                 f"Failed to start scratchpad: {exc}. "
                 "The Python venv has been deleted and will be recreated on next attempt."
@@ -804,8 +895,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self.cells.clear()
         self._discard_session_snapshot()
         self._consecutive_deaths = 0
-        if not self._verify_venv_python():
-            self._nuke_venv()
+        await self._run_venv_work(self._remove_broken_venv)
         await self.start()
 
     async def _auto_resume(self) -> bool:
@@ -864,11 +954,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def close(self) -> None:
         """Kill the process and save requirements; preserve the venv."""
+        cancelled = await self._drain_venv_workers()
         await self._stop_process()
         if self._venv_dir is not None:
             self._save_requirements()
             self._venv_dir = None
             self._venv_python = None
+        if cancelled is not None:
+            raise cancelled
 
     async def cancel(self) -> None:
         """Kill the current cell and restart the runtime."""
@@ -893,9 +986,16 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
     async def cleanup(self) -> None:
         """Kill process and delete the venv entirely."""
-        await self._stop_process()
-        self._nuke_venv()
-        self._discard_session_snapshot()
+        cancelled = await self._drain_venv_workers()
+        try:
+            await self._stop_process()
+            await self._run_venv_work(self._nuke_venv)
+        finally:
+            # A Stop during the delete still drops the namespace, so a later
+            # pad with this name starts empty instead of restoring it.
+            self._discard_session_snapshot()
+        if cancelled is not None:
+            raise cancelled
 
     async def execute_streaming(
         self,
@@ -940,6 +1040,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._salvage_truncated = False
 
         payload = code + "\n" + CELL_DELIM + "\n"
+        trace = get_trace_context()
+        if trace is not None:
+            payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload
         self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
         await self._proc.stdin.drain()  # type: ignore[union-attr]
 
@@ -1001,6 +1104,21 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 logs=recovery_note or "",
             )
             self.cells.append(cell)
+            # A Stop or a host's watchdog cancels the task running this cell.
+            # With the cell killed and recorded, that cancel goes on up and
+            # ends the turn; stopped here, the turn would read the error cell
+            # and make its next model call. It is raised before the yield,
+            # because a consumer that stops at the first Cell, as execute()
+            # does, never resumes this generator to receive it. Only a
+            # CancelledError re-raises, so a cell past its own budget
+            # (TimeoutError) still yields its error cell. cancelling() is
+            # checked too, so a CancelledError that leaks up from something
+            # the cell awaited, with no cancel() on this task, yields its
+            # cell like any other kill. The CLI opts out of propagation.
+            if self._cancel_ends_turn and isinstance(exc, asyncio.CancelledError):
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
             yield cell
             return
         except Exception as exc:
@@ -1284,7 +1402,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         refused = reject_invalid_packages(needed)
         if refused:
             return refused
-        self._ensure_venv()
+        await self._run_venv_work(self._ensure_venv)
 
         uv = self._find_uv()
         if uv:
@@ -1369,6 +1487,7 @@ def local_scratchpad_runtime_factory(
     session_id: str | None = None,
     scratchpad_ds_env: dict[str, str] | None = None,
     workspace_env_overlay: dict[str, str] | None = None,
+    cancel_ends_turn: bool = True,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -1381,4 +1500,5 @@ def local_scratchpad_runtime_factory(
         session_id=session_id,
         scratchpad_ds_env=scratchpad_ds_env,
         workspace_env_overlay=workspace_env_overlay,
+        cancel_ends_turn=cancel_ends_turn,
     )

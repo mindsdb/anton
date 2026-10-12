@@ -26,11 +26,14 @@ if TYPE_CHECKING:
 __all__ = ["build_runtime_context", "get_runtime_factory", "rebuild_session"]
 
 
-def get_runtime_factory(settings: AntonSettings):
+def get_runtime_factory(settings: AntonSettings, *, cancel_ends_turn: bool = True):
     """Return the appropriate scratchpad runtime factory based on settings.
 
     If backend is set to "remote" (and minds_api_key available),
     returns a remote factory. Otherwise returns the local factory.
+
+    The CLI opts out of ending a turn when Ctrl+C kills its local cell.
+    Other hosts propagate cancellation so Stop ends the whole turn.
     """
     if settings.backend == "remote":
         from functools import partial
@@ -43,7 +46,11 @@ def get_runtime_factory(settings: AntonSettings):
         )
 
     from anton.core.backends.local import local_scratchpad_runtime_factory
-    return local_scratchpad_runtime_factory
+    if cancel_ends_turn:
+        return local_scratchpad_runtime_factory
+    from functools import partial
+
+    return partial(local_scratchpad_runtime_factory, cancel_ends_turn=False)
 
 
 async def rebuild_session(
@@ -84,7 +91,7 @@ async def rebuild_session(
     runtime_context = build_runtime_context(settings)
     return ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
-        runtime_factory=get_runtime_factory(settings),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
         settings=settings,
         self_awareness=self_awareness,
         cortex=cortex,

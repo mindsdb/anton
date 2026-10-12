@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -15,6 +16,18 @@ class CoreSettings(BaseSettings):
     # for answers that die at the cap; the session's truncation recovery
     # retries one-off at double this value.
     max_tokens: int = 8192
+
+    # How long one model call may send nothing before LLMClient stops it with
+    # ModelCallTimeoutError and the turn ends (ANTON_MODEL_CALL_IDLE_TIMEOUT_S).
+    # It restarts with every piece of text, thinking or tool-call arguments a
+    # streamed call sends; a non-streamed call is bounded over its whole
+    # duration, across the SDK's retries. 0 or less turns it off, and then a
+    # model call that never answers keeps the turn alive until the SDK, the
+    # gateway or a Stop ends it. Above 600, also raise the SDKs' 600 s read
+    # timeout: on an endpoint with no keepalives, a streamed call that goes
+    # quiet after its response starts ends at 600 s with a read-timeout error
+    # instead. Must be a finite number.
+    model_call_idle_timeout_s: float = Field(600.0, allow_inf_nan=False)
 
     # Session orchestration tuning
     max_tool_rounds: int = 25
@@ -42,9 +55,9 @@ class CoreSettings(BaseSettings):
     # opposite verdict, because they protect different things.
     #
     # 1.25M measured against 30 days of production (2026-08-12): trips ~15% of
-    # external turns at a median of 16 LLM calls in. Set above Kiranam's worst
-    # turn (1,480,766) and you stop catching the case this exists for — 1.5M
-    # misses it by 20k tokens.
+    # external turns at a median of 16 LLM calls in. Set above the worst turn
+    # of the runaway session this exists for (1,480,766) and you stop catching
+    # it — 1.5M misses it by 20k tokens.
     max_turn_tokens: int = 1_250_000
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5

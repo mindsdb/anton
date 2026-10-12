@@ -9,6 +9,7 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_TRACE_MARKER,
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
@@ -425,6 +426,10 @@ if _session_load_note:
     _session_notes.append(_session_load_note)
 namespace["_anton_explainability_queries"] = []
 
+# The running cell's trace context, read by every helper model call. The main
+# loop sets it from the cell's CELL_TRACE_MARKER line.
+_cell_trace = None
+
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
 if _scratchpad_model:
@@ -476,6 +481,12 @@ if _scratchpad_model:
             )
         else:
             _llm_provider_kwargs = {}  # Anthropic doesn't need ssl_verify
+
+        from anton.core.llm.tracing import (
+            call_role,
+            reset_trace_context,
+            set_trace_context,
+        )
 
         def _new_llm_provider():
             """Build a provider from the pad's model settings. The only place one is built."""
@@ -539,9 +550,14 @@ if _scratchpad_model:
             one, under ``asyncio.gather`` or on other threads.
             """
             provider = _new_llm_provider()
+            # Set here, inside the call's own task, because the cell's context
+            # does not reach an asyncio.run loop on a worker thread.
+            trace_token = set_trace_context(_cell_trace)
             try:
-                return await _run_with_heartbeat(call(provider))
+                with call_role("coding"):
+                    return await _run_with_heartbeat(call(provider))
             finally:
+                reset_trace_context(trace_token)
                 try:
                     await provider.aclose()
                 except Exception:
@@ -1381,6 +1397,13 @@ while True:
         eof = True
     if eof:
         break
+
+    _cell_trace = None
+    # The JSON object's "{" keeps a cell line like `__ANTON_CELL_TRACE__ = 1` code.
+    if lines and lines[0].startswith(CELL_TRACE_MARKER + " {"):
+        from anton.core.llm.tracing import trace_context_from_json
+
+        _cell_trace = trace_context_from_json(lines.pop(0)[len(CELL_TRACE_MARKER):])
 
     code = "".join(lines)
     # Heal lone surrogates before compile() — a non-ASCII Windows path byte can

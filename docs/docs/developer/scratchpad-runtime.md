@@ -27,6 +27,16 @@ convenience that drains `execute_streaming()` (progress strings, then a final
 destroys them — that's the difference between session end and the `remove`
 action.
 
+When the task running a cell is cancelled, the local backend kills the cell's
+process tree, records the `Cell` in `pad.cells` and re-raises the cancel
+instead of yielding the `Cell`, so the turn ends. A cell past its own time
+budget still yields its error `Cell`.
+
+The CLI builds its local runtimes with `cancel_ends_turn=False`: Ctrl+C
+during a cell kills that cell and the turn continues. During the first-run
+demo's cell it reports the error and starts chat; Ctrl+C during the earlier
+wait or dependency installation still exits the CLI.
+
 ## `ScratchpadManager`
 
 Owned by the session; maps names to runtimes. `get_or_create(name)` builds a
@@ -54,6 +64,13 @@ under `<workspace>/.anton/scratchpad-venvs/<name>/` (falling back to
   recorded Python version matches; `requirements.txt` inside the venv dir
   restores the installed-package set across sessions. Installed packages
   survive `reset` (only process state is cleared).
+- **Worker threads**: `start()`, `reset()`, `cleanup()` and `install_packages()`
+  run the venv check, build and removal on a worker thread, so the host's event
+  loop keeps serving other turns. Pads with the same name in one workspace
+  share one venv directory, and creating or deleting it takes a lock per
+  directory, so concurrent first starts build it once.
+  Cancellation waits for the worker to finish before teardown clears its
+  runtime paths. Reset checks and removes a broken venv under that same lock.
 - **Execution**: `start()` launches `scratchpad_boot.py` as a subprocess
   (stdin/stdout pipes, own process group). Cells are written to stdin with a
   delimiter; results come back as JSON between result markers, with
@@ -78,6 +95,13 @@ stream (`progress` events, then a `cell` event). Selection happens in
 `settings.backend == "remote"`, the remote factory is built with
 `endpoint_url=settings.minds_url` and `api_key=settings.minds_api_key`;
 otherwise the local factory is used.
+
+Each execution sends the turn's `trace_context` alongside the unchanged cell
+source. The scratchpad service restores it while executing the request, so
+the local runtime can forward it to the cell's model calls. A request outside
+a turn sends `null`. This requires the scratchpad service's trace-aware
+receiver and an Anton runtime that forwards cell traces; older receivers
+ignore the extra field and continue executing without trace attribution.
 
 `backend` comes from `ANTON_BACKEND` (default `local`), and a validator in
 `anton/config/settings.py` rejects `remote` unless both the Minds URL and the

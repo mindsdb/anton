@@ -33,6 +33,15 @@ Events written back on stdout (JSONL):
       only to a host that declared `ChatSessionConfig.live_tool_peek`, and
       the pod does not. A consumer that meets it anyway (an older pod, a
       host that opted in later) should drop it unless it renders a live tail.
+      `phase: "model_wait"` says a model call is open and has sent nothing
+      the wire carried: `message` reads "Waiting for the model (2m 40s)", or
+      "The model is still writing (2m 40s)" when the call produced output the
+      wire does not carry, and `eta_seconds` is how long the call has been
+      open; `id` and `ok` are null. The heartbeat task writes it outside the
+      rate limit, at most once per 20 s of otherwise quiet wire, and only
+      while the session reports a call waiting on the provider. A tool, a
+      cell or an open question reports none, so they still go quiet. A
+      consumer shows it as a still-working line and does not save it.
   {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork
