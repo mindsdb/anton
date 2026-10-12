@@ -3,6 +3,8 @@ auth's turn-key token endpoint (see anton/cloud_turn/session.py).
 """
 from __future__ import annotations
 
+import json
+import threading
 import urllib.error
 
 import pytest
@@ -279,3 +281,123 @@ def test_developer_token_is_marked_secret_and_login_customer_id_is_not(monkeypat
     monkeypatch.setattr("anton.minds_client.minds_request", lambda *a, **kw: _GOOGLE_ADS_RESPONSE)
     record = _google_ads_vault().read_record("google_ads", "primary")
     assert record["secure_keys"] == ["access_token", "developer_token"]
+
+
+# ── prefetch ─────────────────────────────────────────────────────────────────
+
+
+def _vault_with(count: int) -> TurnKeyDataVault:
+    return _vault(connections=[{"engine": "google_drive", "name": f"c{i}"} for i in range(count)])
+
+
+class _CountingAuth:
+    """Fake token endpoint that records each fetch and the peak overlap."""
+
+    def __init__(self, barrier: threading.Barrier | None = None, fail_names: tuple[str, ...] = ()) -> None:
+        self.calls: list[str] = []
+        self.threads: set[str] = set()
+        self.peak = 0
+        self._active = 0
+        self._lock = threading.Lock()
+        self._barrier = barrier
+        self._fail_names = fail_names
+
+    def __call__(self, url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        name = json.loads(payload)["name"]
+        with self._lock:
+            self.calls.append(name)
+            self.threads.add(threading.current_thread().name)
+            self._active += 1
+            self.peak = max(self.peak, self._active)
+        try:
+            if self._barrier is not None:
+                self._barrier.wait(timeout=5)
+            if name in self._fail_names:
+                raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+            return json.dumps({"access_token": f"tok-{name}"}).encode()
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
+def test_prefetch_with_no_connections_makes_no_call(monkeypatch):
+    auth = _CountingAuth()
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    _vault(connections=[]).prefetch()
+    assert auth.calls == []
+
+
+def test_prefetch_of_a_single_connection_runs_on_the_calling_thread(monkeypatch):
+    auth = _CountingAuth()
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    vault = _vault_with(1)
+    vault.prefetch()
+    assert auth.calls == ["c0"]
+    assert auth.threads == {threading.current_thread().name}
+    assert vault.load("google_drive", "c0")["access_token"] == "tok-c0"
+    assert auth.calls == ["c0"]
+
+
+def test_prefetch_runs_fetches_concurrently_and_caches_every_result(monkeypatch):
+    """Four fetches that each wait for the other three only complete when they
+    overlap; a sequential fetch would break the barrier and cache no token."""
+    auth = _CountingAuth(barrier=threading.Barrier(4))
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    vault = _vault_with(4)
+    vault.prefetch()
+    assert sorted(auth.calls) == ["c0", "c1", "c2", "c3"]
+    for i in range(4):
+        assert vault.load("google_drive", f"c{i}")["access_token"] == f"tok-c{i}"
+    assert len(auth.calls) == 4
+
+
+def test_prefetch_never_runs_more_than_four_fetches_at_once(monkeypatch):
+    auth = _CountingAuth(barrier=threading.Barrier(4))
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    vault = _vault_with(8)
+    vault.prefetch()
+    assert sorted(auth.calls) == sorted(f"c{i}" for i in range(8))
+    assert auth.peak == 4
+    for i in range(8):
+        assert vault.load("google_drive", f"c{i}")["access_token"] == f"tok-c{i}"
+    assert len(auth.calls) == 8
+
+
+def test_prefetch_fetches_a_duplicated_connection_once(monkeypatch):
+    auth = _CountingAuth()
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    vault = _vault(connections=[
+        {"engine": "google_drive", "name": "a"},
+        {"engine": "google_drive", "name": "a"},
+        {"engine": "google_drive", "name": "b"},
+    ])
+    vault.prefetch()
+    assert sorted(auth.calls) == ["a", "b"]
+
+
+def test_prefetch_skips_connections_already_cached(monkeypatch):
+    auth = _CountingAuth()
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    vault = _vault_with(3)
+    vault.load("google_drive", "c1")
+    vault.prefetch()
+    assert sorted(auth.calls) == ["c0", "c1", "c2"]
+
+
+def test_prefetch_caches_a_needs_reconnect_failure_like_a_plain_load(monkeypatch):
+    auth = _CountingAuth(fail_names=("c1",))
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    vault = _vault_with(3)
+    vault.prefetch()
+    assert vault.load("google_drive", "c1") is None
+    assert vault.load("google_drive", "c0")["access_token"] == "tok-c0"
+    assert len(auth.calls) == 3
+
+
+def test_prefetch_without_a_turn_key_makes_no_call(monkeypatch):
+    auth = _CountingAuth()
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    vault = _vault(turn_key="", connections=[{"engine": "google_drive", "name": f"c{i}"} for i in range(3)])
+    vault.prefetch()
+    assert auth.calls == []
+    assert vault.load("google_drive", "c0") is None

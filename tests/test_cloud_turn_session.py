@@ -1261,6 +1261,39 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
     assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ
 
 
+
+def test_oauth_connections_are_fetched_together_once_and_registered_for_scrubbing(tmp_path, monkeypatch):
+    """Each connection's fetch waits for the other three, so the build only
+    gets tokens when the fetches overlap; every value must then be scrubbable."""
+    import json
+    import threading
+
+    from anton.utils.datasources import scrub_credentials
+
+    barrier = threading.Barrier(4)
+    calls: list[str] = []
+    lock = threading.Lock()
+
+    def fake_minds_request(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+        name = json.loads(payload)["name"]
+        with lock:
+            calls.append(name)
+        barrier.wait(timeout=5)
+        return json.dumps({"access_token": f"live-token-{name}"}).encode()
+
+    monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
+
+    names = ["alpha", "beta", "gamma", "delta"]
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "google_drive", "name": n} for n in names]}
+    _, cfg = _build(tmp_path, monkeypatch, oauth=oauth)
+
+    assert sorted(calls) == sorted(names)
+    for n in names:
+        token = f"live-token-{n}"
+        assert cfg.data_vault.load("google_drive", n)["access_token"] == token
+        assert token not in scrub_credentials(f"leaked {token}")
+    assert len(calls) == len(names)
+
 # ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────
 
 def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, monkeypatch):

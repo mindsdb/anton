@@ -810,6 +810,7 @@ def build_cloud_chat_session(
         from anton.utils.datasources import restore_namespaced_env
 
         data_vault = TurnKeyDataVault(request.oauth)
+        data_vault.prefetch()
         restore_namespaced_env(data_vault)
 
         # ENG-1816: discover any MCP-method connections' tools now, before

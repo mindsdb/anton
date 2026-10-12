@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -391,6 +392,10 @@ _TURNKEY_RESPONSE_FIELDS = ("access_token", "account_email", "token_type", "scop
 _TURNKEY_EXTRA_FIELDS = ("developer_token", "login_customer_id")
 _TURNKEY_SECURE_KEYS = ("access_token", "developer_token")
 
+#: Upper bound on simultaneous token fetches while a turn's session is built,
+#: so a turn with many connectors does not burst auth.
+_PREFETCH_MAX_WORKERS = 4
+
 
 class TurnKeyDataVault:
     """Read-only DataVault backed by a live call to auth's turn-key token
@@ -492,6 +497,34 @@ class TurnKeyDataVault:
         pre-clear credentials."""
         _sweep_ds_env_vars()
         self._cache.clear()
+
+    def prefetch(self) -> None:
+        """Fetch every listed connection not yet cached, a few at a time.
+
+        Called once while a turn's session is built, so the later reads
+        (registry rebuild, MCP discovery, prompt) hit the cache instead of paying
+        one auth round trip per connection in sequence. Workers only fetch; the
+        calling thread writes the cache, and no context or process state is
+        touched. Returns after every fetch finished, successful or not.
+        """
+        pending = [
+            key
+            for key in dict.fromkeys((c["engine"], c["name"]) for c in self._connections)
+            if key not in self._cache
+        ]
+        if len(pending) <= 1:
+            for engine, name in pending:
+                self._fetch(engine, name)
+            return
+        workers = min(_PREFETCH_MAX_WORKERS, len(pending))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turnkey-prefetch") as pool:
+            futures = {key: pool.submit(self._fetch_uncached, *key) for key in pending}
+        for (engine, name), future in futures.items():
+            try:
+                self._cache[(engine, name)] = future.result()
+            except Exception:
+                # Left uncached, so the first real read retries it on the old path.
+                logger.warning("turn-key prefetch failed for %s/%s", engine, name, exc_info=True)
 
     def _fetch(self, engine: str, name: str) -> dict[str, str] | None:
         cache_key = (engine, name)
