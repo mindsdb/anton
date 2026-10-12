@@ -454,6 +454,60 @@ def test_fallback_is_refused_when_the_app_interpreter_is_blocked_too(tmp_path, m
     assert not (tmp_path / "scratchpad-packages").exists()
 
 
+def _refuse_uv_only(uv: str):
+    """A subprocess.run where Windows refuses uv and runs everything else."""
+    real_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd[0] == uv:
+            raise _policy_error(4551)
+        return real_run(cmd, *args, **kwargs)
+
+    return run
+
+
+def test_a_blocked_uv_is_named_in_the_fallback_note(tmp_path, monkeypatch):
+    uv = str(tmp_path / "bin" / "uv.exe")
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: uv))
+    monkeypatch.setattr(subprocess, "run", _refuse_uv_only(uv))
+    pad = make_pad(tmp_path / "venvs")
+
+    pad._ensure_venv()
+
+    assert pad._in_fallback
+    assert f"Windows blocked {uv}" in pad._pending_recovery_note
+
+
+def test_a_blocked_uv_is_named_in_the_recovery_path(tmp_path, monkeypatch):
+    # Allowing the venvs folder alone would leave uv blocked.
+    uv = str(tmp_path / "bin" / "uv.exe")
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: uv))
+    monkeypatch.setattr(subprocess, "run", _refuse_every_run(4551))
+    pad = make_pad(tmp_path / "venvs")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pad._ensure_venv()
+
+    message = str(exc_info.value)
+    assert f"Windows blocked {uv}" in message
+    assert f"allow {uv} and programs in {tmp_path / 'venvs'}" in message
+
+
+async def test_an_install_refused_by_policy_names_the_installer(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    pad = _fallback_pad(tmp_path)
+
+    async def refuse(*_args, **_kwargs):
+        raise _policy_error(4551)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse)
+
+    result = await pad.install_packages(["requests"])
+
+    assert result.startswith("Install failed: Windows blocked /usr/bin/uv")
+    assert "WinError 4551" in result
+
+
 async def test_fallback_cleanup_deletes_only_the_packages_folder(tmp_path, monkeypatch):
     pad = _fallback_pad(tmp_path)
     await pad.start()

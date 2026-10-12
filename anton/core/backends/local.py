@@ -515,11 +515,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if not self._in_fallback:
             self._pending_recovery_note = (
                 f"Note: this scratchpad runs on the app's own Python ({sys.executable}) "
-                f"because Windows blocked the scratchpad's Python "
-                f"({blocked.filename or 'its venv'}, WinError "
-                f"{_policy_block_code(blocked)}: {blocked.strerror}) by an Application "
-                f"Control policy. Installed packages go to {packages}. A package with "
-                "compiled parts may be blocked by the same policy."
+                f"because Windows blocked {blocked.filename or 'the scratchpad venv'} "
+                f"(WinError {_policy_block_code(blocked)}: {blocked.strerror}) by an "
+                f"Application Control policy. Installed packages go to {packages}. A "
+                "package with compiled parts may be blocked by the same policy."
             )
         self._in_fallback = True
 
@@ -541,13 +540,18 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if fallback_error is not None
             else ""
         )
+        # A blocked uv lives outside the venvs folder, so allowing that folder alone
+        # would not unblock it.
+        allow = f"programs in {self._venvs_base}"
+        if blocked.filename and not Path(blocked.filename).is_relative_to(self._venvs_base):
+            allow = f"{blocked.filename} and {allow}"
         return (
             f"Scratchpad failed to start: Windows blocked {program} "
             f"(WinError {_policy_block_code(blocked)}: {blocked.strerror}). "
             f"{fallback}"
             "A Windows Application Control policy on this computer blocks it. "
             "Renaming the scratchpad, retrying, or re-uploading files will not help. "
-            f"To recover, an IT administrator can allow programs in {self._venvs_base}, "
+            f"To recover, an IT administrator can allow {allow}, "
             "and then the app must be restarted. Otherwise, use a computer "
             "without this restriction."
         )
@@ -610,6 +614,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # never seen — only "returned non-zero exit status N".
                 stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"uv venv failed: {stderr}" if stderr else str(exc)) from exc
+            except OSError as exc:
+                # Windows names no file on a launch it refuses; the message needs it.
+                if _policy_block_code(exc) is not None and exc.filename is None:
+                    exc.filename = uv
+                raise
         else:
             # symlinks=False is venv.create()'s own default on every platform
             # (only the `python -m venv` CLI defaults it per-OS); a copied
@@ -1582,14 +1591,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *needed]
 
         _install_timeout = CoreSettings().cell_install_timeout
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            # Same UTF-8 mode as the scratchpad process, so pip/uv output on a
-            # non-UTF-8 host locale doesn't come back as mojibake (ENG-824).
-            env=_utf8_env(os.environ),
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                # Same UTF-8 mode as the scratchpad process, so pip/uv output on a
+                # non-UTF-8 host locale doesn't come back as mojibake (ENG-824).
+                env=_utf8_env(os.environ),
+            )
+        except OSError as exc:
+            code = _policy_block_code(exc)
+            if code is None:
+                raise
+            return (
+                f"Install failed: Windows blocked {cmd[0]} (WinError {code}: "
+                f"{exc.strerror}) by an Application Control policy on this computer."
+            )
         try:
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=_install_timeout
