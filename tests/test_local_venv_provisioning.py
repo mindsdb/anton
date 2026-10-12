@@ -438,6 +438,28 @@ def test_fallback_runs_on_the_app_interpreter_with_a_packages_folder(tmp_path):
     assert pad.venv_python() is None
 
 
+def test_fallback_packages_folders_follow_the_venv_names(tmp_path):
+    # Sanitized names would put "a b" and "a_b" in one folder under two
+    # different venv locks, so one pad's cleanup could delete the other's installs.
+    spaced = make_pad(tmp_path / "venvs", name="a b")
+    spaced._record_policy_block(_policy_error(4551), program=None)
+    spaced._ensure_venv()
+    underscored = make_pad(tmp_path / "venvs", name="a_b")
+    underscored._ensure_venv()
+
+    assert spaced._venv_dir == str(tmp_path / "scratchpad-packages" / "a b")
+    assert underscored._venv_dir == str(tmp_path / "scratchpad-packages" / "a_b")
+
+
+def test_fallback_refuses_a_pad_name_that_leaves_the_packages_folder(tmp_path):
+    pad = make_pad(tmp_path / "venvs", name="../escape")
+    pad._record_policy_block(_policy_error(4551), program=None)
+
+    with pytest.raises(RuntimeError, match="points outside"):
+        pad._ensure_venv()
+    assert not (tmp_path / "escape").exists()
+
+
 def test_fallback_is_refused_when_the_app_interpreter_is_blocked_too(tmp_path, monkeypatch):
     pad = make_pad(tmp_path / "venvs")
     venv_python = str(tmp_path / "venvs" / "probe" / "Scripts" / "python.exe")

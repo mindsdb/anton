@@ -489,11 +489,15 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         and every delete path removes only it, never the app's environment.
         Raises the policy message when the app's interpreter is refused too.
         """
-        packages = (
-            self._venvs_base.parent
-            / "scratchpad-packages"
-            / _safe_segment(self.name, "scratchpad")
-        )
+        # Named like the venv folder, so the venv lock that guards its deletion
+        # covers exactly the pads that share it.
+        packages_root = self._venvs_base.parent / "scratchpad-packages"
+        packages = packages_root / self.name
+        if not packages.resolve().is_relative_to(packages_root.resolve()):
+            raise RuntimeError(
+                f"Scratchpad failed to start: the scratchpad name {self.name!r} "
+                f"points outside {packages_root}."
+            ) from blocked
         if packages.resolve().is_relative_to(Path(sys.prefix).resolve()):
             raise RuntimeError(
                 f"Scratchpad failed to start: refusing a packages folder inside the "
