@@ -256,3 +256,26 @@ def test_clear_ds_env_drops_the_per_connection_cache(monkeypatch):
     assert vault.load("google_drive", "primary")["access_token"] == "first"
     vault.clear_ds_env()
     assert vault.load("google_drive", "primary")["access_token"] == "second"
+
+
+def _google_ads_vault() -> TurnKeyDataVault:
+    return _vault(connections=[{"engine": "google_ads", "name": "primary"}])
+
+
+_GOOGLE_ADS_RESPONSE = (
+    b'{"access_token": "tok", "account_email": "a@b.com",'
+    b' "developer_token": "ABCDE-FGHIJ-KLMNO", "login_customer_id": "1234567890"}'
+)
+
+
+def test_google_ads_developer_token_and_login_customer_id_reach_the_env(monkeypatch):
+    monkeypatch.setattr("anton.minds_client.minds_request", lambda *a, **kw: _GOOGLE_ADS_RESPONSE)
+    env = _google_ads_vault().env_for("google_ads", "primary")
+    assert env["DS_GOOGLE_ADS_PRIMARY__DEVELOPER_TOKEN"] == "ABCDE-FGHIJ-KLMNO"
+    assert env["DS_GOOGLE_ADS_PRIMARY__LOGIN_CUSTOMER_ID"] == "1234567890"
+
+
+def test_developer_token_is_marked_secret_and_login_customer_id_is_not(monkeypatch):
+    monkeypatch.setattr("anton.minds_client.minds_request", lambda *a, **kw: _GOOGLE_ADS_RESPONSE)
+    record = _google_ads_vault().read_record("google_ads", "primary")
+    assert record["secure_keys"] == ["access_token", "developer_token"]

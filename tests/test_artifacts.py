@@ -487,32 +487,40 @@ def test_discovery_json_is_a_generation_input_not_an_artifact_file():
     assert DISCOVERY_FILENAME in GENERATION_INPUT_FILES
 
 
-def test_housekeeping_set_still_mirrors_cowork_server():
-    """The set is documented as mirroring cowork-server's artifacts service
-    (`cowork/services/artifacts.py:132`), and `publish_access` plus the publish
-    bundle carry their own copies. Drift means the agent and the UI disagree on
-    what an artifact contains — which is exactly how backend.log ended up
-    counted here and nowhere else. The STATE runtime entries are in
-    anton's three copies; cowork-server's copy does not know them yet."""
-    from anton.core.artifacts.store import _HOUSEKEEPING_FILES
+def test_housekeeping_files_contract():
+    """cowork-server consumes this set via `NON_CONTENT_NAMES`; a change here
+    changes what the UI treats as artifact content."""
+    from anton.core.artifacts.internal_files import HOUSEKEEPING_FILES
 
-    assert _HOUSEKEEPING_FILES == {
+    assert HOUSEKEEPING_FILES == frozenset({
         "metadata.json", "README.md", "backend.log", ".published.json",
         ".anton_state.db", ".anton_state.db-wal", ".anton_state.db-shm",
         ".state_manifest.published.json",
-    }
+    })
+
+
+def test_non_content_names_is_the_union():
+    """The publisher's state manifest is a deliverable and must stay content."""
+    from anton.core.artifacts.internal_files import (
+        GENERATION_INPUT_FILES,
+        HOUSEKEEPING_DIRS,
+        HOUSEKEEPING_FILES,
+        NON_CONTENT_NAMES,
+    )
+
+    assert NON_CONTENT_NAMES == HOUSEKEEPING_FILES | GENERATION_INPUT_FILES | HOUSEKEEPING_DIRS
+    assert HOUSEKEEPING_DIRS == frozenset({".revisions"})
+    assert "state_manifest.json" not in NON_CONTENT_NAMES
 
 
 def test_publisher_excludes_exactly_the_housekeeping_set():
     """The bundle omits what the store hides from files[] (housekeeping and
-    generation inputs): one definition, three consumers."""
-    from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES
-    from anton.core.artifacts.store import _EXCLUDED_FROM_FILES, _HOUSEKEEPING_DIRS
+    generation inputs)."""
+    from anton.core.artifacts.internal_files import GENERATION_INPUT_FILES, NON_CONTENT_NAMES
     from anton.publisher import _BUNDLE_SKIP_NAMES, _FULLSTACK_EXCLUDED
 
-    assert _FULLSTACK_EXCLUDED == _EXCLUDED_FROM_FILES | _HOUSEKEEPING_DIRS
     assert GENERATION_INPUT_FILES <= _BUNDLE_SKIP_NAMES
-    assert ".revisions" in _HOUSEKEEPING_DIRS
+    assert _FULLSTACK_EXCLUDED is NON_CONTENT_NAMES
 
 
 def test_reconcile_excludes_state_runtime_files(store: ArtifactStore):

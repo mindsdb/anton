@@ -41,6 +41,8 @@ COPY . /app
 # fails deep inside the sync with an error that does not mention the build arg.
 # Fail here instead, naming the cause — and never fall back to a made-up version,
 # which is the failure mode this whole change exists to remove.
+# compileall: the base image strips every .pyc and PYTHONDONTWRITEBYTECODE stops
+# rewriting them, so each turn recompiled stdlib, deps and anton from source.
 RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
     || { echo "ERROR: --build-arg ANTON_VERSION is required (ENG-1796)." >&2; exit 1; } \
     && case "$SETUPTOOLS_SCM_PRETEND_VERSION" in 2.0.0*) \
@@ -58,6 +60,8 @@ RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
     && uv venv "$VIRTUAL_ENV" \
     && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --frozen --no-dev --no-cache \
     && uv pip install --no-cache boto3 \
+    && python -m compileall -q -j 0 -x '/(test|tests|idle_test)/' \
+         /usr/local/lib/python3.12 "$VIRTUAL_ENV" /app/anton \
     && chown -R 1000:1000 "$VIRTUAL_ENV"
 
 # scratchpad-boot.sh: the single-cell entrypoint the controller execs (reads code + delimiter on stdin).

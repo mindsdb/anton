@@ -501,7 +501,7 @@ async def generate(
     """
     from .attachments import resolve_attachments
     from .discovery import checkpoint as cp
-    from .orchestrator import _datasource_context, run
+    from .orchestrator import _datasource_catalog, run
     from .spend import SpendGuard
     from .state import GenState
     from .debug_trace import make_trace
@@ -529,7 +529,7 @@ async def generate(
         agent_understanding=agent_understanding,
         known_data=known_data,
         user_preferences=user_preferences,
-        datasource_context=_datasource_context(session),
+        datasource_catalog=_datasource_catalog(session),
         scratchpads_context=_scratchpads_context(session),
         trace_log=trace,
         progress=progress,

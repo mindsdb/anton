@@ -25,6 +25,9 @@ class JevVerdict:
     ms: int = 0
     model: str = ""
     error: str = ""
+    # Billed usage the service reported; None when the reply carried none.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 def build_questions(status_description: str, rubric: str, close_to_done_description: str) -> dict:
@@ -37,6 +40,18 @@ def build_questions(status_description: str, rubric: str, close_to_done_descript
         "status": {"type": "choice", "instructions": f"{preamble} {rubric}", "criteria": bullets},
         "close_to_done": {"type": "noul", "instructions": close_to_done_description},
     }
+
+
+def _usage(body: object) -> dict:
+    """The reported token usage, or nothing when it is missing or malformed."""
+    usage = body.get("usage") if isinstance(body, dict) else None
+    if not isinstance(usage, dict):
+        return {}
+    tokens = {k: usage.get(k) for k in ("input_tokens", "output_tokens")}
+    # bool is an int subclass; a JSON true is not a token count.
+    if all(type(v) is int and v >= 0 for v in tokens.values()):
+        return tokens
+    return {}
 
 
 def _probability(value: object) -> float:
@@ -92,6 +107,11 @@ async def classify(
         return JevVerdict(ms=ms, error=f"http_{response.status_code}")
     try:
         body = response.json()
+    except Exception:
+        return JevVerdict(ms=ms, error="malformed")
+    # A reply that was billed keeps its usage even when its answer is unusable.
+    usage = _usage(body)
+    try:
         answer = body["answers"]["status"]
         status = answer["choice"]
         if status not in STATUSES:
@@ -100,7 +120,8 @@ async def classify(
         p_status = _probability(probabilities[status])
         p_complete = _probability(probabilities["COMPLETE"])
     except Exception:  # any shape problem is one error class
-        return JevVerdict(ms=ms, error="malformed")
+        return JevVerdict(ms=ms, error="malformed", **usage)
     return JevVerdict(
-        status=status, p_status=p_status, p_complete=p_complete, ms=ms, model=str(body.get("model") or "")
+        status=status, p_status=p_status, p_complete=p_complete, ms=ms, model=str(body.get("model") or ""),
+        **usage,
     )

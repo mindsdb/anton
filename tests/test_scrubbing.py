@@ -265,6 +265,26 @@ class TestConcurrentTurnIsolation:
         assert "[DS_ACME_CRM_PROD__TOKEN]" in result_a
         assert "secret-for-turn-b" not in result_b
         assert "[DS_ACME_CRM_PROD__TOKEN]" in result_b
+
+
+class TestTurnKeyGoogleAdsDeveloperToken:
+    def test_developer_token_is_scrubbed_and_login_customer_id_is_not(self, monkeypatch):
+        from anton.core.datasources.data_vault import TurnKeyDataVault
+        from anton.utils.datasources import restore_namespaced_env
+
+        def fake(url, api_key, *, method="GET", payload=None, verify=True, timeout=30):
+            return b'{"access_token": "ya29.live-token", "developer_token": "ABCDE-FGHIJ-KLMNO", "login_customer_id": "1234567890"}'
+
+        monkeypatch.setattr("anton.minds_client.minds_request", fake)
+        vault = TurnKeyDataVault({"turn_key": "tk_abc", "connections": [{"engine": "google_ads", "name": "primary"}]})
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials("dev token ABCDE-FGHIJ-KLMNO for customer 1234567890")
+        assert "ABCDE-FGHIJ-KLMNO" not in result
+        assert "[DS_GOOGLE_ADS_PRIMARY__DEVELOPER_TOKEN]" in result
+        assert "1234567890" in result
+
+
 class TestOAuthEngineRegistryCollision:
     """A cloud gmail OAuth connection shares its engine name with the
     registry's legacy IMAP gmail connector (datasources.md) — its OAuth

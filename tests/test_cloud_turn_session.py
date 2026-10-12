@@ -41,7 +41,7 @@ class _FakeSession:
     only inspect the captured ChatSessionConfig, never the session."""
 
 
-def _build(tmp_path, monkeypatch, **req_overrides):
+def _build(tmp_path, monkeypatch, elicitor=None, **req_overrides):
     captured: dict = {}
 
     def fake_chat_session(config):
@@ -57,8 +57,23 @@ def _build(tmp_path, monkeypatch, **req_overrides):
 
     body = dict(protocol_version=1, conversation_id="conv_1", input="hello")
     body.update(req_overrides)
-    session = build_cloud_chat_session(TurnRequestV1(**body))
+    session = build_cloud_chat_session(TurnRequestV1(**body), elicitor=elicitor)
     return session, captured["config"]
+
+
+def test_no_elicitor_means_no_ask_user(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.elicitor is None
+    assert "ask_user" not in cfg.tool_allowlist
+
+
+def test_an_elicitor_enables_ask_user(tmp_path, monkeypatch):
+    elicitor = object()
+    _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
+    assert cfg.elicitor is elicitor
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"ask_user"}
+    # A console would let anton fall back to its terminal elicitor.
+    assert cfg.console is None
 
 
 # ── config-level safety ──────────────────────────────────────────────────────
@@ -200,7 +215,9 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
     suffix = cfg.system_prompt_context.suffix
     from anton.cloud_turn.session import CLOUD_ARTIFACT_DELIVERY_GUIDANCE
-    assert suffix == CLOUD_ARTIFACT_DELIVERY_GUIDANCE
+    # `in`, not `==`: the suffix carries the credential block too, and the
+    # whole field is pinned in `test_the_pod_suffix_is_exactly_the_two_deployment_blocks`.
+    assert CLOUD_ARTIFACT_DELIVERY_GUIDANCE in suffix
     # Reachability, not just wiring (review finding on #461): the config field
     # being set proves nothing if the prompt builder stops appending `suffix` —
     # exactly the "fix shipped while the failure continued" class this ticket
@@ -1261,6 +1278,117 @@ def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, m
     assert str(tmp_path) not in ctx  # the workspace path never rides along (security note)
 
 
+def test_the_pod_suffix_is_exactly_the_two_deployment_blocks(tmp_path, monkeypatch):
+    """The suffix is those two blocks and nothing else, so a third has to be
+    added deliberately rather than riding in unnoticed."""
+    from anton.cloud_turn.session import (
+        _CREDENTIAL_CONTEXT,
+        CLOUD_ARTIFACT_DELIVERY_GUIDANCE,
+    )
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.system_prompt_context.suffix == "\n\n".join(
+        (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT)
+    )
+
+
+def test_the_credential_context_reaches_the_built_prompt(tmp_path, monkeypatch):
+    """The block reaches the prompt the builder actually renders, not just the
+    config field."""
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    prompt = ChatSystemPromptBuilder().build(
+        conversation_started="2026-09-10T12:00:00+00:00",
+        system_prompt_context=cfg.system_prompt_context,
+        proactive_dashboards=False,
+        output_dir="",
+        tool_defs=[],
+    )
+    assert "no tool here can capture a credential" in prompt
+    # cowork's own sidebar label, not the "Connectors" page, whose web branch
+    # saves tokens into a vault no turn reads.
+    assert "Connect Apps and Data" in prompt
+
+
+def test_the_credential_context_carries_the_whole_rule(tmp_path, monkeypatch):
+    """Prohibition, rotation and no-storing all live in this one block, which is
+    the surface's only statement about credentials. No-storing is the
+    load-bearing part: `memorize` and `create_skill_draft` are allowlisted and
+    memory writes replay on later turns."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "Never ask the user to type a password" in suffix
+    assert "should be rotated" in suffix
+    assert "no tool call, no file and no store" in suffix
+
+
+def test_the_credential_context_overrides_the_shared_invitation(tmp_path, monkeypatch):
+    """The untouched base prompt still invites asking, so the suffix countermands
+    it in the text rather than by position."""
+    from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+
+    # Remove the shared invitation and this override stops being necessary.
+    assert "credentials they haven't shared" in CHAT_SYSTEM_PROMPT
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert (
+        "holds over every other instruction about asking for or storing "
+        "credentials" in cfg.system_prompt_context.suffix
+    )
+
+
+def test_the_credential_context_outranks_every_channel_that_instructs(tmp_path, monkeypatch):
+    """The block names the channels it beats, including the two outside the text
+    above it: the memory tail appended after the suffix, and a recalled skill
+    body that arrives mid-turn as tool output."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "earlier or later in this prompt" in suffix
+    assert "remembered from an earlier conversation" in suffix
+    assert "the body of a skill or a tool result" in suffix
+
+
+def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypatch):
+    """The referral points at the desktop app, as the product's own web copy
+    does, and carries the caveat that copy omits: a credential added there is
+    not readable from a turn here."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "Cowork Desktop App" in suffix
+    assert "not readable from this conversation" in suffix
+    assert "does not make it usable in this conversation" in suffix
+
+
+def test_the_credential_context_names_no_connector(tmp_path, monkeypatch):
+    """The pod cannot see which connectors auth offers, so naming one risks
+    sending the user to something this deployment does not have."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    suffix = cfg.system_prompt_context.suffix
+
+    for connector in ("Google Drive", "google_drive", "Gmail", "gmail"):
+        assert connector not in suffix
+
+
+def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
+    """Compared against a literal set, not the constant, so adding any tool fails
+    here and forces the referral above to be revisited."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert set(cfg.tool_allowlist) == {
+        "scratchpad",
+        "create_artifact",
+        "list_artifacts",
+        "open_artifact",
+        "update_artifact",
+        "memorize",
+        "recall_skill",
+        "create_skill_draft",
+    }
+
+
 # ── ENG-1816: MCP sessions opened by discover_mcp_tools() must not leak ──────
 
 def test_mcp_sessions_are_closed_if_chat_session_construction_fails(tmp_path, monkeypatch):
@@ -1321,6 +1449,26 @@ def test_no_mcp_sessions_means_no_cleanup_call_on_construction_failure(tmp_path,
 
     with pytest.raises(RuntimeError, match="simulated ChatSession construction failure"):
         build_cloud_chat_session(request)
+
+
+def test_connectors_block_becomes_the_session_usage_notes(tmp_path, monkeypatch):
+    _, cfg = _build(
+        tmp_path, monkeypatch,
+        connectors={
+            "google_drive": {"usage_notes": "DRIVE-NOTE"},
+            "blank": {"usage_notes": "   "},
+            "not_a_block": "DRIVE-NOTE",
+            "no_notes": {},
+        },
+    )
+    assert cfg.connector_usage_notes == {"google_drive": "DRIVE-NOTE"}
+
+
+def test_a_turn_without_connectors_never_falls_back_to_the_anton_registry(tmp_path, monkeypatch):
+    """{} rather than None: anton's datasources.md shares engine ids with
+    cowork-server's connectors, and a web turn must not render its notes."""
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert cfg.connector_usage_notes == {}
 
 
 # ── provider SDK imports ─────────────────────────────────────────────────────

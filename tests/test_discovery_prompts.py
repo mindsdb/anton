@@ -27,6 +27,7 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     render_scratchpads_context,
 )
 from anton.core.tools.generate_artifact.state import GenState
+from anton.utils.datasources import CatalogConnection, DatasourceCatalog
 
 
 def _state(**over) -> GenState:
@@ -134,8 +135,16 @@ def test_call_kickoff_says_when_nothing_is_connected():
 def test_call_kickoff_carries_the_connected_sources_section_once():
     """`build_datasource_context` renders its own heading; the kickoff must
     not add a second one on top of it."""
-    section = f"\n\n{DATASOURCES_HEADER}\n- postgres-7e8971c3 (prod-db)\n"
-    kickoff = build_call_kickoff(_state(datasource_context=section))
+    catalog = DatasourceCatalog(
+        connections=(
+            CatalogConnection(
+                slug="postgres-7e8971c3", engine="postgres", engine_name="PostgreSQL",
+                label="prod-db", block="\n### Slug: `postgres-7e8971c3` — Label: prod-db",
+            ),
+        ),
+        notes={},
+    )
+    kickoff = build_call_kickoff(_state(datasource_catalog=catalog))
     assert "postgres-7e8971c3" in kickoff
     assert kickoff.count(DATASOURCES_HEADER) == 1
     assert "(none)" not in kickoff

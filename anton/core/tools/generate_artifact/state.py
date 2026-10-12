@@ -19,6 +19,7 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
 DATA_LOOP_MAX: int = 3
@@ -222,11 +223,11 @@ class GenState:
     agent_understanding: str = ""
     known_data: str = ""
     user_preferences: str = ""
-    # The `## Connected Data Sources` section as `build_datasource_context`
-    # renders it (slugs and DS_* names, no values), or "" when nothing is
-    # connected. Filled by the entry point; rendered into the call kickoff so
-    # the gathering step knows what it can query.
-    datasource_context: str = ""
+    # The session's connections as data (slugs and DS_* names, no values), or
+    # None when nothing is connected. Filled by the entry point; rendered whole
+    # as `datasource_context`, and for only the declared sources by the
+    # backend prompt.
+    datasource_catalog: "DatasourceCatalog | None" = None
     # The `## Scratchpads already in this session` section of the gathering
     # kickoff (`discovery.prompts.render_scratchpads_context`): the pads the
     # calling agent already ran, so the step reuses them instead of guessing
@@ -279,6 +280,13 @@ class GenState:
     # change them mid-run has to live in a step message instead.
     _pipeline_system: str = ""
     _pipeline_tools: "list[dict] | None" = None
+
+    @property
+    def datasource_context(self) -> str:
+        """The whole `## Connected Data Sources` section, as the chat prompt
+        renders it, or "" when nothing is connected. The call kickoff and the
+        fetch node carry it so they know what can be queried."""
+        return self.datasource_catalog.render() if self.datasource_catalog else ""
 
     @property
     def pipeline_system(self) -> str:

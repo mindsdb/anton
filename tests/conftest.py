@@ -398,6 +398,20 @@ def _no_builtin_skills(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_user_registry(tmp_path_factory, monkeypatch):
+    """Keep the developer's ~/.anton/datasources.md out of DatasourceRegistry.
+
+    `_USER_PATH` is bound when the module is imported, before `_no_real_home`
+    redirects $HOME, so that fixture cannot cover it. Tests that exercise a
+    user registry set `_USER_PATH` themselves.
+    """
+    from anton.core.datasources.datasource_registry import DatasourceRegistry
+
+    empty = tmp_path_factory.mktemp("no-user-registry")
+    monkeypatch.setattr(DatasourceRegistry, "_USER_PATH", empty / "datasources.md")
+
+
+@pytest.fixture(autouse=True)
 def _no_shared_verifier_latches():
     """Start and end every test with no host-shared verifier latch.
 

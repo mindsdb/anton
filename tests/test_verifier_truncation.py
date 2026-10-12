@@ -44,6 +44,12 @@ from anton.core.session import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _verify_single_round_turns(monkeypatch):
+    # These tests drive the verifier through single-tool-round turns.
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
+
+
 @pytest.fixture()
 def workspace():
     # Keep scratchpad venvs inside the repo workspace (pytest runs sandboxed and

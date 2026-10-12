@@ -256,24 +256,27 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # drops scratchpad-related "when" rules — those are already injected
         # into the scratchpad tool description by get_scratchpad_context(),
         # and showing them here too would double their token cost.
-        global_engrams = self.global_hc.get_rules(exclude_scratchpad_when=True)
-        if global_engrams:
-            global_engrams = await self._retrieve_relevant_rules(global_engrams, user_message)
-            if global_engrams:
-                sections.append(
-                    f"## Your Memory — Global Rules\n{self._format_rules_engrams(global_engrams)}"
-                )
-
         # 3. Project rules (with smart retrieval) — same scratchpad exclusion.
-        project_engrams = self.project_hc.get_rules(exclude_scratchpad_when=True)
+        # Both filters can be a model call, and the user waits on them before
+        # the first reply token, so they run concurrently.
+        global_engrams, project_engrams = await asyncio.gather(
+            self._retrieve_relevant_rules(
+                self.global_hc.get_rules(exclude_scratchpad_when=True), user_message
+            ),
+            self._retrieve_relevant_rules(
+                self.project_hc.get_rules(exclude_scratchpad_when=True), user_message
+            ),
+        )
+        if global_engrams:
+            sections.append(
+                f"## Your Memory — Global Rules\n{self._format_rules_engrams(global_engrams)}"
+            )
         if project_engrams:
-            project_engrams = await self._retrieve_relevant_rules(project_engrams, user_message)
-            if project_engrams:
-                sections.append(
-                    f"## Your Memory — Project Rules\n{self._format_rules_engrams(project_engrams)}"
-                )
-                for engram in project_engrams:
-                    self._log_read_engram(engram)
+            sections.append(
+                f"## Your Memory — Project Rules\n{self._format_rules_engrams(project_engrams)}"
+            )
+            for engram in project_engrams:
+                self._log_read_engram(engram)
 
         # 4. Global lessons. recall_lessons() excludes scratchpad-related
         # entries internally — same reasoning as the rules exclusion above.

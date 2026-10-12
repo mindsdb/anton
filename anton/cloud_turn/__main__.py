@@ -1,8 +1,11 @@
 """`python -m anton.cloud_turn` - the sandbox-pod turn entrypoint.
 
 Contract (matches scratchpad-controller + cowork-server):
-  stdin : ONE newline-terminated TurnRequestV1 JSON line (controller closes stdin)
-  stdout: JSONL events - `delta` / `turn_completed` / `turn_failed`, nothing else
+  stdin : the TurnRequestV1 JSON line; then, for an interactive turn only, one
+          answer line per user answer (see contract.py). The live-pod exec
+          never closes stdin.
+  stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
+          then exactly one terminal
   stderr: diagnostic logs + full tracebacks
   exit  : 0 (the controller detects the terminal from the event, not the code)
 
@@ -16,14 +19,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
 import logging
 import os
 import sys
 import time
+from collections.abc import Callable
+from typing import BinaryIO
 
 from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.elicitor import (
+    CloudElicitor,
+    ask_user_answered_event,
+    ask_user_event,
+)
 from anton.cloud_turn.history_rows import split_turn_into_rows
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
@@ -32,6 +43,8 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
     drain_pending_skills,
 )
+from anton.cloud_turn.stdin import start_answer_reader
+from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +141,50 @@ def _isolated_protocol_stdout():
         os.close(protocol_fd)
 
 
+class _WireClock:
+    """``emit`` plus the time the last protocol line went out.
+
+    Every line the turn writes goes through it except the heartbeat. A
+    heartbeat only resets the controller's stall timer and never reaches
+    cowork-server, so it is not activity on the wire a user's idle bound sees.
+    """
+
+    def __init__(self, *, emit: Callable[[dict], None]) -> None:
+        self._emit = emit
+        self.last_line_at = time.monotonic()
+
+    def __call__(self, event: dict) -> None:
+        self._emit(event)
+        self.last_line_at = time.monotonic()
+
+
+def _model_wait_line(*, session, wire: _WireClock) -> dict | None:
+    """The still-working progress line to write now, or None.
+
+    Written only when the session reports a model call waiting on the provider
+    and nothing else has gone out for ``MODEL_WAIT_TICK_S``. A hung tool, cell
+    or question reports no wait, so it still goes quiet on the wire. Catches
+    its own errors: it runs in the heartbeat task, and a dead heartbeat trips
+    the controller's stall window.
+    """
+    try:
+        calls = getattr(session, "model_calls", None)
+        if calls is None:
+            return None
+        if time.monotonic() - wire.last_line_at < MODEL_WAIT_TICK_S:
+            return None
+        snapshot = calls.snapshot()
+        if snapshot is None:
+            return None
+        return {"kind": "progress", "phase": MODEL_WAIT_PHASE,
+                "message": snapshot.message[:MAX_PROGRESS_CHARS],
+                "eta_seconds": snapshot.open_for_s,
+                "id": None, "ok": None}
+    except Exception:
+        logger.warning("model-wait check failed (non-fatal)", exc_info=True)
+        return None
+
+
 async def _close(session) -> None:
     close = getattr(session, "close", None)
     if close is None:
@@ -152,7 +209,9 @@ async def _settle_memory(session) -> None:
         logger.warning("memory settle failed (non-fatal)", exc_info=True)
 
 
-async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
+async def stream_turn(
+    raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
+) -> None:
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
@@ -162,12 +221,18 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
-    keep the controller's stall timer reset. It is cancelled once the turn
-    ends. ``emit`` is a synchronous ``os.write`` with no ``await`` inside, so
-    the ticker and the delta loop cannot interleave mid-line - no lock needed.
+    keep the controller's stall timer reset. On the same tick it writes a
+    ``model_wait`` progress line when the session reports a model call waiting
+    on the provider and the wire has been quiet for ``MODEL_WAIT_TICK_S``, so
+    cowork-server's and the UI's idle bounds see a silent model call as alive.
+    It is cancelled once the turn ends. ``emit`` is a synchronous ``os.write``
+    with no ``await`` inside, so the ticker and the delta loop cannot
+    interleave mid-line - no lock needed.
     """
     from anton.core.llm.provider import (
         MindsHubBillingStop,
+        StreamAskUser,
+        StreamAskUserAnswered,
         StreamComplete,
         StreamContextCompacted,
         StreamTaskProgress,
@@ -181,12 +246,16 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     builder = session_builder or build_cloud_chat_session
     session = None
     interval = float(os.environ.get("ANTON_CLOUD_TURN_HEARTBEAT_SECONDS", "5"))
+    wire = _WireClock(emit=emit)
 
     async def _heartbeat() -> None:
         try:
             while True:
                 await asyncio.sleep(interval)
                 emit({"kind": "heartbeat"})
+                line = _model_wait_line(session=session, wire=wire)
+                if line is not None:
+                    wire(line)
         except asyncio.CancelledError:
             return
 
@@ -195,13 +264,21 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
     # a terminal event in `finally` — else the turn dies with no terminal and
     # the controller reports a silent "unexpected error".
     terminal_emitted = False
+    elicitor = None
     try:
         req = TurnRequestV1.from_json(raw_line)
+        build = functools.partial(builder, req)
+        if req.interactive and stdin is not None:
+            # Before the build: the build is what registers `ask_user`, and a
+            # question must never be asked with nothing reading its answer.
+            elicitor = CloudElicitor(wire)
+            start_answer_reader(stdin, asyncio.get_running_loop(), elicitor.deliver)
+            build = functools.partial(builder, req, elicitor=elicitor)
         # build_cloud_chat_session() can block synchronously for several
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
-        session = await asyncio.get_running_loop().run_in_executor(None, builder, req)
+        session = await asyncio.get_running_loop().run_in_executor(None, build)
         # Length of the seeded history — everything anton appends past this
         # index belongs to this turn. Captured BEFORE turn_stream, so the
         # current turn's user input lands inside the slice and is trimmed off
@@ -242,13 +319,13 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         } or None
         async for event in session.turn_stream(turn_content, trace_metadata=_trace_md):
             if isinstance(event, StreamTextDelta):
-                emit({"kind": "delta", "text": event.text or ""})
+                wire({"kind": "delta", "text": event.text or ""})
             # Step events go on the wire for cowork's thinking/steps UI;
             # stderr keeps the controller-log narration.
             elif isinstance(event, StreamToolUseStart):
                 logger.info("tool call: %s", event.name)
                 tool_args[event.id] = []
-                emit({"kind": "tool_start", "id": event.id, "name": event.name})
+                wire({"kind": "tool_start", "id": event.id, "name": event.name})
             elif isinstance(event, StreamToolUseDelta):
                 parts = tool_args.get(event.id)
                 if parts is not None and tool_args_len.get(event.id, 0) < MAX_STEP_CHARS:
@@ -259,7 +336,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             elif isinstance(event, StreamToolUseEnd):
                 args = "".join(tool_args.pop(event.id, []))
                 tool_args_len.pop(event.id, None)
-                emit({"kind": "tool_end", "id": event.id,
+                wire({"kind": "tool_end", "id": event.id,
                       "args": args[:MAX_STEP_CHARS]})
             elif isinstance(event, StreamTaskProgress):
                 logger.info("progress [%s]: %s", event.phase, event.message)
@@ -285,7 +362,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                 if always or now - last_progress_wire >= PROGRESS_WIRE_INTERVAL:
                     if not always:
                         last_progress_wire = now
-                    emit({"kind": "progress", "phase": phase,
+                    wire({"kind": "progress", "phase": phase,
                           "message": (event.message or "")[:MAX_PROGRESS_CHARS],
                           "eta_seconds": event.eta_seconds,
                           "id": event.id, "ok": event.ok})
@@ -293,18 +370,24 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                 action = f" action={event.action}" if event.action else ""
                 logger.info("tool result: %s%s (%d chars)",
                             event.name, action, len(event.content or ""))
-                emit({"kind": "tool_result", "id": event.id, "name": event.name,
+                wire({"kind": "tool_result", "id": event.id, "name": event.name,
                       "action": event.action,
                       "content": _clip_result_content(event.content or "")})
             elif isinstance(event, StreamContextCompacted):
                 logger.info("context compacted: %s", event.message)
                 compacted = True
-                emit({"kind": "compacted", "message": event.message})
+                wire({"kind": "compacted", "message": event.message})
+            elif isinstance(event, StreamAskUser):
+                logger.info("ask_user question: %s", event.id)
+                wire(ask_user_event(event))
+            elif isinstance(event, StreamAskUserAnswered):
+                logger.info("ask_user closed: %s status=%s", event.id, event.answer.status)
+                wire(ask_user_answered_event(event, elicitor))
             elif isinstance(event, StreamComplete):
                 logger.info("model response complete")
                 # Round boundary: cowork's formatter separates rounds with a
                 # paragraph break unless the round was truncated mid-sentence.
-                emit({"kind": "round_end",
+                wire({"kind": "round_end",
                       "stop_reason": event.response.stop_reason,
                       "had_tool_calls": bool(event.response.tool_calls)})
         await _settle_memory(session)
@@ -312,14 +395,14 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         if entries:
             # Before the terminal event: cowork persists on this, then stops reading.
             logger.info("emitting %d memory entr(ies)", len(entries))
-            emit({"kind": "memory", "entries": entries})
+            wire({"kind": "memory", "entries": entries})
         drafts = drain_pending_skills(session)
         if drafts:
             # Pre-terminal for the same reason as memory. Staged only — cowork
             # surfaces a card the user saves; nothing reaches their skill store.
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
-            emit({"kind": "skill", "entries": drafts})
+            wire({"kind": "skill", "entries": drafts})
         # Pre-terminal like memory and skills. Without this the pod compacts
         # every turn and throws the result away: the host owns history, so it
         # must be told which seeded messages the summary now covers.
@@ -330,7 +413,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         if compaction:
             logger.info("emitting compaction covering %d seeded message(s)",
                         compaction["covered_through"])
-            emit({"kind": "compaction",
+            wire({"kind": "compaction",
                   "summary": compaction["summary"],
                   "covered_through": compaction["covered_through"]})
         # Pre-terminal for the same reason as memory and skills: cowork stops
@@ -354,9 +437,9 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
             rows = split_turn_into_rows(turn_slice)
             if rows:
                 logger.info("emitting %d turn-history row(s)", len(rows))
-                emit({"kind": "history", "rows": rows})
+                wire({"kind": "history", "rows": rows})
         logger.info("cloud turn completed")
-        emit({"kind": "turn_completed"})
+        wire({"kind": "turn_completed"})
         terminal_emitted = True
     except Exception as exc:
         # Full traceback -> stderr only; wire carries a short scrubbed string.
@@ -368,7 +451,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
         # no instant that parses, and then the key is left off.
         if isinstance(exc, MindsHubBillingStop) and exc.reset_at:
             failed["reset_at"] = exc.reset_at
-        emit(failed)
+        wire(failed)
         terminal_emitted = True
     finally:
         # No terminal yet = BaseException/teardown path; emit one (guarded — a
@@ -381,7 +464,7 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
                 # remote_turn_error can classify it instead of discarding it for
                 # the fully generic message — a bare sentence with no colon reads
                 # as an unrecognized type name and gets thrown away.
-                emit({"kind": "turn_failed",
+                wire({"kind": "turn_failed",
                       "error": "TurnInterrupted: The turn ended unexpectedly. Please try again."})
         hb.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -392,10 +475,16 @@ async def stream_turn(raw_line: str, emit, session_builder=None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     with _isolated_protocol_stdout() as emit:
-        # One bounded line (the controller writes a single JSON line + \n, then
-        # closes stdin). ``readline`` returns on the newline without blocking.
-        raw_line = sys.stdin.readline(MAX_REQUEST_BYTES + 1)
-        asyncio.run(stream_turn(raw_line, emit))
+        # A private reader over a dup of fd 0, never `sys.stdin` (why: see the
+        # cloud_turn/stdin.py docstring).
+        stdin = open(os.dup(0), "rb")
+        # Then point fd 0 itself at /dev/null, so no child process spawned
+        # during the turn inherits the answer pipe and swallows an answer line.
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(devnull, 0)
+        os.close(devnull)
+        raw_line = stdin.readline(MAX_REQUEST_BYTES + 1).decode("utf-8", errors="replace")
+        asyncio.run(stream_turn(raw_line, emit, stdin=stdin))
     return 0
 
 

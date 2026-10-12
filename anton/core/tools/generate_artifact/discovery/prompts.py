@@ -7,6 +7,9 @@ neither has to re-derive it — only the task-specific instructions differ.
 from __future__ import annotations
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES_ORDERED
+# The heading `build_datasource_context` renders, so the kickoff reads the same
+# whether or not anything is connected.
+from anton.utils.datasources import DATASOURCES_HEADER
 
 from ..attachments import render_for_gathering
 from .state import PrdState
@@ -60,9 +63,6 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
     )
 
 
-# Same heading `anton.utils.datasources.build_datasource_context` renders, so
-# the kickoff reads the same whether or not anything is connected.
-DATASOURCES_HEADER = "## Connected Data Sources"
 SCRATCHPADS_HEADER = "## Scratchpads already in this session"
 
 

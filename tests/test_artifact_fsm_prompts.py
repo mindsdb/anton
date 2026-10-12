@@ -5,8 +5,10 @@ import re
 import json
 from pathlib import Path
 
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.tools.generate_artifact import prompts
 from anton.core.tools.generate_artifact.state import GenState
+from anton.utils.datasources import collect_datasource_catalog
 
 
 def _state(**kw):
@@ -83,50 +85,144 @@ def test_backend_prompt_states_the_ds_env_var_convention():
         assert "DS_<ENGINE>_<NAME>__<FIELD>" in system
 
 
-_CATALOG = (
-    "\n\n## Connected Data Sources\nEach connection has a Slug …\n"
-    "\n### Slug: `mysql-df6b1140` — Label: (none)\nEngine: MySQL\nHost: h\n"
-    "Credential env vars:\n - DS_MYSQL_DF6B1140__HOST\n"
-    "\n### Slug: `snowflake-wh42` — Label: warehouse\nEngine: Snowflake\n"
-    "Credential env vars:\n - DS_SNOWFLAKE_WH42__ACCOUNT\n"
-)
+def _catalog(tmp_path, connections, usage_notes=None):
+    """A catalog from the real renderer over a vault holding `connections`
+    (engine, name, fields)."""
+    vault = LocalDataVault(tmp_path / "vault")
+    for engine, name, fields in connections:
+        vault.save(engine, name, fields)
+    return collect_datasource_catalog(vault, usage_notes=usage_notes or {})
 
 
-def test_backend_prompt_embeds_the_catalog_entries_the_artifact_declared():
+_TWO_DATABASES = [
+    ("mysql", "df6b1140", {"host": "h"}),
+    ("snowflake", "wh42", {"_user_label": "warehouse", "account": "a"}),
+]
+
+
+def test_backend_prompt_embeds_the_catalog_entries_the_artifact_declared(tmp_path):
     """Distinctive names — `_BACKEND_RULES` itself quotes DS_POSTGRES_PROD_DB__*
     and DS_HUBSPOT_MAIN__* as examples, so an assertion on those passes
     vacuously."""
     system = prompts.build_backend_system_prompt(
-        Path("/tmp/a"), stateless=True, datasource_context=_CATALOG,
+        Path("/tmp/a"), stateless=True, datasources=_catalog(tmp_path, _TWO_DATABASES),
         declared_sources=["sales rows from the warehouse (snowflake)"],
     )
     assert "DS_SNOWFLAKE_WH42__ACCOUNT" in system
     assert "DS_MYSQL_DF6B1140__HOST" not in system
 
 
-def test_backend_prompt_replaces_the_catalog_with_a_note_when_no_source_is_declared():
-    """Run 18: two databases and ten DS_* names went into a backend whose spec
+def test_backend_prompt_replaces_the_catalog_with_a_note_when_no_source_is_declared(tmp_path):
+    """Two databases and ten DS_* names once went into a backend whose spec
     said "no external data" — noise and a temptation."""
     system = prompts.build_backend_system_prompt(
-        Path("/tmp/a"), stateless=True, datasource_context=_CATALOG,
+        Path("/tmp/a"), stateless=True, datasources=_catalog(tmp_path, _TWO_DATABASES),
     )
     assert "None are used by this artifact" in system
     assert "DS_SNOWFLAKE_WH42__ACCOUNT" not in system
     assert "DS_MYSQL_DF6B1140__HOST" not in system
 
 
-def test_datasource_section_keeps_the_whole_catalog_when_unsure():
+def test_datasource_section_keeps_the_whole_catalog_when_unsure(tmp_path):
     """Declared names are free text; a wrong drop costs a regeneration that
     the full catalog never does. Gathered cells reading `DS_*` count as a
     declaration the model forgot to make."""
+    catalog = _catalog(tmp_path, _TWO_DATABASES)
     both = ("DS_MYSQL_DF6B1140__HOST", "DS_SNOWFLAKE_WH42__ACCOUNT")
-    unsure = prompts._datasource_section(_CATALOG, ["the article at http://x"], "")
+    unsure = prompts._datasource_section(catalog, ["the article at http://x"], "")
     assert all(name in unsure for name in both)
-    forgot = prompts._datasource_section(_CATALOG, [], "cell: os.environ['DS_MYSQL_DF6B1140__HOST']")
+    forgot = prompts._datasource_section(catalog, [], "cell: os.environ['DS_MYSQL_DF6B1140__HOST']")
     assert all(name in forgot for name in both)
-    by_slug = prompts._datasource_section(_CATALOG, ["mysql-df6b1140 orders"], "")
+    by_slug = prompts._datasource_section(catalog, ["mysql-df6b1140 orders"], "")
     assert "DS_MYSQL_DF6B1140__HOST" in by_slug and "DS_SNOWFLAKE" not in by_slug
-    assert prompts._datasource_section("", [], "") == ""
+    assert prompts._datasource_section(None, [], "") == ""
+
+
+def test_datasource_section_matches_by_label_engine_id_and_engine_name(tmp_path):
+    catalog = _catalog(
+        tmp_path,
+        [
+            ("snowflake", "wh42", {"_user_label": "warehouse", "account": "a"}),
+            ("postgres", "db", {"host": "h", "password": "p"}),
+            ("optima-api", "x1", {"token": "t"}),
+        ],
+    )
+    cases = {
+        "the WAREHOUSE tables": "DS_SNOWFLAKE_WH42__ACCOUNT",  # label
+        "postgres orders": "DS_POSTGRES_DB__HOST",  # engine id
+        "WebArm Comarch Optima API invoices": "DS_OPTIMA_API_X1__TOKEN",  # engine name
+    }
+    for declared, expected in cases.items():
+        section = prompts._datasource_section(catalog, [declared], "")
+        assert [name for name in cases.values() if name in section] == [expected], declared
+
+
+def _drive_and_postgres(tmp_path):
+    """google_drive-work sorts before postgres-db, so both engines' notes
+    come after the postgres block."""
+    return _catalog(
+        tmp_path,
+        [
+            ("google_drive", "work", {"auth_type": "oauth", "access_token": "t"}),
+            ("postgres", "db", {"host": "h", "password": "p"}),
+        ],
+        usage_notes={"google_drive": "DRIVE-NOTE", "postgres": "PG-NOTE"},
+    )
+
+
+def test_datasource_section_keeps_notes_of_the_kept_engine_when_the_last_block_is_dropped(tmp_path):
+    section = prompts._datasource_section(_drive_and_postgres(tmp_path), ["google_drive-work"], "")
+
+    assert "DS_GOOGLE_DRIVE_WORK__ACCESS_TOKEN" in section
+    assert "DS_POSTGRES_DB__HOST" not in section
+    assert "DRIVE-NOTE" in section
+    assert "(engine `google_drive`)" in section
+    assert "Connected Google Drive accounts are available" in section
+
+
+def test_datasource_section_drops_notes_of_a_filtered_out_engine(tmp_path):
+    section = prompts._datasource_section(_drive_and_postgres(tmp_path), ["postgres-db"], "")
+
+    assert "DS_POSTGRES_DB__HOST" in section
+    assert "PG-NOTE" in section
+    assert "DRIVE-NOTE" not in section
+    assert "google_drive" not in section.replace("DS_GOOGLE_DRIVE", "")
+    assert "Connected Google Drive accounts are available" not in section
+
+
+def test_datasource_section_keeps_engines_apart_when_one_id_prefixes_another(tmp_path):
+    catalog = _catalog(
+        tmp_path,
+        [
+            ("optima", "ledger", {"_user_label": "ledger", "token": "t"}),
+            ("optima-api", "billing", {"_user_label": "billing", "token": "t"}),
+        ],
+        usage_notes={"optima": "OPTIMA-NOTE", "optima-api": "OPTIMA-API-NOTE"},
+    )
+
+    section = prompts._datasource_section(catalog, ["billing"], "")
+
+    assert "DS_OPTIMA_API_BILLING__TOKEN" in section
+    assert "OPTIMA-API-NOTE" in section
+    assert "DS_OPTIMA_LEDGER__TOKEN" not in section
+    assert "OPTIMA-NOTE" not in section
+
+
+def test_datasource_section_keeps_a_note_whose_code_quotes_a_notes_heading(tmp_path):
+    note = "Run:\n```\n### Usage notes: x\nSELECT 1\n```\nAfter the fence."
+    catalog = _catalog(
+        tmp_path,
+        [
+            ("postgres", "db", {"host": "h", "password": "p"}),
+            ("mysql", "df6b1140", {"host": "h"}),
+        ],
+        usage_notes={"postgres": note},
+    )
+
+    section = prompts._datasource_section(catalog, ["postgres-db"], "")
+
+    assert note in section
+    assert "DS_MYSQL" not in section
 
 
 def test_fetch_prompt_embeds_the_datasource_catalog():

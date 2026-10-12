@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import orchestrator
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
@@ -188,20 +190,18 @@ async def test_declare_datasources_writes_an_empty_list_to_clear_the_previous_on
     assert rec.outcome == "done" and "cleared" in rec.detail
 
 
-async def test_gen_verify_backend_stateful_wiring(tmp_path: Path, monkeypatch):
-    """Stateful: the manifest step is injected and the type reaches the verifier."""
-    st = _state(tmp_path, artifact_type="fullstack-stateful-app", is_fullstack=True)
-    st.api_spec = "{}"
-    captured = {}
+def _stub_backend_run(monkeypatch, tmp_path: Path) -> dict:
+    """Stub the backend generation step's loop, verifier and datasource
+    mapping; returns where the loop's and the verifier's kwargs land."""
+    captured: dict = {}
 
     async def fake_loop(**kw):
-        captured["injections"] = kw["step_injections"]
-        captured["system"] = kw["system"]
+        captured["loop"] = kw
         (tmp_path / "backend.py").write_text("x")
         return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
 
     async def fake_verify(**kw):
-        captured["artifact_type"] = kw.get("artifact_type")
+        captured["verify"] = kw
         return VerifyResult(errors=[]), []
 
     async def fake_declare(state, refs):
@@ -211,43 +211,56 @@ async def test_gen_verify_backend_stateful_wiring(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
     monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
     monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
-    monkeypatch.setattr(orchestrator, "_datasource_context", lambda s: "")
+    return captured
+
+
+async def test_gen_verify_backend_stateful_wiring(tmp_path: Path, monkeypatch):
+    """Stateful: the manifest step is injected and the type reaches the verifier."""
+    st = _state(tmp_path, artifact_type="fullstack-stateful-app", is_fullstack=True)
+    st.api_spec = "{}"
+    captured = _stub_backend_run(monkeypatch, tmp_path)
     err = await orchestrator._gen_verify_backend(st)
     assert err is None
-    assert [t for t, _ in captured["injections"]] == ["backend.py", "state_manifest.json"]
-    assert captured["artifact_type"] == "fullstack-stateful-app"
+    assert [t for t, _ in captured["loop"]["step_injections"]] == ["backend.py", "state_manifest.json"]
+    assert captured["verify"].get("artifact_type") == "fullstack-stateful-app"
     # The system prompt carries the STATE contract, not the old sqlite model.
-    assert "state_manifest.json" in captured["system"]
-    assert "sqlite file (or similar) IS allowed" not in captured["system"]
+    assert "state_manifest.json" in captured["loop"]["system"]
+    assert "sqlite file (or similar) IS allowed" not in captured["loop"]["system"]
 
 
 async def test_gen_verify_backend_stateless_wiring(tmp_path: Path, monkeypatch):
     """Stateless: two files only — no manifest step; the type reaches the verifier."""
     st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True)
     st.api_spec = "{}"
-    captured = {}
-
-    async def fake_loop(**kw):
-        captured["injections"] = kw["step_injections"]
-        (tmp_path / "backend.py").write_text("x")
-        return {"files_written": ["backend.py"], "rounds_used": 1, "summary": "s"}
-
-    async def fake_verify(**kw):
-        captured["artifact_type"] = kw.get("artifact_type")
-        return VerifyResult(errors=[]), []
-
-    async def fake_declare(state, refs):
-        pass
-
-    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_backend", fake_verify)
-    monkeypatch.setattr(orchestrator, "_map_datasources", lambda s, k: ([], []))
-    monkeypatch.setattr(orchestrator, "_declare_datasources", fake_declare)
-    monkeypatch.setattr(orchestrator, "_datasource_context", lambda s: "")
+    captured = _stub_backend_run(monkeypatch, tmp_path)
     err = await orchestrator._gen_verify_backend(st)
     assert err is None
-    assert [t for t, _ in captured["injections"]] == ["backend.py"]
-    assert captured["artifact_type"] == "fullstack-stateless-app"
+    assert [t for t, _ in captured["loop"]["step_injections"]] == ["backend.py"]
+    assert captured["verify"].get("artifact_type") == "fullstack-stateless-app"
+
+
+async def test_backend_prompt_gets_only_the_declared_connection_and_its_notes(tmp_path: Path, monkeypatch):
+    vault = LocalDataVault(tmp_path / "vault")
+    vault.save("langfuse", "prod", {"public_key": "pk", "secret_key": "sk"})
+    vault.save("postgres", "db", {"host": "h", "password": "p"})
+    session = SimpleNamespace(
+        _data_vault=vault,
+        _connector_usage_notes={"langfuse": "LF-NOTE", "postgres": "PG-NOTE"},
+    )
+    st = _state(
+        tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True,
+        datasource_catalog=orchestrator._datasource_catalog(session),
+        declared_sources=["daily metrics from langfuse"],
+    )
+    st.api_spec = "{}"
+    captured = _stub_backend_run(monkeypatch, tmp_path)
+
+    assert await orchestrator._gen_verify_backend(st) is None
+    system = captured["loop"]["system"]
+    assert "DS_LANGFUSE_PROD__PUBLIC_KEY" in system
+    assert "LF-NOTE" in system
+    assert "DS_POSTGRES_DB__HOST" not in system
+    assert "PG-NOTE" not in system
 
 
 async def test_gen_verify_backend_terminal_after_second_failure(tmp_path: Path, monkeypatch):
@@ -440,7 +453,7 @@ def test_datasource_context_is_defensive_against_mock_session():
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
-        assert orchestrator._datasource_context(AsyncMock()) == ""
+        assert orchestrator._datasource_catalog(AsyncMock()) is None
         assert orchestrator._known_connection_hints(AsyncMock()) == []
 
 

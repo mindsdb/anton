@@ -597,7 +597,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         return f"{title} is at {file_path} but no previewable HTML was found."
 
     # Publish flow
-    from anton.publisher import publish
+    import urllib.error
+
+    from anton.publisher import ArtifactOwnedByOtherUserError, publish
 
     if not settings.minds_api_key:
         console.print()
@@ -687,11 +689,24 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 access=eff_access,
                 pwd_version=pwd_version,
                 access_version=access_version,
+                previous_access=prev,
+            )
+        except ArtifactOwnedByOtherUserError as e:
+            console.print(f"  [anton.error]{e}[/]")
+            console.print()
+            return (
+                f"PUBLISH FAILED: {e} Do NOT call this tool again for this artifact "
+                "and do not publish it under a new report on your own. Tell the user "
+                "that the existing link belongs to another account, and that they can "
+                "publish their own copy by running /publish and choosing 'new'."
             )
         except Exception as e:
-            if report_id:
-                # The report may have been deleted server-side — retry
-                # without report_id to create a fresh one.
+            # Only a 404 says the report is gone, so publishing it afresh
+            # without report_id is safe. After a timeout, a 5xx or a 409 the
+            # report may still exist, and a retry would publish a copy under
+            # a new URL.
+            gone = isinstance(e, urllib.error.HTTPError) and e.code == 404
+            if report_id and gone:
                 try:
                     result = publish(
                         publish_target,
@@ -729,6 +744,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # instead of creating a new report (owner-side; unified location + key).
     if returned_report_id:
         entry = dict(owner_side)
+        if result.get("password_hash"):
+            # Sent again by the next publish while the password is unchanged.
+            entry["password_hash"] = result["password_hash"]
         entry.update({
             "report_id": returned_report_id,
             "url": view_url,

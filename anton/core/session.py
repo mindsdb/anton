@@ -24,6 +24,7 @@ from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import product_lines, serving_model_lines
+from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
@@ -48,9 +49,11 @@ from anton.core.llm.provider import (
     ContextOverflowError,
     EndpointConfigurationError,
     LLMResponse,
+    ModelCallTimeoutError,
     ModelUnavailableError,
     ProviderAuthError,
     ProviderOverloadedError,
+    RequestRefusedError,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -844,6 +847,12 @@ def _verifier_error_type(exc: BaseException | None) -> str:
     name = _safe_error_type(exc)
     if isinstance(exc, StructuredOutputError):
         return name + (":unusable_call" if exc.reached_tool_call else ":no_call")
+    if isinstance(exc, ModelCallTimeoutError) and exc.role:
+        # The role of the call that ran out its deadline, a closed set. The
+        # verdict call's own expiry reads `:coding`; `:router` means compaction
+        # ran out earlier in the turn and the latch failed the verdict call
+        # before it was sent.
+        return f"{name}:{exc.role}"
     return name
 
 
@@ -1315,6 +1324,12 @@ class ChatSessionConfig:
     system_prompt_context: SystemPromptContext = field(default_factory=SystemPromptContext)
     workspace: Workspace | None = None
     data_vault: DataVault | None = None
+    # Agent-facing usage notes per connector engine (engine -> markdown),
+    # rendered by build_datasource_context for connected engines only. None
+    # means the host sent none (the CLI, or an older cowork-server), so notes
+    # come from anton's datasources.md registry. A dict, even an empty one, is
+    # the only source; see anton.utils.datasources._resolve_usage_notes.
+    connector_usage_notes: dict[str, str] | None = None
     workspace_env_overlay: dict[str, str] | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
@@ -1478,6 +1493,8 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
+        # Memory section by user message, reused within one turn. None outside a turn.
+        self._turn_memory: dict[str, str] | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
         # nothing reads this to change behaviour. The control that will
         # (ENG-1531) is deliberately unbuilt until this has reported real
@@ -1511,6 +1528,15 @@ class ChatSession:
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._llm = config.llm_client
+        # The open model calls of the current turn: None before the first
+        # turn, and a closed tracker that reports nothing once a turn ends.
+        # Hosts poll `model_calls.snapshot()` to keep a turn alive while a
+        # model call is silent (see anton.core.llm.liveness).
+        self.model_calls: ModelCallTracker | None = None
+        # Applied here, not only in LLMClient.from_settings: hosts that build
+        # the client themselves (cowork-server) pass their settings to the
+        # session, and this is how the deadline setting reaches their client.
+        self._llm.model_call_idle_timeout_s = s.model_call_idle_timeout_s
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -1530,6 +1556,7 @@ class ChatSession:
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
         self._data_vault = config.data_vault
+        self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
         # scratchpad gets; it is never applied to this process.
         self._workspace_env_overlay = config.workspace_env_overlay or {}
@@ -2243,7 +2270,14 @@ class ChatSession:
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
         if self._cortex is not None:
-            memory_section = await self._cortex.build_memory_context(user_message)
+            # Once per turn: a retry must not repeat the rule filter model calls.
+            turn_memory = self._turn_memory
+            if turn_memory is not None and user_message in turn_memory:
+                memory_section = turn_memory[user_message]
+            else:
+                memory_section = await self._cortex.build_memory_context(user_message)
+                if turn_memory is not None:
+                    turn_memory[user_message] = memory_section
 
         sa_section = ""
         if self._self_awareness is not None and self._cortex is None:
@@ -2256,7 +2290,11 @@ class ChatSession:
             md_context = self._workspace.build_anton_md_context()
 
         # Inject connected datasource context without credentials
-        ds_ctx = build_datasource_context(self._data_vault, active_only=self._active_datasource)
+        ds_ctx = build_datasource_context(
+            self._data_vault,
+            active_only=self._active_datasource,
+            usage_notes=self._connector_usage_notes,
+        )
 
         # Turn-start workspace discovery (ENG-578): volatile, so it rides the
         # tail — never the cache-stable prefix. Best-effort; a failure here
@@ -3340,6 +3378,9 @@ class ChatSession:
                 "jev_errors": str(tc.jev_errors),
                 "jev_last_status": tc.jev_last_status,
                 "jev_last_ms": str(tc.jev_last_ms),
+                "jev_input_tokens": str(tc.jev_input_tokens),
+                "jev_output_tokens": str(tc.jev_output_tokens),
+                "jev_checks_without_usage": str(tc.jev_checks_without_usage),
                 **(
                     {"jev_last_p_complete": f"{tc.jev_last_p_complete:.3f}"}
                     if tc.jev_last_p_complete is not None
@@ -3953,6 +3994,11 @@ class ChatSession:
                 tc.jev_last_status = result.status or result.error
                 tc.jev_last_p_complete = result.p_complete
                 tc.jev_last_ms = result.ms
+                if result.input_tokens is None or result.output_tokens is None:
+                    tc.jev_checks_without_usage += 1
+                else:
+                    tc.jev_input_tokens += result.input_tokens
+                    tc.jev_output_tokens += result.output_tokens
             logger.info(
                 "completion-verifier jev status=%s p=%s decided=%s llm=%s ms=%d model=%s error=%s",
                 result.status or "-",
@@ -4484,6 +4530,7 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
+        self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
@@ -4543,6 +4590,12 @@ class ChatSession:
         )
         _turn_cost_books = self._turn_cost
         self._llm.usage_listener = self._turn_cost.add
+        # The turn's open model calls, armed at the same narrow waist. Every
+        # call this turn issues registers here, and the first one that runs
+        # out its idle deadline latches so later calls fail at once.
+        _turn_calls = ModelCallTracker()
+        self.model_calls = _turn_calls
+        _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
         try:
@@ -4750,6 +4803,32 @@ class ChatSession:
                         )
                         raise
 
+                    # A request the provider refuses outright: a setting the
+                    # model does not accept, or a prompt its policy blocks. The
+                    # re-send below would be identical and fail identically.
+                    # The explain call after the re-sends sends no tools, so
+                    # for a refused effort it can pass, and its prose would
+                    # end the turn as the answer with no error shown. So the
+                    # turn ends here and the host shows the error. After the
+                    # seal, as for the content rejection.
+                    if isinstance(_agent_exc, RequestRefusedError):
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_refused"
+                        )
+                        raise
+
+                    # A model call sent nothing for its whole deadline. A
+                    # re-send, the recovery note's retry or the wrap-up call
+                    # would each wait out another deadline against the same
+                    # silent provider, and the latch fails them anyway. So the
+                    # turn ends here and the host shows its no-response card.
+                    # After the seal, as for the refusal above.
+                    if isinstance(_agent_exc, ModelCallTimeoutError):
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "model_call_timeout"
+                        )
+                        raise
+
                     if _retry_count <= _max_auto_retries:
                         # Inject the error into history and let the LLM try to
                         # recover. A TransientProviderError reaching here is a
@@ -4940,10 +5019,11 @@ class ChatSession:
                                 # every module that defines one of these.
                                 #
                                 # And propagating is not automatically better.
-                                # Four members currently have NO card on either
+                                # Five members currently have NO card on either
                                 # transport (ContextOverflowError,
                                 # StructuredOutputError, TransientProviderError,
-                                # EndpointConfigurationError): cowork-server
+                                # EndpointConfigurationError,
+                                # RequestRefusedError): cowork-server
                                 # replaces the message with a flat "An unexpected
                                 # error occurred." and the client renders a
                                 # BUTTONLESS alert, so for those the turn trades
@@ -4976,6 +5056,19 @@ class ChatSession:
             _turn_exc = _e
             raise
         finally:
+            self._turn_memory = None
+            # Closed before the books, with no await in between, so work that
+            # outlives the turn (memory consolidation, a late finalizer) can
+            # neither keep a host's wait line alive nor latch a deadline.
+            # Disarmed too, so the tasks started below see no tracker and
+            # cannot reach the next turn's on this session.
+            _turn_calls.close()
+            try:
+                disarm_turn_tracker(_calls_token)
+            except ValueError:
+                # Cross-context finalizer of an abandoned turn: the ContextVar
+                # copy dies with that task, and the newer turn keeps its own.
+                pass
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
@@ -5958,9 +6051,9 @@ class ChatSession:
                         self._compaction_failed_this_turn = True
 
             # --- Completion verification ---
-            # Skip when too few tool rounds were used (pure Q&A always skips at
-            # tool_round==0; raising verify_min_tool_rounds also skips trivial
-            # single-round turns) or when we hit the max-rounds hard stop.
+            # Skip when too few tool rounds were used (pure Q&A and, at the
+            # default of 2, single-round turns) or when we hit the max-rounds
+            # hard stop.
             if tool_round < self._verify_min_tool_rounds or _max_rounds_hit or _spend_ceiling_hit:
                 break
 
@@ -6120,6 +6213,20 @@ class ChatSession:
                     )
                     if not retrying:
                         break
+                except ModelCallTimeoutError as exc:
+                    # The verdict call sent nothing for its whole deadline, or
+                    # an earlier call in the turn did and the latch failed this
+                    # one before it was sent; exc.role names which. The answer
+                    # already streamed, so the turn ends quietly on it,
+                    # unverified, below. A retry would wait out another
+                    # deadline, and a hand-back would need the same provider.
+                    verdict_failure = "timeout"
+                    verdict_exc = exc
+                    logger.warning(
+                        "completion-verifier verdict=TIMEOUT budget=%d role=%s model=%s",
+                        budget, exc.role, exc.model,
+                    )
+                    break
                 except ProviderAuthError:
                     # The client already made the one bounded confirmation
                     # attempt. ProviderAuthError subclasses ConnectionError,
@@ -6206,6 +6313,15 @@ class ChatSession:
                     self._turn_cost.verifier_error_type = _verifier_error_type(
                         verdict_exc
                     )
+                if verdict_failure == "timeout":
+                    # A silent provider says nothing about whether this model
+                    # can produce a verdict, so the verifier latch is left
+                    # alone. Unverified turn, as for the latched skip above.
+                    # The deadline did latch the turn's model calls, so this
+                    # must end the turn: any model call after it fails at once.
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
+                    break
                 if verdict_failure == "denied":
                     # A denied verdict recurs every turn by construction, so
                     # don't wait for a second sample: latch NOW and end the

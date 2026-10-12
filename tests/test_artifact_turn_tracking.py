@@ -24,6 +24,7 @@ import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.tools.tool_handlers import (
+    lint_changed_artifact_files,
     snapshot_existing_artifact_mtimes,
     track_edits_since,
     handle_create_artifact,
@@ -230,6 +231,79 @@ async def test_housekeeping_only_mtime_bump_is_not_an_edit(session, root):
     track_edits_since(session, ArtifactStore(root), before)
 
     assert session._artifacts_touched == set()
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [".anton_state.db-wal", "backend.log", "prd.md", ".revisions/r1.json"],
+)
+async def test_non_content_write_is_not_an_edit(session, root, rel):
+    """A running backend writes its SQLite store and log into the artifact
+    folder during a cell; none of that is the agent editing the artifact."""
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    target = root / slug / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x")
+    _bump_mtime(target)
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == set()
+
+
+async def test_content_write_next_to_state_files_is_an_edit(session, root):
+    slug = await _create(session)
+    (root / slug / ".anton_state.db").write_text("x")
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    index = root / slug / "index.html"
+    index.write_text("<html>v2</html>")
+    _bump_mtime(index)
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}
+
+
+async def test_nested_name_matching_a_non_content_name_is_an_edit(session, root):
+    """Only the first path component decides: `static/prd.md` is content."""
+    slug = await _create(session)
+    session._artifacts_touched.clear()
+
+    before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
+    target = root / slug / "static" / "prd.md"
+    target.parent.mkdir()
+    target.write_text("x")
+    _bump_mtime(target)
+
+    track_edits_since(session, ArtifactStore(root), before)
+
+    assert session._artifacts_touched == {slug}
+
+
+def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):
+    import anton.core.tools.tool_handlers as th
+
+    class Store:
+        root = tmp_path
+
+    folder = tmp_path / "art"
+    (folder / ".revisions").mkdir(parents=True)
+    (folder / "metadata.json").write_text("{}")
+    (folder / ".revisions" / "x.html").write_text("<broken")
+    index = folder / "index.html"
+    index.write_text("<html></html>")
+    monkeypatch.setattr(
+        th, "_artifact_linters", lambda: {".html": lambda p: [f"bad {p.name}"]}
+    )
+
+    messages = lint_changed_artifact_files(Store(), {"art": 0.0})
+
+    assert messages == ["art/index.html — bad index.html"]
 
 
 async def test_edit_without_reopening_stamps_provenance_too(session, root):

@@ -128,31 +128,10 @@ def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = 
 
 
 def _artifact_content_mtime(folder: Path) -> float:
-    """Max mtime across an artifact folder's user-content files.
+    """Max mtime across an artifact folder's content files, 0.0 if none."""
+    from anton.core.artifacts.store import iter_content_files
 
-    Excludes the store's own housekeeping files, mirroring cowork-server's
-    `content_mtime` gate so both sides agree on what "changed" means.
-    """
-    from anton.core.artifacts.store import (
-        METADATA_FILENAME,
-        PUBLISHED_FILENAME,
-        README_FILENAME,
-    )
-
-    housekeeping = {METADATA_FILENAME, README_FILENAME, PUBLISHED_FILENAME}
-    try:
-        return max(
-            (
-                p.stat().st_mtime
-                for p in folder.rglob("*")
-                if p.is_file()
-                and not p.is_symlink()
-                and str(p.relative_to(folder)) not in housekeeping
-            ),
-            default=0.0,
-        )
-    except OSError:
-        return 0.0
+    return max((st.st_mtime for _, st in iter_content_files(folder)), default=0.0)
 
 
 def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
@@ -248,6 +227,8 @@ def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
     edited (mtime moved since `before`), so findings reach the agent as
     tool-result text right away, not only via a later open()/list().
     """
+    from anton.core.artifacts.store import iter_content_files
+
     linters = _artifact_linters()
     if not linters:
         return []
@@ -258,14 +239,10 @@ def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
         if current is None or current <= prev_mtime:
             continue
 
-        for path in (store.root / slug).rglob("*"):
+        artifact_dir = store.root / slug
+        for path, st in iter_content_files(artifact_dir):
             linter = linters.get(path.suffix.lower())
-            if linter is None or not path.is_file():
-                continue
-            try:
-                if path.stat().st_size > _ARTIFACT_LINT_SIZE_CEILING:
-                    continue
-            except OSError:
+            if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
                 continue
             file_messages = linter(path)
             if not file_messages:
@@ -919,7 +896,31 @@ async def handle_open_artifact(
         "description": artifact.description,
         "path": str(folder),
         "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
+        **_primary_content(folder, artifact.primary),
     }, indent=2), ok=True)
+
+
+# Opening an artifact is almost always followed by reading its entry file, so a
+# small text one comes back with the descriptor and saves a model round trip.
+OPEN_ARTIFACT_CONTENT_MAX_BYTES = 20_000
+
+
+def _primary_content(folder: Path, primary: str | None) -> dict:
+    """The primary file's text, or why it was left out; {} when there is none."""
+    if not primary:
+        return {}
+    root = Path(folder).resolve()
+    target = (root / primary).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return {}
+    size = target.stat().st_size
+    if size > OPEN_ARTIFACT_CONTENT_MAX_BYTES:
+        return {"primary_content_omitted": f"{primary} is {size} bytes; read it from the scratchpad"}
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return {"primary_content_omitted": f"{primary} is not a text file"}
+    return {"primary_content": text}
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:

@@ -58,3 +58,34 @@ def test_turn_request_rejects_a_version_that_is_not_the_integer_one(version):
         TurnRequestV1.from_json(
             f'{{"protocol_version":{version},"conversation_id":"c","input":"hi"}}'
         )
+
+
+def _interactive_request(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
+    if value is not ...:
+        body["interactive"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+def test_interactive_true_is_read():
+    assert _interactive_request(True).interactive is True
+
+
+@pytest.mark.parametrize("value", [..., False, None, 1, "true", {"on": True}])
+def test_interactive_is_false_unless_a_real_true(value):
+    assert _interactive_request(value).interactive is False
+def test_turn_request_parses_the_connectors_block():
+    connectors = {"google_drive": {"usage_notes": "Pass supportsAllDrives=true."}}
+    request = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "c", "input": "q",
+        "connectors": connectors,
+    }))
+    assert request.connectors == connectors
+
+
+@pytest.mark.parametrize("value", [None, "x", ["google_drive"], 3])
+def test_a_missing_or_non_object_connectors_block_parses_to_none(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "q"}
+    if value is not None:
+        body["connectors"] = value
+    assert TurnRequestV1.from_json(json.dumps(body)).connectors is None

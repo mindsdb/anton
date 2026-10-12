@@ -862,3 +862,119 @@ def test_the_handback_marker_outlives_a_progress_flood_too():
     assert phases.count("handback") == 1, (
         f"the hand-back marker was dropped by the rate limiter; phases: {phases}"
     )
+
+
+# ── interactive turns: ask_user over stdin ───────────────────────────────────
+
+import io
+import os
+
+from anton.core.interaction.elicit import AskOption, AskRequest
+from anton.core.llm.provider import StreamAskUser, StreamAskUserAnswered
+
+_QUESTION = AskRequest(
+    prompt="Which database?",
+    options=(AskOption(value="pg", label="postgres"), AskOption(value="my", label="mysql")),
+    timeout_s=300,
+)
+
+
+class _AskingSession(_FakeSession):
+    """Asks one question through the real elicitor it was built with, the way
+    `elicit()` would, and answers it from the stdin the test provides."""
+
+    def __init__(self):
+        super().__init__()
+        self.elicitor = None
+
+    async def turn_stream(self, user_input, **kwargs):
+        await self.elicitor.begin("ask:1", _QUESTION)
+        yield StreamAskUser(id="ask:1", request=_QUESTION)
+        answer = await self.elicitor.ask("ask:1", _QUESTION)
+        await self.elicitor.end("ask:1")
+        yield StreamAskUserAnswered(id="ask:1", answer=answer)
+
+
+def _interactive_req(interactive=True):
+    return json.dumps({"protocol_version": 1, "conversation_id": "c",
+                       "input": "hi", "interactive": interactive})
+
+
+def test_interactive_turn_asks_and_takes_the_stdin_answer(monkeypatch):
+    import anton.cloud_turn.__main__ as entry_mod
+
+    session = _AskingSession()
+    built = {}
+    # Record the reader thread so the test can join it instead of leaking it.
+    threads = []
+    real_start = entry_mod.start_answer_reader
+
+    def recording_start(*args):
+        thread = real_start(*args)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(entry_mod, "start_answer_reader", recording_start)
+
+    def builder(req, elicitor=None):
+        built["elicitor"] = elicitor
+        session.elicitor = elicitor
+        return session
+
+    answer = {"kind": "answer", "question_id": "ask:1", "answer_id": "a1",
+              "values": ["pg"], "text": "", "skipped": False}
+    # A pipe, not BytesIO: the answer must arrive only after the question is
+    # out, as it does in production — earlier, it would be `not_found`.
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "rb")
+    events = []
+
+    def emit(event):
+        events.append(event)
+        if event["kind"] == "ask_user":
+            os.write(write_fd, (json.dumps(answer) + "\n").encode())
+
+    try:
+        asyncio.run(stream_turn(_interactive_req(), emit,
+                                session_builder=builder, stdin=stdin))
+    finally:
+        os.close(write_fd)  # EOF ends the reader thread
+        for thread in threads:
+            thread.join(timeout=5)
+        stdin.close()
+
+    assert built["elicitor"] is not None
+    assert events[0] == {
+        "kind": "ask_user", "id": "ask:1", "prompt": "Which database?",
+        "options": [{"value": "pg", "label": "postgres", "detail": ""},
+                    {"value": "my", "label": "mysql", "detail": ""}],
+        "select": "one", "allow_custom": True, "timeout_s": 300,
+    }
+    assert events[1] == {"kind": "ask_user_answered", "id": "ask:1", "status": "answered",
+                         "values": ["pg"], "text": "", "answer_id": "a1"}
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_non_interactive_turn_builds_without_an_elicitor():
+    calls = []
+
+    def builder(req, **kwargs):
+        calls.append(kwargs)
+        return _FakeSession(deltas=["ok"])
+
+    events = []
+    asyncio.run(stream_turn(_interactive_req(False), events.append,
+                            session_builder=builder, stdin=io.BytesIO(b"")))
+    assert calls == [{}]
+    assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_interactive_request_without_stdin_builds_without_an_elicitor():
+    calls = []
+
+    def builder(req, **kwargs):
+        calls.append(kwargs)
+        return _FakeSession()
+
+    asyncio.run(stream_turn(_interactive_req(), lambda e: None, session_builder=builder))
+    assert calls == [{}]
