@@ -100,12 +100,29 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         # partly read ("assess... and guide"); fail closed to write.
         "manage_onboarding": "write",
     },
+    # Notion lists only its read tools here; everything else (page/database
+    # writes, agent sessions, skills) is write-tier by the fail-closed default.
+    # Every registered tool's schema is resent on every LLM call, and all 49
+    # Notion tools came to ~57k tokens, enough to stall smaller models when
+    # another connector was connected too; these come to ~5k.
+    # `notion-query-data-sources` is a read but is left out on size alone (an
+    # 83k-character schema); `notion-query-multiple-data-sources` covers it.
+    "notion": {
+        "notion-search": "read",
+        "notion-fetch": "read",
+        "notion-get-comments": "read",
+        "notion-get-users": "read",
+        "notion-get-teams": "read",
+        "notion-get-self": "read",
+        "notion-list-private-pages": "read",
+        "notion-list-shared-pages": "read",
+        "notion-list-favorite-pages": "read",
+        "notion-list-recent-pages": "read",
+        "notion-query-multiple-data-sources": "read",
+        "notion-memory-search": "read",
+        "notion-get-file-download-urls": "read",
+    },
 }
-
-#: Engines whose grant already bounds every tool to what the signed-in user
-#: can access, so they need no read/write table. Opt-in, so an engine with no
-#: table still fails closed.
-UNRESTRICTED_ENGINES: frozenset[str] = frozenset({"notion"})
 
 
 def allowed_for_mode(engine: str, tool_name: str, access_mode: AccessMode) -> bool:
@@ -115,12 +132,9 @@ def allowed_for_mode(engine: str, tool_name: str, access_mode: AccessMode) -> bo
     all for it — see `registry.discover_tool_defs`). `read` allows only
     tools this engine's table classifies "read"; an unrecognized name is
     never treated as read. `write` allows everything this engine advertises.
-    An engine in `UNRESTRICTED_ENGINES` allows everything in any mode but `none`.
     """
     if access_mode == "none":
         return False
-    if engine in UNRESTRICTED_ENGINES:
-        return True
     if access_mode == "write":
         return True
     return TOOL_ACCESS.get(engine, {}).get(tool_name) == "read"
