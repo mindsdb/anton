@@ -467,6 +467,12 @@ class TestRuleRetrievalObservability:
         assert out == [rules[1], rules[4]]
         assert _one_event(captured_events)["kept_rules"] == 2
 
+    async def test_a_fenced_selection_still_filters(self, cortex, captured_events):
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _FakeLLM(content='```json\n{"keep": [2]}\n```'), rules)
+        assert out == [rules[1]]
+        assert _one_event(captured_events)["outcome"] == "filtered"
+
     async def test_one_invalid_index_keeps_every_rule(self, cortex, captured_events):
         rules = _when_engrams(12)
         out = await self._run(cortex, _FakeLLM(content='{"keep": [1, 13]}'), rules)
@@ -887,6 +893,9 @@ class TestParseRuleSelection:
             ('{"keep": []}', []),
             ('{"keep": [3, 1, 3]}', [0, 2]),
             ('  {"keep": [2]}  ', [1]),
+            ('```json\n{"keep": [1, 3]}\n```', [0, 2]),
+            ('```\n{"keep": []}\n```', []),
+            ('  ```JSON\n{"keep": [2]}\n```  ', [1]),
         ],
     )
     def test_accepts_exact_index_selections(self, text, expected):
@@ -910,6 +919,11 @@ class TestParseRuleSelection:
             '{"keep": [1.0]}',
             '{"keep": ["1"]}',
             '{"keep": [null]}',
+            '```json\n{"keep": [4]}\n```',
+            '```json\n```json\n{"keep": [1]}\n```\n```',
+            '```json\n{"keep": [1]}',
+            'Here you go: ```json\n{"keep": [1]}\n```',
+            '```python\n{"keep": [1]}\n```',
         ],
     )
     def test_rejects_anything_else(self, text):

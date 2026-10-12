@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -99,13 +100,22 @@ def _emit_rule_retrieval(**shape) -> None:
         logger.debug("rule_retrieval analytics event failed", exc_info=True)
 
 
+# Models often fence JSON even when told not to; one surrounding fence is unwrapped.
+_JSON_FENCE_RE = re.compile(r"\A```(?:json)?[ \t]*\n(.*)\n[ \t]*```\Z", re.DOTALL | re.IGNORECASE)
+
+
 def _parse_rule_selection(text: str, count: int) -> list[int] | None:
     """Parse the rule filter's `{"keep": [1, 3]}` answer into 0-based indices.
 
-    `count` is how many rules were numbered (from 1). Returns the sorted,
-    de-duplicated indices, an empty list when the model chose none, or None when
-    the answer is not exactly that shape or names a rule that was not shown.
+    `count` is how many rules were numbered (from 1). One surrounding code fence
+    is removed first. Returns the sorted, de-duplicated indices, an empty list
+    when the model chose none, or None when the answer is not exactly that shape
+    or names a rule that was not shown.
     """
+    text = text.strip()
+    fenced = _JSON_FENCE_RE.match(text)
+    if fenced:
+        text = fenced.group(1)
     try:
         data = json.loads(text)
     except ValueError:
