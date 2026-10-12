@@ -422,10 +422,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 if venv_path.is_dir() and self._try_recycle_venv(venv_path):
                     return
 
-                if venv_path.is_dir():
+                # A thread that held this lock may have recorded a block meanwhile.
+                attempts = 0 if self._base_policy_block() is not None else self._MAX_VENV_RETRIES
+                if attempts and venv_path.is_dir():
                     self._nuke_venv()
 
-                for attempt in range(1, self._MAX_VENV_RETRIES + 1):
+                for attempt in range(1, attempts + 1):
                     try:
                         self._create_venv()
                         if self._verify_venv_python():

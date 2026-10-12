@@ -325,6 +325,29 @@ def test_a_renamed_pad_under_a_blocked_base_skips_the_build(tmp_path, monkeypatc
     assert renamed._in_fallback
 
 
+def test_a_block_recorded_while_waiting_for_the_lock_skips_the_build(tmp_path, monkeypatch):
+    # Another thread holding the lock builds, is refused, and records the
+    # block; the thread that waited must not delete and build once more.
+    pad = make_pad(tmp_path / "venvs")
+    builds = _count_builds(pad, monkeypatch, verify=pad._verify_venv_python)
+    (tmp_path / "venvs" / "probe").mkdir(parents=True)
+    real_lock = local._venv_lock
+
+    def lock_taken_by_a_refused_build(*, venv_path):
+        make_pad(tmp_path / "venvs", name="other")._record_policy_block(
+            _policy_error(4551), program=None
+        )
+        return real_lock(venv_path=venv_path)
+
+    monkeypatch.setattr(local, "_venv_lock", lock_taken_by_a_refused_build)
+
+    pad._ensure_venv()
+
+    assert builds == []
+    assert (tmp_path / "venvs" / "probe").is_dir()
+    assert pad._in_fallback
+
+
 def test_a_policy_block_leaves_other_venvs_bases_building(tmp_path, monkeypatch):
     blocked_pad = make_pad(tmp_path / "blocked")
     _count_builds(blocked_pad, monkeypatch, verify=_blocked_verify(blocked_pad))
