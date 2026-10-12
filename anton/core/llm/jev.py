@@ -125,3 +125,88 @@ async def classify(
         status=status, p_status=p_status, p_complete=p_complete, ms=ms, model=str(body.get("model") or ""),
         **usage,
     )
+
+
+@dataclass(frozen=True)
+class JevDecision:
+    """Raw answers for any set of questions, keyed by question name.
+
+    Each answer is Jev's own shape: ``{"choice": ..., "probabilities": {...}}``
+    for a choice, ``{"noul": p}`` for a yes/no. Empty with ``error`` set on
+    any failure, so the caller falls back the same way ``classify``'s do.
+    """
+
+    answers: dict
+    ms: int = 0
+    model: str = ""
+    error: str = ""
+
+    def choice(self, name: str) -> tuple[str, float]:
+        """(choice, its probability), or ("", 0.0) when absent or malformed."""
+        answer = self.answers.get(name)
+        if not isinstance(answer, dict):
+            return "", 0.0
+        picked = answer.get("choice")
+        try:
+            p = _probability((answer.get("probabilities") or {})[picked])
+        except Exception:
+            return "", 0.0
+        return (picked if isinstance(picked, str) else ""), p
+
+    def yes(self, name: str) -> float:
+        """Probability that a yes/no question is true; 0.0 when absent or malformed."""
+        answer = self.answers.get(name)
+        try:
+            return _probability(answer["noul"])
+        except Exception:
+            return 0.0
+
+
+async def decide(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    state: dict,
+    questions: dict,
+    timeout_s: float,
+    client=None,
+) -> JevDecision:
+    """POST one decision request with any questions. Never raises."""
+    import httpx2 as httpx
+
+    started = time.monotonic()
+
+    def elapsed() -> int:
+        return round((time.monotonic() - started) * 1000)
+
+    owned = client is None
+    client = client or httpx.AsyncClient(timeout=timeout_s)
+    try:
+        async with asyncio.timeout(timeout_s):
+            response = await client.post(
+                f"{base_url.rstrip('/')}/decisions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "state": state, "questions": questions},
+            )
+    except TimeoutError:
+        return JevDecision(answers={}, ms=elapsed(), error="timeout")
+    except httpx.HTTPError:
+        return JevDecision(answers={}, ms=elapsed(), error="transport")
+    except Exception as exc:  # a decision must never raise into the turn
+        return JevDecision(answers={}, ms=elapsed(), error=type(exc).__name__)
+    finally:
+        if owned:
+            await client.aclose()
+
+    ms = elapsed()
+    if response.status_code != 200:
+        return JevDecision(answers={}, ms=ms, error=f"http_{response.status_code}")
+    try:
+        body = response.json()
+        answers = body["answers"]
+        if not isinstance(answers, dict):
+            raise ValueError("answers is not an object")
+    except Exception:
+        return JevDecision(answers={}, ms=ms, error="malformed")
+    return JevDecision(answers=answers, ms=ms, model=str(body.get("model") or ""))

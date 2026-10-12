@@ -216,6 +216,12 @@ class TurnRequestV1:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: The user's MindsHub browser instance, when cowork-server resolved one and
+    #: the user enabled it: {"base_url": "https://br-<hash>...", "profile": "main"}.
+    #: No credential: the pod reaches it with this turn's `llm` key, which the
+    #: Cloudflare worker accepts for the instance's owner (ENG-3296). Absent or
+    #: malformed means no browser tool this turn.
+    browser: dict | None = None
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -250,4 +256,5 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            browser=d.get("browser") if isinstance(d.get("browser"), dict) else None,
         )
