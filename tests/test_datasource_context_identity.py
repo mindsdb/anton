@@ -107,11 +107,14 @@ class TestUserLabelInPrompt:
         ctx = build_datasource_context(v)
         assert "Label: Support" in ctx
 
-    def test_no_label_shows_none(self, tmp_path):
+    def test_no_label_falls_back_to_the_engine(self, tmp_path):
+        # A connection nobody named reads as its engine, the same text the
+        # model saw when the host used to store the engine id as the label.
         v = LocalDataVault(tmp_path)
         v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo"})
         ctx = build_datasource_context(v)
-        assert "Label: (none)" in ctx
+        assert "Label: postgres" in ctx
+        assert "(none)" not in ctx
 
     def test_slug_leads_the_block_in_backticks(self, tmp_path):
         v = LocalDataVault(tmp_path)
