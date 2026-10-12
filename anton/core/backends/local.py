@@ -1595,6 +1595,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # --target keeps every install in the packages folder; without it
             # this would install into the app's own environment.
             target = ["--target", self._venv_dir]
+            blocked = self._base_policy_block()
+            if uv is not None and blocked is not None and blocked.filename == uv:
+                uv = None  # Windows refused this uv; pip on the allowed Python may still work.
             if uv:
                 cmd = [uv, "pip", "install", "--python", self._venv_python, *target, *needed]
             elif importlib.util.find_spec("pip") is None:

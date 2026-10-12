@@ -518,6 +518,27 @@ def test_a_blocked_uv_is_named_in_the_recovery_path(tmp_path, monkeypatch):
     assert f"allow {uv} and programs in {tmp_path / 'venvs'}" in message
 
 
+async def test_fallback_installs_skip_a_uv_that_windows_refused(tmp_path, monkeypatch):
+    uv = str(tmp_path / "bin" / "uv.exe")
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: uv))
+    monkeypatch.setattr(subprocess, "run", _refuse_uv_only(uv))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: object() if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = make_pad(tmp_path / "venvs")
+    pad._ensure_venv()
+    commands = _record_install_commands(monkeypatch)
+
+    await pad.install_packages(["requests"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    assert commands == [
+        (sys.executable, "-m", "pip", "install", "--no-input", "--target", packages, "requests")
+    ]
+
+
 async def test_an_install_refused_by_policy_names_the_installer(tmp_path, monkeypatch):
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
     pad = _fallback_pad(tmp_path)
