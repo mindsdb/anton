@@ -442,7 +442,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         if blocked is not None:
             self._venv_dir = None
             self._venv_python = None
-            last_error = last_error or blocked
+            raise RuntimeError(self._policy_blocked_message(blocked)) from blocked
 
         # The model reads this message and relays it to the user, so it states
         # facts only: a generic fix hint here gets repeated as a diagnosis.
@@ -467,6 +467,24 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if self._policy_block is not None:
                 _POLICY_BLOCKED_BASES.setdefault(key, self._policy_block)
             return _POLICY_BLOCKED_BASES.get(key)
+
+    def _policy_blocked_message(self, blocked: OSError) -> str:
+        """The start failure the model relays when Windows policy refused a launch.
+
+        Unlike the facts-only venv failure, this one carries a recovery path:
+        the cause is identified by its error code, so the advice cannot be a
+        misdiagnosis. Re-uploading is named as useless because it was offered.
+        """
+        program = blocked.filename or "a program the scratchpad needs"
+        return (
+            f"Scratchpad failed to start: Windows blocked {program} "
+            f"(WinError {_policy_block_code(blocked)}: {blocked.strerror}). "
+            "A Windows Application Control policy on this computer blocks it. "
+            "Renaming the scratchpad, retrying, or re-uploading files will not help. "
+            f"To recover, an IT administrator can allow programs in {self._venvs_base}, "
+            "and then the app must be restarted. Otherwise, use a computer "
+            "without this restriction."
+        )
 
     @staticmethod
     def _find_uv() -> str | None:
@@ -580,6 +598,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         except Exception as exc:
             self._last_verify_error = str(exc)
             if _policy_block_code(exc) is not None:
+                if exc.filename is None:
+                    exc.filename = self._venv_python
                 self._policy_block = exc
             return False
 
@@ -912,6 +932,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 await self._run_venv_work(self._ensure_venv)
                 self._proc = await spawn()
         except (FileNotFoundError, PermissionError, OSError) as exc:
+            if _policy_block_code(exc) is not None:
+                # Rebuilding cannot help, so keep the venv and stop other pads trying.
+                if exc.filename is None:
+                    exc.filename = self._venv_python
+                self._policy_block = exc
+                self._base_policy_block()
+                raise RuntimeError(self._policy_blocked_message(exc)) from exc
             await self._run_venv_work(self._nuke_venv)
             raise RuntimeError(
                 f"Failed to start scratchpad: {exc}. "

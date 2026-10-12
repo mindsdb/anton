@@ -340,6 +340,59 @@ def test_a_failure_that_is_not_a_policy_block_still_retries(tmp_path, monkeypatc
     assert len(builds) == LocalScratchpadRuntime._MAX_VENV_RETRIES
 
 
+def test_a_policy_block_names_the_blocker_and_a_recovery_path(tmp_path, monkeypatch):
+    # The model relays this message; the ticket's failure ended with the user
+    # told to re-upload files, which cannot start a blocked interpreter.
+    pad = make_pad(tmp_path)
+    blocked_python = str(tmp_path / "probe" / "Scripts" / "python.exe")
+
+    def build():
+        pad._venv_dir = str(tmp_path / "probe")
+        pad._venv_python = blocked_python
+
+    monkeypatch.setattr(pad, "_create_venv", build)
+    monkeypatch.setattr(local.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(_policy_error(4551)))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pad._ensure_venv()
+
+    message = str(exc_info.value)
+    assert f"Windows blocked {blocked_python}" in message
+    assert "WinError 4551" in message
+    assert "Application Control policy" in message
+    assert "re-uploading files will not help" in message
+    assert f"allow programs in {tmp_path}" in message
+    assert "restarted" in message
+    assert "after 3 attempts" not in message
+
+
+async def test_a_spawn_refused_by_policy_reports_it_and_keeps_the_venv(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    pad = make_pad(tmp_path)
+
+    async def refuse_spawn(*_args, **_kwargs):
+        raise _policy_error(4551)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_spawn)
+
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            await pad.start()
+    finally:
+        await pad.close()
+
+    message = str(exc_info.value)
+    assert "WinError 4551" in message
+    assert "will be recreated" not in message
+    assert (tmp_path / "probe").is_dir(), "a rebuild cannot help, so the venv stays"
+    renamed = make_pad(tmp_path, name="probe_retry")
+    builds = _count_builds(renamed, monkeypatch, verify=lambda: True)
+    with pytest.raises(RuntimeError, match="WinError 4551"):
+        renamed._ensure_venv()
+    assert builds == []
+
+
 def _in_daemon_thread(*, fn, timeout: float = 30.0):
     """Run ``fn`` on a daemon thread, then return its result or raise its error.
 
