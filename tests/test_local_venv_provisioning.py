@@ -598,6 +598,41 @@ async def test_a_uv_refused_at_install_time_falls_back_to_pip_and_is_remembered(
     ]
 
 
+async def test_a_packages_folder_for_another_python_is_rebuilt(tmp_path, monkeypatch):
+    # After an app update to a new Python minor, compiled installs in the old
+    # folder would not import, so the remembered requirements must not count.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    packages = tmp_path / "scratchpad-packages" / "probe"
+    packages.mkdir(parents=True)
+    (packages / ".python_version").write_text("2.7\n")
+    (packages / "requirements.txt").write_text("requests\n")
+    (packages / "stale_cp27_module.py").write_text("")
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    result = await pad.install_packages(["requests"])
+
+    expected = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert (packages / ".python_version").read_text().strip() == expected
+    assert not (packages / "stale_cp27_module.py").exists()
+    assert result == "installed"
+    assert len(commands) == 1
+
+
+def test_a_packages_folder_for_this_python_is_kept(tmp_path):
+    packages = tmp_path / "scratchpad-packages" / "probe"
+    packages.mkdir(parents=True)
+    (packages / ".python_version").write_text(
+        f"{sys.version_info.major}.{sys.version_info.minor}\n"
+    )
+    (packages / "requirements.txt").write_text("requests\n")
+
+    pad = _fallback_pad(tmp_path)
+
+    assert "requests" in pad._installed_packages
+    assert (packages / "requirements.txt").exists()
+
+
 async def test_an_install_refused_by_policy_names_the_installer(tmp_path, monkeypatch):
     # No pip to retry with, so the uv refusal is what the model sees.
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))

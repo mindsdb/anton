@@ -519,8 +519,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 self._policy_blocked_message(blocked, fallback_error=fallback_error)
             ) from blocked
 
-        packages.mkdir(parents=True, exist_ok=True)
         self._venv_dir = str(packages)
+        if packages.is_dir() and not self._check_python_version():
+            # Built for another Python: its compiled installs would not import, and
+            # requirements.txt would make install_packages skip reinstalling them.
+            with _venv_lock(venv_path=self._venvs_base / self.name):
+                shutil.rmtree(packages)
+        packages.mkdir(parents=True, exist_ok=True)
+        self._save_python_version()
         self._load_requirements()
         if not self._in_fallback:
             self._pending_recovery_note = (
