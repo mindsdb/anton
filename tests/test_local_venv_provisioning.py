@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import os
 import asyncio
+import re
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -251,7 +253,7 @@ def test_verify_clears_a_recorded_policy_block_on_success(tmp_path):
 def test_a_venv_build_refused_by_policy_is_recorded(tmp_path, monkeypatch):
     # uv.exe can sit in a folder the same policy covers, so the build itself
     # may be the launch Windows refuses.
-    pad = make_pad(tmp_path)
+    pad = make_pad(tmp_path / "venvs")
     blocked = _policy_error(4551)
 
     def blocked_build():
@@ -259,9 +261,8 @@ def test_a_venv_build_refused_by_policy_is_recorded(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pad, "_create_venv", blocked_build)
 
-    with pytest.raises(RuntimeError):
-        pad._ensure_venv()
-    assert pad._policy_block is blocked
+    pad._ensure_venv()
+    assert pad._base_policy_block() is blocked
 
 
 def test_recycling_an_existing_venv_records_a_policy_block(tmp_path, monkeypatch):
@@ -303,17 +304,17 @@ def test_a_policy_block_stops_the_build_after_one_attempt(tmp_path, monkeypatch)
 
 
 def test_a_renamed_pad_under_a_blocked_base_skips_the_build(tmp_path, monkeypatch):
-    first = make_pad(tmp_path, name="probe")
+    first = make_pad(tmp_path / "venvs", name="probe")
     _count_builds(first, monkeypatch, verify=_blocked_verify(first))
     with pytest.raises(RuntimeError):
         first._ensure_venv()
 
-    renamed = make_pad(tmp_path, name="probe_retry")
+    renamed = make_pad(tmp_path / "venvs", name="probe_retry")
     builds = _count_builds(renamed, monkeypatch, verify=lambda: True)
 
-    with pytest.raises(RuntimeError, match="Application Control policy"):
-        renamed._ensure_venv()
+    renamed._ensure_venv()
     assert builds == []
+    assert renamed._in_fallback
 
 
 def test_a_policy_block_leaves_other_venvs_bases_building(tmp_path, monkeypatch):
@@ -369,7 +370,7 @@ def test_a_policy_block_names_the_blocker_and_a_recovery_path(tmp_path, monkeypa
 
 async def test_a_spawn_refused_by_policy_reports_it_and_keeps_the_venv(tmp_path, monkeypatch):
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
-    pad = make_pad(tmp_path)
+    pad = make_pad(tmp_path / "venvs")
 
     async def refuse_spawn(*_args, **_kwargs):
         raise _policy_error(4551)
@@ -385,12 +386,106 @@ async def test_a_spawn_refused_by_policy_reports_it_and_keeps_the_venv(tmp_path,
     message = str(exc_info.value)
     assert "WinError 4551" in message
     assert "will be recreated" not in message
-    assert (tmp_path / "probe").is_dir(), "a rebuild cannot help, so the venv stays"
-    renamed = make_pad(tmp_path, name="probe_retry")
+    assert (tmp_path / "venvs" / "probe").is_dir(), "a rebuild cannot help, so the venv stays"
+    renamed = make_pad(tmp_path / "venvs", name="probe_retry")
     builds = _count_builds(renamed, monkeypatch, verify=lambda: True)
-    with pytest.raises(RuntimeError, match="WinError 4551"):
-        renamed._ensure_venv()
+    renamed._ensure_venv()
     assert builds == []
+    assert renamed._in_fallback
+
+
+def _fallback_pad(tmp_path):
+    """A pad whose venvs base Windows has refused, so it runs on sys.executable."""
+    pad = make_pad(tmp_path / "venvs")
+    pad._policy_block = _policy_error(4551)
+    pad._base_policy_block()
+    pad._ensure_venv()
+    return pad
+
+
+def _record_rmtree_paths(monkeypatch) -> list[Path]:
+    """Record the resolved target of every rmtree call the runtime makes."""
+    paths: list[Path] = []
+    real_rmtree = local.shutil.rmtree
+
+    def recording(path, *args, **kwargs):
+        paths.append(Path(path).resolve())
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(local.shutil, "rmtree", recording)
+    return paths
+
+
+def _under_app_environment(paths: list[Path]) -> list[Path]:
+    prefix = Path(sys.prefix).resolve()
+    return [p for p in paths if p.is_relative_to(prefix)]
+
+
+def test_fallback_runs_on_the_app_interpreter_with_a_packages_folder(tmp_path):
+    pad = _fallback_pad(tmp_path)
+
+    assert pad._venv_python == sys.executable
+    assert pad._venv_dir == str(tmp_path / "scratchpad-packages" / "probe")
+    assert (tmp_path / "scratchpad-packages" / "probe").is_dir()
+    assert pad.venv_python() is None
+
+
+def test_fallback_is_refused_when_the_app_interpreter_is_blocked_too(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path / "venvs")
+    pad._policy_block = _policy_error(4551)
+    pad._base_policy_block()
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(_policy_error(4551)))
+
+    with pytest.raises(RuntimeError, match=f"Windows blocked {re.escape(sys.executable)}"):
+        pad._ensure_venv()
+    assert not pad._in_fallback
+    assert not (tmp_path / "scratchpad-packages").exists()
+
+
+async def test_fallback_cleanup_deletes_only_the_packages_folder(tmp_path, monkeypatch):
+    pad = _fallback_pad(tmp_path)
+    await pad.start()
+    deleted = _record_rmtree_paths(monkeypatch)
+
+    await pad.cleanup()
+
+    assert deleted == [(tmp_path / "scratchpad-packages" / "probe").resolve()]
+    assert not (tmp_path / "scratchpad-packages" / "probe").exists()
+
+
+async def test_fallback_reset_restarts_on_the_app_interpreter(tmp_path, monkeypatch):
+    pad = _fallback_pad(tmp_path)
+    await pad.start()
+    deleted = _record_rmtree_paths(monkeypatch)
+    try:
+        await pad.reset()
+        cell = await pad.execute("import sys; print(sys.executable)")
+    finally:
+        await pad.close()
+
+    assert cell.stdout.strip() == sys.executable
+    assert _under_app_environment(deleted) == []
+
+
+async def test_a_failed_fallback_spawn_never_deletes_the_app_environment(
+    tmp_path, monkeypatch
+):
+    pad = _fallback_pad(tmp_path)
+    deleted = _record_rmtree_paths(monkeypatch)
+
+    async def refuse_spawn(*_args, **_kwargs):
+        raise OSError("spawn refused")
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_spawn)
+    try:
+        with pytest.raises(RuntimeError, match="spawn refused"):
+            await pad.start()
+    finally:
+        await pad.close()
+
+    assert deleted
+    assert _under_app_environment(deleted) == []
+    assert Path(sys.executable).exists()
 
 
 def _in_daemon_thread(*, fn, timeout: float = 30.0):

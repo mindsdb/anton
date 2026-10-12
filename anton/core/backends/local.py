@@ -328,6 +328,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # The launch Windows refused by policy, kept with its code so the
         # venv build can stop retrying.
         self._policy_block: OSError | None = None
+        # Set once the pad runs on the app's own interpreter; the venvs base
+        # stays blocked for the process, so the pad never leaves this mode.
+        self._in_fallback = False
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -440,9 +443,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             blocked = self._base_policy_block()
 
         if blocked is not None:
-            self._venv_dir = None
-            self._venv_python = None
-            raise RuntimeError(self._policy_blocked_message(blocked)) from blocked
+            self._enter_fallback(blocked)
+            return
 
         # The model reads this message and relays it to the user, so it states
         # facts only: a generic fix hint here gets repeated as a diagnosis.
@@ -467,6 +469,35 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if self._policy_block is not None:
                 _POLICY_BLOCKED_BASES.setdefault(key, self._policy_block)
             return _POLICY_BLOCKED_BASES.get(key)
+
+    def _enter_fallback(self, blocked: OSError) -> None:
+        """Run this pad on the app's own interpreter, which the policy already allows.
+
+        A per-pad packages folder takes the venv's place, so installs land there
+        and every delete path removes only it, never the app's environment.
+        Raises the policy message when the app's interpreter is refused too.
+        """
+        packages = (
+            self._venvs_base.parent
+            / "scratchpad-packages"
+            / _safe_segment(self.name, "scratchpad")
+        )
+        if packages.resolve().is_relative_to(Path(sys.prefix).resolve()):
+            raise RuntimeError(
+                f"Scratchpad failed to start: refusing a packages folder inside the "
+                f"app's own Python environment ({packages})."
+            ) from blocked
+
+        self._venv_python = sys.executable
+        if not self._verify_venv_python():
+            refused = self._policy_block or blocked
+            self._venv_dir = None
+            self._venv_python = None
+            raise RuntimeError(self._policy_blocked_message(refused)) from refused
+
+        packages.mkdir(parents=True, exist_ok=True)
+        self._venv_dir = str(packages)
+        self._in_fallback = True
 
     def _policy_blocked_message(self, blocked: OSError) -> str:
         """The start failure the model relays when Windows policy refused a launch.
@@ -570,7 +601,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         Returns None when the venv has not been provisioned yet (i.e.
         no exec has run). Auxiliary tools that want to share installed
         packages call this to discover the interpreter.
+
+        Also None in fallback mode: those tools launch the interpreter without
+        the pad's packages folder, so its installs would not import there.
         """
+        if self._in_fallback:
+            return None
         if self._venv_python and os.path.isfile(self._venv_python):
             return self._venv_python
         return None
