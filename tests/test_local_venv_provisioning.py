@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import asyncio
-import re
 import subprocess
 import sys
 import threading
@@ -393,7 +392,9 @@ async def test_a_spawn_refused_by_policy_reports_it_and_keeps_the_venv(tmp_path,
         await pad.close()
 
     message = str(exc_info.value)
-    assert "WinError 4551" in message
+    venv_python = tmp_path / "venvs" / "probe" / "bin" / "python"
+    assert f"Windows blocked {venv_python}" in message
+    assert f"Running on the app's own Python ({sys.executable}) failed as well" in message
     assert "will be recreated" not in message
     assert (tmp_path / "venvs" / "probe").is_dir(), "a rebuild cannot help, so the venv stays"
     renamed = make_pad(tmp_path / "venvs", name="probe_retry")

@@ -1030,7 +1030,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # Rebuilding cannot help, so keep the venv and stop other pads trying.
                 self._record_policy_block(exc, program=self._venv_python)
                 if self._in_fallback:
-                    raise RuntimeError(self._policy_blocked_message(exc)) from exc
+                    first = self._base_policy_block() or exc
+                    fallback_error = str(exc) if first is not exc else None
+                    raise RuntimeError(
+                        self._policy_blocked_message(first, fallback_error=fallback_error)
+                    ) from exc
                 # Start on the app's own Python now, rather than report a block
                 # that the next start would get past.
                 await self._run_venv_work(lambda: self._enter_fallback(exc))
