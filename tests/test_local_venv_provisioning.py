@@ -566,9 +566,19 @@ async def test_fallback_cleanup_deletes_only_the_packages_folder(tmp_path, monke
 
 
 async def test_fallback_reset_restarts_on_the_app_interpreter(tmp_path, monkeypatch):
+    # The check fails once, so reset() takes its delete path for a broken
+    # interpreter; in fallback mode that may only remove the packages folder.
     pad = _fallback_pad(tmp_path)
     await pad.start()
     deleted = _record_rmtree_paths(monkeypatch)
+    real_verify = pad._verify_venv_python
+    checks: list[bool] = []
+
+    def fails_once() -> bool:
+        checks.append(True)
+        return len(checks) > 1 and real_verify()
+
+    monkeypatch.setattr(pad, "_verify_venv_python", fails_once)
     try:
         await pad.reset()
         cell = await pad.execute("import sys; print(sys.executable)")
@@ -576,6 +586,7 @@ async def test_fallback_reset_restarts_on_the_app_interpreter(tmp_path, monkeypa
         await pad.close()
 
     assert cell.stdout.strip() == sys.executable
+    assert deleted == [(tmp_path / "scratchpad-packages" / "probe").resolve()]
     assert _under_app_environment(deleted) == []
 
 
@@ -653,6 +664,8 @@ async def test_the_fallback_note_reaches_the_model_once(tmp_path):
         after_resume = await pad.execute("print(2)")
         await pad.reset()
         after_reset = await pad.execute("print(3)")
+        await pad.cancel()
+        after_cancel = await pad.execute("print(4)")
     finally:
         await pad.close()
 
@@ -661,6 +674,8 @@ async def test_the_fallback_note_reaches_the_model_once(tmp_path):
     assert "keeps the app's version" in first.logs
     assert "runs on the app's own Python" not in after_resume.logs
     assert "runs on the app's own Python" not in after_reset.logs
+    assert after_cancel.stdout.strip() == "4"
+    assert "runs on the app's own Python" not in after_cancel.logs
 
 
 def _record_install_commands(monkeypatch) -> list[tuple[str, ...]]:
