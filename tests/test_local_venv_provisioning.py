@@ -659,7 +659,30 @@ async def test_a_fallback_pad_reads_a_zip_of_workbooks(tmp_path):
     assert cell.stdout.strip() == "March"
 
 
-async def test_fallback_child_env_keeps_the_anton_root_first(tmp_path, monkeypatch):
+async def test_fallback_installs_never_shadow_the_stdlib_or_app_packages(tmp_path):
+    # A --target install of a backport or of a package the app ships must not
+    # replace the stdlib or the app's copy: the boot script imports both.
+    pad = _fallback_pad(tmp_path)
+    packages = tmp_path / "scratchpad-packages" / "probe"
+    for name in ("json", "dill", "only_in_packages"):
+        (packages / name).mkdir()
+        (packages / name / "__init__.py").write_text("FROM_PACKAGES = True\n")
+
+    await pad.start()
+    try:
+        cell = await pad.execute(
+            "import json, dill, only_in_packages\n"
+            "print(hasattr(json, 'FROM_PACKAGES'), hasattr(dill, 'FROM_PACKAGES'),"
+            " only_in_packages.FROM_PACKAGES)\n"
+        )
+    finally:
+        await pad.close()
+
+    assert cell.error is None, cell.error
+    assert cell.stdout.strip() == "False False True"
+
+
+async def test_fallback_child_env_points_installs_at_the_packages_folder(tmp_path, monkeypatch):
     pad = _fallback_pad(tmp_path)
     envs: list[dict[str, str]] = []
     real_exec = local.asyncio.create_subprocess_exec
@@ -673,9 +696,8 @@ async def test_fallback_child_env_keeps_the_anton_root_first(tmp_path, monkeypat
     await pad.close()
 
     packages = str(tmp_path / "scratchpad-packages" / "probe")
-    parts = envs[0]["PYTHONPATH"].split(os.pathsep)
-    anton_root = str(Path(local.__file__).resolve().parents[3])
-    assert parts.index(anton_root) < parts.index(packages)
+    assert packages not in envs[0]["PYTHONPATH"].split(os.pathsep)
+    assert envs[0]["ANTON_SCRATCHPAD_PACKAGES_PATH"] == packages
     assert envs[0]["PIP_TARGET"] == packages
 
 

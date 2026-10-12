@@ -977,13 +977,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 os.pathsep + python_path if python_path else ""
             )
         if self._in_fallback and self._venv_dir is not None:
-            # After the anton root, so an install cannot shadow what the boot
-            # script imports; PIP_TARGET keeps a cell's pip off the app's own env.
-            parts = env["PYTHONPATH"].split(os.pathsep)
-            at = parts.index(_anton_root) + 1 if _anton_root in parts else len(parts)
-            parts.insert(at, self._venv_dir)
-            env["PYTHONPATH"] = os.pathsep.join(parts)
+            # Not on PYTHONPATH, which precedes the stdlib: the boot script appends
+            # it last. PIP_TARGET keeps a cell's pip off the app's own environment.
+            env["ANTON_SCRATCHPAD_PACKAGES_PATH"] = self._venv_dir
             env["PIP_TARGET"] = self._venv_dir
+        else:
+            env.pop("ANTON_SCRATCHPAD_PACKAGES_PATH", None)
 
         # Pin the subprocess cwd to the workspace root so bare-relative
         # paths in scratchpad code (`open("data.csv")`, `os.listdir(".")`,
