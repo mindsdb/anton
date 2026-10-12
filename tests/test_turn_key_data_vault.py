@@ -401,3 +401,25 @@ def test_prefetch_without_a_turn_key_makes_no_call(monkeypatch):
     vault.prefetch()
     assert auth.calls == []
     assert vault.load("google_drive", "c0") is None
+
+
+def test_a_prefetch_worker_that_raises_leaves_the_connection_to_a_later_read(monkeypatch):
+    """An unexpected error in one worker must not fail the others or cache a
+    miss; the first real read fetches that connection again."""
+    vault = _vault_with(3)
+    real = vault._fetch_uncached
+    failed = []
+
+    def flaky(engine, name):
+        if name == "c1" and not failed:
+            failed.append(name)
+            raise RuntimeError("unexpected")
+        return real(engine, name)
+
+    auth = _CountingAuth()
+    monkeypatch.setattr("anton.minds_client.minds_request", auth)
+    monkeypatch.setattr(vault, "_fetch_uncached", flaky)
+    vault.prefetch()
+    assert sorted(auth.calls) == ["c0", "c2"]
+    assert vault.load("google_drive", "c1")["access_token"] == "tok-c1"
+    assert sorted(auth.calls) == ["c0", "c1", "c2"]

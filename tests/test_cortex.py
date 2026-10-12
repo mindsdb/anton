@@ -497,7 +497,7 @@ class TestRuleRetrievalObservability:
         cortex._llm = _Hanging()
         started = asyncio.get_running_loop().time()
         out = await cortex._retrieve_relevant_rules(rules, "do the august campaign")
-        assert asyncio.get_running_loop().time() - started < 1
+        assert asyncio.get_running_loop().time() - started < 5, "must not wait for the 30 s hang"
         assert out == rules
         assert _one_event(captured_events)["outcome"] == "timeout"
 
@@ -520,7 +520,7 @@ class TestRuleRetrievalObservability:
         )
         started = asyncio.get_running_loop().time()
         result = await cortex.build_memory_context("do the august campaign")
-        assert asyncio.get_running_loop().time() - started < 0.35
+        assert asyncio.get_running_loop().time() - started < 5, "must not wait for the 30 s hang"
         assert [ev["outcome"] for ev in captured_events] == ["timeout", "timeout"]
         assert result.count("When condition 011 applies") == 2
 

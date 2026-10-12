@@ -1265,7 +1265,6 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
 def test_oauth_connections_are_fetched_together_once_and_registered_for_scrubbing(tmp_path, monkeypatch):
     """Each connection's fetch waits for the other three, so the build only
     gets tokens when the fetches overlap; every value must then be scrubbable."""
-    import json
     import threading
 
     from anton.utils.datasources import scrub_credentials

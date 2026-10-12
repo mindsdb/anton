@@ -442,11 +442,8 @@ answer {"keep": []}. Do not repeat the rule text.
                 when_rules=len(when_engrams),
                 kept_rules=kept,
                 rules_chars=len(when_text),
-                # `stop_reason`, not output_tokens == max_tokens: a truncated
-                # verbatim echo is silently accepted as "the relevant rules", so
-                # this is the difference between a real filter and one that just
-                # ran out of room. The provider reason is authoritative where the
-                # exact-cap heuristic gives false positives.
+                # Separates a selection rejected for hitting the output cap from
+                # one rejected as malformed; both report `kept_all_no_match`.
                 stop_reason=stop_reason,
                 input_tokens=getattr(usage, "input_tokens", 0) or 0,
                 output_tokens=getattr(usage, "output_tokens", 0) or 0,
