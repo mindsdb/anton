@@ -220,6 +220,15 @@ def _raise_on_run(exc: OSError):
     return run
 
 
+def _refuse_every_run(code: int):
+    """A subprocess.run that Windows refuses, with a new error per launch as CPython raises."""
+
+    def run(*args, **kwargs):
+        raise _policy_error(code)
+
+    return run
+
+
 @pytest.mark.parametrize("code", [4551, 1260])
 def test_verify_records_a_launch_refused_by_policy(tmp_path, monkeypatch, code):
     pad = make_pad(tmp_path)
@@ -353,7 +362,7 @@ def test_a_policy_block_names_the_blocker_and_a_recovery_path(tmp_path, monkeypa
 
     monkeypatch.setattr(pad, "_create_venv", build)
     monkeypatch.setattr(local.os.path, "exists", lambda p: True)
-    monkeypatch.setattr(subprocess, "run", _raise_on_run(_policy_error(4551)))
+    monkeypatch.setattr(subprocess, "run", _refuse_every_run(4551))
 
     with pytest.raises(RuntimeError) as exc_info:
         pad._ensure_venv()
@@ -431,11 +440,16 @@ def test_fallback_runs_on_the_app_interpreter_with_a_packages_folder(tmp_path):
 
 def test_fallback_is_refused_when_the_app_interpreter_is_blocked_too(tmp_path, monkeypatch):
     pad = make_pad(tmp_path / "venvs")
-    pad._record_policy_block(_policy_error(4551), program=None)
-    monkeypatch.setattr(subprocess, "run", _raise_on_run(_policy_error(4551)))
+    venv_python = str(tmp_path / "venvs" / "probe" / "Scripts" / "python.exe")
+    pad._record_policy_block(_policy_error(4551), program=venv_python)
+    monkeypatch.setattr(subprocess, "run", _refuse_every_run(4551))
 
-    with pytest.raises(RuntimeError, match=f"Windows blocked {re.escape(sys.executable)}"):
+    with pytest.raises(RuntimeError) as exc_info:
         pad._ensure_venv()
+
+    message = str(exc_info.value)
+    assert f"Windows blocked {venv_python}" in message
+    assert f"Running on the app's own Python ({sys.executable}) failed as well" in message
     assert not pad._in_fallback
     assert not (tmp_path / "scratchpad-packages").exists()
 

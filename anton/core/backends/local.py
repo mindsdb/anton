@@ -502,10 +502,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         self._venv_python = sys.executable
         if not self._verify_venv_python():
-            refused = self._policy_block or blocked
+            fallback_error = self._last_verify_error or "it did not run"
             self._venv_dir = None
             self._venv_python = None
-            raise RuntimeError(self._policy_blocked_message(refused)) from refused
+            raise RuntimeError(
+                self._policy_blocked_message(blocked, fallback_error=fallback_error)
+            ) from blocked
 
         packages.mkdir(parents=True, exist_ok=True)
         self._venv_dir = str(packages)
@@ -521,17 +523,28 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             )
         self._in_fallback = True
 
-    def _policy_blocked_message(self, blocked: OSError) -> str:
+    def _policy_blocked_message(
+        self, blocked: OSError, *, fallback_error: str | None = None
+    ) -> str:
         """The start failure the model relays when Windows policy refused a launch.
 
-        Unlike the facts-only venv failure, this one carries a recovery path:
-        the cause is identified by its error code, so the advice cannot be a
-        misdiagnosis. Re-uploading is named as useless because it was offered.
+        ``blocked`` is the first refusal; ``fallback_error`` says why running on
+        the app's own Python failed too, when it was tried. Unlike the
+        facts-only venv failure, this carries a recovery path: the cause is
+        identified by its error code, so the advice cannot be a misdiagnosis.
+        Re-uploading is named as useless because it was offered.
         """
         program = blocked.filename or "a program the scratchpad needs"
+        fallback = (
+            f"Running on the app's own Python ({sys.executable}) failed as well: "
+            f"{fallback_error}. "
+            if fallback_error is not None
+            else ""
+        )
         return (
             f"Scratchpad failed to start: Windows blocked {program} "
             f"(WinError {_policy_block_code(blocked)}: {blocked.strerror}). "
+            f"{fallback}"
             "A Windows Application Control policy on this computer blocks it. "
             "Renaming the scratchpad, retrying, or re-uploading files will not help. "
             f"To recover, an IT administrator can allow programs in {self._venvs_base}, "
