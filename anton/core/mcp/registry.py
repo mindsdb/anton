@@ -26,6 +26,8 @@ nothing new to design.
 
 from __future__ import annotations
 
+from typing import Any
+
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.errors import McpPermanentError, McpTransientError
@@ -70,17 +72,71 @@ async def discover_tool_defs(
             name=namespaced_tool_name(engine, tool.name, connection_name=connection_name),
             description=tool.description or "",
             input_schema=tool.input_schema,
-            handler=_make_handler(mcp_session, engine=engine, bare_tool_name=tool.name),
+            handler=_make_handler(
+                mcp_session, engine=engine, bare_tool_name=tool.name, input_schema=tool.input_schema or {}
+            ),
         )
         for tool in tools
         if allowed_for_mode(engine, tool.name, access_mode)
     ]
 
 
-def _make_handler(mcp_session: McpSession, *, engine: str, bare_tool_name: str):
+_MAX_SCHEMA_DEPTH = 20
+
+
+def _schema_branches(schema: Any, root: dict, depth: int) -> list[dict]:
+    """`schema` plus every anyOf/oneOf/allOf branch, with local `$ref`s
+    resolved: everywhere a field's `required`/`properties` can come from."""
+    if not isinstance(schema, dict) or depth > _MAX_SCHEMA_DEPTH:
+        return []
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/"):
+        node: Any = root
+        for part in ref[2:].split("/"):
+            node = node.get(part) if isinstance(node, dict) else None
+        return _schema_branches(node, root, depth + 1)
+    branches = [schema]
+    for key in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(key) or ():
+            branches.extend(_schema_branches(branch, root, depth + 1))
+    return branches
+
+
+def without_empty_optionals(value: Any, schema: Any, root: dict, depth: int = 0) -> Any:
+    """`value` with every "" or null field left out, at any depth, unless
+    some branch of its schema marks that field required.
+
+    Some models fill optional fields with "" or null instead of omitting them,
+    and servers validate those as real values: Notion and HubSpot both reject
+    cursor="" as an invalid cursor, HubSpot's one level down inside `query`.
+    """
+    if depth > _MAX_SCHEMA_DEPTH:
+        return value
+    branches = _schema_branches(schema, root, depth)
+    if isinstance(value, dict):
+        required = {name for branch in branches for name in branch.get("required") or ()}
+        cleaned = {}
+        for key, item in value.items():
+            if key not in required and (item is None or item == ""):
+                continue
+            item_schemas = [
+                branch["properties"][key]
+                for branch in branches
+                if isinstance(branch.get("properties"), dict) and key in branch["properties"]
+            ]
+            cleaned[key] = without_empty_optionals(item, {"anyOf": item_schemas}, root, depth + 1)
+        return cleaned
+    if isinstance(value, list):
+        item_schemas = [branch["items"] for branch in branches if isinstance(branch.get("items"), dict)]
+        return [without_empty_optionals(item, {"anyOf": item_schemas}, root, depth + 1) for item in value]
+    return value
+
+
+def _make_handler(mcp_session: McpSession, *, engine: str, bare_tool_name: str, input_schema: dict):
     async def handle_mcp_call(session, tc_input: dict) -> ToolOutcome:  # noqa: ARG001 - session unused, contract requires it
+        arguments = without_empty_optionals(tc_input or {}, input_schema, input_schema)
         try:
-            content, is_error = await mcp_session.call_tool(bare_tool_name, tc_input)
+            content, is_error = await mcp_session.call_tool(bare_tool_name, arguments)
         except McpPermanentError:
             return ToolOutcome(
                 content=(
