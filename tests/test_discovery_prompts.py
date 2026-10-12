@@ -193,9 +193,20 @@ def test_gathering_step_records_each_decision_in_one_list_only():
 
 
 def test_gathering_step_names_the_structured_fields():
+    # `constraints` and `open_points` are named by the `finish_gathering`
+    # schema; the instruction only needs the two its rules refer to.
     message = step_message(sub_tools.STEP_GATHERING, _state())
-    for field_name in ("`data_findings`", "`assumptions`", "`open_points`", "`constraints`"):
+    for field_name in ("`data_findings`", "`assumptions`"):
         assert field_name in message
+
+
+def test_gathering_step_carries_no_language_rule():
+    """Seen live: with an all-English request and English attachments,
+    "write in the language of the user request" made the gathering notes
+    come back in Spanish (and Russian on replays), and the brief and the PRD
+    followed them. Without the rule the notes stay in the request's language."""
+    message = step_message(sub_tools.STEP_GATHERING, _state())
+    assert "language" not in message.lower()
 
 
 def test_restored_context_carries_assumptions_and_open_points():
