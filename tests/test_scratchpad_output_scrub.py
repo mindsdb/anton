@@ -18,7 +18,7 @@ import pytest
 
 from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
-from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.local import LocalScratchpadRuntime, _add_salvage_chunk, _salvage_tail
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
@@ -159,8 +159,8 @@ async def test_a_cell_killed_after_printing_a_token_keeps_scrubbed_output(monkey
 async def test_a_killed_cell_over_the_salvage_budget_does_not_strip_a_token_key(monkeypatch, key, filler):
     """Salvage arrives in heartbeat chunks; trimming the oldest chunk must not
     drop a token's key and leave the token itself in the kept output. The first
-    chunk ends with the key and the second starts with the token; together they
-    are just over the budget, so only the key's chunk is dropped."""
+    chunk ends with the key and the second starts with the token, and the
+    salvage is cut to its budget after the scrub."""
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "2")
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "2")
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "2")
@@ -186,6 +186,50 @@ async def test_a_killed_cell_over_the_salvage_budget_does_not_strip_a_token_key(
     assert "timed out" in cells[0].error.lower()
     assert cells[0].stdout
     assert TOKEN not in cells[0].stdout
+
+
+def _salvage_from(stream: str) -> tuple[str, bool]:
+    """Feed `stream` through the salvage path in worker-sized chunks."""
+    kept: list[str] = []
+    dropped = False
+    for start in range(0, len(stream), 8192):
+        dropped = _add_salvage_chunk(kept, stream[start : start + 8192]) or dropped
+    return _salvage_tail(kept, dropped)
+
+
+_LONG_TOKEN = "opq" + "Z9" * 500
+
+
+@pytest.mark.parametrize("key", ["access_token: ", "Authorization: Bearer\n", "Authorization: Bearer"])
+def test_dropped_salvage_never_leaves_a_token_without_its_key(key):
+    """Token-dense output scrubs to far less than the budget, so the start of
+    the kept chunks reaches the output; a token whose key was in a dropped
+    chunk must not be there. Sized so only the first chunk is dropped."""
+    first = "x" * (8192 - len(key) - 1) + "\n" + key
+    rest = ("\n" if key.endswith("Bearer") else "") + TOKEN + "\n"
+    rest += "".join(f"access_token: {_LONG_TOKEN}\n" for _ in range(35))
+    salvaged, truncated = _salvage_from(first + rest)
+
+    assert TOKEN not in salvaged
+    assert "access_token: [REDACTED_TOKEN]" in salvaged
+    assert truncated
+
+
+def test_dropped_salvage_on_one_long_line_reports_nothing_rather_than_a_bare_token():
+    """With no line start to cut at, the kept text cannot be told safe."""
+    line = "x" * 8178 + "access_token: " + TOKEN + " "
+    line += "".join(f"access_token: {_LONG_TOKEN} " for _ in range(32))
+    salvaged, truncated = _salvage_from(line)
+
+    assert TOKEN not in salvaged
+    assert truncated
+
+
+def test_salvage_under_the_budget_is_kept_whole():
+    salvaged, truncated = _salvage_from("sent 1/3\nsent 2/3\n")
+
+    assert salvaged == "sent 1/3\nsent 2/3\n"
+    assert not truncated
 
 
 async def test_another_tool_result_keeps_quoted_placeholders(tmp_path):
