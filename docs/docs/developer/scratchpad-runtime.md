@@ -96,6 +96,13 @@ stream (`progress` events, then a `cell` event). Selection happens in
 `endpoint_url=settings.minds_url` and `api_key=settings.minds_api_key`;
 otherwise the local factory is used.
 
+Each execution sends the turn's `trace_context` alongside the unchanged cell
+source. The scratchpad service restores it while executing the request, so
+the local runtime can forward it to the cell's model calls. A request outside
+a turn sends `null`. This requires the scratchpad service's trace-aware
+receiver and an Anton runtime that forwards cell traces; older receivers
+ignore the extra field and continue executing without trace attribution.
+
 `backend` comes from `ANTON_BACKEND` (default `local`), and a validator in
 `anton/config/settings.py` rejects `remote` unless both the Minds URL and the
 Minds API key are configured. The `/remote` chat command provisions a remote

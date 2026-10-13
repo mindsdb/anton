@@ -159,3 +159,35 @@ class TestPeekRelay:
             outcome = await reg.dispatch_tool(session, "peeking", {}, tool_call_id="tc1")
             assert outcome.content == "final result"
             assert [(e.phase, e.message) for e in events] == [("tool_progress", "step 1")]
+
+
+async def _messaging_handler(_session, _input):
+    yield ToolProgress("step 1")
+    yield ToolProgress("## Brief", kind="message")
+    yield "final result"
+
+
+class TestMessageRelay:
+    async def test_a_message_travels_as_a_tool_result_for_a_host_that_renders_it(self):
+        from anton.core.llm.provider import StreamTaskProgress, StreamToolResult
+
+        reg = ToolRegistry()
+        reg.register_tool(_make_tool("messaging", _messaging_handler))
+        session, events = TestPeekRelay._session(tool_messages=True)
+        outcome = await reg.dispatch_tool(session, "messaging", {}, tool_call_id="tc1")
+        assert outcome.content == "final result"
+        assert isinstance(events[0], StreamTaskProgress) and events[0].message == "step 1"
+        message = events[1]
+        assert isinstance(message, StreamToolResult)
+        assert (message.name, message.action, message.content, message.id) == (
+            "messaging", "message", "## Brief", "tc1",
+        )
+        assert len(events) == 2
+
+    async def test_a_message_is_dropped_unless_the_host_opted_in(self):
+        reg = ToolRegistry()
+        reg.register_tool(_make_tool("messaging", _messaging_handler))
+        for session, events in (TestPeekRelay._session(), TestPeekRelay._session(tool_messages=False)):
+            outcome = await reg.dispatch_tool(session, "messaging", {}, tool_call_id="tc1")
+            assert outcome.content == "final result"
+            assert [(e.phase, e.message) for e in events] == [("tool_progress", "step 1")]

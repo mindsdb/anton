@@ -26,7 +26,7 @@ from anton.core.root_cause import (
 # Verbatim-shaped reasons from the ENG-836 runaway: four approaches at one wall
 # (no ODBC driver, no root). `tool_handlers.py` sets `reason` to the traceback's
 # LAST line, which is what these are.
-KIRANAM_ATTEMPTS = [
+ODBC_WALL_ATTEMPTS = [
     "ModuleNotFoundError: No module named 'pyodbc'",
     "package_install_failed",
     "ModuleNotFoundError: No module named 'pyodbc.drivers'",
@@ -34,13 +34,13 @@ KIRANAM_ATTEMPTS = [
 ]
 
 
-def test_the_kiranam_ping_pong_collapses_to_one_class():
+def test_the_odbc_driver_ping_pong_collapses_to_one_class():
     """Four identifiers, one class — the case an exact match cannot catch.
 
     This is why the key has two rungs. Normalised error TEXT would see four
     unrelated problems here and never fire, which is exactly what happened.
     """
-    causes = [classify(r) for r in KIRANAM_ATTEMPTS]
+    causes = [classify(r) for r in ODBC_WALL_ATTEMPTS]
 
     assert {c.cls for c in causes} == {"missing_dependency"}
     assert all(c.trip_eligible for c in causes)
@@ -245,7 +245,7 @@ def test_event_fields_are_flat_and_complete():
     a breaker exists at all.
     """
     ledger = RootCauseLedger()
-    for r in KIRANAM_ATTEMPTS:
+    for r in ODBC_WALL_ATTEMPTS:
         ledger.add(classify(r))
     ledger.add(classify("NameError: name 'x' is not defined"))
     ledger.add(classify("HTTPError: 429 Too Many Requests"))

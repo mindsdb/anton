@@ -7,9 +7,10 @@ any nested tool/scratchpad LLM call made within the same asyncio
 task) is attributed to the same session + turn server-side.
 
 A `ContextVar` is used so that nested calls — `_stream_and_handle_tools`,
-`generate_object` (structured output), the cerebellum's diff call,
-and the scratchpad's `coding_provider` calls — all inherit the same
-trace automatically without threading kwargs through every layer.
+`generate_object` (structured output), the cerebellum's diff call —
+all inherit the same trace automatically without threading kwargs
+through every layer. A scratchpad runs in its own process, so it gets
+the context with each cell instead (see `CELL_TRACE_MARKER`).
 
 Scope: only consumed by the OpenAI provider when its base URL points
 at MindsHub. Other providers (direct Anthropic, raw OpenAI, Azure,
@@ -19,8 +20,9 @@ Gemini) ignore the context entirely.
 from __future__ import annotations
 
 import contextlib
+import json
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 
 
 # WHICH AGENT ran the turn (ENG-1694). The canonical definition, alongside the
@@ -124,6 +126,42 @@ def set_trace_context(ctx: TraceContext | None) -> Token:
 def reset_trace_context(token: Token) -> None:
     """Restore the previous trace context. Pass the token returned by `set_trace_context`."""
     _trace_ctx.reset(token)
+
+
+def trace_context_to_json(ctx: TraceContext) -> str:
+    """One-line form of `ctx`, sent to a scratchpad with each cell."""
+    # default=str: a host's odd metadata value must not stop the cell being sent.
+    return json.dumps(asdict(ctx), default=str)
+
+
+def trace_context_from_json(text: str) -> TraceContext | None:
+    """Inverse of `trace_context_to_json`; None for anything it cannot read."""
+    try:
+        fields = json.loads(text)
+        return TraceContext(**{**fields, "tags": tuple(fields.get("tags") or ())})
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+# The LLMClient role (planning, coding, router) of the model call in flight.
+# A ContextVar rather than a provider attribute: one provider object can serve
+# two roles (the router falls back to the coding provider).
+_call_role: ContextVar[str | None] = ContextVar("anton_call_role", default=None)
+
+
+def get_call_role() -> str | None:
+    """Return the role of the model call in flight, or None outside one."""
+    return _call_role.get()
+
+
+@contextlib.contextmanager
+def call_role(role: str):
+    """Mark model calls made inside the block as serving `role`."""
+    token = _call_role.set(role)
+    try:
+        yield
+    finally:
+        _call_role.reset(token)
 
 
 @contextlib.contextmanager
