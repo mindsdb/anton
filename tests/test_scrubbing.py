@@ -270,6 +270,9 @@ class TestScrubOutput:
         ("access_token=Ab9CdEfGhIjKlMnOpQr", "access_token=[REDACTED_TOKEN]"),
         ("access_token=ABCDEFGHIJKLMNOPQRST", "access_token=[REDACTED_TOKEN]"),
         ("access_token=AB_cdEFgh_IJklMNop", "access_token=[REDACTED_TOKEN]"),
+        ("access_token=AbCdEfGhIjKlMnOpQr", "access_token=[REDACTED_TOKEN]"),
+        ("refresh_token=A1B2C3D4_E5F6G7H8_I9J0", "refresh_token=[REDACTED_TOKEN]"),
+        ("access_token=AB12_CD34_EF56_GH78", "access_token=[REDACTED_TOKEN]"),
     ])
     def test_tokens_that_resemble_code_are_still_redacted(self, text, expected):
         """Printed headers and token_type/token pairs are output, not source code."""
