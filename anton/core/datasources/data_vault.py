@@ -512,9 +512,7 @@ class TurnKeyDataVault:
             for key in dict.fromkeys((c["engine"], c["name"]) for c in self._connections)
             if key not in self._cache
         ]
-        if len(pending) <= 1:
-            for engine, name in pending:
-                self._fetch(engine, name)
+        if not pending:
             return
         workers = min(_PREFETCH_MAX_WORKERS, len(pending))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="turnkey-prefetch") as pool:

@@ -295,7 +295,6 @@ class _CountingAuth:
 
     def __init__(self, barrier: threading.Barrier | None = None, fail_names: tuple[str, ...] = ()) -> None:
         self.calls: list[str] = []
-        self.threads: set[str] = set()
         self.peak = 0
         self._active = 0
         self._lock = threading.Lock()
@@ -306,7 +305,6 @@ class _CountingAuth:
         name = json.loads(payload)["name"]
         with self._lock:
             self.calls.append(name)
-            self.threads.add(threading.current_thread().name)
             self._active += 1
             self.peak = max(self.peak, self._active)
         try:
@@ -327,13 +325,12 @@ def test_prefetch_with_no_connections_makes_no_call(monkeypatch):
     assert auth.calls == []
 
 
-def test_prefetch_of_a_single_connection_runs_on_the_calling_thread(monkeypatch):
+def test_prefetch_of_a_single_connection_caches_it_with_one_fetch(monkeypatch):
     auth = _CountingAuth()
     monkeypatch.setattr("anton.minds_client.minds_request", auth)
     vault = _vault_with(1)
     vault.prefetch()
     assert auth.calls == ["c0"]
-    assert auth.threads == {threading.current_thread().name}
     assert vault.load("google_drive", "c0")["access_token"] == "tok-c0"
     assert auth.calls == ["c0"]
 
