@@ -35,23 +35,26 @@ from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
-# Bound on accumulated salvage chunks per cell — mirrors the boot script's
+# Bound on a killed cell's reported salvage — mirrors the boot script's
 # _MAX_OUTPUT so a killed cell can never report more stdout than a successful
 # one would have.
 _SALVAGE_MAX = 10_000
 
+# Raw salvage kept for the scrub. Whole chunks are dropped only past this, so a
+# dropped key is too far back to belong to a token in the kept tail.
+_SALVAGE_RAW_MAX = 4 * _SALVAGE_MAX
 
-def _salvage_tail(text: str) -> str:
-    """Return the last `_SALVAGE_MAX` or fewer characters of salvaged stdout.
 
-    Chunks split wherever a heartbeat fell, so a cut there could keep a token
-    and drop its key. The cut lands at a line start instead; output with no
-    line break in the kept span is scrubbed before it is cut.
+def _salvage_tail(chunks: list[str]) -> tuple[str, bool]:
+    """Join salvaged stdout chunks, scrub them, then keep the last `_SALVAGE_MAX` characters.
+
+    Chunks split wherever a heartbeat fell, and the scrub matches a key across a
+    line break, so only scrubbed text is safe to cut. Returns the text and
+    whether it was cut.
     """
-    start = text.find("\n", len(text) - _SALVAGE_MAX, len(text) - 1)
-    if start != -1:
-        return text[start + 1 :]
-    return scrub_output(text)[-_SALVAGE_MAX:]
+    scrubbed = scrub_output("".join(chunks))
+    return scrubbed[-_SALVAGE_MAX:], len(scrubbed) > _SALVAGE_MAX
+
 
 # The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
 # it's progressing, so a wedged cell stays silent — for as long as
@@ -1051,7 +1054,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # Fresh salvage state per cell: _read_result accumulates the worker's
         # stdout chunks here so a kill/crash can still report partial output.
         self._salvage: list[str] = []
-        self._salvage_truncated = False
 
         payload = code + "\n" + CELL_DELIM + "\n"
         trace = get_trace_context()
@@ -1098,9 +1100,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # A cancellation carries no message; name it so the error still
             # leads with its cause like every other kill.
             error_msg = f"{str(exc) or 'Cancelled'}. {state_note}"
-            salvaged = "".join(self._salvage)
+            salvaged, truncated = _salvage_tail(self._salvage)
             if salvaged:
-                if self._salvage_truncated:
+                if truncated:
                     salvaged = "(truncated to most recent output)\n" + salvaged
                 error_msg += (
                     "\n\nPartial output from before the kill was recovered "
@@ -1283,7 +1285,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # Crash/EOF: attach whatever stdout chunks were salvaged —
                 # the process died with side effects possibly already done.
                 yield {
-                    "stdout": "".join(self._salvage),
+                    "stdout": _salvage_tail(self._salvage)[0],
                     "stderr": "",
                     "error": (
                         f"Process exited unexpectedly while auto-installing "
@@ -1334,9 +1336,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 if isinstance(chunk, str) and chunk:
                     last_output = elapsed
                     self._salvage.append(chunk)
-                    if sum(len(c) for c in self._salvage) > _SALVAGE_MAX:
-                        self._salvage = [_salvage_tail("".join(self._salvage))]
-                        self._salvage_truncated = True
+                    total = sum(len(c) for c in self._salvage)
+                    while total > _SALVAGE_RAW_MAX and len(self._salvage) > 1:
+                        total -= len(self._salvage.pop(0))
                 continue
 
             if line.startswith(PROGRESS_MARKER):
