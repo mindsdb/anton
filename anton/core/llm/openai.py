@@ -305,8 +305,11 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # Read UNGATED, for the velocity check below only: a velocity limit is not
     # a billing verdict, so the origin gate does not apply to it.
     raw_gate_reason = ""
+    azure_retry_hint = False
     if getattr(exc, "response", None) is not None:
         raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+        # Azure sends retry-after-ms on rate and capacity 429s, which its docs say to wait out.
+        azure_retry_hint = "retry-after-ms" in exc.response.headers
 
     # Origin-gated too (ENG-1693 review): this branch's copy names a MindsHub
     # PLAN and links console.mindshub.ai to upgrade, so it is a billing verdict
@@ -373,7 +376,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # ungated too, so a spoofer would just use that. What it DID cost was a
     # real regression — a relay or corporate proxy in front of MindsHub
     # forwarding our 429 and `Retry-After` lost its wait (ENG-1537).
-    _velocity = raw_gate_reason == "rate_limited" or code == "rate_limited"
+    _velocity = raw_gate_reason == "rate_limited" or code == "rate_limited" or azure_retry_hint
     transient = classify_transient(
         exc.status_code, raw_body, provider="The model provider", model=model,
         retry_after=retry_after_seconds(exc),
