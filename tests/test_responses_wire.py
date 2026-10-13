@@ -490,3 +490,14 @@ async def test_a_failed_responses_call_is_logged_before_it_raises(endpoint, monk
 
     (line,) = _usage_lines(caplog)
     assert (line["model"], line["input"], line["output"]) == ("gpt-test", 20, 16)
+
+
+async def test_a_streamed_responses_call_that_fails_is_logged_before_it_raises(endpoint, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO", logger="anton.usage")
+    endpoint.replies.append((200, "sse", _failed("server_error", "boom")))
+    with pytest.raises(TransientProviderError):
+        await _stream(endpoint.provider())
+
+    (line,) = _usage_lines(caplog)
+    assert (line["model"], line["input"], line["cache_read"], line["output"]) == ("gpt-test", 20, 100, 16)

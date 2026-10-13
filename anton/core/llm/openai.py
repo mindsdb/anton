@@ -1912,6 +1912,11 @@ class OpenAIProvider(LLMProvider):
                 # classifies it the same way (billing stop, a code that names
                 # its cause, transient, or stream_error with backoff).
                 elif etype in ("response.failed", "error"):
+                    failed = getattr(event, "response", None) if etype == "response.failed" else None
+                    if failed is not None:
+                        # Billed though it failed, and this raise skips the usage line below.
+                        self.log_usage(model=model, usage=_responses_usage(failed, model),
+                                       served_model=getattr(failed, "model", None))
                     error = (getattr(getattr(event, "response", None), "error", None)
                              if etype == "response.failed" else event)
                     body = _responses_error_body(error)
