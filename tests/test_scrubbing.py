@@ -189,6 +189,16 @@ class TestScrubOutput:
         result = scrub_output(json.dumps({"access_token": token, "expires_in": 3600}))
         assert result == '{"access_token": "[REDACTED_TOKEN]", "expires_in": 3600}'
 
+    @pytest.mark.parametrize("text", [
+        f'{{"access_token": "{OPAQUE_TOKEN}',
+        f"'refresh_token': '{B64URL_TOKEN}",
+        f'\\"access_token\\": \\"{OPAQUE_TOKEN}',
+    ])
+    def test_a_quoted_value_cut_off_before_its_closing_quote_is_redacted(self, text):
+        result = scrub_output(text)
+        assert OPAQUE_TOKEN not in result and B64URL_TOKEN not in result
+        assert result.endswith("[REDACTED_TOKEN]")
+
     def test_python_dict_repr_is_redacted(self):
         result = scrub_output(str({"refresh_token": OPAQUE_TOKEN}))
         assert result == "{'refresh_token': '[REDACTED_TOKEN]'}"
