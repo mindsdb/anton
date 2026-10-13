@@ -210,22 +210,22 @@ _SECRET_KEY_PATTERN = re.compile(
     r"|AQ\.[A-Za-z0-9._-]{50}"   # Google authorization key (AI Studio, 2026+)
 )
 
-# OAuth tokens a cell fetches at runtime, so no env var or vault value names
-# them. Output only: user input and published artifacts keep the narrower
-# _SECRET_KEY_PATTERN, because these shapes also match pasted connect
-# credentials and code that handles tokens.
+# Output only: user input and published artifacts keep _SECRET_KEY_PATTERN,
+# since these shapes also match pasted connect credentials and token code.
 _TOKEN_SHAPE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"  # JWT
     r"|ya29\.[A-Za-z0-9_-]{20,}"  # Google OAuth access token
 )
-# A value after `Bearer` or after a token-named key, in JSON, a dict repr,
-# escaped JSON, or key=value form. The key or word stays readable; the
-# 16-character floor leaves prose like "send a Bearer token" alone.
+# Output includes source code the model reads and may write back, so a value
+# that is a dotted path, a call, or all lowercase is code or prose, not a token.
 _TOKEN_VALUE_PATTERN = re.compile(
-    r"((?i:\bbearer)\s+"
-    r"|(?<![A-Za-z0-9])(?i:access_?token|refresh_?token|id_?token|client_?secret)"
-    r"\\?[\"']?\s*[:=]\s*\\?[\"']?)"
-    r"[A-Za-z0-9._~+/=-]{16,}"
+    r"((?i:\bbearer)[ \t]+"
+    r"|(?<![A-Za-z0-9])"
+    r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
+    r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+)\\?[\"']?)"
+    r"(?!(?:[a-z_/-]+|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)(?![A-Za-z0-9._~+/=%-]))"
+    r"[A-Za-z0-9._~+/=%-]{16,}"
+    r"(?![A-Za-z0-9._~+/=%(-])"
 )
 
 

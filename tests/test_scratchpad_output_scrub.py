@@ -47,6 +47,7 @@ _PRINT_TOKEN_RESPONSE = (
 
 
 def _exec_response(code: str) -> LLMResponse:
+    """A model round that asks the scratchpad to run ``code``."""
     return LLMResponse(
         content="running",
         tool_calls=[ToolCall(id="tc_cell", name="scratchpad",
@@ -66,6 +67,7 @@ async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_pat
     model_inputs: list[str] = []
 
     def plan_stream(**kwargs):
+        """Record what the model is sent; run the cell first, then finish."""
         model_inputs.append(repr(kwargs.get("messages")))
         response = _exec_response(_PRINT_TOKEN_RESPONSE) if len(model_inputs) == 1 else LLMResponse(
             content="done", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
