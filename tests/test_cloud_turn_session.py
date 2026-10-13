@@ -20,6 +20,8 @@ from pathlib import Path
 # `_pin_today` later replaces on the module.
 from datetime import datetime as _stdlib_datetime
 
+import httpx2 as httpx
+import openai
 import pytest
 
 import anton.core.llm.client as llm_client_mod
@@ -34,6 +36,8 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.llm.openai import OpenAIProvider
+from tests.test_bad_request_reaches_the_classifier import _streamed_answer
 
 
 class _FakeSession:
@@ -1261,13 +1265,11 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
     assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ
 
 
-# ── selected reasoning effort ────────────────────────────────────────────────
-
 _MINDS_LLM = {"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"}
 
 
 def _build_real_client(tmp_path, monkeypatch, **req_overrides):
-    """Like _build, but keeps the real LLMClient so its providers can be inspected."""
+    """The real LLMClient a cloud turn builds for this request, with ChatSession faked."""
     captured: dict = {}
     real_from_settings = llm_client_mod.LLMClient.from_settings.__func__
 
@@ -1284,47 +1286,88 @@ def _build_real_client(tmp_path, monkeypatch, **req_overrides):
     return captured["client"]
 
 
-def _request_reasoning(provider):
-    """The reasoning block the provider would put on its next real request, or None."""
-    kwargs = provider._build_responses_kwargs(
-        model="m", system="s", messages=[{"role": "user", "content": "hi"}],
-        tools=None, tool_choice=None, max_tokens=100, native_web_tools=None,
-    )
-    return kwargs.get("reasoning")
+def _record_requests(monkeypatch) -> list[tuple[str, dict]]:
+    """Point every OpenAI SDK client built from now on at a transport that
+    records each request as (path, body) and answers it with a short completion."""
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        requests.append((request.url.path, sent))
+        if sent.get("stream"):
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"},
+                content=_streamed_answer(OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, "answered"),
+            )
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "answered"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    real_async_openai = openai.AsyncOpenAI
+
+    def mock_async_openai(**kwargs):
+        kwargs["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return real_async_openai(**{**kwargs, "max_retries": 0})
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", mock_async_openai)
+    return requests
+
+
+async def _efforts_on_the_wire(client, requests) -> dict[str, str | None]:
+    """One call per role; the ``reasoning_effort`` each chat.completions request carried."""
+    messages = [{"role": "user", "content": "hi"}]
+    async for _ in client.plan_stream(system="s", messages=messages):
+        pass
+    async for _ in client.code_stream(system="s", messages=messages):
+        pass
+    await client.summarize(system="s", messages=messages)
+    assert [path for path, _ in requests] == ["/v1/chat/completions"] * 3
+    efforts = (sent.get("reasoning_effort") for _, sent in requests)
+    return dict(zip(("planning", "coding", "router"), efforts))
 
 
 @pytest.mark.parametrize("coding_model", [None, "claude-opus-4-6"])
 @pytest.mark.parametrize("router", [False, True])
-def test_selected_effort_reaches_only_the_planning_provider(tmp_path, monkeypatch, coding_model, router):
+async def test_selected_effort_reaches_only_the_planning_request(tmp_path, monkeypatch, coding_model, router):
     """The router shares the coding provider unless one is configured, so
     coding effort must stay put or history summarization would change too."""
     if router:
         monkeypatch.setenv("ANTON_ROUTER_PROVIDER", "openai-compatible")
     monkeypatch.setenv("ANTON_CODING_REASONING_EFFORT", "medium")
+    requests = _record_requests(monkeypatch)
     llm = dict(_MINDS_LLM, coding_model=coding_model) if coding_model else _MINDS_LLM
     client = _build_real_client(
         tmp_path, monkeypatch, model="claude-opus-4-6", llm=llm, reasoning_effort="low",
     )
-    assert _request_reasoning(client.planning_provider)["effort"] == "low"
-    assert _request_reasoning(client.coding_provider)["effort"] == "medium"
-    if router:
-        assert client.router_provider is not client.coding_provider
-        assert _request_reasoning(client.router_provider) is None
-    else:
-        assert client.router_provider is client.coding_provider
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "low", "coding": "medium", "router": None if router else "medium"}
 
 
-def test_no_selected_effort_keeps_the_configured_planning_effort(tmp_path, monkeypatch):
+async def test_no_selected_effort_keeps_the_configured_planning_effort(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTON_PLANNING_REASONING_EFFORT", "high")
+    requests = _record_requests(monkeypatch)
     client = _build_real_client(tmp_path, monkeypatch, reasoning_effort=None)
-    assert _request_reasoning(client.planning_provider)["effort"] == "high"
-    assert _request_reasoning(client.coding_provider) is None
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "high", "coding": None, "router": None}
 
 
-def test_no_selected_or_configured_effort_sends_none(tmp_path, monkeypatch):
+async def test_no_selected_or_configured_effort_sends_none(tmp_path, monkeypatch):
+    requests = _record_requests(monkeypatch)
     client = _build_real_client(tmp_path, monkeypatch)
-    assert _request_reasoning(client.planning_provider) is None
-    assert _request_reasoning(client.coding_provider) is None
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": None, "coding": None, "router": None}
 
 # ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────
 
