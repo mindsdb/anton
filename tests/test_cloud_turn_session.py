@@ -36,8 +36,6 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
-from anton.core.llm.openai import OpenAIProvider
-from tests.test_bad_request_reaches_the_classifier import _streamed_answer
 
 
 class _FakeSession:
@@ -1286,6 +1284,17 @@ def _build_real_client(tmp_path, monkeypatch, **req_overrides):
     return captured["client"]
 
 
+def _chat_stream(text: str) -> bytes:
+    """``text`` as a streamed chat.completions answer, the format the minds passthrough reads."""
+    chunk = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 0, "model": "m"}
+    chunks = [
+        {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
+                               "finish_reason": None}]},
+        {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
+
+
 def _record_requests(monkeypatch) -> list[tuple[str, dict]]:
     """Point every OpenAI SDK client built from now on at a transport that
     records each request as (path, body) and answers it with a short completion."""
@@ -1297,7 +1306,7 @@ def _record_requests(monkeypatch) -> list[tuple[str, dict]]:
         if sent.get("stream"):
             return httpx.Response(
                 200, headers={"content-type": "text/event-stream"},
-                content=_streamed_answer(OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, "answered"),
+                content=_chat_stream("answered"),
             )
         return httpx.Response(200, json={
             "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
@@ -1350,6 +1359,7 @@ async def test_selected_effort_reaches_only_the_planning_request(tmp_path, monke
 
 
 async def test_no_selected_effort_keeps_the_configured_planning_effort(tmp_path, monkeypatch):
+    """With nothing selected, planning carries the configured effort and the other roles none."""
     monkeypatch.setenv("ANTON_PLANNING_REASONING_EFFORT", "high")
     requests = _record_requests(monkeypatch)
     client = _build_real_client(tmp_path, monkeypatch, reasoning_effort=None)
@@ -1361,6 +1371,7 @@ async def test_no_selected_effort_keeps_the_configured_planning_effort(tmp_path,
 
 
 async def test_no_selected_or_configured_effort_sends_none(tmp_path, monkeypatch):
+    """With nothing selected or configured, no request carries an effort."""
     requests = _record_requests(monkeypatch)
     client = _build_real_client(tmp_path, monkeypatch)
     try:
@@ -1368,6 +1379,7 @@ async def test_no_selected_or_configured_effort_sends_none(tmp_path, monkeypatch
     finally:
         await client.aclose()
     assert sent == {"planning": None, "coding": None, "router": None}
+
 
 # ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────
 

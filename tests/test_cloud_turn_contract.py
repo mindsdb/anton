@@ -92,6 +92,7 @@ def test_a_missing_or_non_object_connectors_block_parses_to_none(value):
 
 
 def _with_effort(**extra):
+    """The parsed request for a minimal body carrying ``extra``."""
     body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
     body.update(extra)
     return TurnRequestV1.from_json(json.dumps(body))
