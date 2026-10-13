@@ -22,7 +22,7 @@ def _offline_turn(tmp_path, monkeypatch):
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
     monkeypatch.setattr(
         llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings: make_mock_llm()),
+        classmethod(lambda cls, settings, **_kw: make_mock_llm()),
     )
     # MCP discovery is not under test here; stubbing the module also keeps the
     # test runnable in an env that lacks the `mcp` runtime dependency.
