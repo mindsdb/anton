@@ -703,7 +703,13 @@ async def _generate_api_spec(
 
 
 _API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
-_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)*?]+)")
+# What a path IS (plain, `{name}`, `{name:conv}` or `:name` segments), not
+# which characters end it: anything after the last segment is left out.
+_DECLARED_PATH_RE = re.compile(
+    r"\b(?:GET|POST|PUT|PATCH|DELETE)\b[*`]*\s+[*`]*"
+    r"(/api(?:/(?:\{[^{}\s]+\}|:[A-Za-z_]\w*|[\w.~-]+))+)"
+)
+_COLON_PARAM_RE = re.compile(r"/:([A-Za-z_]\w*)")
 _HEALTH_PATH = "/api/health"
 
 
@@ -727,7 +733,7 @@ def _declared_api_paths(context: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for raw in _DECLARED_PATH_RE.findall(match.group(1)):
         # A sentence's full stop; dots inside a path segment stay.
-        path = raw.rstrip(".")
+        path = _COLON_PARAM_RE.sub(r"/{\1}", raw.rstrip("."))
         if _normalise_api_path(path) != _HEALTH_PATH:
             found.setdefault(_normalise_api_path(path), path)
     return found

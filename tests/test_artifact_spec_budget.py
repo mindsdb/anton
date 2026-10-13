@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.state import (
@@ -320,6 +322,22 @@ def test_declared_api_paths_drop_markdown_punctuation_and_query():
         "/api/results": "/api/results",
         "/api/vote": "/api/vote",
     }
+
+
+@pytest.mark.parametrize("line, path", [
+    ("- **GET** /api/poll", "/api/poll"),
+    ("- GET `/api/poll`", "/api/poll"),
+    ('- "GET /api/poll"', "/api/poll"),
+    ("- [GET /api/poll]", "/api/poll"),
+    ("- GET /api/poll! Then vote", "/api/poll"),
+    ("- `GET /api/files/{file_path:path}`", "/api/files/{file_path:path}"),
+    ("- GET /api/items/:id", "/api/items/{id}"),
+    ("- GET /api/v1.2/items.", "/api/v1.2/items"),
+])
+def test_declared_api_paths_take_the_whole_path_and_nothing_after_it(line, path):
+    """A path that is missed or cut is quoted to the model as exact, and the
+    check then rejects any path it did not list."""
+    assert list(engine._declared_api_paths("## Backend\n" + line + "\n").values()) == [path]
 
 
 def _doc(*paths: str) -> dict:
