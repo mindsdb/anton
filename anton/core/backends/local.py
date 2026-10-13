@@ -62,17 +62,29 @@ def _salvage_tail(chunks: list[str], dropped: bool) -> tuple[str, bool]:
     """Join salvaged stdout chunks, scrub them, then keep the last `_SALVAGE_MAX` characters.
 
     Chunks split wherever a heartbeat fell, so after a drop the kept text can
-    start with a token whose key was dropped, and the scrub matches a key on
-    the line before its value. Everything up to the second line start goes
-    before the scrub. Returns the text and whether it is partial.
+    start with a token whose key was dropped. The scrub runs first, then the
+    region such a token can sit in goes. Returns the text and whether it is partial.
     """
-    raw = "".join(chunks)
+    scrubbed = scrub_output("".join(chunks))
     if dropped:
-        first = raw.find("\n")
-        second = raw.find("\n", first + 1) if first != -1 else -1
-        raw = raw[second + 1 :] if second != -1 else ""
-    scrubbed = scrub_output(raw)
+        scrubbed = _without_orphan_region(scrubbed)
     return scrubbed[-_SALVAGE_MAX:], dropped or len(scrubbed) > _SALVAGE_MAX
+
+
+def _without_orphan_region(text: str) -> str:
+    """Drop the partial first line, any blank lines, and the next line.
+
+    A key in a dropped chunk can be followed by whitespace of any length before
+    its value, so the value is on the first line or the first non-blank one after.
+    """
+    first = text.find("\n")
+    if first == -1:
+        return ""
+    start = first + 1
+    while start < len(text) and text[start].isspace():
+        start += 1
+    end = text.find("\n", start)
+    return text[end + 1 :] if end != -1 else ""
 
 
 # The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
