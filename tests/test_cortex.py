@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import anton.core.memory.cortex as cortex_mod
+from anton.core.llm.provider import LLMResponse, Usage
 from anton.core.memory.cortex import Cortex, _CompactionResult, _parse_rule_selection
 from anton.core.memory.hippocampus import Engram, Hippocampus
 
@@ -447,8 +449,6 @@ class TestRuleRetrievalObservability:
 
         class _Capturing:
             async def code(self, **kwargs):
-                from anton.core.llm.provider import LLMResponse, Usage
-
                 seen.update(kwargs)
                 return LLMResponse(content='{"keep": [3]}', usage=Usage())
 
@@ -490,8 +490,6 @@ class TestRuleRetrievalObservability:
             assert out[:2] == mandatory, content
 
     async def test_a_slow_filter_times_out_and_keeps_every_rule(self, cortex, captured_events, monkeypatch):
-        import anton.core.memory.cortex as cortex_mod
-
         monkeypatch.setattr(cortex_mod, "_RULE_RETRIEVAL_TIMEOUT_SECONDS", 0.05)
 
         class _Hanging:
@@ -519,8 +517,6 @@ class TestRuleRetrievalObservability:
 
     async def test_both_scopes_time_out_together(self, dirs, captured_events, monkeypatch):
         """Prompt assembly waits for one deadline, not one per memory scope."""
-        import anton.core.memory.cortex as cortex_mod
-
         monkeypatch.setattr(cortex_mod, "_RULE_RETRIEVAL_TIMEOUT_SECONDS", 0.2)
         for d in dirs:
             lines = "\n".join(f"- {e.text}" for e in _when_engrams(12))

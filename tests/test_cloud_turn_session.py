@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 # Bound at import so the constants below are built from the real class, which
 # `_pin_today` later replaces on the module.
@@ -34,6 +35,7 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.utils.datasources import scrub_credentials
 
 
 class _FakeSession:
@@ -1264,10 +1266,6 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
 def test_oauth_connections_are_fetched_together_once_and_registered_for_scrubbing(tmp_path, monkeypatch):
     """Each connection's fetch waits for the other three, so the build only
     gets tokens when the fetches overlap; every value must then be scrubbable."""
-    import threading
-
-    from anton.utils.datasources import scrub_credentials
-
     barrier = threading.Barrier(4)
     calls: list[str] = []
     lock = threading.Lock()
