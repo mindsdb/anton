@@ -58,32 +58,39 @@ def _add_salvage_chunk(chunks: list[str], chunk: str) -> bool:
     return dropped
 
 
-def _salvage_tail(chunks: list[str], dropped: bool) -> tuple[str, bool]:
+def _salvage_tail(chunks: list[str], dropped: bool) -> str:
     """Join salvaged stdout chunks, scrub them, then keep the last `_SALVAGE_MAX` characters.
 
     Chunks split wherever a heartbeat fell, so after a drop the kept text can
     start with a token whose key was dropped. The scrub runs first, then the
-    region such a token can sit in goes. Returns the text and whether it is partial.
+    region such a token can sit in goes. Returns the text, led by a note when
+    it is partial.
     """
     scrubbed = scrub_output("".join(chunks))
     if dropped:
         scrubbed = _without_orphan_region(scrubbed)
-    return scrubbed[-_SALVAGE_MAX:], dropped or len(scrubbed) > _SALVAGE_MAX
+    tail = scrubbed[-_SALVAGE_MAX:]
+    if tail and (dropped or len(scrubbed) > _SALVAGE_MAX):
+        return "(truncated to most recent output)\n" + tail
+    return tail
 
 
 def _without_orphan_region(text: str) -> str:
-    """Drop the partial first line, any blank lines, and the next line.
+    """Drop the partial first line and the next two non-blank lines.
 
-    A key in a dropped chunk can be followed by whitespace of any length before
-    its value, so the value is on the first line or the first non-blank one after.
+    The scrub pairs a key with its value across any whitespace on both sides of
+    the `:` or `=`, so a key on the partial line can have its separator and its
+    value on the next two non-blank lines; the value's opening quote sits on
+    the value's own line.
     """
-    first = text.find("\n")
-    if first == -1:
-        return ""
-    start = first + 1
-    while start < len(text) and text[start].isspace():
-        start += 1
-    end = text.find("\n", start)
+    end = text.find("\n")
+    for _ in range(2):
+        if end == -1:
+            return ""
+        start = end + 1
+        while start < len(text) and text[start].isspace():
+            start += 1
+        end = text.find("\n", start)
     return text[end + 1 :] if end != -1 else ""
 
 
@@ -1132,10 +1139,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # A cancellation carries no message; name it so the error still
             # leads with its cause like every other kill.
             error_msg = f"{str(exc) or 'Cancelled'}. {state_note}"
-            salvaged, truncated = _salvage_tail(self._salvage, self._salvage_dropped)
+            salvaged = _salvage_tail(self._salvage, self._salvage_dropped)
             if salvaged:
-                if truncated:
-                    salvaged = "(truncated to most recent output)\n" + salvaged
                 error_msg += (
                     "\n\nPartial output from before the kill was recovered "
                     "and is shown in stdout (current to within one heartbeat "
@@ -1317,7 +1322,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # Crash/EOF: attach whatever stdout chunks were salvaged —
                 # the process died with side effects possibly already done.
                 yield {
-                    "stdout": _salvage_tail(self._salvage, self._salvage_dropped)[0],
+                    "stdout": _salvage_tail(self._salvage, self._salvage_dropped),
                     "stderr": "",
                     "error": (
                         f"Process exited unexpectedly while auto-installing "
