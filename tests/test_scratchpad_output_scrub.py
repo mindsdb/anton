@@ -188,7 +188,7 @@ async def test_a_killed_cell_over_the_salvage_budget_does_not_strip_a_token_key(
     assert TOKEN not in cells[0].stdout
 
 
-def _salvage_from(stream: str) -> tuple[str, bool]:
+def _salvage_from(stream: str) -> str:
     """Feed `stream` through the salvage path in worker-sized chunks."""
     kept: list[str] = []
     dropped = False
@@ -206,7 +206,14 @@ _LONG_TOKEN = "opq" + "Z9" * 500
     ("Authorization: Bearer", "\n"),
     ('"access_token":', '\n\n  "'),
     ("", "partial\nAuthorization: Bearer\n"),
-], ids=["same-line", "bearer-newline-in-dropped", "bearer-newline-in-kept", "blank-lines", "key-on-a-kept-line"])
+    ('"access_token"', '\n:\n"'),
+    ("access_token", '\n\n=\n\n  "'),
+    ('"access_to', 'ken"\n:\n"'),
+], ids=[
+    "same-line", "bearer-newline-in-dropped", "bearer-newline-in-kept", "blank-lines",
+    "key-on-a-kept-line", "separator-on-its-own-line", "separator-between-blank-lines",
+    "cut-inside-the-key",
+])
 def test_dropped_salvage_never_leaves_a_token_without_its_key(key, before_token):
     """Token-dense output scrubs to far less than the budget, so the start of
     the kept chunks reaches the output; a token whose key was in a dropped
@@ -214,28 +221,47 @@ def test_dropped_salvage_never_leaves_a_token_without_its_key(key, before_token)
     first = "x" * (8192 - len(key) - 1) + "\n" + key
     rest = before_token + TOKEN + "\n"
     rest += "".join(f"access_token: {_LONG_TOKEN}\n" for _ in range(35))
-    salvaged, truncated = _salvage_from(first + rest)
+    salvaged = _salvage_from(first + rest)
 
     assert TOKEN not in salvaged
     assert "access_token: [REDACTED_TOKEN]" in salvaged
-    assert truncated
+    assert salvaged.startswith("(truncated to most recent output)\n")
 
 
 def test_dropped_salvage_on_one_long_line_reports_nothing_rather_than_a_bare_token():
     """With no line start to cut at, the kept text cannot be told safe."""
     line = "x" * 8178 + "access_token: " + TOKEN + " "
     line += "".join(f"access_token: {_LONG_TOKEN} " for _ in range(32))
-    salvaged, truncated = _salvage_from(line)
-
-    assert TOKEN not in salvaged
-    assert truncated
+    assert _salvage_from(line) == ""
 
 
 def test_salvage_under_the_budget_is_kept_whole():
-    salvaged, truncated = _salvage_from("sent 1/3\nsent 2/3\n")
+    """Nothing is dropped or cut, so the salvage comes back as printed."""
+    assert _salvage_from("sent 1/3\nsent 2/3\n") == "sent 1/3\nsent 2/3\n"
 
-    assert salvaged == "sent 1/3\nsent 2/3\n"
-    assert not truncated
+
+async def test_a_crashed_cell_with_dropped_salvage_says_it_is_partial(monkeypatch):
+    """A crash reports salvaged stdout like a kill does, so cut output is
+    marked as cut instead of passing for the whole output."""
+    monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
+    pad = LocalScratchpadRuntime(name="crashed-cell", **_DEFAULTS)
+    await pad.start()
+    code = (
+        "import os, time\n"
+        "for i in range(6):\n"
+        "    print(f'line {i}\\n' + 'x' * 8000, flush=True)\n"
+        "    time.sleep(0.4)\n"
+        "os._exit(1)\n"
+    )
+    try:
+        items = [item async for item in pad.execute_streaming(code)]
+    finally:
+        await pad.close()
+
+    cells = [item for item in items if isinstance(item, Cell)]
+    assert len(cells) == 1
+    assert "exited unexpectedly" in cells[0].error.lower()
+    assert cells[0].stdout.startswith("(truncated to most recent output)\n")
 
 
 async def test_another_tool_result_keeps_quoted_placeholders(tmp_path):
