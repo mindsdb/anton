@@ -27,6 +27,7 @@ from anton.core.llm.provider import (
 )
 from anton.core.memory.episodes import EpisodicMemory
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
+from anton.core.tools.tool_defs import ToolDef
 from tests.conftest import make_mock_llm
 
 _DEFAULTS = dict(
@@ -146,3 +147,54 @@ async def test_a_cell_killed_after_printing_a_token_keeps_scrubbed_output(monkey
     assert TOKEN not in cells[0].stdout
     assert "access_token=[REDACTED_TOKEN]" in cells[0].stdout
     assert TOKEN not in pad.cells[-1].stdout
+
+
+async def test_another_tool_result_keeps_quoted_placeholders(tmp_path):
+    """Only scratchpad output gets the token filter; source another tool returns reaches the model as written."""
+    source = 'export const config = { accessToken: "some-placeholder-value" };'
+
+    async def read_source(_session, _input):
+        """Return artifact source the way open_artifact does."""
+        return source
+
+    workspace = MagicMock(base=tmp_path)
+    workspace.artifacts_dir = tmp_path / "artifacts"
+    llm = make_mock_llm()
+    llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="done")
+    )
+    model_inputs: list[str] = []
+
+    def plan_stream(**kwargs):
+        """Ask for the tool once, then finish."""
+        model_inputs.append(repr(kwargs.get("messages")))
+        response = LLMResponse(
+            content="reading",
+            tool_calls=[ToolCall(id="tc_read", name="read_source", input={})],
+            usage=Usage(input_tokens=1, output_tokens=1),
+            stop_reason="tool_use",
+        ) if len(model_inputs) == 1 else LLMResponse(
+            content="done", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
+            stop_reason="end_turn",
+        )
+
+        async def gen():
+            yield StreamComplete(response=response)
+
+        return gen()
+
+    llm.plan_stream = plan_stream
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    session.tool_registry.register_tool(ToolDef(
+        name="read_source", description="read source", input_schema={"type": "object", "properties": {}},
+        handler=read_source,
+    ))
+    try:
+        with patch("anton.analytics.send_event"):
+            async for _event in session.turn_stream("read the source"):
+                pass
+    finally:
+        await session.close()
+
+    assert len(model_inputs) == 2
+    assert 'some-placeholder-value' in model_inputs[1]

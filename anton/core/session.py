@@ -5905,7 +5905,7 @@ class ChatSession:
                         # branch of `_apply_error_tracking` instead of running
                         # the full string-only nudge logic.
                         scrubbed_blocks = [
-                            {**b, "text": scrub_output(b.get("text", ""))}
+                            {**b, "text": scrub_credentials(b.get("text", ""))}
                             if b.get("type") == "text"
                             else b
                             for b in result_text
@@ -5943,7 +5943,9 @@ class ChatSession:
                         )
                         continue
 
-                    result_text = scrub_output(result_text)
+                    # Scratchpad output already got scrub_output when its cell was recorded;
+                    # other tools return source the model may write back, so not here.
+                    result_text = scrub_credentials(result_text)
                     if self._episodic is not None:
                         self._episodic.log_turn(
                             self._turn_count + 1,
