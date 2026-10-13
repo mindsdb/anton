@@ -131,18 +131,26 @@ class _EffortFallbackProvider(LLMProvider):
 
     @property
     def name(self) -> str:
+        """The active provider's id."""
         return self.active.name
 
     @property
     def trace_role(self) -> str | None:
+        """The role the active provider reports in traces."""
         return self.active.trace_role
 
     @trace_role.setter
     def trace_role(self, role: str | None) -> None:
+        """Set the trace role on both providers, so a fallback keeps it."""
         self._selected.trace_role = role
         self._configured.trace_role = role
 
     def _should_fall_back(self, exc: RequestRefusedError) -> bool:
+        """True when ``exc`` refuses the selected effort and no fallback happened yet.
+
+        Side effect: on True, logs once and moves every later call on this
+        provider to the configured effort.
+        """
         if self._fell_back or exc.code != "parameter_refused":
             return False
         logging.getLogger(__name__).warning(
@@ -152,9 +160,11 @@ class _EffortFallbackProvider(LLMProvider):
         return True
 
     def native_web_tools(self) -> set[str]:
+        """The active provider's server-side web tools."""
         return self.active.native_web_tools()
 
     def export_connection_info(self) -> ProviderConnectionInfo:
+        """The active provider's connection details."""
         return self.active.export_connection_info()
 
     async def aclose(self) -> None:
