@@ -66,6 +66,10 @@ class ScratchpadRuntime(ABC):
         self._coding_model = coding_model
         self._coding_api_key = coding_api_key
         self._coding_base_url = coding_base_url
+        # Replayed cells can come from storage written before the scrub. Scrubbed
+        # in place: the manager hands the same list to every pad it creates.
+        if cells is not None:
+            cells[:] = [scrub_cell(c) for c in cells]
         self.cells: list[Cell] = cells if cells is not None else []
         self._workspace_path = workspace_path or Path("~/.anton").expanduser()
         self._installed_packages: set[str] = set()

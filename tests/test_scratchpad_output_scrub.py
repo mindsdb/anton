@@ -111,6 +111,18 @@ async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_pat
     assert any("Bearer [REDACTED_TOKEN]" in m for m in progress)
 
 
+def test_cells_replayed_from_stored_history_are_scrubbed():
+    # A host rebuilds a pad's earlier cells from stored events, which can
+    # predate the scrub; dump and view must not hand them back raw.
+    stored = Cell(code="fetch()", stdout=f'{{"access_token": "{TOKEN}"}}', stderr="", error=None)
+    pad = LocalScratchpadRuntime(name="replayed", cells=[stored], **_DEFAULTS)
+
+    assert TOKEN not in pad.cells[0].stdout
+    assert TOKEN not in pad.render_notebook()
+    assert TOKEN not in pad.view()
+    assert '"access_token": "[REDACTED_TOKEN]"' in pad.cells[0].stdout
+
+
 async def test_a_cell_killed_after_printing_a_token_keeps_scrubbed_output(monkeypatch):
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
