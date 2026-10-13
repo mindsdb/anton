@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 from unittest.mock import patch
 
 import pytest
 
 from anton.core.session import _scrub_user_input
+from anton.tools import SCRUBBED_VALUE_RE
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
     _reset_registered_ds_vars,
     scrub_credentials,
+    scrub_output,
 )
 
 
@@ -128,6 +132,87 @@ class TestScrubProviderKeys:
         result = scrub_credentials("sk-abc connecting to https://api.openai.com/v1")
         assert "sk-abc" in result
         assert "https://api.openai.com/v1" in result
+
+
+def _b64url(payload: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+
+
+# Built at runtime: a realistic token literal trips GitHub push protection.
+FAKE_JWT = ".".join([
+    _b64url({"alg": "HS256", "typ": "JWT"}),
+    _b64url({"sub": "scrub-test", "exp": 0}),
+    "s" * 43,
+])
+OPAQUE_TOKEN = "opq" + "Z9" * 15
+
+
+class TestScrubOutput:
+    """OAuth tokens a cell fetches at runtime must not leave the scratchpad readable."""
+
+    def test_printed_token_response_keeps_keys_and_drops_the_token(self):
+        body = json.dumps({"access_token": OPAQUE_TOKEN, "token_type": "Bearer", "expires_in": 3600})
+        result = scrub_output(body)
+        assert OPAQUE_TOKEN not in result
+        assert '"access_token": "[REDACTED_TOKEN]"' in result
+        assert '"token_type": "Bearer"' in result
+        assert '"expires_in": 3600' in result
+
+    @pytest.mark.parametrize("key", [
+        "access_token", "refresh_token", "id_token", "client_secret",
+        "accessToken", "refreshToken", "clientSecret", "ACCESS_TOKEN",
+    ])
+    def test_every_token_key_form_is_redacted(self, key):
+        result = scrub_output(f"{key}={OPAQUE_TOKEN}")
+        assert result == f"{key}=[REDACTED_TOKEN]"
+
+    def test_python_dict_repr_is_redacted(self):
+        result = scrub_output(str({"refresh_token": OPAQUE_TOKEN}))
+        assert result == "{'refresh_token': '[REDACTED_TOKEN]'}"
+
+    def test_token_inside_escaped_json_is_redacted(self):
+        cell_json = json.dumps({"stdout": json.dumps({"access_token": OPAQUE_TOKEN})})
+        result = scrub_output(cell_json)
+        assert OPAQUE_TOKEN not in result
+        assert '\\"access_token\\": \\"[REDACTED_TOKEN]\\"' in result
+
+    def test_query_string_value_stops_at_the_next_parameter(self):
+        result = scrub_output(f"https://idp.example/cb?access_token={OPAQUE_TOKEN}&scope=read")
+        assert result == "https://idp.example/cb?access_token=[REDACTED_TOKEN]&scope=read"
+
+    @pytest.mark.parametrize("word", ["Bearer", "bearer", "BEARER"])
+    def test_bearer_value_is_redacted_and_the_word_kept(self, word):
+        result = scrub_output(f"Authorization: {word} {OPAQUE_TOKEN}")
+        assert result == f"Authorization: {word} [REDACTED_TOKEN]"
+
+    def test_bare_jwt_is_redacted(self):
+        result = scrub_output(f"token is {FAKE_JWT} now")
+        assert result == "token is [REDACTED_TOKEN] now"
+
+    def test_google_oauth_token_is_redacted(self):
+        token = "ya29." + "a0B1" * 8
+        assert scrub_output(f"got {token}") == "got [REDACTED_TOKEN]"
+
+    @pytest.mark.parametrize("text", [
+        "send a Bearer token in the Authorization header",
+        "access_token=short",
+        '{"access_token": null, "token_type": "Bearer"}',
+        "access_token=[DS_MAESTRO_PROD__TOKEN]",
+        "valid_token=" + OPAQUE_TOKEN,
+    ])
+    def test_prose_short_values_and_markers_are_left_alone(self, text):
+        assert scrub_output(text) == text
+
+    def test_marker_is_one_the_connect_flow_refuses_to_save(self):
+        assert SCRUBBED_VALUE_RE.match("[REDACTED_TOKEN]")
+
+    def test_known_credentials_are_still_scrubbed(self):
+        result = scrub_output("key mdb_AAAAAAAAAA.BBBBBBBBBBBBCCCC")
+        assert "[REDACTED_API_KEY]" in result
+
+    def test_scrub_credentials_leaves_tokens_for_input_paths(self):
+        text = f"client_secret={OPAQUE_TOKEN} and {FAKE_JWT}"
+        assert scrub_credentials(text) == text
 
 
 class TestScrubUserInput:

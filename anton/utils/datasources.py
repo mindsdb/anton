@@ -210,6 +210,24 @@ _SECRET_KEY_PATTERN = re.compile(
     r"|AQ\.[A-Za-z0-9._-]{50}"   # Google authorization key (AI Studio, 2026+)
 )
 
+# OAuth tokens a cell fetches at runtime, so no env var or vault value names
+# them. Output only: user input and published artifacts keep the narrower
+# _SECRET_KEY_PATTERN, because these shapes also match pasted connect
+# credentials and code that handles tokens.
+_TOKEN_SHAPE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"  # JWT
+    r"|ya29\.[A-Za-z0-9_-]{20,}"  # Google OAuth access token
+)
+# A value after `Bearer` or after a token-named key, in JSON, a dict repr,
+# escaped JSON, or key=value form. The key or word stays readable; the
+# 16-character floor leaves prose like "send a Bearer token" alone.
+_TOKEN_VALUE_PATTERN = re.compile(
+    r"((?i:\bbearer)\s+"
+    r"|(?<![A-Za-z0-9])(?i:access_?token|refresh_?token|id_?token|client_?secret)"
+    r"\\?[\"']?\s*[:=]\s*\\?[\"']?)"
+    r"[A-Za-z0-9._~+/=-]{16,}"
+)
+
 
 def _reset_registered_ds_vars() -> None:
     """Drop all DS_* scope, so nothing survives into a turn with no vault."""
@@ -334,6 +352,20 @@ def scrub_credentials(text: str) -> str:
         text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
     text = _SECRET_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     return text
+
+
+def scrub_output(text: str) -> str:
+    """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
+
+    Runs `scrub_credentials`, then redacts OAuth tokens that no configured
+    value names: JWTs, Google `ya29.` tokens, `Bearer` values, and the values
+    of access/refresh/id token and client secret keys. Use it on output only;
+    inbound user text keeps `scrub_credentials` so pasted connect
+    credentials still reach the vault.
+    """
+    text = scrub_credentials(text)
+    text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
+    return _TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
 
 
 def unscrub_marker(vault: "DataVault", marker: str) -> str | None:
