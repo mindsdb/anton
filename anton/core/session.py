@@ -397,7 +397,13 @@ class _VerifierVerdict(BaseModel):
             "connect, or authorise something the assistant needs (a file, a "
             "link, a Drive connection, credentials), or to make a decision — "
             "even after a single failed attempt. Asking is a valid stop, never a "
-            "premature one.\n"
+            "premature one. "
+            # Asking leave to read data it already had ended a third of one
+            # deployment's evaluation turns without an answer.
+            "The one exception is asking permission for a read-only step the "
+            "assistant can already take itself (reading, searching or analysing "
+            "project files, attachments or connected data it has access to): "
+            "nothing there needs the user, so that stop is INCOMPLETE.\n"
             "- INCOMPLETE: the assistant stopped partway through the requested task "
             "WITHOUT asking the user anything, and could keep going on its own — "
             "including when it implied success but the data its answer actually "
@@ -841,6 +847,13 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+
+# Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
+_NO_GUESS_AT_LIMIT = (
+    "Report only what your tool results actually showed. If you have not found the "
+    "answer, say plainly that you could not find it; do not estimate, extrapolate or "
+    "state a figure you did not retrieve."
+)
 
 
 def _safe_error_detail(exc: BaseException) -> str:
@@ -4237,6 +4250,7 @@ class ChatSession:
             "work, so the user can decide whether it is worth continuing. "
             "If you are on a good track and can finish, say so and ask if they'd "
             "like you to continue. "
+            f"{_NO_GUESS_AT_LIMIT} "
             "Do NOT retry automatically — wait for the user's response. "
             + _limit_handback_clause(self._limit_reached("spend_ceiling"))
             + _HANDBACK_NOT_USER_CLAUSE
@@ -5708,6 +5722,7 @@ class ChatSession:
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
+                                f"{_NO_GUESS_AT_LIMIT} "
                                 "Do NOT retry automatically — wait for the user's response. "
                                 + _limit_handback_clause(self._limit_reached("round_cap"))
                                 + _HANDBACK_NOT_USER_CLAUSE
