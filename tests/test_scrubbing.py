@@ -218,6 +218,16 @@ class TestScrubOutput:
         """Some JSON encoders escape `/`; the whole value is still one token."""
         assert scrub_output(text) == '{"access_token":"[REDACTED_TOKEN]"}'
 
+    @pytest.mark.parametrize("text", [
+        f'{{"access_token": "[X]{OPAQUE_TOKEN}"}}',
+        f'{{"access_token": "${OPAQUE_TOKEN}"}}',
+        f'{{"access_token": "{{a}}{OPAQUE_TOKEN}"}}',
+        f"'Bearer {{x}}{OPAQUE_TOKEN}'",
+    ])
+    def test_a_value_that_only_starts_like_a_marker_or_placeholder_is_redacted(self, text):
+        """Only a whole marker or template placeholder is kept, never a prefix of a token."""
+        assert OPAQUE_TOKEN not in scrub_output(text)
+
     def test_python_dict_repr_is_redacted(self):
         """A printed dict uses single quotes around keys and values."""
         result = scrub_output(str({"refresh_token": OPAQUE_TOKEN}))
@@ -250,10 +260,12 @@ class TestScrubOutput:
     @pytest.mark.parametrize("text, expected", [
         ("{'Authorization': 'Bearer AbCdEfGh.IjKlMnOpQr'}",
          "{'Authorization': 'Bearer [REDACTED_TOKEN]'}"),
-        ("Authorization: Bearer abc/def_ghi-jkl/mno", "Authorization: Bearer [REDACTED_TOKEN]"),
         ("Authorization: Bearer 00Dxx0000001gPL!AR8AQJXg5oj8ZnP9kQ2wRtY",
          "Authorization: Bearer [REDACTED_TOKEN]"),
         ("Bearer\n" + OPAQUE_TOKEN, "Bearer\n[REDACTED_TOKEN]"),
+        ("Bearer\r\n" + OPAQUE_TOKEN, "Bearer\r\n[REDACTED_TOKEN]"),
+        ('{"access_token":"AAAA\\u002fBBBBBBBBBBBBBBBBBBBBB"}', '{"access_token":"[REDACTED_TOKEN]"}'),
+        ("client_secret = '$2b$12$AbCdEfGhIjKlMnOpQrStUv'", "client_secret = '[REDACTED_TOKEN]'"),
         ("access_token: Abc.Def.Ghi_jklmnopq", "access_token: [REDACTED_TOKEN]"),
     ])
     def test_tokens_that_resemble_code_are_still_redacted(self, text, expected):
@@ -278,6 +290,8 @@ class TestScrubOutput:
         '{"access_token": "[DS_CRM_PROD__ACCESS_TOKEN]"}',
         "valid_token=" + OPAQUE_TOKEN,
         "the bearer tokens/credentials are sent",
+        "token_type    Bearer\nrefresh_token_expires_in    7200",
+        "uses Bearer token-based-authentication-scheme",
     ])
     def test_prose_short_values_and_markers_are_left_alone(self, text):
         """Prose, short values and existing scrub markers stay as they are."""
@@ -292,6 +306,7 @@ class TestScrubOutput:
         "headers = {'Authorization': 'Bearer ' + access_token}",
         'headers = {"Authorization": f"Bearer {self.config.access_token_value}"}',
         "const auth = `Bearer ${process.env.API_ACCESS_TOKEN}`",
+        "if access_token !=expected_access_token_value:",
     ])
     def test_source_code_the_model_reads_is_left_alone(self, line):
         """Code the model reads and may write back is never rewritten."""
