@@ -209,6 +209,7 @@ def test_a_shared_replay_list_stays_correct_across_pads():
     after_first = list(shared)
     second = LocalScratchpadRuntime(name="second", cells=shared, **_DEFAULTS)
 
+    assert first.cells is shared and second.cells is shared
     assert shared == after_first
     assert shared[0].stdout == '{"access_token": "[REDACTED_TOKEN]"}'
     assert shared[0].code == "fetch()"

@@ -331,7 +331,7 @@ async def launch_artifact_backend(
         if proc.returncode is not None:
             tail = ""
             try:
-                tail = scrub_output(log_path.read_text(errors="replace")[-2000:])
+                tail = scrub_output(log_path.read_text(errors="replace"))[-2000:]
             except OSError:
                 pass
             return (
@@ -377,7 +377,7 @@ async def launch_artifact_backend(
             pass
         tail = ""
         try:
-            tail = scrub_output(log_path.read_text(errors="replace")[-2000:])
+            tail = scrub_output(log_path.read_text(errors="replace"))[-2000:]
         except OSError:
             pass
         return (
