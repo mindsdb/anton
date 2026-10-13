@@ -325,6 +325,10 @@ OAuth2 is not offered here: finishing it in the scratchpad would print the
 tokens, and scratchpad output redacts them. If the user asks for OAuth2, use the
 Private App token instead.
 
+A HubSpot connection saved earlier with OAuth2 has no way to refresh its token
+and stops working once the token expires. When one fails to authenticate, tell
+the user, and reconnect it with a Private App token.
+
 ---
 
 ## Oracle Database
