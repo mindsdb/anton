@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+from anton.utils.datasources import scrub_output
 
 
 _log = logging.getLogger(__name__)
@@ -330,7 +331,7 @@ async def launch_artifact_backend(
         if proc.returncode is not None:
             tail = ""
             try:
-                tail = log_path.read_text(errors="replace")[-2000:]
+                tail = scrub_output(log_path.read_text(errors="replace")[-2000:])
             except OSError:
                 pass
             return (
@@ -376,7 +377,7 @@ async def launch_artifact_backend(
             pass
         tail = ""
         try:
-            tail = log_path.read_text(errors="replace")[-2000:]
+            tail = scrub_output(log_path.read_text(errors="replace")[-2000:])
         except OSError:
             pass
         return (
