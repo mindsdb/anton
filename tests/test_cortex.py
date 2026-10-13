@@ -506,6 +506,17 @@ class TestRuleRetrievalObservability:
         assert out == rules
         assert _one_event(captured_events)["outcome"] == "timeout"
 
+    async def test_a_provider_timeout_before_the_deadline_is_an_error(self, cortex, captured_events):
+        class _ProviderTimeout:
+            async def code(self, **kwargs):
+                raise TimeoutError("read timed out")
+
+        rules = _when_engrams(12)
+        cortex._llm = _ProviderTimeout()
+        out = await cortex._retrieve_relevant_rules(rules, "do the august campaign")
+        assert out == rules
+        assert _one_event(captured_events)["outcome"] == "error"
+
     async def test_both_scopes_time_out_together(self, dirs, captured_events, monkeypatch):
         """Prompt assembly waits for one deadline, not one per memory scope."""
         import anton.core.memory.cortex as cortex_mod

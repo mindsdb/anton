@@ -429,7 +429,9 @@ answer {"keep": []}. Do not repeat the rule text.
                 outcome, kept = "filtered", len(filtered_when)
         except TimeoutError:
             filtered_when = when_engrams
-            outcome = "timeout"
+            # A provider's own timeout is an error, not a deadline hit.
+            reached = time.monotonic() - started >= _RULE_RETRIEVAL_TIMEOUT_SECONDS
+            outcome = "timeout" if reached else "error"
         except asyncio.CancelledError:
             # A user pressing STOP, or an abandoned SSE stream, cancels the turn
             # mid-call. `CancelledError` is a BaseException, so `except Exception`
