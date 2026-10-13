@@ -19,6 +19,7 @@ from anton.core.llm.structured import (
     generate_with_truncation_retry,
     no_preamble_instruction,
 )
+from anton.utils.datasources import scrub_output
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -397,6 +398,10 @@ async def import_v0_1(
             return session
 
     raw_history = payload.get("session", {}).get("conversation_history", [])
+    # An export can predate the scrub; tool_call content is the model's own code.
+    for ep_data in raw_history:
+        if ep_data.get("role") != "tool_call" and isinstance(ep_data.get("content"), str):
+            ep_data["content"] = scrub_output(ep_data["content"])
 
     # fill episodic from export
     if episodic and episodic.enabled:
