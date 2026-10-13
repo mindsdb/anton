@@ -749,7 +749,6 @@ class LLMClient:
 
     @classmethod
     def from_settings(cls, settings: AntonSettings) -> LLMClient:
-        """Build the client the settings describe, one provider per role."""
         from .openai import OpenAIProvider
 
         def build_anthropic(effort: str | None) -> LLMProvider:
