@@ -20,6 +20,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from anton.utils.datasources import scrub_output
+
 _RUNNER_SCRIPT = Path(__file__).with_name("_html_lint_runner.js")
 # Public: callers that treat `None` from `lint_html` as "could not check"
 # read these to say WHY in their own diagnostics (generate_artifact's
@@ -141,10 +143,10 @@ def _findings_from_result(result: dict) -> list[HtmlFinding]:
         message = err.get("message", "")
         line = err.get("line")
         detail = f"{message} (line {line})" if line else message
-        findings.append(HtmlFinding(kind="console_error", detail=detail))
+        findings.append(HtmlFinding(kind="console_error", detail=scrub_output(detail)))
     for req in result.get("failedRequests") or []:
         detail = f"{req.get('url', '?')} — {req.get('error', 'unknown error')}"
-        findings.append(HtmlFinding(kind="failed_request", detail=detail))
+        findings.append(HtmlFinding(kind="failed_request", detail=scrub_output(detail)))
     if result.get("crashed"):
         findings.append(
             HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page")
