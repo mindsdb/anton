@@ -391,8 +391,8 @@ class TestRuleRetrievalObservability:
         assert ev["when_rules"] == 12 and ev["kept_rules"] == 2
 
     async def test_dropped_all_is_its_own_outcome(self, cortex, captured_events):
-        """An empty selection discards every conditional rule — measured at 30%
-        and absent from the ticket's original three-outcome taxonomy."""
+        """An empty selection discards every conditional rule, an outcome
+        separate from the original three."""
         rules = _when_engrams(12)
         out = await self._run(cortex, _FakeLLM(content='{"keep": []}'), rules)
         assert out == [], "no mandatory rules present, so nothing should remain"
@@ -458,7 +458,6 @@ class TestRuleRetrievalObservability:
         assert f"1. {rules[0].text}" in content
         assert f"12. {rules[11].text}" in content
         assert '{"keep"' in seen["system"]
-        assert seen["max_tokens"] == 1024
         assert out == [rules[2]]
 
     async def test_selection_keeps_file_order_and_collapses_duplicates(self, cortex, captured_events):

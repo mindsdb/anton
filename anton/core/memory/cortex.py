@@ -423,7 +423,7 @@ answer {"keep": []}. Do not repeat the rule text.
                 outcome, filtered_when = "kept_all_no_match", when_engrams
             elif not selection:
                 # The opposite of the permissive fallback: EVERY conditional rule
-                # is discarded, which was ~30% of calls.
+                # is discarded.
                 outcome, kept, early = "dropped_all", 0, mandatory
             else:
                 # Original engrams in file order; model text never becomes a rule.
@@ -452,8 +452,8 @@ answer {"keep": []}. Do not repeat the rule text.
                 when_rules=len(when_engrams),
                 kept_rules=kept,
                 rules_chars=len(when_text),
-                # Separates a selection rejected for hitting the output cap from
-                # one rejected as malformed; both report `kept_all_no_match`.
+                # A cap hit can still report "stop", so `stop_reason` and
+                # `output_tokens` together separate it from a malformed selection.
                 stop_reason=stop_reason,
                 input_tokens=getattr(usage, "input_tokens", 0) or 0,
                 output_tokens=getattr(usage, "output_tokens", 0) or 0,
