@@ -773,6 +773,10 @@ def build_cloud_chat_session(
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
+    # Planning only: the router shares the coding provider, so changing coding
+    # effort would also change history summarization.
+    if request.reasoning_effort:
+        settings.planning_reasoning_effort = request.reasoning_effort
     # Mounted (_SKILLS_ROOT_ENV set): the organization's own live skills tree,
     # owned by cowork-server, read directly. Unmounted (desktop, CI): the
     # request's skills are staged outside the workspace instead, since that PVC
@@ -796,11 +800,7 @@ def build_cloud_chat_session(
     # No apply_env_to_process(): loading workspace .env into the process env
     # would expose tenant secrets to cell code.
 
-    # Planning only: the router shares the coding provider, so changing coding
-    # effort would also change history summarization.
-    llm_client = LLMClient.from_settings(
-        settings, planning_effort_override=request.reasoning_effort
-    )
+    llm_client = LLMClient.from_settings(settings)
 
     cortex = _build_cortex(request.memory, llm_client)
 

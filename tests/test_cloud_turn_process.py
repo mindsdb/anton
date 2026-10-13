@@ -161,7 +161,7 @@ async def _real_cloud_session(tmp_path, monkeypatch):
 
     monkeypatch.setenv("ANTON_CLOUD_WORKSPACE_PATH", str(tmp_path))
 
-    def _mk(cls, settings, **_kw):
+    def _mk(cls, settings):
         llm = AsyncMock()
         llm.coding_provider = MagicMock()
         llm.coding_provider.export_connection_info = MagicMock(

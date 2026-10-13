@@ -61,7 +61,7 @@ def _install_fake_model() -> None:
         def export_connection_info(self):
             return ProviderConnectionInfo(provider="fake", api_key="fake")
 
-    def _fake_from_settings(cls, settings, **_kw):
+    def _fake_from_settings(cls, settings):
         prov = _FakeProvider()
         return LLMClient(
             planning_provider=prov, planning_model="fake-model",

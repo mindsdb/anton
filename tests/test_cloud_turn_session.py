@@ -51,7 +51,7 @@ def _build(tmp_path, monkeypatch, elicitor=None, **req_overrides):
     monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session)
     monkeypatch.setattr(
         llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings, **_kw: object()),
+        classmethod(lambda cls, settings: object()),
     )
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
 
@@ -567,7 +567,7 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
     monkeypatch.setattr(
         llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings, **_kw: _mock_llm()),
+        classmethod(lambda cls, settings: _mock_llm()),
     )
     body = dict(protocol_version=1, conversation_id="conv_1", input="hi")
     body.update(req_overrides)
@@ -644,7 +644,7 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
     monkeypatch.setattr(
         llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings, **_kw: _mock_llm()),
+        classmethod(lambda cls, settings: _mock_llm()),
     )
     req = TurnRequestV1(protocol_version=1, conversation_id="c", input="hi")
     session = build_cloud_chat_session(req)  # REAL ChatSession
@@ -773,7 +773,7 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
     monkeypatch.setattr(
         llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings, **_kw: _mock_llm()),
+        classmethod(lambda cls, settings: _mock_llm()),
     )
     body = dict(protocol_version=1, conversation_id="c", input="hi")
     body.update(req_overrides)
@@ -1271,8 +1271,8 @@ def _build_real_client(tmp_path, monkeypatch, **req_overrides):
     captured: dict = {}
     real_from_settings = llm_client_mod.LLMClient.from_settings.__func__
 
-    def capture(cls, settings, **kwargs):
-        captured["client"] = real_from_settings(cls, settings, **kwargs)
+    def capture(cls, settings):
+        captured["client"] = real_from_settings(cls, settings)
         return captured["client"]
 
     monkeypatch.setattr(session_mod, "ChatSession", lambda config: _FakeSession())
@@ -1286,7 +1286,6 @@ def _build_real_client(tmp_path, monkeypatch, **req_overrides):
 
 def _request_reasoning(provider):
     """The reasoning block the provider would put on its next real request, or None."""
-    provider = getattr(provider, "active", provider)
     kwargs = provider._build_responses_kwargs(
         model="m", system="s", messages=[{"role": "user", "content": "hi"}],
         tools=None, tool_choice=None, max_tokens=100, native_web_tools=None,
@@ -1482,7 +1481,7 @@ def test_mcp_sessions_are_closed_if_chat_session_construction_fails(tmp_path, mo
     monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session_raises)
     monkeypatch.setattr(
         llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings, **_kw: object()),
+        classmethod(lambda cls, settings: object()),
     )
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
 
@@ -1507,7 +1506,7 @@ def test_no_mcp_sessions_means_no_cleanup_call_on_construction_failure(tmp_path,
     monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session_raises)
     monkeypatch.setattr(
         llm_client_mod.LLMClient, "from_settings",
-        classmethod(lambda cls, settings, **_kw: object()),
+        classmethod(lambda cls, settings: object()),
     )
     monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
 

@@ -12,8 +12,6 @@ from .provider import (
     LLMResponse,
     ModelCallTimeoutError,
     ProviderAuthError,
-    ProviderConnectionInfo,
-    RequestRefusedError,
     StreamComplete,
     StreamEvent,
 )
@@ -108,96 +106,6 @@ def _resolve_openai_compatible_flavor(settings: AntonSettings) -> str:
     if minds and base in (minds, f"{minds}/v1", f"{minds}/api/v1"):
         return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
     return OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
-
-
-class _EffortFallbackProvider(LLMProvider):
-    """Planning provider for an effort the request picked, not the configuration.
-
-    If the provider refuses that effort, the request switches to the same
-    provider at the configured effort and is sent once more; every later call
-    stays on the configured one. A refusal after a stream has produced events
-    is raised as is, since resending would repeat output.
-    """
-
-    def __init__(self, *, selected: LLMProvider, configured: LLMProvider) -> None:
-        self._selected = selected
-        self._configured = configured
-        self._fell_back = False
-
-    @property
-    def active(self) -> LLMProvider:
-        """The provider the next call goes to."""
-        return self._configured if self._fell_back else self._selected
-
-    @property
-    def name(self) -> str:
-        """The active provider's id."""
-        return self.active.name
-
-    @property
-    def trace_role(self) -> str | None:
-        """The role the active provider reports in traces."""
-        return self.active.trace_role
-
-    @trace_role.setter
-    def trace_role(self, role: str | None) -> None:
-        """Set the trace role on both providers, so a fallback keeps it."""
-        self._selected.trace_role = role
-        self._configured.trace_role = role
-
-    def _should_fall_back(self, exc: RequestRefusedError) -> bool:
-        """True when ``exc`` refuses the selected effort and no fallback happened yet.
-
-        Side effect: on True, logs once and moves every later call on this
-        provider to the configured effort.
-        """
-        if self._fell_back or exc.code != "parameter_refused":
-            return False
-        logging.getLogger(__name__).warning(
-            "planning provider refused the selected reasoning effort; using the configured one"
-        )
-        self._fell_back = True
-        return True
-
-    def native_web_tools(self) -> set[str]:
-        """The active provider's server-side web tools."""
-        return self.active.native_web_tools()
-
-    def export_connection_info(self) -> ProviderConnectionInfo:
-        """The active provider's connection details."""
-        return self.active.export_connection_info()
-
-    async def aclose(self) -> None:
-        """Close both providers' transports."""
-        try:
-            await self._selected.aclose()
-        finally:
-            await self._configured.aclose()
-
-    async def complete(self, **kwargs) -> LLMResponse:
-        """``complete`` on the active provider, resent once on a refused effort."""
-        provider = self.active
-        try:
-            return await provider.complete(**kwargs)
-        except RequestRefusedError as exc:
-            if provider is not self._selected or not self._should_fall_back(exc):
-                raise
-        return await self._configured.complete(**kwargs)
-
-    async def stream(self, **kwargs) -> AsyncIterator[StreamEvent]:
-        """``stream`` on the active provider, resent once on a refused effort."""
-        provider = self.active
-        started = False
-        try:
-            async for event in provider.stream(**kwargs):
-                started = True
-                yield event
-            return
-        except RequestRefusedError as exc:
-            if started or provider is not self._selected or not self._should_fall_back(exc):
-                raise
-        async for event in self._configured.stream(**kwargs):
-            yield event
 
 
 class LLMClient:
@@ -840,15 +748,8 @@ class LLMClient:
         )
 
     @classmethod
-    def from_settings(
-        cls, settings: AntonSettings, *, planning_effort_override: str | None = None
-    ) -> LLMClient:
-        """Build the client the settings describe.
-
-        ``planning_effort_override`` is an effort picked for this turn rather
-        than configured. The planning provider uses it, and falls back to the
-        configured planning effort if the provider refuses it.
-        """
+    def from_settings(cls, settings: AntonSettings) -> LLMClient:
+        """Build the client the settings describe, one provider per role."""
         from .openai import OpenAIProvider
 
         def build_anthropic(effort: str | None) -> LLMProvider:
@@ -916,15 +817,10 @@ class LLMClient:
                 raise ValueError(f"Unknown router provider: {router_provider_name}")
             router_provider = router_factory(None)
 
-        configured_effort = getattr(settings, "planning_reasoning_effort", None)
-        planning_provider = planning_factory(configured_effort)
-        if planning_effort_override and planning_effort_override != configured_effort:
-            planning_provider = _EffortFallbackProvider(
-                selected=planning_factory(planning_effort_override),
-                configured=planning_provider,
-            )
         return cls(
-            planning_provider=planning_provider,
+            planning_provider=planning_factory(
+                getattr(settings, "planning_reasoning_effort", None)
+            ),
             planning_model=settings.planning_model,
             coding_provider=coding_factory(
                 getattr(settings, "coding_reasoning_effort", None)
