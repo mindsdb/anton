@@ -148,6 +148,20 @@ class TestUserLabelInPrompt:
         ]
         assert sorted(labels) == ["mysql", "postgres", "postgres 2", "postgres 3"]
 
+    def test_a_newer_unnamed_connection_takes_the_suffix(self, tmp_path):
+        # The newcomer sorts first by name; the older connection keeps its label.
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "d4e5f6", {"host": "a.example.com"})
+        v.save("postgres", "a1b2c3", {"host": "b.example.com"})
+        for name, created_at in (("d4e5f6", "2026-01-01T00:00:00"), ("a1b2c3", "2026-02-01T00:00:00")):
+            record = next(tmp_path.glob(f"*{name}*"))
+            data = json.loads(record.read_text())
+            data["created_at"] = created_at
+            record.write_text(json.dumps(data))
+        ctx = build_datasource_context(v)
+        assert "### Slug: `postgres-d4e5f6` — Label: postgres\n" in ctx
+        assert "### Slug: `postgres-a1b2c3` — Label: postgres 2\n" in ctx
+
     def test_a_filtered_out_connection_does_not_claim_a_label(self, tmp_path):
         v = LocalDataVault(tmp_path)
         v.save("postgres", "a1b2c3", {"host": "a.example.com"})

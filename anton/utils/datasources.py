@@ -532,6 +532,9 @@ def collect_datasource_catalog(
 
     `slugs`, when given, leaves every other connection out before its record
     is read: a remote vault fetches each record over the network.
+
+    An unnamed connection's block shows its engine as the label, suffixed to
+    stay unique within the returned catalog; its `label` field stays "".
     """
     _reject_bare_string(slugs)
     try:
@@ -568,6 +571,7 @@ def collect_datasource_catalog(
     engine_names: dict[str, str] = {}
     notes: dict[str, str] = {}
     connections: list[CatalogConnection] = []
+    created_at: list[str] = []
     for c in conns:
         engine = c["engine"]
         slug = f"{engine}-{c['name']}"
@@ -627,6 +631,7 @@ def collect_datasource_catalog(
             fields.get("auth_type") == "oauth"
             or bool(_parse_picked_files(fields.get("_picked_files")))
         )
+        created_at.append(str(c.get("created_at") or ""))
         connections.append(
             CatalogConnection(
                 slug=slug,
@@ -637,21 +642,25 @@ def collect_datasource_catalog(
                 footer=_GOOGLE_DRIVE_PARAGRAPH if google_drive_access else "",
             )
         )
-    # An unnamed connection shows its engine, not "(none)": evals found the
-    # bare "(none)" made the model likelier to estimate figures it lacks.
-    # Suffixed like ensure_unique_user_label, but only against rendered
-    # connections: `slugs` must not trigger reads of records it leaves out.
-    taken = {conn.label for conn in connections if conn.label}
-    for i, conn in enumerate(connections):
-        label = conn.label
-        if not label:
-            base = conn.engine or conn.slug
-            label, n = base, 2
-            while label in taken:
-                label, n = f"{base} {n}", n + 1
-            taken.add(label)
-        header = f"\n### Slug: `{conn.slug}` — Label: {label}"
-        connections[i] = replace(conn, block=f"{header}\n{conn.block}")
+    # An unnamed connection shows its engine, not "(none)", since "(none)" made
+    # the model estimate figures it lacked. The suffix rule matches
+    # ensure_unique_user_label, against rendered connections only, because
+    # `slugs` must not trigger reads of records it leaves out. Oldest first,
+    # so adding a connection never renames one the model already knows.
+    labels = [conn.label for conn in connections]
+    taken = {label for label in labels if label}
+    unnamed = [i for i, label in enumerate(labels) if not label]
+    for i in sorted(unnamed, key=lambda i: (created_at[i], connections[i].slug)):
+        base = connections[i].engine or connections[i].slug
+        label, n = base, 2
+        while label in taken:
+            label, n = f"{base} {n}", n + 1
+        taken.add(label)
+        labels[i] = label
+    connections = [
+        replace(conn, block=f"\n### Slug: `{conn.slug}` — Label: {label}\n{conn.block}")
+        for conn, label in zip(connections, labels)
+    ]
     return DatasourceCatalog(connections=tuple(connections), notes=notes)
 
 
