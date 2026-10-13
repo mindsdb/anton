@@ -40,20 +40,39 @@ _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 # one would have.
 _SALVAGE_MAX = 10_000
 
-# Raw salvage kept for the scrub. Whole chunks are dropped only past this, so a
-# dropped key is too far back to belong to a token in the kept tail.
+# Raw salvage kept for the scrub, past which the oldest whole chunks are dropped.
 _SALVAGE_RAW_MAX = 4 * _SALVAGE_MAX
 
 
-def _salvage_tail(chunks: list[str]) -> tuple[str, bool]:
+def _add_salvage_chunk(chunks: list[str], chunk: str) -> bool:
+    """Append a salvaged stdout chunk, dropping the oldest past `_SALVAGE_RAW_MAX`.
+
+    Mutates `chunks` in place. Returns whether any chunk was dropped.
+    """
+    chunks.append(chunk)
+    total = sum(len(c) for c in chunks)
+    dropped = False
+    while total > _SALVAGE_RAW_MAX and len(chunks) > 1:
+        total -= len(chunks.pop(0))
+        dropped = True
+    return dropped
+
+
+def _salvage_tail(chunks: list[str], dropped: bool) -> tuple[str, bool]:
     """Join salvaged stdout chunks, scrub them, then keep the last `_SALVAGE_MAX` characters.
 
-    Chunks split wherever a heartbeat fell, and the scrub matches a key across a
-    line break, so only scrubbed text is safe to cut. Returns the text and
-    whether it was cut.
+    Chunks split wherever a heartbeat fell, so after a drop the kept text can
+    start with a token whose key was dropped, and the scrub matches a key on
+    the line before its value. Everything up to the second line start goes
+    before the scrub. Returns the text and whether it is partial.
     """
-    scrubbed = scrub_output("".join(chunks))
-    return scrubbed[-_SALVAGE_MAX:], len(scrubbed) > _SALVAGE_MAX
+    raw = "".join(chunks)
+    if dropped:
+        first = raw.find("\n")
+        second = raw.find("\n", first + 1) if first != -1 else -1
+        raw = raw[second + 1 :] if second != -1 else ""
+    scrubbed = scrub_output(raw)
+    return scrubbed[-_SALVAGE_MAX:], dropped or len(scrubbed) > _SALVAGE_MAX
 
 
 # The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
@@ -1054,6 +1073,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # Fresh salvage state per cell: _read_result accumulates the worker's
         # stdout chunks here so a kill/crash can still report partial output.
         self._salvage: list[str] = []
+        self._salvage_dropped = False
 
         payload = code + "\n" + CELL_DELIM + "\n"
         trace = get_trace_context()
@@ -1100,7 +1120,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # A cancellation carries no message; name it so the error still
             # leads with its cause like every other kill.
             error_msg = f"{str(exc) or 'Cancelled'}. {state_note}"
-            salvaged, truncated = _salvage_tail(self._salvage)
+            salvaged, truncated = _salvage_tail(self._salvage, self._salvage_dropped)
             if salvaged:
                 if truncated:
                     salvaged = "(truncated to most recent output)\n" + salvaged
@@ -1285,7 +1305,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # Crash/EOF: attach whatever stdout chunks were salvaged —
                 # the process died with side effects possibly already done.
                 yield {
-                    "stdout": _salvage_tail(self._salvage)[0],
+                    "stdout": _salvage_tail(self._salvage, self._salvage_dropped)[0],
                     "stderr": "",
                     "error": (
                         f"Process exited unexpectedly while auto-installing "
@@ -1335,10 +1355,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     chunk = ""
                 if isinstance(chunk, str) and chunk:
                     last_output = elapsed
-                    self._salvage.append(chunk)
-                    total = sum(len(c) for c in self._salvage)
-                    while total > _SALVAGE_RAW_MAX and len(self._salvage) > 1:
-                        total -= len(self._salvage.pop(0))
+                    if _add_salvage_chunk(self._salvage, chunk):
+                        self._salvage_dropped = True
                 continue
 
             if line.startswith(PROGRESS_MARKER):
