@@ -432,6 +432,22 @@ class TestRuleRetrievalObservability:
         assert len(out) == 12, "the permissive fallback must still apply"
         assert _one_event(captured_events)["outcome"] == "error"
 
+    async def test_a_selection_at_the_output_cap_keeps_every_rule_even_on_stop(self, cortex, captured_events):
+        """A gateway may report "stop" at the cap, so the token count alone rejects it."""
+
+        class _AtTheCap:
+            async def code(self, **kwargs):
+                return LLMResponse(
+                    content='{"keep": [1, 2]}',
+                    usage=Usage(output_tokens=cortex_mod._RULE_RETRIEVAL_MAX_TOKENS),
+                    stop_reason="stop",
+                )
+
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _AtTheCap(), rules)
+        assert out == rules
+        assert _one_event(captured_events)["outcome"] == "kept_all_no_match"
+
     async def test_truncated_selection_keeps_every_rule(self, cortex, captured_events):
         """A selection cut at the ceiling may be missing rules even when what
         arrived parses, so it is rejected whole rather than trusted."""
