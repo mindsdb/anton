@@ -14,12 +14,7 @@ from anton.core.tools.tool_handlers import (
     handle_update_artifact_metadata,
 )
 from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
-from anton.core.tools.text_file import (
-    DEFAULT_LINE_COUNT,
-    MAX_FILE_BYTES,
-    MAX_LINE_CHARS,
-    MAX_OUTPUT_CHARS,
-)
+from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
@@ -318,17 +313,11 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
 LIST_ARTIFACTS_TOOL = ToolDef(
     name="list_artifacts",
     description=(
-        "List the artifacts in this workspace, newest first, grouped by "
-        "artifacts root. An artifact's folder is `<root>/<slug>`; `primary` and "
-        "the paths under `files` and `service_files` are relative to that folder.\n\n"
-        "Without `match` you get a summary of each artifact: name, type, "
-        "updatedAt, description, primary. That is enough to pick one and read "
-        "its primary file with `read_text_file`. Pass `match` with slugs or ids "
-        "to get the full record, including id, files and service_files. "
-        "`fields` replaces the default set of fields; `slug` is always included.\n\n"
-        "Service files (metadata.json, README.md, prd.md, spec.md, backend.log, "
-        "…) are not part of what was built. Files whose name starts with a dot "
-        "are not listed."
+        "List the artifacts in this workspace, newest first. An artifact's folder "
+        "is `<root>/<slug>`, and paths in the result are relative to it. Without "
+        "`match` you get a summary (name, type, updatedAt, description, primary); "
+        "with `match` the full record, including id, files and service_files "
+        "(housekeeping and generation files, not what was built)."
     ),
     input_schema={
         "type": "object",
@@ -336,28 +325,12 @@ LIST_ARTIFACTS_TOOL = ToolDef(
             "fields": {
                 "type": "array",
                 "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
-                "description": (
-                    "Fields to return for each artifact; `slug` is always included.\n"
-                    "- id: the artifact's stable id (32 hex)\n"
-                    "- name, description: human-readable name and summary\n"
-                    "- type: html-app, document, dataset, image, mixed, "
-                    "fullstack-stateless-app, fullstack-stateful-app\n"
-                    "- updatedAt: last change, ISO 8601\n"
-                    "- primary: entry file, relative to the artifact folder\n"
-                    "- files: the artifact's own files with sizes\n"
-                    "- service_files: housekeeping and generation files "
-                    "(metadata.json, README.md, prd.md, spec.md, backend.log, ...)\n"
-                    "Default without `match`: name, type, updatedAt, description, "
-                    "primary. Default with `match`: all fields."
-                ),
+                "description": "Fields to return instead of the default set; `slug` is always included.",
             },
             "match": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": (
-                    "Return only artifacts whose slug or id equals one of these "
-                    "values. Default: all artifacts."
-                ),
+                "description": "Slugs or ids of the artifacts to return. Default: all.",
             },
         },
     },
@@ -641,50 +614,32 @@ READ_IMAGE_TOOL = ToolDef(
 READ_TEXT_FILE_TOOL = ToolDef(
     name="read_text_file",
     description=(
-        "Read a text file. Use it to read artifact sources, project files and "
-        "conversation attachments, for example before you change them. Use the "
-        "scratchpad to analyse data and to write files. Only files in the "
-        "project, the artifacts and the conversation's attachments can be read; "
-        "dot-files and files in dot-directories are refused.\n\n"
-        "`path` is absolute, or relative to the project root. `start_line` and "
-        "`end_line` start at 1 and are inclusive; a negative value counts from "
-        f"the end, so -1 is the last line. Without them you get the first {DEFAULT_LINE_COUNT} "
-        "lines. Pass `end_line=-1` to read to the end of the file. One call "
-        f"returns at most {MAX_OUTPUT_CHARS:,} characters, and the header line says where to "
-        f"continue. Files over {MAX_FILE_BYTES // (1024 * 1024)} MB are refused.\n\n"
-        "The first line of the result is a header with the path and the range "
-        "of lines returned; the file's text starts on the next line. Pass "
-        "`line_numbers=true` to get each line's number, for example to pick a "
-        "range for the next call; the number and the tab after it are not part "
-        "of the file. If the lines you asked for do not fit into one call, a line "
-        f"longer than {MAX_LINE_CHARS:,} characters is shortened to its "
-        f"first and last {MAX_LINE_CHARS // 2:,} characters with a mark in between. Binary and "
-        "non-UTF-8 files are refused; read those in the scratchpad."
+        "Read a text file: an artifact's source, a project file or a conversation "
+        "attachment. Files elsewhere, dot-files, and binary or non-UTF-8 files are "
+        "refused.\n\n"
+        f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
+        f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
+        "characters. The first line of the result is a header naming the lines "
+        "returned and where to continue; the file's text starts on the next line."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Absolute path, or a path relative to the project root.",
+                "description": "Absolute, or relative to the project root.",
             },
             "start_line": {
                 "type": "integer",
-                "description": (
-                    "First line to return, starting at 1. A negative value counts "
-                    "from the end: -20 starts 20 lines before the end. Default: 1."
-                ),
+                "description": "First line, from 1; negative counts from the end (-20: the last 20 lines). Default: 1.",
             },
             "end_line": {
                 "type": "integer",
-                "description": (
-                    "Last line to return, inclusive. A negative value counts from "
-                    f"the end: -1 is the last line. Default: start_line + {DEFAULT_LINE_COUNT - 1}."
-                ),
+                "description": f"Last line, inclusive; -1 is the last line. Default: start_line + {DEFAULT_LINE_COUNT - 1}.",
             },
             "line_numbers": {
                 "type": "boolean",
-                "description": "Prefix every line with its number and a tab. Default: false.",
+                "description": "Prefix each line with its number and a tab, which are not part of the file. Default: false.",
             },
         },
         "required": ["path"],

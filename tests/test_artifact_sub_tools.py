@@ -224,4 +224,4 @@ def test_the_write_loop_offers_read_text_file_without_line_numbers():
     # `tool_schema` hands out the main agent's dict; it must stay intact.
     main = READ_TEXT_FILE_TOOL.input_schema["properties"]
     assert "line_numbers" in main
-    assert main["path"]["description"] == "Absolute path, or a path relative to the project root."
+    assert main["path"]["description"] == "Absolute, or relative to the project root."

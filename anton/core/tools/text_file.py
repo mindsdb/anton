@@ -70,11 +70,21 @@ class TextRange:
     last: int
     body: str
     stop: Literal["done", "page", "chars"]
+    # Said in the header, not the tool description: it only happens when a
+    # range does not fit, and the reader must not copy the mark into the file.
+    shortened: int = 0
 
     def render(self) -> str:
         if self.total_lines == 0:
             return f"{self.path} — empty file\n"
         header = f"{self.path} — lines {self.first}-{self.last} of {self.total_lines}"
+        if self.shortened:
+            half = MAX_LINE_CHARS // 2
+            header += (
+                f" ({self.shortened} long line{'s' if self.shortened != 1 else ''} "
+                f"shortened to the first and last {half:,} characters around a "
+                "[line truncated] mark that is not part of the file)"
+            )
         if self.stop == "page":
             header += f" (partial; continue with start_line={self.last + 1})"
         elif self.stop == "chars":
@@ -169,11 +179,13 @@ def read_text_range(
     out: list[str] = []
     size = 0
     last = start - 1
+    shortened = 0
     stop: Literal["done", "page", "chars"] = "done"
     for number in numbers:
         text = lines[number - 1]
-        if shorten:
+        if shorten and len(text) > MAX_LINE_CHARS:
             text = _shorten(text)
+            shortened += 1
         if line_numbers:
             text = f"{number:>6}\t{text}"
         added = len(text) + (1 if out else 0)
@@ -185,4 +197,4 @@ def read_text_range(
         last = number
     if stop == "done" and end_line is None and last < total:
         stop = "page"
-    return TextRange(shown_path, total, start, last, "\n".join(out), stop)
+    return TextRange(shown_path, total, start, last, "\n".join(out), stop, shortened)

@@ -144,9 +144,19 @@ def test_long_lines_come_back_whole_when_the_range_fits(tmp_path):
 def test_a_long_line_keeps_its_start_and_end_when_the_range_does_not_fit(tmp_path, monkeypatch):
     monkeypatch.setattr(text_file, "MAX_OUTPUT_CHARS", 5000)
     long_line = "S" * 1000 + "M" * 5000 + "E" * 1000
-    body = _read(_write(tmp_path, f"short\n{long_line}\n")).body.splitlines()
+    result = _read(_write(tmp_path, f"short\n{long_line}\n"))
+    body = result.body.splitlines()
     assert body[0] == "short"
     assert body[1] == "S" * 1000 + " … [line truncated: 7000 chars] … " + "E" * 1000
+    # The header says so, since the tool description no longer does.
+    assert result.render().splitlines()[0].endswith(
+        "(1 long line shortened to the first and last 1,000 characters around a "
+        "[line truncated] mark that is not part of the file)"
+    )
+
+
+def test_a_header_without_shortened_lines_has_no_note(tmp_path):
+    assert "shortened" not in _read(_write(tmp_path, "a\nb\n")).render()
 
 
 def test_line_numbers_count_toward_the_fit(tmp_path, monkeypatch):
