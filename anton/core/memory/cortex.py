@@ -385,8 +385,6 @@ answer {"keep": []}. Do not repeat the rule text.
         # Every keep-all fallback below (unusable answer, empty response, timeout,
         # exception) is byte-identical in its effect on the prompt, so only
         # `outcome` tells a working filter from a broken one.
-        # Measured shares before this shipped: 55.7% filtered, 30.2% dropped_all,
-        # 14.2% kept_all_no_match, plus an exception rate that was unobservable.
         outcome = "error"
         kept = len(when_engrams)
         stop_reason = ""
