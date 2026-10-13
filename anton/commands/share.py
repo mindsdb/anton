@@ -456,18 +456,19 @@ async def import_v0_1(
                 cortex.project_hc.encode_lesson(content, topic=topic, source="import")
 
     # restore scratchpad cells
-    from anton.core.backends.base import Cell as _Cell  # noqa: PLC0415
+    from anton.core.backends.base import Cell as _Cell, scrub_cell  # noqa: PLC0415
     cells_data = payload.get("scratchpad", {}).get("cells", [])
     for cell_data in cells_data:
         pad_name = cell_data.get("pad", "main")
         pad = await new_session._scratchpads.get_or_create(pad_name)
-        pad.cells.append(_Cell(
+        # An export can predate the scrub, or come from anywhere.
+        pad.cells.append(scrub_cell(_Cell(
             code=cell_data.get("code", ""),
             stdout=cell_data.get("stdout", ""),
             stderr=cell_data.get("stderr", ""),
             error=cell_data.get("error"),
             description=cell_data.get("description", ""),
-        ))
+        )))
 
     # print briefing
     sess = payload.get("session", {})
