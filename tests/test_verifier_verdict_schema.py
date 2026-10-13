@@ -156,6 +156,11 @@ def test_complete_rejects_disclaimered_fabrication_but_not_computed_or_requested
     # that matched nothing was re-scored STUCK in the replay.
     assert "a genuine empty result" in complete
     assert "a COMPLETE answer of 'none', not a blocker" in complete
+    # "The data does not record this" is an answer too; continued, Luna invented the value.
+    assert "a value the data does not record at all" in complete
+    assert "without substituting a related figure" in complete
+    # A value that can be derived from what is recorded is not "not recorded".
+    assert "cannot be worked out from what is recorded" in complete
 
 
 def test_close_to_done_is_never_true_on_an_unobtainable_gap():

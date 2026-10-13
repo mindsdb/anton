@@ -27,10 +27,10 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   4. NEVER re-emit the full HTML mid-build. Append deltas, don't re-print the world. Assembly is a one-line concat at the end, not a re-render of everything you've written so far.
   5. KEEP READS SMALL. To verify what landed, `os.path.getsize(path)` or `open(path).read(2000)` — never `open(path).read()` on a multi-KB HTML.
 
-  HOST CONTRACT (critical — the same static checks `generate_artifact` runs on every page it produces; a hand-built page gets no automatic check, so verify each item yourself before you finish):
+  HOST CONTRACT (critical — the checks `generate_artifact` runs on every page it produces: 1–7 fail the step (`<html lang>` in 1 is not checked), 8–9 are warnings, 10 runs in a headless browser; a hand-built page gets no automatic check, so verify each item yourself before you finish):
   1. A complete HTML document with an explicit `<body>`...`</body>`, and `<html lang>` set to the language the user writes in (UI text follows it too).
   2. `<meta name="viewport" content="width=device-width, initial-scale=1.0">` in `<head>`.
-  3. No absolute URL in any `fetch()` call — relative paths only. (`href`/`src` links to external sources are fine.)
+  3. No absolute URL in any `fetch()` call. No root-relative path either, in `src`, `href`, `fetch()` or `new EventSource()`: a value that starts with a single `/` (`/logo.png`, `/api/export`) breaks in the app preview and once published, because the page is served under a path prefix that a path from the root drops. Use a relative path for files and links (`logo.png`); in a fullstack app, call the backend through the `api()` helper that build-fullstack-backend defines. `https://`, `//`, `data:`, `blob:`, `#` and `mailto:` values are fine, so `href`/`src` links to external sources stay allowed. Moving the same root-relative path into a JS string does not fix it.
   4. Every opened `<script>` block is closed with `</script>` — an unclosed one silently disables all JS.
   5. The global name `window.__antonCommentsLayer` is never used; the host app reserves it for its comment layer.
   6. No universal `* { ... !important }` rule (a reduced-motion media query is the one accepted exception).
@@ -38,7 +38,9 @@ Before the first write, call `create_artifact(type="html-app", name=..., descrip
   8. Significant block containers (`div`, `section`, `table`, `main`, `article`) carry stable `id` attributes — the host app attaches comments to them.
   9. The only external resources are the two CDN scripts named under Visual design (Tailwind, ECharts). Any other library from a CDN is allowed only when the user asked for it.
   10. Opened in a browser, the page logs no console error and requests no local file that does not exist; it renders visible content without user interaction.
+  Not checked by the pipeline, but the page breaks inside the frame without them:
   11. BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB` / `document.cookie` may be unavailable — the in-app preview runs the page in a sandboxed frame. Never touch them directly during top-level initialisation: a throw there aborts the script before any listener is bound, and the page renders with every control dead. Go through one guarded helper with an in-memory fallback.
+  12. LINKS: the page runs inside a frame, in the app preview and on the published link alike. `target="_top"` and `target="_parent"` do not work; give a link to another artifact or an external site `target="_blank"`, or it opens inside the frame.
 
   SECURITY (critical): Dashboards may be published to the web. NEVER embed API keys, tokens, passwords, connection strings, or any credentials in the HTML, JS, or inline data. Fetch data in scratchpad cells using credentials from environment variables, then serialize only the resulting data into the dashboard. If the user explicitly asks to embed a credential (e.g. for a live-updating dashboard), warn them that publishing will expose it and get confirmation before proceeding.
 
