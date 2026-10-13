@@ -221,10 +221,10 @@ _TOKEN_KEY = (
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
 # A quoted value after a token key is a string literal, never a code
-# expression, so any characters up to the closing quote are redacted.
+# expression. No closing quote is required: clipped output can end mid-value.
 _QUOTED_TOKEN_VALUE_PATTERN = re.compile(
     r"(" + _TOKEN_KEY + r"\\?[\"']?[ \t]*[:=][ \t]*\\?[\"'])"
-    r"[^\"'\\\s]{16,}(?=\\?[\"'])"
+    r"[^\"'\\\s]{16,}"
 )
 # Unquoted values can be source code the model reads and may write back, so a
 # dotted path, a call, or an all-lowercase value is code or prose, not a token.
