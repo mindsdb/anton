@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 #     only way to observe the EXCEPTION outcome at all (a failed call leaves no
 #     observation to count).
 _RULE_RETRIEVAL_TAG = "rule-retrieval"
-_RULE_RETRIEVAL_MAX_TOKENS = 1024
+_RULE_RETRIEVAL_MAX_TOKENS = 4096
 # The filter blocks the first reply token; past this, every conditional rule is kept.
 _RULE_RETRIEVAL_TIMEOUT_SECONDS = 3.0
 
