@@ -310,6 +310,14 @@ def test_draft_brief_instruction_pins_the_language_to_the_request():
     assert "same language as the user request" in brief._DRAFT_BRIEF_INSTRUCTION
 
 
+def test_draft_brief_instruction_translates_the_section_headings():
+    """Seen live: a Spanish request got a Spanish brief under the English
+    section names the instruction lists (Goal, Artifact type, ...)."""
+    text = brief._DRAFT_BRIEF_INSTRUCTION
+    assert "section headings" in text
+    assert "translate the section names" in text
+
+
 async def test_show_and_confirm_defaults_to_accept_on_a_bare_enter(monkeypatch):
     """A bare Enter (no selection, no free text) must resolve to "accept",
     not the channel's own default of "cancelled" — accepting the brief as
@@ -382,3 +390,26 @@ async def test_redraw_brief_keeps_the_lists_a_call_does_not_mention(tmp_path):
     await brief.redraw_brief(state)
     assert state.assumptions == ["old assumption"]
     assert state.open_points == ["old question"]
+
+
+def test_act_first_brief_has_one_assumptions_section_and_no_question():
+    text = brief.draft_brief_instruction(act_first=True)
+    assert "- Assumptions — one line per `assumption` and per `open_point`" in text
+    assert "- Proposals —" not in text
+    assert "- Questions —" not in text
+    assert "if the user continues" not in text.lower()
+    assert "Do NOT ask the user anything" in text
+    # The shared rules survive.
+    lowered = text.lower()
+    for marker in ("lead-in", "same language as the user request", "hex", "not used", "redo"):
+        assert marker in lowered, marker
+
+
+def test_the_default_brief_is_the_confirm_variant():
+    text = brief.draft_brief_instruction()
+    assert "SHORT proposal for the user to confirm." in text
+    assert "a summary before confirmation, not the final document." in text
+    assert "belongs in the full PRD, after acceptance." in text
+    assert "- Proposals — one line per `assumption`" in text
+    assert "End with two short lines" in text
+    assert "- Assumptions —" not in text

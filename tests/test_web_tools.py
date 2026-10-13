@@ -432,6 +432,23 @@ class TestWebFetchRetry:
         assert "Could not resolve" in _text(out)
 
 
+# Slack and Discord webhooks and Telegram bot URLs carry their token in the path.
+_PATH_TOKEN = "Xy7Qp3Lm9Rt5Vw1Zn8Bc4Df6"
+
+
+def _nxdomain(host, *args, **kwargs):
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+
+def _dns_timeout(host, *args, **kwargs):
+    raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+
+def _egress_gateway(host, *args, **kwargs):
+    # Self-hosted maps every allowlisted name to the egress gateway's private address.
+    return [(2, 1, 6, "", ("172.30.9.10", 0))]
+
+
 class TestWebFetchLogging:
     """Exactly one structured audit line per web_fetch call."""
 
@@ -479,7 +496,36 @@ class TestWebFetchLogging:
         assert "SECRET123" not in msg
         assert "api_key" not in msg
         assert "pass" not in msg  # userinfo credentials stripped too
-        assert "url=https://example.com/data?<redacted>" in msg
+        assert "url=https://example.com/<5 chars>?<redacted>" in msg
+
+    @pytest.mark.parametrize("url,logged_url", [
+        (f"https://hooks.slack.invalid/services/T0ABCDEF1/B0GHIJKL2/{_PATH_TOKEN}",
+         "https://hooks.slack.invalid/<54 chars>"),
+        (f"https://api.telegram.invalid/bot7712345678:{_PATH_TOKEN}/getUpdates",
+         "https://api.telegram.invalid/<50 chars>"),
+    ], ids=["slack_webhook", "telegram_bot"])
+    @pytest.mark.parametrize("resolver,level,status", [
+        (_nxdomain, logging.INFO, "blocked"),
+        (_egress_gateway, logging.INFO, "blocked"),
+        (_dns_timeout, logging.WARNING, "transient_giveup"),
+    ], ids=["nxdomain", "egress_gateway", "dns_timeout"])
+    async def test_url_path_is_logged_as_its_length(
+        self, caplog, monkeypatch, url, logged_url, resolver, level, status
+    ):
+        monkeypatch.delenv("ANTON_ALLOW_PRIVATE_FETCH", raising=False)
+        with patch(
+            "anton.core.tools.web_tools.socket.getaddrinfo", new=resolver
+        ), patch("anton.core.tools.web_tools._FETCH_BACKOFF_BASE_S", 0), caplog.at_level(
+            logging.INFO, logger=self._LOGGER
+        ):
+            await handle_web_fetch_fallback(None, {"url": url})
+
+        recs = [r for r in caplog.records if r.name == self._LOGGER]
+        assert [r.levelno for r in recs] == [level]
+        msg = recs[0].getMessage()
+        assert f"web_fetch url={logged_url} method=GET status={status} " in msg
+        assert _PATH_TOKEN not in msg
+        assert _PATH_TOKEN not in repr(recs[0].args)
 
     async def test_giveup_logs_single_warning_line(self, caplog):
         async def _get(self, url, headers=None):

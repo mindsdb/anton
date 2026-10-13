@@ -56,7 +56,7 @@ case recorded rather than gated on a model, are both pinned by
 tests/test_verifier_eval_gate.py.
 
 N defaults to 3. A case whose acceptable set includes STUCK runs 6: STUCK's
-base rate under the pre-ENG-836 rubric was ~1-in-5 (Kiranam session: 4
+base rate under the pre-ENG-836 rubric was ~1-in-5 (one production session: 4
 COMPLETE / 4 INCOMPLETE / 1 STUCK on one blocker), so a single run passes
 ~20% of the time by luck. The environment-wall case therefore doubles as
 ENG-836's before/after measurement, and the honest-gap case as ENG-2686's.
@@ -789,7 +789,7 @@ _WAITING = Case(
 )
 
 # --- 4. Environment wall — repeated failed workarounds → STUCK --------------
-# ENG-836's Kiranam incident: an OS-level library the task requires, no root
+# A production incident: an OS-level library the task requires, no root
 # to install it, and the assistant narrating "let me try another approach"
 # after each failed workaround. Under the pre-ENG-836 rubric this measured
 # 4 COMPLETE / 4 INCOMPLETE / 1 STUCK — the ~1-in-5 base rate that makes this
@@ -896,7 +896,7 @@ _STUCK = Case(
         },
     ],
     expected="STUCK",
-    source="ENG-836 (Kiranam environment wall, base rate 1-in-5)",
+    source="ENG-836 (environment wall, base rate 1-in-5)",
 )
 
 # --- 5. Stopped partway through a multi-part request → INCOMPLETE -----------

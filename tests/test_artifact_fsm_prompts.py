@@ -410,12 +410,28 @@ def test_verifier_contract_reaches_both_frontend_prompts():
       for marker in (
         "explicit `<body>`",
         "absolute URL",
+        "No root-relative path",
         "__antonCommentsLayer",
         "!important",
         "z-index",
         "stable `id`",
       ):
         assert marker in rules, marker
+
+
+def test_frame_notes_follow_the_browser_gate_in_both_frontend_prompts():
+    """BROWSER STORAGE and LINKS are not verifier checks. They sit after the
+    browser-gate bullet under their own lead sentence, so neither they nor
+    the browser gate read as the other kind."""
+    assert "BROWSER STORAGE" not in prompts._VERIFIER_CONTRACT
+    assert 'target="_blank"' not in prompts._VERIFIER_CONTRACT
+    for text in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        gate = text.index("Where a headless browser is available")
+        notes = text.index("Not checked by the verifier, but the page breaks inside the frame")
+        assert gate < notes < text.index("BROWSER STORAGE") < text.index('target="_blank"')
 
 
 def test_verifier_contract_promises_the_browser_load_for_both_page_kinds():
