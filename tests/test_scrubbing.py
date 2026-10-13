@@ -135,6 +135,7 @@ class TestScrubProviderKeys:
 
 
 def _b64url(payload: dict) -> str:
+    """Encode ``payload`` as one unpadded base64url JWT segment."""
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
 
 
@@ -145,6 +146,8 @@ FAKE_JWT = ".".join([
     "s" * 43,
 ])
 OPAQUE_TOKEN = "opq" + "Z9" * 15
+B64URL_TOKEN = "ab_" + "Cd-Ef.Gh9" * 3
+TOKEN_SAMPLES = [OPAQUE_TOKEN, B64URL_TOKEN]
 
 
 class TestScrubOutput:
@@ -158,13 +161,23 @@ class TestScrubOutput:
         assert '"token_type": "Bearer"' in result
         assert '"expires_in": 3600' in result
 
+    @pytest.mark.parametrize("token", TOKEN_SAMPLES)
     @pytest.mark.parametrize("key", [
         "access_token", "refresh_token", "id_token", "client_secret",
         "accessToken", "refreshToken", "clientSecret", "ACCESS_TOKEN",
+        "client-secret", "access-token",
     ])
-    def test_every_token_key_form_is_redacted(self, key):
-        result = scrub_output(f"{key}={OPAQUE_TOKEN}")
+    def test_every_token_key_form_is_redacted(self, key, token):
+        result = scrub_output(f"{key}={token}")
         assert result == f"{key}=[REDACTED_TOKEN]"
+
+    def test_whitespace_separated_column_is_redacted(self):
+        result = scrub_output(f"access_token    {OPAQUE_TOKEN}\nexpires_in      3600")
+        assert result == "access_token    [REDACTED_TOKEN]\nexpires_in      3600"
+
+    def test_url_encoded_value_is_redacted_whole(self):
+        token = "abc%2FdefGhijk%3D" + OPAQUE_TOKEN
+        assert scrub_output(f"'access_token': '{token}'") == "'access_token': '[REDACTED_TOKEN]'"
 
     def test_python_dict_repr_is_redacted(self):
         result = scrub_output(str({"refresh_token": OPAQUE_TOKEN}))
@@ -180,9 +193,10 @@ class TestScrubOutput:
         result = scrub_output(f"https://idp.example/cb?access_token={OPAQUE_TOKEN}&scope=read")
         assert result == "https://idp.example/cb?access_token=[REDACTED_TOKEN]&scope=read"
 
+    @pytest.mark.parametrize("token", TOKEN_SAMPLES)
     @pytest.mark.parametrize("word", ["Bearer", "bearer", "BEARER"])
-    def test_bearer_value_is_redacted_and_the_word_kept(self, word):
-        result = scrub_output(f"Authorization: {word} {OPAQUE_TOKEN}")
+    def test_bearer_value_is_redacted_and_the_word_kept(self, word, token):
+        result = scrub_output(f"Authorization: {word} {token}")
         assert result == f"Authorization: {word} [REDACTED_TOKEN]"
 
     def test_bare_jwt_is_redacted(self):
@@ -197,11 +211,24 @@ class TestScrubOutput:
         "send a Bearer token in the Authorization header",
         "access_token=short",
         '{"access_token": null, "token_type": "Bearer"}',
-        "access_token=[DS_MAESTRO_PROD__TOKEN]",
+        "access_token=[DS_CRM_PROD__TOKEN]",
         "valid_token=" + OPAQUE_TOKEN,
+        "the bearer tokens/credentials are sent",
+        "Bearer\n" + OPAQUE_TOKEN,
     ])
     def test_prose_short_values_and_markers_are_left_alone(self, text):
         assert scrub_output(text) == text
+
+    @pytest.mark.parametrize("line", [
+        'const accessToken = window.localStorage.getItem("t")',
+        "refreshToken: response.data.refresh_token,",
+        "access_token = self.config.access_token_value",
+        "client_secret = load_client_secret_from_vault()",
+        "accessToken = fetchAccessTokenNow(session)",
+        "headers = {'Authorization': 'Bearer ' + access_token}",
+    ])
+    def test_source_code_the_model_reads_is_left_alone(self, line):
+        assert scrub_output(line) == line
 
     def test_marker_is_one_the_connect_flow_refuses_to_save(self):
         assert SCRUBBED_VALUE_RE.match("[REDACTED_TOKEN]")
