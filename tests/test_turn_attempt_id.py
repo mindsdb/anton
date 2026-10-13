@@ -139,9 +139,9 @@ async def test_the_attempt_id_survives_a_non_completed_terminal(workspace):
         return gen()
 
     session._llm.plan_stream = boom
-    # Since ENG-3410 the turn raises once its explain call fails too. The
-    # assertions are still on the emitted row: the raise alone says nothing
-    # about whether the books closed.
+    # The turn raises once its explain call fails too. The assertions are on
+    # the emitted row: the raise alone says nothing about whether the books
+    # closed.
     with patch("anton.analytics.send_event") as sent:
         with pytest.raises(RuntimeError, match="planning blew up"):
             async for _ in session.turn_stream("go"):

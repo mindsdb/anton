@@ -1997,9 +1997,12 @@ def classify_markup_bad_request(body: object) -> "EndpointConfigurationError | N
     Shared by the OpenAI-compatible and Anthropic 400 paths. Both SDKs keep a
     body that is not JSON as the raw string, and use that string as the
     exception's message too. A model API answers in JSON, so markup means the
-    request reached some other service: a web server, a proxy's error page, or
-    a storage bucket. ENG-3410's was Google Cloud Storage's XML ``InvalidArgument
-    / POST object expects Content-Type multipart/form-data``.
+    request reached some other service, such as a web server, a proxy, a CDN
+    or a storage bucket.
+
+    The 400 path is the one that needs this. Its unclassified errors re-raise
+    the SDK error, raw body included. Other statuses go through
+    ``_raise_for_status_error``, which always ends in anton's own copy.
 
     The identical request fails identically on a retry, and the raw body is
     neither safe nor useful to show. So this returns curated copy that leaves
@@ -2010,9 +2013,9 @@ def classify_markup_bad_request(body: object) -> "EndpointConfigurationError | N
     if not (isinstance(body, str) and body.lstrip().startswith("<")):
         return None
     return EndpointConfigurationError(
-        "The model endpoint returned 400 with a web page or storage error "
-        "instead of an API response, so the request likely reached the wrong "
-        "service — check the endpoint URL configuration."
+        "The model endpoint returned 400 with a web page or other non-API "
+        "response, so the request likely reached the wrong service — check "
+        "the endpoint URL configuration."
     )
 
 

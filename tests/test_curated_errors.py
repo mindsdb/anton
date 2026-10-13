@@ -359,9 +359,9 @@ async def test_a_curated_error_on_the_summarize_path_fails_the_turn(exc_type):
 
 
 async def test_an_uncurated_error_on_the_summarize_path_fails_the_turn_too():
-    """ENG-3410: an unlisted type no longer becomes prose either. Its message
-    can be a provider's raw body, and as prose it skipped the host's redaction
-    and was saved as the turn's reply. The host maps it to its own copy."""
+    """An unlisted type fails the turn too, rather than becoming prose. Its
+    message can be anything, such as a provider's raw body. As prose it would
+    skip the host's redaction and be saved as the turn's reply."""
     s = _session()
 
     class _Boom(Exception):

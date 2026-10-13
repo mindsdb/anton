@@ -5046,19 +5046,19 @@ class ChatSession:
                             # "An unexpected error occurred.", the CLI's
                             # setup/retry prompt.
                             #
-                            # This used to stream "An unexpected error occurred:
-                            # {e}" as assistant prose for any type outside the
-                            # curated allowlist. `str(e)` is the provider's raw
-                            # body — for ENG-3410 a storage service's XML — and
-                            # as prose it skipped the host's redaction, was saved
-                            # as the turn's reply, and was replayed to the model
-                            # on every later turn. Raising is default-safe: an
-                            # unlisted type no longer leaks, it gets generic copy.
+                            # Never stream the exception as prose. Its message
+                            # can be anything: a provider's raw response body,
+                            # a file path, an internal detail. As prose it
+                            # skips the host's redaction, is saved as the
+                            # turn's reply, and is replayed to the model on
+                            # every later turn. Raising is default-safe: a type
+                            # outside the curated allowlist gets generic copy
+                            # rather than leaking (ENG-3410).
                             #
-                            # Booked as the retry_exhausted terminal stamped
-                            # above, with the error that exhausted the retries,
-                            # as it was while this ended in prose. A curated or
-                            # auth failure keeps being booked as "error".
+                            # Telemetry keeps the retry_exhausted terminal
+                            # stamped above, with the error that exhausted the
+                            # retries. A curated or auth failure is booked as
+                            # "error", since it names its own cause.
                             if not isinstance(e, CURATED_PROVIDER_ERRORS) and not _is_provider_auth_error(e):
                                 _booked_exc = e
                             raise

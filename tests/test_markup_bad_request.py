@@ -1,11 +1,10 @@
-"""ENG-3410: a 400 whose body is HTML or XML must not become a chat reply.
+"""A 400 whose body is HTML or XML must not become a chat reply.
 
-A desktop user's plain "hi" came back as Google Cloud Storage's raw XML error,
-saved as the assistant's answer and replayed to the model on later turns. Two
-defects combined. The provider re-raised the SDK error as-is, whose message is
-the raw body when that body is not JSON. Then the session retried it, and when
-the tool-less explain call failed too, streamed ``f"An unexpected error
-occurred: {e}"`` as prose, past the host's redaction.
+Both SDKs keep a body that is not JSON as the raw string, and use it as the
+exception's message too. Unclassified, that error re-raised from the 400 path,
+was retried, and ended as the turn's prose reply, past the host's redaction
+(ENG-3410). The provider now classifies a markup body as a misrouted request,
+and the session never streams an exception as prose.
 
 These drive the pinned SDKs through ``httpx.MockTransport`` rather than mocks,
 for the reason ``test_bad_request_reaches_the_classifier.py`` gives: which SDK
@@ -29,8 +28,8 @@ from anton.core.llm.provider import (
     classify_markup_bad_request,
 )
 
-# The incident's body, as Google Cloud Storage's XML API sends it.
-_GCS_XML = (
+# An XML error body of the kind a storage service sends.
+_XML = (
     "<?xml version='1.0' encoding='UTF-8'?><Error><Code>InvalidArgument</Code>"
     "<Message>Invalid argument.</Message><Details>POST object expects "
     "Content-Type multipart/form-data</Details></Error>"
@@ -87,7 +86,7 @@ def _assert_no_markup(text: str) -> None:
 # ── the classifier ─────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("body", [_GCS_XML, _HTML, "  \n" + _HTML], ids=["xml", "html", "leading-space"])
+@pytest.mark.parametrize("body", [_XML, _HTML, "  \n" + _HTML], ids=["xml", "html", "leading-space"])
 def test_a_markup_body_is_a_misrouted_request(body):
     err = classify_markup_bad_request(body)
     assert isinstance(err, EndpointConfigurationError)
@@ -108,7 +107,7 @@ def test_any_other_body_is_left_to_the_existing_rungs(body):
 
 @pytest.mark.parametrize("flavor", _FLAVORS)
 async def test_openai_complete_maps_a_markup_400(flavor):
-    provider = _openai_provider(_GCS_XML, flavor)
+    provider = _openai_provider(_XML, flavor)
     with pytest.raises(EndpointConfigurationError) as err:
         await provider.complete(model="gpt-6-luna", system="s", messages=_MESSAGES)
     _assert_no_markup(str(err.value))
@@ -116,7 +115,7 @@ async def test_openai_complete_maps_a_markup_400(flavor):
 
 @pytest.mark.parametrize("flavor", _FLAVORS)
 async def test_openai_stream_maps_a_markup_400(flavor):
-    provider = _openai_provider(_GCS_XML, flavor)
+    provider = _openai_provider(_XML, flavor)
     with pytest.raises(EndpointConfigurationError) as err:
         async for _ in provider.stream(model="gpt-6-luna", system="s", messages=_MESSAGES):
             pass
@@ -141,17 +140,17 @@ async def test_anthropic_stream_maps_a_markup_400():
 
 @pytest.mark.parametrize("flavor", _FLAVORS)
 async def test_a_markup_400_fails_the_turn_without_xml_in_text_or_history(flavor):
-    """The incident end to end: one request, a raised error the host maps to
-    its own copy, and no raw body in the streamed text or the stored history."""
+    """End to end: one request, a raised error the host maps to its own copy,
+    and no raw body in the streamed text or the stored history."""
     from anton.chat import ChatSession
     from anton.core.llm.client import LLMClient
     from anton.core.session import ChatSessionConfig
 
     requests: list[dict] = []
-    provider = _openai_provider(_GCS_XML, flavor, requests)
+    provider = _openai_provider(_XML, flavor, requests)
     client = LLMClient(planning_provider=provider, planning_model="gpt-6-luna",
                        coding_provider=provider, coding_model="gpt-6-luna")
-    session = ChatSession(ChatSessionConfig(llm_client=client, session_id="conv-eng-3410"))
+    session = ChatSession(ChatSessionConfig(llm_client=client, session_id="conv-markup-400"))
 
     events: list = []
     try:

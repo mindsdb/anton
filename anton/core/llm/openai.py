@@ -152,8 +152,8 @@ def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     terminal today. Naming only what we can name leaves every other 400
     byte-identical; the generic-fallback question is ENG-1283's.
     """
-    # First: a markup body is the raw HTML/XML, and the checks below would
-    # read it as text (ENG-3410).
+    # First, because the checks below read the body as an API error and a
+    # markup body is not one.
     misrouted = classify_markup_bad_request(_error_body(exc))
     if misrouted is not None:
         raise misrouted from exc

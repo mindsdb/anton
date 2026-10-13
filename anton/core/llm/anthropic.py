@@ -51,8 +51,8 @@ def _raise_for_bad_request(exc: anthropic.BadRequestError) -> None:
     matches a 400 first and its bare ``raise`` re-raises out of the whole
     ``try`` — ``_raise_for_status_error`` never sees a 400, on either provider.
     """
-    # First: a markup body is the raw HTML/XML, and the checks below would
-    # read it as text (ENG-3410).
+    # First, because the checks below read the body as an API error and a
+    # markup body is not one.
     misrouted = classify_markup_bad_request(exc.body)
     if misrouted is not None:
         raise misrouted from exc
