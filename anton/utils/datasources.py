@@ -231,8 +231,8 @@ _QUOTED_TOKEN_VALUE_PATTERN = re.compile(
 )
 # Unquoted values can be source code the model reads and may write back: after a
 # key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
-# type or an UPPER_SNAKE constant is code. Name words need two letters, so mixed
-# tokens are not.
+# type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
+# UPPER_SNAKE parts are letters with at most one trailing digit.
 _TOKEN_VALUE_PATTERN = re.compile(
     r"((?i:\bbearer)(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
     r"(?![a-z_/-]+(?![A-Za-z0-9._~+/=%!-]))"
