@@ -12,8 +12,6 @@ from contextlib import aclosing
 
 from openai import AsyncAzureOpenAI
 
-from anton.utils.datasources import scrub_credentials
-
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -40,6 +38,7 @@ from .provider import (
     classify_request_refusal,
     classify_responses_failure,
     classify_transient,
+    log_transient_provider_error,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
@@ -381,11 +380,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         velocity_confirmed=_velocity,
     )
     if transient is not None:
-        logger.warning(
-            "transient provider error (%s): status=%s retry_after=%s body=%s",
-            transient.code, exc.status_code, transient.retry_after,
-            scrub_credentials(str(exc.body))[:500],
-        )
+        log_transient_provider_error(logger=logger, error=transient)
         raise transient from exc
 
     raise ConnectionError(
@@ -1168,7 +1163,7 @@ class OpenAIProvider(LLMProvider):
         """
         if not self._emit_trace_headers:
             return None
-        from .tracing import get_trace_context, surface_tag
+        from .tracing import get_call_role, get_trace_context, surface_tag
 
         ctx = get_trace_context()
         if ctx is None:
@@ -1206,6 +1201,10 @@ class OpenAIProvider(LLMProvider):
         # tag convention. The tag is what a cheap population count uses.
         if ctx.surface:
             extra["surface"] = ctx.surface
+        # So usage can be summed per role even when roles share a model.
+        role = get_call_role() or self.trace_role
+        if role:
+            extra["role"] = role
         # Our own build (ENG-1279). The router lifts this onto the trace's
         # native `version` field, the only form the Langfuse metrics API can
         # group by — so "did this fix change behaviour in production?" becomes
@@ -1539,10 +1538,7 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                logger.warning(
-                    "transient mid-stream provider error (%s): %s",
-                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
-                )
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
@@ -1967,10 +1963,7 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                logger.warning(
-                    "transient mid-stream provider error (%s): %s",
-                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
-                )
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
