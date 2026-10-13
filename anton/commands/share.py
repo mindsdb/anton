@@ -398,7 +398,8 @@ async def import_v0_1(
             return session
 
     raw_history = payload.get("session", {}).get("conversation_history", [])
-    # An export can predate the scrub; tool_call content is the model's own code.
+    # An export can predate the scrub. User turns get scrub_output too: import never
+    # feeds connect. tool_call content is the model's own code and stays as written.
     for ep_data in raw_history:
         if ep_data.get("role") != "tool_call" and isinstance(ep_data.get("content"), str):
             ep_data["content"] = scrub_output(ep_data["content"])
