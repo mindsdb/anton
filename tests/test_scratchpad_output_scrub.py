@@ -200,13 +200,19 @@ def _salvage_from(stream: str) -> tuple[str, bool]:
 _LONG_TOKEN = "opq" + "Z9" * 500
 
 
-@pytest.mark.parametrize("key", ["access_token: ", "Authorization: Bearer\n", "Authorization: Bearer"])
-def test_dropped_salvage_never_leaves_a_token_without_its_key(key):
+@pytest.mark.parametrize("key, before_token", [
+    ("access_token: ", ""),
+    ("Authorization: Bearer\n", ""),
+    ("Authorization: Bearer", "\n"),
+    ('"access_token":', '\n\n  "'),
+    ("", "partial\nAuthorization: Bearer\n"),
+], ids=["same-line", "bearer-newline-in-dropped", "bearer-newline-in-kept", "blank-lines", "key-on-a-kept-line"])
+def test_dropped_salvage_never_leaves_a_token_without_its_key(key, before_token):
     """Token-dense output scrubs to far less than the budget, so the start of
     the kept chunks reaches the output; a token whose key was in a dropped
     chunk must not be there. Sized so only the first chunk is dropped."""
     first = "x" * (8192 - len(key) - 1) + "\n" + key
-    rest = ("\n" if key.endswith("Bearer") else "") + TOKEN + "\n"
+    rest = before_token + TOKEN + "\n"
     rest += "".join(f"access_token: {_LONG_TOKEN}\n" for _ in range(35))
     salvaged, truncated = _salvage_from(first + rest)
 
