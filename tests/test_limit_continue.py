@@ -285,3 +285,18 @@ def test_an_exact_non_latin_quote_counts():
     assert not _finish_authorized(
         _FinishAuthorization(quote="不要问我", authorized=True), "请继续，不要停下来。"
     ), "a quote the message does not contain is still invented"
+
+
+async def test_typing_keep_going_in_the_cli_continues(workspace, monkeypatch):
+    """The CLI shows the options as labels, so typing "Keep going" must mean
+    Keep going, not free text the turn reads as a stop (review finding)."""
+    from rich.console import Console
+
+    from anton.core.interaction.cli import CLIElicitor
+
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)] + [_text("all done")])
+    session.elicitor = CLIElicitor(Console(quiet=True))
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="Keep going"))
+    _, kwargs = await _run(session)
+    assert kwargs["ended_by"] == "completed"
+    assert kwargs["limit_continues"] == "1"
