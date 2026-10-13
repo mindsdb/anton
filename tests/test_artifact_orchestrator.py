@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -1433,3 +1434,20 @@ async def test_tail_log_cut_between_key_and_token_still_redacts_it(tmp_path: Pat
 
     assert len(tail) <= 2000
     assert token not in tail
+
+
+async def test_tail_log_is_scrubbed_off_the_event_loop(tmp_path: Path, monkeypatch):
+    """The whole log is scrubbed, so the work must not block the event loop."""
+    loop_thread = threading.get_ident()
+    scrub_threads: list[int] = []
+
+    def recording_scrub(text):
+        scrub_threads.append(threading.get_ident())
+        return text
+
+    monkeypatch.setattr(orchestrator, "scrub_output", recording_scrub)
+    (tmp_path / "backend.log").write_text("INFO started\n")
+
+    await orchestrator._tail_log(_state(tmp_path))
+
+    assert scrub_threads and loop_thread not in scrub_threads

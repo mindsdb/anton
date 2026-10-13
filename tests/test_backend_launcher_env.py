@@ -1,8 +1,10 @@
 import os
 import sys
+import threading
 from pathlib import Path
 
 import anton_state
+from anton.core.artifacts import backend_launcher
 from anton.core.artifacts.backend_launcher import (
     _anton_state_pythonpath_dir,
     build_backend_env,
@@ -290,3 +292,26 @@ async def test_a_log_tail_cut_between_key_and_token_still_redacts_it(tmp_path):
 
     assert isinstance(result, str) and "exited early" in result
     assert _LOGGED_TOKEN not in result
+
+
+async def test_the_log_tail_is_scrubbed_off_the_event_loop(tmp_path, monkeypatch):
+    """The whole log is scrubbed and it grows across relaunches, so the work
+    must not block the event loop."""
+    loop_thread = threading.get_ident()
+    scrub_threads: list[int] = []
+
+    def recording_scrub(text):
+        scrub_threads.append(threading.get_ident())
+        return text
+
+    monkeypatch.setattr(backend_launcher, "scrub_output", recording_scrub)
+    (tmp_path / "backend.py").write_text("raise SystemExit(1)\n")
+
+    await launch_artifact_backend(
+        slug="app",
+        artifact_folder=tmp_path,
+        scratchpad_pool=_PoolWithHostPython(),
+        tracked_backends={},
+    )
+
+    assert scrub_threads and loop_thread not in scrub_threads
