@@ -270,3 +270,23 @@ async def test_a_not_ready_log_tail_redacts_a_logged_token(tmp_path):
     assert isinstance(result, str) and "did not become ready" in result
     assert "Authorization: Bearer" in result
     assert _LOGGED_TOKEN not in result
+
+
+async def test_a_log_tail_cut_between_key_and_token_still_redacts_it(tmp_path):
+    """The tail is the last 2000 characters; a cut just before the token must
+    not leave it without the key that identifies it."""
+    filler = "x" * (2000 - len(_LOGGED_TOKEN) - len('"}') - len("\n"))
+    (tmp_path / "backend.py").write_text(
+        f"print('INFO got {{\"access_token\": \"{_LOGGED_TOKEN}\"}}{filler}', flush=True)\n"
+        "raise SystemExit(1)\n"
+    )
+
+    result = await launch_artifact_backend(
+        slug="app",
+        artifact_folder=tmp_path,
+        scratchpad_pool=_PoolWithHostPython(),
+        tracked_backends={},
+    )
+
+    assert isinstance(result, str) and "exited early" in result
+    assert _LOGGED_TOKEN not in result

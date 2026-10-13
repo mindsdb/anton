@@ -1421,3 +1421,15 @@ async def test_tail_log_redacts_a_logged_token(tmp_path: Path):
 
     assert "access_token" in tail
     assert token not in tail
+
+
+async def test_tail_log_cut_between_key_and_token_still_redacts_it(tmp_path: Path):
+    """A cut that lands just after the key must not leave the token bare."""
+    token = "FAKE0tok3nZr1xK2mN4pL7vT9wY3sB6dF"
+    filler = "x" * (2000 - len(token) - len('"}'))
+    (tmp_path / "backend.log").write_text(f'INFO got {{"access_token": "{token}"}}{filler}')
+
+    tail = await orchestrator._tail_log(_state(tmp_path))
+
+    assert len(tail) <= 2000
+    assert token not in tail
