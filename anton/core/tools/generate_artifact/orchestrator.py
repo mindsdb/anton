@@ -890,8 +890,9 @@ async def _tail_log(state: GenState, limit: int = 2000) -> str:
         return ""
     # Scrubbed before the cut, so a cut between a key and its token cannot strip the
     # key; in a thread, since the whole log is read and it grows across relaunches.
-    text = await asyncio.to_thread(log.read_text, encoding="utf-8", errors="replace")
-    return (await asyncio.to_thread(scrub_output, text))[-limit:]
+    return await asyncio.to_thread(
+        lambda: scrub_output(log.read_text(encoding="utf-8", errors="replace"))[-limit:]
+    )
 
 
 def _launch_datasource_env(state: GenState) -> dict[str, str]:
