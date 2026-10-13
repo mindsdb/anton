@@ -30,6 +30,7 @@ from anton.core.backends.wire import (
 )
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
+from anton.utils.datasources import scrub_output
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
@@ -38,6 +39,19 @@ _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 # _MAX_OUTPUT so a killed cell can never report more stdout than a successful
 # one would have.
 _SALVAGE_MAX = 10_000
+
+
+def _salvage_tail(text: str) -> str:
+    """Return the last `_SALVAGE_MAX` or fewer characters of salvaged stdout.
+
+    Chunks split wherever a heartbeat fell, so a cut there could keep a token
+    and drop its key. The cut lands at a line start instead; output with no
+    line break in the kept span is scrubbed before it is cut.
+    """
+    start = text.find("\n", len(text) - _SALVAGE_MAX, len(text) - 1)
+    if start != -1:
+        return text[start + 1 :]
+    return scrub_output(text)[-_SALVAGE_MAX:]
 
 # The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
 # it's progressing, so a wedged cell stays silent — for as long as
@@ -1320,9 +1334,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 if isinstance(chunk, str) and chunk:
                     last_output = elapsed
                     self._salvage.append(chunk)
-                    total = sum(len(c) for c in self._salvage)
-                    while total > _SALVAGE_MAX and len(self._salvage) > 1:
-                        total -= len(self._salvage.pop(0))
+                    if sum(len(c) for c in self._salvage) > _SALVAGE_MAX:
+                        self._salvage = [_salvage_tail("".join(self._salvage))]
                         self._salvage_truncated = True
                 continue
 

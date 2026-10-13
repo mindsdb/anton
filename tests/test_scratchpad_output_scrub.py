@@ -14,6 +14,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
 from anton.core.backends.local import LocalScratchpadRuntime
@@ -147,6 +149,39 @@ async def test_a_cell_killed_after_printing_a_token_keeps_scrubbed_output(monkey
     assert TOKEN not in cells[0].stdout
     assert "access_token=[REDACTED_TOKEN]" in cells[0].stdout
     assert TOKEN not in pad.cells[-1].stdout
+
+
+@pytest.mark.parametrize("filler", ["'line\\n' * 1600", "'x' * 8000"], ids=["lines", "one-line"])
+async def test_a_killed_cell_over_the_salvage_budget_does_not_strip_a_token_key(monkeypatch, filler):
+    """Salvage arrives in heartbeat chunks; trimming the oldest chunk must not
+    drop a token's key and leave the token itself in the kept output. The first
+    chunk ends with the key and the second starts with the token; together they
+    are just over the budget, so only the key's chunk is dropped."""
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "2")
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "2")
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "2")
+    monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "3")
+    monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+    pad = LocalScratchpadRuntime(name="salvage-split-cell", **_DEFAULTS)
+    await pad.start()
+    code = (
+        _MAKE_TOKEN
+        + "import time\n"
+        + "print('a' * 2000 + ' access_token: ', end='', flush=True)\n"
+        + "time.sleep(0.6)\n"
+        + f"print(tok + ' ' + {filler}, flush=True)\n"
+        + "time.sleep(30)\n"
+    )
+    try:
+        items = [item async for item in pad.execute_streaming(code)]
+    finally:
+        await pad.close()
+
+    cells = [item for item in items if isinstance(item, Cell)]
+    assert len(cells) == 1
+    assert "timed out" in cells[0].error.lower()
+    assert cells[0].stdout
+    assert TOKEN not in cells[0].stdout
 
 
 async def test_another_tool_result_keeps_quoted_placeholders(tmp_path):
