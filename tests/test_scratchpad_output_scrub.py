@@ -198,3 +198,18 @@ async def test_another_tool_result_keeps_quoted_placeholders(tmp_path):
 
     assert len(model_inputs) == 2
     assert 'some-placeholder-value' in model_inputs[1]
+
+
+def test_a_shared_replay_list_stays_correct_across_pads():
+    """Pads built from one replayed list share it; scrubbing it again for each pad changes nothing more."""
+    stored = Cell(code="fetch()", stdout=f'{{"access_token": "{TOKEN}"}}', stderr="", error=None)
+    shared = [stored]
+
+    first = LocalScratchpadRuntime(name="first", cells=shared, **_DEFAULTS)
+    after_first = list(shared)
+    second = LocalScratchpadRuntime(name="second", cells=shared, **_DEFAULTS)
+
+    assert first.cells is shared and second.cells is shared
+    assert shared == after_first
+    assert shared[0].stdout == '{"access_token": "[REDACTED_TOKEN]"}'
+    assert shared[0].code == "fetch()"
