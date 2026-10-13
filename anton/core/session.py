@@ -5943,8 +5943,8 @@ class ChatSession:
                         )
                         continue
 
-                    # Process output gets scrub_output where it is read: scratchpad cells and
-                    # backend log tails. Other tools return source the model may write back.
+                    # Process output gets scrub_output where it is read, such as scratchpad cells
+                    # and backend logs. Other tools return source the model may write back.
                     result_text = scrub_credentials(result_text)
                     if self._episodic is not None:
                         self._episodic.log_turn(
