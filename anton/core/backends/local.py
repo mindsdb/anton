@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from anton.core.backends.base import Cell, ScratchpadRuntime
+from anton.core.backends.base import Cell, ScratchpadRuntime, scrub_cell
 from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_TRACE_MARKER,
@@ -972,7 +972,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             await asyncio.wait_for(self._proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
-        self.cells.append(
+        self._record_cell(
             Cell(
                 code="# (cancelled by user)",
                 stdout="",
@@ -1013,7 +1013,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # discover it and call reset — which used to be the only path,
             # and which throws away the very state ENG-1124 started saving.
             if not await self._auto_resume():
-                yield Cell(
+                yield scrub_cell(Cell(
                     code=code,
                     stdout="",
                     stderr="",
@@ -1025,7 +1025,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     ),
                     description=description,
                     estimated_time=estimated_time,
-                )
+                ))
                 return
             # Grabbed once and cleared immediately: whatever happens to THIS
             # cell (succeeds, errors, or is killed again), the note must
@@ -1103,7 +1103,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
             )
-            self.cells.append(cell)
+            cell = self._record_cell(cell)
             # A Stop or a host's watchdog cancels the task running this cell.
             # With the cell killed and recorded, that cancel goes on up and
             # ends the turn; stopped here, the turn would read the error cell
@@ -1134,7 +1134,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
             )
-            self.cells.append(cell)
+            cell = self._record_cell(cell)
             yield cell
             return
 
@@ -1160,7 +1160,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             estimated_time=estimated_time,
             logs=logs,
         )
-        self.cells.append(cell)
+        cell = self._record_cell(cell)
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
         # in addition to (not instead of) the reset inside _auto_resume()
