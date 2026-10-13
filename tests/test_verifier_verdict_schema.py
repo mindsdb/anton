@@ -187,3 +187,11 @@ def test_waiting_covers_asking_for_input_after_a_failed_attempt():
     assert "Asking is a valid stop, never a premature one." in waiting
     incomplete = desc[desc.index("- INCOMPLETE:"):desc.index("- STUCK:")]
     assert "If it instead asked the user for what it needs, that is WAITING" in incomplete
+
+
+def test_asking_leave_for_a_read_only_step_is_not_waiting():
+    # Asking to read data it already had stopped turns that needed no one.
+    desc = _status_description()
+    waiting = desc[desc.index("- WAITING:"):desc.index("- INCOMPLETE:")]
+    assert "asking permission for a read-only step" in waiting
+    assert "that stop is INCOMPLETE" in waiting
