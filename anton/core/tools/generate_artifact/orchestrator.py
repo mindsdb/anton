@@ -21,6 +21,7 @@ from anton.core.artifacts.internal_files import (
     TECH_SPEC_FILENAME,
 )
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+from anton.utils.datasources import scrub_output
 
 from . import attachments, engine, prompts, verifiers
 from .discovery import checkpoint as cp
@@ -888,7 +889,7 @@ async def _tail_log(state: GenState, limit: int = 2000) -> str:
     if not log.is_file():
         return ""
     text = log.read_text(encoding="utf-8", errors="replace")
-    return text[-limit:]
+    return scrub_output(text[-limit:])
 
 
 def _launch_datasource_env(state: GenState) -> dict[str, str]:
