@@ -232,31 +232,36 @@ _REF_PATTERNS = [
 def _bundle_entries(
     root: Path, files: Iterable[Path], skip: frozenset[str]
 ) -> Iterator[tuple[Path, str]]:
-    """Yield (file, arcname) for each of *files* (paths under *root*) that may
-    enter the published bundle.
+    """Yield (resolved file, arcname) for each of *files* that may enter the
+    published bundle. The arcname is the path as written, relative to *root*;
+    the caller reads the resolved file, the one these checks were made on.
 
-    Skipped: non-files, files that resolve outside *root* (a symlink must not
-    publish what it points to), and files with a *skip* name on the path as
-    written or as resolved. Names match case-insensitively because on macOS
-    `.PUBLISHED.json` opens `.published.json`.
+    Skipped: non-files, files written or resolving outside *root* (a symlink
+    must not publish what it points to), and files with a *skip* name on the
+    path as written or as resolved. Names match case-insensitively because on
+    macOS `.PUBLISHED.json` opens `.published.json`.
     """
     real_root = root.resolve()
     folded = {name.casefold() for name in skip}
     for f in files:
-        if not f.is_file():
+        if not f.is_file() or not f.is_relative_to(root):
             continue
-        target = f.resolve()
+        try:
+            target = f.resolve()
+        except (OSError, RuntimeError):  # RuntimeError: symlink loop before 3.13
+            continue
         if not target.is_relative_to(real_root):
             continue
         rel = f.relative_to(root)
         parts = rel.parts + target.relative_to(real_root).parts
         if not any(part.casefold() in folded for part in parts):
-            yield f, rel.as_posix()
+            yield target, rel.as_posix()
 
 
 def _find_referenced_files(html_path: Path) -> list[Path]:
-    """Scan an HTML file for relative references and return the resolved
-    paths they point to; `_bundle_entries` decides which ones are bundled."""
+    """Scan an HTML file for relative references and return them as written
+    (normalized, not resolved), so a reference through a symlink keeps the
+    name the page uses; `_bundle_entries` decides which ones are bundled."""
     try:
         html = html_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -271,7 +276,7 @@ def _find_referenced_files(html_path: Path) -> list[Path]:
             # Skip absolute URLs, data URIs, anchors, protocol-relative
             if not ref or ref.startswith(("/", "http:", "https:", "data:", "//")):
                 continue
-            refs.add((parent / ref).resolve())
+            refs.add(Path(os.path.normpath(parent / ref)))
 
     return sorted(refs)
 
@@ -310,12 +315,12 @@ def _zip_html(path: Path) -> bytes:
             # Bundle any referenced sibling files (JS, CSS, images, etc.)
             primary = path.resolve()
             refs = _find_referenced_files(path)
-            for ref, arc_name in _bundle_entries(path.parent.resolve(), refs, _BUNDLE_SKIP_NAMES):
+            for src, arc_name in _bundle_entries(path.parent.resolve(), refs, _BUNDLE_SKIP_NAMES):
                 # The primary page owns `index.html`, so a sibling under that
                 # name would replace it. A self-reference keeps its duplicate
                 # entry so existing bundles keep their md5.
-                if arc_name != "index.html" or ref == primary:
-                    _write_scrubbed(zf, ref, arc_name)
+                if arc_name != "index.html" or src == primary:
+                    _write_scrubbed(zf, src, arc_name)
         else:
             # Directory — include all files except owner-side housekeeping
             # (e.g. `.published.json`, which holds the plaintext access
@@ -337,7 +342,8 @@ def _load_artifact_metadata(artifact_dir: Path) -> Artifact | None:
 
 
 def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
-    """Bundle backend.py + static/ + requirements.txt into a zip.
+    """Bundle backend.py, requirements.txt, static/, state_manifest.json and
+    the vendored `anton_state` package into a zip.
 
     Returns (zip_bytes, included_arcnames). Text files are scrubbed.
     Non-content files are skipped (see `_bundle_entries`).

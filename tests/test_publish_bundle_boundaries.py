@@ -4,12 +4,15 @@ no owner-side files and nothing a symlink pulls in from outside it."""
 from __future__ import annotations
 
 import io
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from anton.publisher import _zip_fullstack, _zip_html
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 
 ASSETS = ("style.css", "app.js", "img/logo.png", "img/bg.png")
 
@@ -66,6 +69,47 @@ def test_single_file_bundles_assets_but_not_owner_side_or_outside_files(tmp_path
     _assert_no_leak(zbytes)
 
 
+def test_single_file_bundle_entries_keep_their_order(tmp_path):
+    # Arcnames and their order feed the bundle md5 the "unpublished changes"
+    # check compares against, so they must not change for a plain artifact.
+    html = tmp_path / "index.html"
+    for asset in ASSETS:
+        (tmp_path / asset).parent.mkdir(exist_ok=True)
+        (tmp_path / asset).write_bytes(b"asset")
+    html.write_text(
+        '<script src="./app.js"></script><link href="style.css">'
+        '<img src="img/logo.png"><img src="img/../img/bg.png">'
+    )
+
+    with zipfile.ZipFile(io.BytesIO(_zip_html(html))) as bundle:
+        assert bundle.namelist() == ["index.html", "app.js", "img/bg.png", "img/logo.png", "style.css"]
+
+
+def test_single_file_symlinked_reference_keeps_the_name_the_page_uses(tmp_path):
+    (tmp_path / "css").mkdir()
+    (tmp_path / "css" / "v2.css").write_text("own")
+    (tmp_path / "latest.css").symlink_to(tmp_path / "css" / "v2.css")
+    (tmp_path / "dist" / "assets").mkdir(parents=True)
+    (tmp_path / "dist" / "assets" / "app.js").write_text("own")
+    (tmp_path / "assets").symlink_to(tmp_path / "dist" / "assets")
+    html = tmp_path / "index.html"
+    html.write_text('<link href="latest.css"><script src="assets/app.js"></script>')
+
+    assert _names(_zip_html(html)) == {"index.html", "latest.css", "assets/app.js"}
+
+
+def test_single_file_skips_symlink_loops_and_links_from_outside(tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "style.css").write_text("own")
+    (artifact / "loop").symlink_to(artifact / "loop")
+    (tmp_path / "alias").symlink_to(artifact)
+    html = artifact / "index.html"
+    html.write_text('<link href="loop"><link href="loop/x.css"><link href="../alias/style.css">')
+
+    assert _names(_zip_html(html)) == {"index.html"}
+
+
 def test_single_file_skips_sibling_folder_with_same_name_prefix(tmp_path):
     artifact = tmp_path / "sales"
     artifact.mkdir()
@@ -87,6 +131,17 @@ def test_single_file_symlinked_primary_bundles_assets_next_to_the_link(tmp_path)
     html.symlink_to(artifact / "dist" / "page.html")
 
     assert _names(_zip_html(html)) == {"index.html", "style.css"}
+
+
+@pytest.mark.filterwarnings("ignore:Duplicate name")
+def test_single_file_symlinked_primary_self_reference_maps_to_index_html(tmp_path):
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "page.html").write_text('<a href="index.html">home</a>')
+    html = tmp_path / "index.html"
+    html.symlink_to(tmp_path / "dist" / "page.html")
+
+    with zipfile.ZipFile(io.BytesIO(_zip_html(html))) as bundle:
+        assert bundle.namelist() == ["index.html", "index.html"]
 
 
 def test_single_file_sibling_index_html_does_not_replace_the_primary(tmp_path):
