@@ -5040,10 +5040,10 @@ class ChatSession:
                         except Exception as e:
                             # The explain call failed too, so the turn fails with
                             # its error and the host maps it: curated types to
-                            # their cards where one exists (ENG-1361), auth
-                            # refusals to the reconnect card, and anything else
-                            # to the host's own redacted copy — cowork-server's
-                            # "An unexpected error occurred.", the CLI's
+                            # their cards where one exists, auth refusals to
+                            # the reconnect card, and anything else to the
+                            # host's own redacted copy — cowork-server's "An
+                            # unexpected error occurred.", the CLI's
                             # setup/retry prompt.
                             #
                             # Never stream the exception as prose. Its message
@@ -5053,7 +5053,7 @@ class ChatSession:
                             # turn's reply, and is replayed to the model on
                             # every later turn. Raising is default-safe: a type
                             # outside the curated allowlist gets generic copy
-                            # rather than leaking (ENG-3410).
+                            # rather than leaking.
                             #
                             # Telemetry keeps the retry_exhausted terminal
                             # stamped above, with the error that exhausted the

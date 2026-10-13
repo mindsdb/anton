@@ -145,7 +145,7 @@ async def test_generic_connection_error_is_retried_before_it_fails_the_turn(work
     """Only the typed auth refusal fails fast. An unrelated ConnectionError
     (e.g. the generic 'temporarily unavailable' case) still gets the retries
     and the explain call. When those fail too the turn raises it rather than
-    streaming it as chat text (ENG-3410)."""
+    streaming it as chat text."""
     mock_llm = make_mock_llm()
     script = _AlwaysRaisingPlanStream(ConnectionError("temporarily unavailable"))
     mock_llm.plan_stream = script

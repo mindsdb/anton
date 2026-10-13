@@ -2,9 +2,9 @@
 
 Both SDKs keep a body that is not JSON as the raw string, and use it as the
 exception's message too. Unclassified, that error re-raised from the 400 path,
-was retried, and ended as the turn's prose reply, past the host's redaction
-(ENG-3410). The provider now classifies a markup body as a misrouted request,
-and the session never streams an exception as prose.
+was retried, and ended as the turn's prose reply, past the host's redaction.
+The provider now classifies a markup body as a misrouted request, and the
+session never streams an exception as prose.
 
 These drive the pinned SDKs through ``httpx.MockTransport`` rather than mocks,
 for the reason ``test_bad_request_reaches_the_classifier.py`` gives: which SDK

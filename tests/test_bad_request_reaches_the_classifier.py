@@ -691,7 +691,7 @@ async def test_a_history_shape_400_still_retries_then_explains(flavor):
     """The narrow rule leaves this 400 on today's path: three attempts with
     tools, then one tool-less call asking the model to explain. That call
     fails too here, so the turn fails with the SDK error rather than streaming
-    it as prose (ENG-3410). An orphan tool call can heal on the re-send once
+    it as prose. An orphan tool call can heal on the re-send once
     the session seals it, so it must not end the turn on the first one."""
     from anton.chat import ChatSession
     from anton.core.llm.client import LLMClient

@@ -242,7 +242,7 @@ async def test_late_finalizer_cannot_close_a_newer_turns_books(workspace):
 
 async def test_exhausted_retries_is_not_reported_as_completed(workspace):
     """Every LLM call failing → the retry loop asks the model to explain, that
-    call fails too, and the turn raises (ENG-3410). The default ``completed``
+    call fails too, and the turn raises. The default ``completed``
     used to hold here — filing the most common failure mode as a clean turn.
     """
     mock_llm = make_mock_llm()
