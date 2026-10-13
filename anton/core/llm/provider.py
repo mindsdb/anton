@@ -1309,18 +1309,21 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     if headers is None:
         return None
     try:
+        raw_ms = headers.get("retry-after-ms") or headers.get("Retry-After-Ms")
         raw = headers.get("retry-after") or headers.get("Retry-After")
     except Exception:
         return None
-    if raw is None:
-        return None
-    try:
-        secs = float(str(raw).strip())
-    except (TypeError, ValueError):
-        return None  # HTTP-date form, or junk
-    if secs != secs or secs in (float("inf"), float("-inf")) or secs < 0:
-        return None
-    return secs
+    # Azure sends the precise interval in milliseconds next to a rounded-up Retry-After.
+    for value, scale in ((raw_ms, 1000), (raw, 1)):
+        if value is None:
+            continue
+        try:
+            secs = float(str(value).strip()) / scale
+        except (TypeError, ValueError):
+            continue  # HTTP-date form, or junk
+        if secs == secs and secs not in (float("inf"), float("-inf")) and secs >= 0:
+            return secs
+    return None
 
 
 def _rate_limited(
