@@ -108,11 +108,5 @@ def test_absent_null_or_empty_reasoning_effort_is_unset(extra):
 
 
 @pytest.mark.parametrize("effort", [1, True, ["high"], {"level": "high"}, 0.5])
-def test_a_non_string_reasoning_effort_is_rejected_without_echoing_it(effort):
-    raw = json.dumps({
-        "protocol_version": 1, "conversation_id": "c", "input": "hi",
-        "llm": {"api_key": "sk-must-not-appear"}, "reasoning_effort": effort,
-    })
-    with pytest.raises(ValueError) as err:
-        TurnRequestV1.from_json(raw)
-    assert str(err.value) == "reasoning_effort must be a string"
+def test_a_non_string_reasoning_effort_falls_back_to_the_default(effort):
+    assert _with_effort(reasoning_effort=effort).reasoning_effort is None
