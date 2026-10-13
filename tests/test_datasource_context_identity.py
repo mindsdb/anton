@@ -120,6 +120,41 @@ class TestUserLabelInPrompt:
         assert "Label: postgres" in ctx
         assert "(none)" not in ctx
 
+    def test_two_unnamed_connections_of_one_engine_get_distinct_labels(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com"})
+        ctx = build_datasource_context(v)
+        assert ctx.count("— Label: postgres\n") == 1
+        assert ctx.count("— Label: postgres 2\n") == 1
+
+    def test_engine_fallback_skips_a_label_another_connection_stored(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com", "_user_label": "postgres"})
+        ctx = build_datasource_context(v)
+        assert "### Slug: `postgres-d4e5f6` — Label: postgres\n" in ctx
+        assert "### Slug: `postgres-a1b2c3` — Label: postgres 2\n" in ctx
+
+    def test_unnamed_labels_stay_unique_across_engines_and_stored_suffixes(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com"})
+        v.save("mysql", "g7h8i9", {"host": "c.example.com", "_user_label": "postgres 2"})
+        v.save("mysql", "j1k2l3", {"host": "d.example.com"})
+        labels = [
+            block.split("— Label: ", 1)[1].split("\n", 1)[0]
+            for block in (c.block for c in collect_datasource_catalog(v).connections)
+        ]
+        assert sorted(labels) == ["mysql", "postgres", "postgres 2", "postgres 3"]
+
+    def test_a_filtered_out_connection_does_not_claim_a_label(self, tmp_path):
+        v = LocalDataVault(tmp_path)
+        v.save("postgres", "a1b2c3", {"host": "a.example.com"})
+        v.save("postgres", "d4e5f6", {"host": "b.example.com", "_user_label": "postgres"})
+        catalog = collect_datasource_catalog(v, slugs={"postgres-a1b2c3"})
+        assert "— Label: postgres\n" in catalog.connections[0].block
+
     def test_the_engine_fallback_stays_out_of_the_catalog_label(self, tmp_path):
         v = LocalDataVault(tmp_path)
         v.save("postgres", "a1b2c3", {"host": "db.example.com", "database": "demo"})

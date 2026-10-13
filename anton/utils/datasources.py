@@ -9,7 +9,7 @@ import uuid
 import yaml
 from collections.abc import Collection, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -602,10 +602,8 @@ def collect_datasource_catalog(
             fields.get("_label", "")
         ).strip()
 
-        # An unnamed connection shows its engine, not "(none)": evals found the
-        # bare "(none)" made the model likelier to estimate figures it lacks.
-        lines = [f"\n### Slug: `{slug}` — Label: {user_label or engine or slug}"]
-        lines.append(f"Engine: {engine_name}")
+        # The slug/label header is prepended below, once every stored label is known.
+        lines = [f"Engine: {engine_name}"]
         # Same non-secret allowlist `_connection_identity()` encodes
         # (host/database/email, secure_keys-gated) — inlined here as
         # independent lines instead of one collapsed string.
@@ -639,6 +637,21 @@ def collect_datasource_catalog(
                 footer=_GOOGLE_DRIVE_PARAGRAPH if google_drive_access else "",
             )
         )
+    # An unnamed connection shows its engine, not "(none)": evals found the
+    # bare "(none)" made the model likelier to estimate figures it lacks.
+    # Suffixed like ensure_unique_user_label, but only against rendered
+    # connections: `slugs` must not trigger reads of records it leaves out.
+    taken = {conn.label for conn in connections if conn.label}
+    for i, conn in enumerate(connections):
+        label = conn.label
+        if not label:
+            base = conn.engine or conn.slug
+            label, n = base, 2
+            while label in taken:
+                label, n = f"{base} {n}", n + 1
+            taken.add(label)
+        header = f"\n### Slug: `{conn.slug}` — Label: {label}"
+        connections[i] = replace(conn, block=f"{header}\n{conn.block}")
     return DatasourceCatalog(connections=tuple(connections), notes=notes)
 
 
