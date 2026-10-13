@@ -216,13 +216,21 @@ _TOKEN_SHAPE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"  # JWT
     r"|ya29\.[A-Za-z0-9_-]{20,}"  # Google OAuth access token
 )
-# Output includes source code the model reads and may write back, so a value
-# that is a dotted path, a call, or all lowercase is code or prose, not a token.
+_TOKEN_KEY = (
+    r"(?<![A-Za-z0-9])"
+    r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
+)
+# A quoted value after a token key is a string literal, never a code
+# expression, so any characters up to the closing quote are redacted.
+_QUOTED_TOKEN_VALUE_PATTERN = re.compile(
+    r"(" + _TOKEN_KEY + r"\\?[\"']?[ \t]*[:=][ \t]*\\?[\"'])"
+    r"[^\"'\\\s]{16,}(?=\\?[\"'])"
+)
+# Unquoted values can be source code the model reads and may write back, so a
+# dotted path, a call, or an all-lowercase value is code or prose, not a token.
 _TOKEN_VALUE_PATTERN = re.compile(
     r"((?i:\bbearer)[ \t]+"
-    r"|(?<![A-Za-z0-9])"
-    r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
-    r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+)\\?[\"']?)"
+    r"|" + _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+))"
     r"(?!(?:[a-z_/-]+|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)(?![A-Za-z0-9._~+/=%-]))"
     r"[A-Za-z0-9._~+/=%-]{16,}"
     r"(?![A-Za-z0-9._~+/=%(-])"
@@ -365,6 +373,7 @@ def scrub_output(text: str) -> str:
     """
     text = scrub_credentials(text)
     text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
+    text = _QUOTED_TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
     return _TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
 
 
