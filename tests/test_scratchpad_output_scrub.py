@@ -151,8 +151,12 @@ async def test_a_cell_killed_after_printing_a_token_keeps_scrubbed_output(monkey
     assert TOKEN not in pad.cells[-1].stdout
 
 
-@pytest.mark.parametrize("filler", ["'line\\n' * 1600", "'x' * 8000"], ids=["lines", "one-line"])
-async def test_a_killed_cell_over_the_salvage_budget_does_not_strip_a_token_key(monkeypatch, filler):
+@pytest.mark.parametrize("key, filler", [
+    ("' access_token: ', end=''", "'line\\n' * 1600"),
+    ("' access_token: ', end=''", "'x' * 8000"),
+    ("' Authorization: Bearer'", "'line\\n' * 1600"),
+], ids=["lines", "one-line", "bearer-on-its-own-line"])
+async def test_a_killed_cell_over_the_salvage_budget_does_not_strip_a_token_key(monkeypatch, key, filler):
     """Salvage arrives in heartbeat chunks; trimming the oldest chunk must not
     drop a token's key and leave the token itself in the kept output. The first
     chunk ends with the key and the second starts with the token; together they
@@ -167,7 +171,7 @@ async def test_a_killed_cell_over_the_salvage_budget_does_not_strip_a_token_key(
     code = (
         _MAKE_TOKEN
         + "import time\n"
-        + "print('a' * 2000 + ' access_token: ', end='', flush=True)\n"
+        + f"print('a' * 2000 + {key}, flush=True)\n"
         + "time.sleep(0.6)\n"
         + f"print(tok + ' ' + {filler}, flush=True)\n"
         + "time.sleep(30)\n"
