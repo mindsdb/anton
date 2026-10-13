@@ -58,6 +58,7 @@ def _exec_response(code: str) -> LLMResponse:
 
 
 async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_path):
+    """Stream, progress, next model input, episodic log and dump never hold the token."""
     workspace = MagicMock(base=tmp_path)
     workspace.artifacts_dir = tmp_path / "artifacts"
     llm = make_mock_llm()
@@ -114,8 +115,7 @@ async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_pat
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():
-    # A host rebuilds a pad's earlier cells from stored events, which can
-    # predate the scrub; dump and view must not hand them back raw.
+    """Cells a host rebuilds from stored events come back scrubbed in dump and view."""
     stored = Cell(code="fetch()", stdout=f'{{"access_token": "{TOKEN}"}}', stderr="", error=None)
     pad = LocalScratchpadRuntime(name="replayed", cells=[stored], **_DEFAULTS)
 
@@ -126,6 +126,7 @@ def test_cells_replayed_from_stored_history_are_scrubbed():
 
 
 async def test_a_cell_killed_after_printing_a_token_keeps_scrubbed_output(monkeypatch):
+    """A cell killed by its timeout keeps its salvaged output, with the token redacted."""
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
     monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "1")
