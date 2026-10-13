@@ -226,17 +226,17 @@ _TOKEN_KEY = (
 _QUOTED_TOKEN_VALUE_PATTERN = re.compile(
     r"(" + _TOKEN_KEY + r"\\?[\"']?\s*[:=]\s*\\?[\"']"
     r"|\\?[\"'](?i:bearer)[ \t]+)"
-    r"(?![{$]|\[[A-Z][A-Z0-9_]*\])"
-    r"(?:[^\"'\\\s]|\\/){16,}"
+    r"(?!(?:\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\])(?![^\"'\\\s]))"
+    r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4}){16,}"
 )
 # Unquoted values can be source code the model reads and may write back: after
 # a key, a lowercase-led dotted path, a call, or an all-lowercase value is code.
 _TOKEN_VALUE_PATTERN = re.compile(
-    r"((?i:\bbearer)(?:[ \t]+|[ \t]*\n[ \t]*)"
-    r"(?![a-z]+(?:/[a-z]+)*(?![A-Za-z0-9._~+/=%!-]))"
+    r"((?i:\bbearer)(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
+    r"(?![a-z_/-]+(?![A-Za-z0-9._~+/=%!-]))"
     r"|" + _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+)"
     r"(?!(?:[a-z_/-]+|[a-z_]\w*(?:\.[A-Za-z_]\w*)+)(?![A-Za-z0-9._~+/=%!-])))"
-    r"[A-Za-z0-9._~+/=%!-]{16,}"
+    r"(?!!)[A-Za-z0-9._~+/=%!-]{16,}"
     r"(?![A-Za-z0-9._~+/=%!(-])"
 )
 
