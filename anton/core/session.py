@@ -481,16 +481,28 @@ class _FinishAuthorization(BaseModel):
 
 
 def _finish_authorized(verdict, message: str) -> bool:
-    """Read a `_FinishAuthorization` verdict: yes needs a quote whose words are
-    in the message. Mostly, not exactly: models fix typos ("hae" → "have") and
-    add punctuation when they copy, but an invented quote shares few words."""
+    """Read a `_FinishAuthorization` verdict: yes needs a quote that is in the
+    message. Copied exactly (ignoring case, spacing and punctuation), or mostly:
+    models fix typos ("hae" → "have") when they copy, but an invented quote
+    shares few words. Unicode-aware, so an exact Chinese or Russian quote
+    counts; scripts without spaces rely on the exact match."""
     if getattr(verdict, "authorized", None) is not True:
         return False
-    words = re.findall(r"[a-z']+", str(getattr(verdict, "quote", "")).lower())
-    if not words:
+    quote = str(getattr(verdict, "quote", ""))
+    letters = lambda text: "".join(ch for ch in text.lower() if ch.isalnum())  # noqa: E731
+    if not letters(quote):
         return False
-    present = set(re.findall(r"[a-z']+", message.lower()))
+    if letters(quote) in letters(message):
+        return True
+    words = re.findall(r"[\w']+", quote.lower())
+    present = set(re.findall(r"[\w']+", message.lower()))
     return sum(w in present for w in words) >= 0.8 * len(words)
+
+
+# Longest message the finish-authorization check reads. Longer ones are never
+# truncated into it (a cut-off restriction would read as unrestricted); the
+# turn asks instead, which only costs a question.
+_FINISH_AUTHORIZATION_MAX_CHARS = 4000
 
 
 def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
@@ -523,12 +535,18 @@ def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
         "say to skip check-ins;\n"
         "- continuing with a change of direction, such as \"keep going but "
         "try a different approach\";\n"
-        "- a question, or an instruction to stop, pause or wait.\n\n"
+        "- a question, or an instruction to stop, pause or wait;\n"
+        "- any message that also asks to be checked with before going past a "
+        "limit, spending more, or exceeding a budget, even if it also says "
+        "\"keep going\" (\"keep going, but ask me before you go over my token "
+        "limit\"). The restriction wins. Permission with a condition about "
+        "cost, budget or limits (\"as long as...\", \"unless...\", \"otherwise "
+        "ask\") is such a restriction.\n\n"
         "If unsure, answer false: the agent will then simply ask.\n\n"
         "First copy the words in the message that give that instruction. If "
         "there are none, leave the quote empty and answer false."
     )
-    return system, [{"role": "user", "content": f"USER MESSAGE:\n{message[:4000]}"}]
+    return system, [{"role": "user", "content": f"USER MESSAGE:\n{message}"}]
 
 
 # Output budgets for the verdict call: first attempt, then the retry used when
@@ -4083,6 +4101,11 @@ class ChatSession:
             yield "event", StreamTaskProgress(phase="analyzing", message=note)
             yield "result", True
             return
+        if self.emitter is None:
+            # `turn()` runs without an emitter, so there is no one to ask and
+            # nothing to drain; the caller hands back as it always did.
+            yield "result", False
+            return
         inner = self._run_draining(self._continue_question(limit))
         try:
             async for kind, item in inner:
@@ -4107,7 +4130,10 @@ class ChatSession:
         if self._finish_authorized is None:
             self._finish_authorized = False
             text = (user_message or "").strip()
-            if text:
+            # Too long to send whole: ask instead. A truncated message could
+            # drop a trailing restriction ("...but ask before going over my
+            # token limit") while its opening "keep going" still verifies.
+            if text and len(text) <= _FINISH_AUTHORIZATION_MAX_CHARS:
                 try:
                     system, messages = _build_finish_authorization_request(text)
                     verdict = await self._llm.generate_object_code(

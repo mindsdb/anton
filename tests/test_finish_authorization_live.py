@@ -82,6 +82,24 @@ CASES: list[tuple[str, str, bool | None]] = [
     ("question", "How much longer will this take?", False),
     ("should-you-continue", "Should you keep going or is this good enough?", False),
     ("only-section-2", "Only finish section 2, leave the rest.", False),
+    # Paraphrases sharing no wording with the prompt's own example, so a pass
+    # is the rule generalizing rather than the example being matched.
+    (
+        "dont-stop-but-check-credits",
+        "Don't stop until you're done — but check with me first if it starts eating a lot of credits.",
+        False,
+    ),
+    (
+        "finish-within-budget",
+        "Finish the whole migration without checking in, as long as it stays under the usual budget; "
+        "otherwise ping me.",
+        False,
+    ),
+    (
+        "keep-going-but-ask-at-limit",
+        "Keep going until it's done, but ask me before you go past my token limit.",
+        False,
+    ),
 ]
 
 

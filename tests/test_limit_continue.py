@@ -237,3 +237,51 @@ def test_a_yes_needs_a_quote_from_the_message():
     assert not _finish_authorized(
         _FinishAuthorization(quote="don't stop", authorized=False), message
     )
+
+
+async def test_turn_without_an_emitter_hands_back_at_the_limit(workspace):
+    """`turn()` runs with no emitter, so nothing can ask. The limit must hand
+    back as before, not crash reading an emitter that is not there (the
+    reviewed failure: an empty reply ending `retry_exhausted`)."""
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    session.elicitor = _ScriptedElicitor(KEEP_GOING)
+    with patch("anton.analytics.send_event") as send:
+        reply = await session.turn("do the thing")
+    assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+    assert send.call_args.kwargs["limit_continues"] == "0"
+    assert isinstance(reply, str)
+
+
+async def test_a_message_too_long_to_check_whole_is_asked_about(workspace):
+    """Truncating it could cut off a trailing restriction while the opening
+    "keep going" still verifies, so a long message never skips the question."""
+    from anton.core.session import _FINISH_AUTHORIZATION_MAX_CHARS
+
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)])
+    elicitor = _ScriptedElicitor(STOP_HERE)
+    session.elicitor = elicitor
+    calls = _structured_calls(session, authorized=True)
+    message = (
+        "Keep going, don't stop until you are finished. "
+        + "Context. " * (_FINISH_AUTHORIZATION_MAX_CHARS // 9)
+        + "But ask me before you go past my token limit."
+    )
+    _, kwargs = await _run(session, message)
+    assert kwargs["limit_message_continues"] == "0"
+    assert len(elicitor.requests) == 1
+    assert _authorization_checks(calls) == 0
+
+
+def test_an_exact_non_latin_quote_counts():
+    from anton.core.session import _finish_authorized
+
+    for message, quote in (
+        ("请继续，不要停下来，直到全部完成。", "不要停下来，直到全部完成"),
+        ("Продолжай и не останавливайся, пока не закончишь.", "не останавливайся, пока не закончишь"),
+        # No spaces or punctuation around the quote: only an exact match finds it.
+        ("请继续不要停下来直到全部完成", "不要停下来"),
+    ):
+        assert _finish_authorized(_FinishAuthorization(quote=quote, authorized=True), message)
+    assert not _finish_authorized(
+        _FinishAuthorization(quote="不要问我", authorized=True), "请继续，不要停下来。"
+    ), "a quote the message does not contain is still invented"
