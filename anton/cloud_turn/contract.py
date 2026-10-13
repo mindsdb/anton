@@ -227,7 +227,7 @@ class TurnRequestV1:
     connectors: dict | None = None
     #: Optional reasoning effort the user picked for this turn. Applied to the
     #: planning model only; the name is passed to the provider uninterpreted.
-    #: Absent, null, empty, or non-string keeps the configured default.
+    #: Absent, null, blank, or non-string keeps the configured default.
     reasoning_effort: str | None = None
 
     @staticmethod
@@ -236,6 +236,9 @@ class TurnRequestV1:
         protocol_version = d["protocol_version"]
         if not _is_version(protocol_version, TURN_PROTOCOL_VERSION):
             raise ValueError("unsupported cloud turn protocol version")
+        reasoning_effort = d.get("reasoning_effort")
+        if not isinstance(reasoning_effort, str):
+            reasoning_effort = ""
         return TurnRequestV1(
             protocol_version=protocol_version,
             conversation_id=str(d["conversation_id"]),
@@ -264,7 +267,5 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
-            reasoning_effort=(
-                d.get("reasoning_effort") if isinstance(d.get("reasoning_effort"), str) else None
-            ) or None,
+            reasoning_effort=reasoning_effort.strip() or None,
         )

@@ -102,8 +102,8 @@ def test_reasoning_effort_is_passed_through_uninterpreted(effort):
     assert _with_effort(reasoning_effort=effort).reasoning_effort == effort
 
 
-@pytest.mark.parametrize("extra", [{}, {"reasoning_effort": None}, {"reasoning_effort": ""}])
-def test_absent_null_or_empty_reasoning_effort_is_unset(extra):
+@pytest.mark.parametrize("extra", [{}, {"reasoning_effort": None}, {"reasoning_effort": ""}, {"reasoning_effort": "  "}])
+def test_absent_null_or_blank_reasoning_effort_is_unset(extra):
     assert _with_effort(**extra).reasoning_effort is None
 
 
