@@ -282,9 +282,9 @@ def _spec_context(state: GenState) -> str:
     """PRD (or the brief when there is none) + gathered data + tech spec —
     the shared context handed to api-spec and generation nodes.
 
-    The brief is NOT sent next to a PRD. Since phase B it is the confirmation
-    proposal shown to the user — "here is what I suggest, continue or say
-    what to change" — with questions the accepted PRD has already settled;
+    The brief is NOT sent next to a PRD. Since phase B it is the short
+    proposal shown to the user, with questions and assumptions the PRD has
+    already settled;
     the PRD supersedes it on every point. Measured 2026-09-16: 1 KB of every
     generation round, and a second voice the generator had to reconcile.
     """
@@ -1172,9 +1172,22 @@ def _invalidate_specs(state: GenState) -> None:
     state.api_spec = None
 
 
+def _brief_fields(state: GenState) -> dict:
+    """What the calling agent needs to know about the brief on success.
+
+    Acting first, the user either saw the brief (`brief_shown`) or its text
+    travels here for the agent to relay. Asking first, the user confirmed it.
+    """
+    if state.brief_shown:
+        return {"brief_shown": True}
+    if state.act_first and state.brief:
+        return {"brief_summary": state.brief}
+    return {}
+
+
 def _finish(state: GenState) -> dict:
     _save_checkpoint(state, cp.STAGE_GENERATED)
-    return {"status": "generated", **_result_shell(state)}
+    return {"status": "generated", **_result_shell(state), **_brief_fields(state)}
 
 
 def _cancelled(state: GenState) -> dict:
@@ -1201,13 +1214,13 @@ def _needs_confirmation(state: GenState) -> dict:
 
 
 def _stopped_over_budget(state: GenState, detail: str) -> dict:
-    # `brief_summary` travels with every budget stop: the run can end before
-    # the user has seen a brief at all, and then this is the only way to show
-    # them one.
+    # `brief_summary` travels with every budget stop the user has not seen
+    # the brief for: the run can end before any brief was shown, and then
+    # this is the only way to show them one.
     return {
         "status": "stopped_over_budget",
         "detail": detail,
-        "brief_summary": state.brief,
+        **({"brief_shown": True} if state.brief_shown else {"brief_summary": state.brief}),
         **_result_shell(state),
     }
 
@@ -1215,6 +1228,10 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
 async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     """Walk the whole pipeline from wherever this call is entitled to start."""
     state.entry = entry
+    if state.act_first and entry not in (cp.ENTRY_FULL, cp.ENTRY_NEW_ITERATION):
+        # A repeat call past the brief: an earlier turn showed it (for
+        # `ENTRY_CONFIRM`, the budget stop that asked to continue).
+        state.brief_shown = True
     if entry in (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION):
         stage = await run_discovery(state, entry=entry)
         if stage == CANCELLED:
@@ -1232,7 +1249,7 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
             # the work stopped short.
             if state.winding_down():
                 return _stopped_over_budget(
-                    state, "budget reached while agreeing the brief"
+                    state, "budget reached at the brief"
                 )
             return _needs_confirmation(state)
         _invalidate_specs(state)

@@ -569,6 +569,7 @@ async def _drain_progress(queue):
     describe steps that already finished.
     """
     from anton.core.tools.generate_artifact.progress import (
+        MESSAGE_PREFIX,
         PEEK_PREFIX,
         QUESTION_CLOSED,
         QUESTION_OPEN,
@@ -588,6 +589,9 @@ async def _drain_progress(queue):
             # describes text that has long since moved on.
             if not depth:
                 yield ToolProgress(line[len(PEEK_PREFIX):], kind="peek")
+            continue
+        if line.startswith(MESSAGE_PREFIX):
+            yield ToolProgress(line[len(MESSAGE_PREFIX):], kind="message")
             continue
         if line == QUESTION_OPEN:
             # A counter, not a flag: `show_and_confirm` wraps a call that
@@ -637,6 +641,9 @@ _STATUS_INSTRUCTIONS = {
         "and `warnings` what the verifier flagged without failing the step: "
         "when either is non-empty, tell the user in one sentence what was "
         "not checked or flagged — never present a skipped check as passed."
+        " When the result carries `brief_shown: true`, the user has already "
+        "seen the brief: do not repeat it. When it carries `brief_summary`, "
+        "the user has not seen it: sum up its assumptions in a sentence or two."
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "
@@ -654,11 +661,13 @@ _STATUS_INSTRUCTIONS = {
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
-        "got and ask whether to continue. When the result carries a "
-        "non-empty `brief_summary`, show it to the user as part of that "
-        "question: the pipeline stopped before they could confirm it, and "
-        "the repeat call is taken as their agreement to that brief. If they "
-        "agree, call this tool again with the SAME `user_request` — it "
+        "got and ask whether to continue. When the result carries "
+        "`brief_shown: true`, the user already saw the brief and was not "
+        "asked to confirm it: do not show it again. Otherwise, when it "
+        "carries a non-empty `brief_summary`, show it to the user as part of "
+        "that question: the pipeline stopped before they could confirm it, "
+        "and the repeat call is taken as their agreement to that brief. If "
+        "they agree, call this tool again with the SAME `user_request` — it "
         "resumes rather than restarting. A requested change goes in "
         "`agent_understanding`, with `user_request` left as it was."
     ),

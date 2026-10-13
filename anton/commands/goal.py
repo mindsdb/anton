@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from anton.chat_ui import is_displayed_tool_result
 from anton.core.llm.provider import (
     StreamContextCompacted,
     StreamTaskProgress,
@@ -142,7 +143,7 @@ async def run_goal_loop(
                         if isinstance(event, StreamTextDelta):
                             display.append_text(event.text)
                         elif isinstance(event, StreamToolResult):
-                            if event.name == "scratchpad" and event.action == "dump":
+                            if is_displayed_tool_result(event):
                                 display.show_tool_result(event.content)
                         elif isinstance(event, StreamToolUseStart):
                             display.on_tool_use_start(event.id, event.name)

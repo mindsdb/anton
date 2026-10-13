@@ -433,7 +433,7 @@ async def test_truncated_verdict_is_retried_with_a_bigger_budget(workspace):
     # The verdict came from the retry (WAITING → a valid stop), so no
     # "Continue working" continuation was injected.
     assert not any(
-        "SYSTEM: Task verification determined this task is not yet complete"
+        "[Automatic completion check, not written by the user]"
         in str(m.get("content", ""))
         for m in session.history
     )
@@ -582,7 +582,7 @@ async def test_truncation_retry_through_the_real_client(workspace, first_failure
     )
     # The retried verdict (WAITING) stands: no forced continuation.
     assert not any(
-        "SYSTEM: Task verification determined this task is not yet complete"
+        "[Automatic completion check, not written by the user]"
         in str(m.get("content", ""))
         for m in session.history
     )
