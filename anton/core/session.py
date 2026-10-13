@@ -4635,6 +4635,9 @@ class ChatSession:
         _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
+        # A wrap-up failure the retry-exhausted site has already booked, so
+        # the finally keeps that terminal instead of filing it as "error".
+        _booked_exc: BaseException | None = None
         try:
             while True:
                 try:
@@ -5035,62 +5038,37 @@ class ChatSession:
                                     assistant_text_parts.append(event.text)
                                 yield event
                         except Exception as e:
-                            if isinstance(e, CURATED_PROVIDER_ERRORS):
-                                # Curated provider failures must FAIL the turn, not
-                                # get wrapped into assistant prose: the server maps
-                                # them to actionable cards, which can only fire when
-                                # the exception propagates. Wrapping them as text is
-                                # how "Server returned 403" ended up mid-chat with
-                                # "please rephrase your request" advice.
-                                #
-                                # ENG-1361 moved the membership list from HERE to
-                                # `provider.py`, beside the classes themselves, so
-                                # a new type is triaged where it is born.
-                                #
-                                # Be precise about what that does and does NOT buy
-                                # (review of #433): this is STILL an allowlist at
-                                # runtime — an unlisted type still becomes prose.
-                                # The default-safe property comes only from
-                                # `test_every_exception_defined_in_a_provider_module_is_triaged`,
-                                # which is why that test's module list must cover
-                                # every module that defines one of these.
-                                #
-                                # And propagating is not automatically better.
-                                # Five members currently have NO card on either
-                                # transport (ContextOverflowError,
-                                # StructuredOutputError, TransientProviderError,
-                                # EndpointConfigurationError,
-                                # RequestRefusedError): cowork-server
-                                # replaces the message with a flat "An unexpected
-                                # error occurred." and the client renders a
-                                # BUTTONLESS alert, so for those the turn trades
-                                # anton's own diagnosis for less text. It is still
-                                # the right trade — the prose asserted a remedy
-                                # that could not work — but it is a trade, not a
-                                # free win, and the cards are the follow-up.
-                                raise
-                            if _is_provider_auth_error(e):
-                                # Preserve a refusal after failed confirmation,
-                                # or the first refusal after stream output, for
-                                # the host's auth-error mapping.
-                                raise
-                            # No "rephrase your request": everything reaching
-                            # this line is an UNEXPECTED failure, and we have no
-                            # basis to claim the user's wording caused it. The
-                            # curated failures — where we DO know the cause, and
-                            # where rephrasing provably cannot help — are re-
-                            # raised above (ENG-1361). Say what happened and stop
-                            # inventing a remedy.
-                            fallback = f"An unexpected error occurred: {e}"
-                            assistant_text_parts.append(fallback)
-                            yield StreamTextDelta(text=fallback)
+                            # The explain call failed too, so the turn fails with
+                            # its error and the host maps it: curated types to
+                            # their cards where one exists (ENG-1361), auth
+                            # refusals to the reconnect card, and anything else
+                            # to the host's own redacted copy — cowork-server's
+                            # "An unexpected error occurred.", the CLI's
+                            # setup/retry prompt.
+                            #
+                            # This used to stream "An unexpected error occurred:
+                            # {e}" as assistant prose for any type outside the
+                            # curated allowlist. `str(e)` is the provider's raw
+                            # body — for ENG-3410 a storage service's XML — and
+                            # as prose it skipped the host's redaction, was saved
+                            # as the turn's reply, and was replayed to the model
+                            # on every later turn. Raising is default-safe: an
+                            # unlisted type no longer leaks, it gets generic copy.
+                            #
+                            # Booked as the retry_exhausted terminal stamped
+                            # above, with the error that exhausted the retries,
+                            # as it was while this ended in prose. A curated or
+                            # auth failure keeps being booked as "error".
+                            if not isinstance(e, CURATED_PROVIDER_ERRORS) and not _is_provider_auth_error(e):
+                                _booked_exc = e
+                            raise
                         break
         except BaseException as _e:
             # Capture, don't classify — the finally needs to know whether THIS
             # turn failed, rather than asking the interpreter what the thread
             # happens to be handling (#309 review). Covers GeneratorExit and
             # CancelledError too, both BaseException, both real turn endings.
-            _turn_exc = _e
+            _turn_exc = None if _e is _booked_exc else _e
             raise
         finally:
             self._turn_memory = None

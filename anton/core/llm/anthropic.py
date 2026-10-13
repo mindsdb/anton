@@ -27,6 +27,7 @@ from .provider import (
     Usage,
     classify_404,
     classify_content_rejection,
+    classify_markup_bad_request,
     classify_transient,
     log_transient_provider_error,
     retry_after_seconds,
@@ -50,6 +51,12 @@ def _raise_for_bad_request(exc: anthropic.BadRequestError) -> None:
     matches a 400 first and its bare ``raise`` re-raises out of the whole
     ``try`` — ``_raise_for_status_error`` never sees a 400, on either provider.
     """
+    # First: a markup body is the raw HTML/XML, and the checks below would
+    # read it as text (ENG-3410).
+    misrouted = classify_markup_bad_request(exc.body)
+    if misrouted is not None:
+        raise misrouted from exc
+
     msg = str(exc).lower()
     if "prompt is too long" in msg or "context limit" in msg:
         raise ContextOverflowError(str(exc)) from exc

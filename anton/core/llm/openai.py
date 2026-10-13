@@ -35,6 +35,7 @@ from .provider import (
     Usage,
     classify_404,
     classify_content_rejection,
+    classify_markup_bad_request,
     classify_request_refusal,
     classify_responses_failure,
     classify_transient,
@@ -151,6 +152,12 @@ def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     terminal today. Naming only what we can name leaves every other 400
     byte-identical; the generic-fallback question is ENG-1283's.
     """
+    # First: a markup body is the raw HTML/XML, and the checks below would
+    # read it as text (ENG-3410).
+    misrouted = classify_markup_bad_request(_error_body(exc))
+    if misrouted is not None:
+        raise misrouted from exc
+
     msg = str(exc).lower()
     if "context_length_exceeded" in msg or "maximum context length" in msg:
         raise ContextOverflowError(str(exc)) from exc

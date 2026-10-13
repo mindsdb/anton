@@ -1991,6 +1991,31 @@ def classify_404(
     )
 
 
+def classify_markup_bad_request(body: object) -> "EndpointConfigurationError | None":
+    """Classify a 400 whose body is HTML or XML as a misrouted request.
+
+    Shared by the OpenAI-compatible and Anthropic 400 paths. Both SDKs keep a
+    body that is not JSON as the raw string, and use that string as the
+    exception's message too. A model API answers in JSON, so markup means the
+    request reached some other service: a web server, a proxy's error page, or
+    a storage bucket. ENG-3410's was Google Cloud Storage's XML ``InvalidArgument
+    / POST object expects Content-Type multipart/form-data``.
+
+    The identical request fails identically on a retry, and the raw body is
+    neither safe nor useful to show. So this returns curated copy that leaves
+    the body out, and the session fails the turn at once instead of spending
+    its retries. Returns None for any other body, so JSON 400s keep their
+    existing handling.
+    """
+    if not (isinstance(body, str) and body.lstrip().startswith("<")):
+        return None
+    return EndpointConfigurationError(
+        "The model endpoint returned 400 with a web page or storage error "
+        "instead of an API response, so the request likely reached the wrong "
+        "service — check the endpoint URL configuration."
+    )
+
+
 class EndpointConfigurationError(ConnectionError):
     """Raised when a request fails in a way that points at the endpoint
     configuration — a wrong base URL, a missing ``/v1``, a reverse-proxy route,
