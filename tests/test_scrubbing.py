@@ -267,6 +267,9 @@ class TestScrubOutput:
         ('{"access_token":"AAAA\\u002fBBBBBBBBBBBBBBBBBBBBB"}', '{"access_token":"[REDACTED_TOKEN]"}'),
         ("client_secret = '$2b$12$AbCdEfGhIjKlMnOpQrStUv'", "client_secret = '[REDACTED_TOKEN]'"),
         ("access_token: Abc.Def.Ghi_jklmnopq", "access_token: [REDACTED_TOKEN]"),
+        ("access_token=Ab9CdEfGhIjKlMnOpQr", "access_token=[REDACTED_TOKEN]"),
+        ("access_token=ABCDEFGHIJKLMNOPQRST", "access_token=[REDACTED_TOKEN]"),
+        ("access_token=AB_cdEFgh_IJklMNop", "access_token=[REDACTED_TOKEN]"),
     ])
     def test_tokens_that_resemble_code_are_still_redacted(self, text, expected):
         """Printed headers and token_type/token pairs are output, not source code."""
@@ -307,6 +310,9 @@ class TestScrubOutput:
         'headers = {"Authorization": f"Bearer {self.config.access_token_value}"}',
         "const auth = `Bearer ${process.env.API_ACCESS_TOKEN}`",
         "if access_token !=expected_access_token_value:",
+        "def refresh(access_token: AccessTokenResponse) -> None:",
+        "client_secret = CLIENT_SECRET_ENV_VAR",
+        "    access_token=ACCESS_TOKEN_DEFAULT_NAME,",
     ])
     def test_source_code_the_model_reads_is_left_alone(self, line):
         """Code the model reads and may write back is never rewritten."""
