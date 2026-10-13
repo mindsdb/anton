@@ -220,20 +220,24 @@ _TOKEN_KEY = (
     r"(?<![A-Za-z0-9])"
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
-# A quoted value after a token key is a string literal, never a code
-# expression. No closing quote is required: clipped output can end mid-value.
+# A quoted value after a token key or `Bearer` is a string literal, so it is
+# redacted whatever its characters; only a placeholder or a marker is kept.
+# No closing quote is required: clipped output can end mid-value.
 _QUOTED_TOKEN_VALUE_PATTERN = re.compile(
-    r"(" + _TOKEN_KEY + r"\\?[\"']?[ \t]*[:=][ \t]*\\?[\"'])"
-    r"[^\"'\\\s]{16,}"
+    r"(" + _TOKEN_KEY + r"\\?[\"']?\s*[:=]\s*\\?[\"']"
+    r"|\\?[\"'](?i:bearer)[ \t]+)"
+    r"(?![{$]|\[[A-Z][A-Z0-9_]*\])"
+    r"(?:[^\"'\\\s]|\\/){16,}"
 )
-# Unquoted values can be source code the model reads and may write back, so a
-# dotted path, a call, or an all-lowercase value is code or prose, not a token.
+# Unquoted values can be source code the model reads and may write back: after
+# a key, a lowercase-led dotted path, a call, or an all-lowercase value is code.
 _TOKEN_VALUE_PATTERN = re.compile(
-    r"((?i:\bbearer)[ \t]+"
-    r"|" + _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+))"
-    r"(?!(?:[a-z_/-]+|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)(?![A-Za-z0-9._~+/=%-]))"
-    r"[A-Za-z0-9._~+/=%-]{16,}"
-    r"(?![A-Za-z0-9._~+/=%(-])"
+    r"((?i:\bbearer)(?:[ \t]+|[ \t]*\n[ \t]*)"
+    r"(?![a-z]+(?:/[a-z]+)*(?![A-Za-z0-9._~+/=%!-]))"
+    r"|" + _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+)"
+    r"(?!(?:[a-z_/-]+|[a-z_]\w*(?:\.[A-Za-z_]\w*)+)(?![A-Za-z0-9._~+/=%!-])))"
+    r"[A-Za-z0-9._~+/=%!-]{16,}"
+    r"(?![A-Za-z0-9._~+/=%!(-])"
 )
 
 
