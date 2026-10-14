@@ -204,7 +204,27 @@ async def test_output_that_scrubs_away_entirely_says_it_was_withheld(tmp_path):
     cell = await _print_saved_secret(tmp_path, secret, "(' ' + secret + chr(10)) * 100")
 
     assert "withheld" in cell.stdout
-    assert secret[:8] not in cell.stdout
+    for start in range(len(secret) - 8):
+        assert secret[start : start + 8] not in cell.stdout
+
+
+async def test_a_long_saved_value_that_is_not_secret_does_not_withhold_output(tmp_path):
+    """Only values the scrub matches set how much is held back; a long
+    non-secret field must not hide normal output."""
+    vault = LocalDataVault(tmp_path / "vault")
+    vault.save("postgres", "prod", {"host": "h" * 20_000, "password": _SAVED_PASSWORD})
+    begin_ds_turn_scope()
+    restore_namespaced_env(vault)
+    pad = LocalScratchpadRuntime(name="long-host-cell", **_DEFAULTS)
+    await pad.start()
+    try:
+        cell = await pad.execute("print('normal line\\n' * 2000)\n")
+    finally:
+        await pad.close()
+
+    assert "withheld" not in cell.stdout
+    assert cell.stdout.startswith("normal line\n")
+    assert cell.stdout.count("normal line") > 800
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():
