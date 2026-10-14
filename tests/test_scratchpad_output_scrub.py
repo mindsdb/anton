@@ -18,6 +18,7 @@ import pytest
 
 from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.backends.local import LocalScratchpadRuntime, _add_salvage_chunk, _salvage_tail
 from anton.core.llm.provider import (
     LLMResponse,
@@ -60,8 +61,12 @@ def _exec_response(code: str) -> LLMResponse:
     )
 
 
-async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_path):
-    """Stream, progress, next model input, episodic log and dump never hold the token."""
+async def _run_one_cell_turn(tmp_path, code: str, data_vault=None) -> dict:
+    """Run a turn whose model runs ``code`` in a real local pad, then finishes.
+
+    Returns every copy of the output: streamed results, progress lines, the
+    model's next input, the episodic log and the pad's notebook.
+    """
     workspace = MagicMock(base=tmp_path)
     workspace.artifacts_dir = tmp_path / "artifacts"
     llm = make_mock_llm()
@@ -73,7 +78,7 @@ async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_pat
     def plan_stream(**kwargs):
         """Record what the model is sent; run the cell first, then finish."""
         model_inputs.append(repr(kwargs.get("messages")))
-        response = _exec_response(_PRINT_TOKEN_RESPONSE) if len(model_inputs) == 1 else LLMResponse(
+        response = _exec_response(code) if len(model_inputs) == 1 else LLMResponse(
             content="done", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
             stop_reason="end_turn",
         )
@@ -87,7 +92,7 @@ async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_pat
     episodic = EpisodicMemory(tmp_path / "episodes")
     episodic.start_session()
     session = ChatSession(
-        ChatSessionConfig(llm_client=llm, workspace=workspace, episodic=episodic)
+        ChatSessionConfig(llm_client=llm, workspace=workspace, episodic=episodic, data_vault=data_vault)
     )
     pad = get_runtime_factory(SimpleNamespace(backend="local"))(
         name="main", cells=None, workspace_path=tmp_path, **_DEFAULTS
@@ -100,21 +105,58 @@ async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_pat
             async for event in session.turn_stream("connect to the API"):
                 events.append(event)
         notebook = pad.render_notebook()
+        recorded = list(pad.cells)
     finally:
         await pad.close()
         await session.close()
 
-    results = [e.content for e in events if isinstance(e, StreamToolResult)]
-    progress = [e.message or "" for e in events if isinstance(e, StreamTaskProgress)]
-    episodes = "".join(p.read_text() for p in (tmp_path / "episodes").glob("*.jsonl"))
     assert len(model_inputs) == 2, "the model never got the tool result"
+    return {
+        "results": [e.content for e in events if isinstance(e, StreamToolResult)],
+        "progress": [e.message or "" for e in events if isinstance(e, StreamTaskProgress)],
+        "next_model_input": model_inputs[1],
+        "episodes": "".join(p.read_text() for p in (tmp_path / "episodes").glob("*.jsonl")),
+        "notebook": notebook,
+        "recorded": recorded,
+    }
+
+
+async def test_a_printed_token_is_scrubbed_from_every_copy_of_the_output(tmp_path):
+    """Stream, progress, next model input, episodic log and dump never hold the token."""
+    out = await _run_one_cell_turn(tmp_path, _PRINT_TOKEN_RESPONSE)
+
+    results, progress = out["results"], out["progress"]
     assert results, "no tool result was streamed"
-    for copy in [*results, *progress, model_inputs[1], episodes, notebook]:
+    for copy in [*results, *progress, out["next_model_input"], out["episodes"], out["notebook"]]:
         assert TOKEN not in copy
     assert "access_token" in results[0]
     assert "[REDACTED_TOKEN]" in results[0]
-    assert "[REDACTED_TOKEN]" in model_inputs[1]
+    assert "[REDACTED_TOKEN]" in out["next_model_input"]
     assert any("Bearer [REDACTED_TOKEN]" in m for m in progress)
+
+
+_SAVED_PASSWORD = "Pw0" + "Q8" * 15
+
+
+async def test_a_printed_saved_secret_shows_its_placeholder_in_the_stream(tmp_path):
+    """A secret-flagged saved value shows as its `[DS_...]` placeholder in the
+    streamed result and the recorded cell, not only in the model's input."""
+    vault = LocalDataVault(tmp_path / "vault")
+    vault.save("postgres", "prod", {"host": "db.example.com", "password": _SAVED_PASSWORD})
+
+    # Read from a file so the value is in the output only, not in the cell's code.
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text(_SAVED_PASSWORD)
+    out = await _run_one_cell_turn(
+        tmp_path, f"print('connecting with ' + open({str(secret_file)!r}).read())\n", data_vault=vault
+    )
+
+    results, recorded = out["results"], out["recorded"]
+    assert results, "no tool result was streamed"
+    for copy in [*results, out["next_model_input"], out["episodes"], out["notebook"], recorded[-1].stdout]:
+        assert _SAVED_PASSWORD not in copy
+    assert "connecting with [DS_POSTGRES_PROD__PASSWORD]" in results[0]
+    assert "connecting with [DS_POSTGRES_PROD__PASSWORD]" in recorded[-1].stdout
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():
