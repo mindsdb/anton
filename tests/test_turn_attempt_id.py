@@ -139,12 +139,13 @@ async def test_the_attempt_id_survives_a_non_completed_terminal(workspace):
         return gen()
 
     session._llm.plan_stream = boom
-    # anton's turn loop SWALLOWS the exception — the stream just ends and the
-    # terminal is recorded on the event. So this asserts on the emitted row,
-    # not on a raise: `pytest.raises` here passed vacuously in a first draft.
+    # The turn raises once its explain call fails too. The assertions are on
+    # the emitted row: the raise alone says nothing about whether the books
+    # closed.
     with patch("anton.analytics.send_event") as sent:
-        async for _ in session.turn_stream("go"):
-            pass
+        with pytest.raises(RuntimeError, match="planning blew up"):
+            async for _ in session.turn_stream("go"):
+                pass
     rows = [c.kwargs for c in sent.call_args_list if c.args[1] == "turn_completed"]
     assert len(rows) == 1, "a dead turn must still close its books"
     assert rows[0]["ended_by"] != "completed", (

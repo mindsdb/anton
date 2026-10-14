@@ -29,6 +29,7 @@ from anton.core.session import (
     ChatSession,
     ChatSessionConfig,
     _SPEND_CEILING_RESERVE,
+    _VerifierVerdict,
 )
 
 CEILING = 1_000_000
@@ -233,8 +234,13 @@ async def test_verification_is_skipped_after_a_ceiling_trip(workspace):
     session._llm.generate_object_code = verdict
     with patch("anton.analytics.send_event"):
         await _run(session)
-    assert verdict.call_count == 0, (
-        f"the completion verifier ran {verdict.call_count}x after the ceiling "
+    # The limit's own "did the user say keep going?" check uses the same
+    # structured call, so count only verifier verdicts.
+    verifier_calls = [
+        c for c in verdict.call_args_list if c.args and c.args[0] is _VerifierVerdict
+    ]
+    assert not verifier_calls, (
+        f"the completion verifier ran {len(verifier_calls)}x after the ceiling "
         "stopped the turn"
     )
 

@@ -143,3 +143,9 @@ def test_gathering_never_gets_the_restore_tail():
     re-entry path always already has a history."""
     state = _state(messages=[], brief="## Goal\nA dashboard.")
     assert "A dashboard." not in p.step_message(st.STEP_GATHERING, state)
+
+
+def test_the_cached_prefix_is_the_same_in_both_modes():
+    ask_first, act_first = _state(), _state(act_first=True)
+    assert ask_first.pipeline_system == act_first.pipeline_system
+    assert ask_first.pipeline_tools == act_first.pipeline_tools
