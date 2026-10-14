@@ -434,3 +434,43 @@ class TestWriterLock:
         assert child.returncode == 0
         text = hc._lessons_path.read_text()
         assert "rewritten" in text and "from the other process" in text, text
+
+    @staticmethod
+    def _run_in_other_processes(child_code: str, tmp_path, count: int) -> None:
+        children = [
+            subprocess.Popen([sys.executable, "-c", child_code, str(tmp_path), str(n)])
+            for n in range(count)
+        ]
+        for child in children:
+            assert child.wait(timeout=120) == 0
+
+    def test_rules_saved_by_several_processes_at_once_are_all_kept(self, tmp_path):
+        """Saving a rule rewrites the whole file from a read; the read sits under
+        the lock, so no session rewrites over another's rule."""
+        hc = Hippocampus(tmp_path)
+        hc.encode_rule("seed rule", kind="when")
+        self._run_in_other_processes(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from anton.core.memory.hippocampus import Hippocampus\n"
+            "hc = Hippocampus(Path(sys.argv[1]))\n"
+            "for i in range(3):\n"
+            "    hc.encode_rule(f'rule {sys.argv[2]} {i}', kind='when')\n",
+            tmp_path, count=6,
+        )
+        rules = {e.text for e in hc.get_rules()}
+        assert rules == {"seed rule"} | {f"rule {n} {i}" for n in range(6) for i in range(3)}
+
+    def test_first_lessons_from_several_processes_at_once_are_all_kept(self, tmp_path):
+        """With no lessons.md yet, every writer would create the file; the
+        existence check sits under the lock, so the first write is not replaced."""
+        hc = Hippocampus(tmp_path)
+        assert not hc._lessons_path.exists()
+        self._run_in_other_processes(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from anton.core.memory.hippocampus import Hippocampus\n"
+            "Hippocampus(Path(sys.argv[1])).encode_lesson(f'lesson {sys.argv[2]}', topic='t')\n",
+            tmp_path, count=6,
+        )
+        assert {e.text for e in hc.get_lessons()} == {f"lesson {n}" for n in range(6)}

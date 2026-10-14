@@ -177,25 +177,27 @@ class Hippocampus:
         return engrams
 
     def del_identity(self, id):
-        entries = self.get_identities()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
+        with self._file_lock(self._profile_path):
+            entries = self.get_identities()
+            entries_out = []
+            for entry in entries:
+                if entry.id != id:
+                    entries_out.append(entry)
 
-        self.save_identities(entries_out)
+            self._save_identities_unlocked(entries_out)
 
     def update_identity(self, id, text):
-        entries = self.get_identities()
+        with self._file_lock(self._profile_path):
+            entries = self.get_identities()
 
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
+            for entry in entries:
+                if entry.id != id:
+                    continue
+                entry.text = text
+                entry.updated_at = dt.datetime.now()
 
-            self.save_identities(entries)
-            return
+                self._save_identities_unlocked(entries)
+                return
 
     def rewrite_identity(self, entries: list[str]) -> None:
         """Merge new entries into the identity snapshot (profile.md) and rewrite.
@@ -205,33 +207,39 @@ class Hippocampus:
         a coherent snapshot rather than growing unboundedly.
         """
 
-        existing_entries = [
-            item.text
-            for item in self.get_identities()
-        ]
+        with self._file_lock(self._profile_path):
+            existing_entries = [
+                item.text
+                for item in self.get_identities()
+            ]
 
-        for fact in entries:
-            fact = _entry_text(fact) if isinstance(fact, str) else fact
-            if isinstance(fact, str) and fact and fact not in existing_entries:
-                # Check if this updates an existing fact (same key prefix)
-                key = fact.split(":")[0].strip().lower() if ":" in fact else ""
-                if key:
-                    existing_entries = [
-                        e
-                        for e in existing_entries
-                        if not e.lower().startswith(key + ":")
-                    ]
-                existing_entries.append(fact)
+            for fact in entries:
+                fact = _entry_text(fact) if isinstance(fact, str) else fact
+                if isinstance(fact, str) and fact and fact not in existing_entries:
+                    # Check if this updates an existing fact (same key prefix)
+                    key = fact.split(":")[0].strip().lower() if ":" in fact else ""
+                    if key:
+                        existing_entries = [
+                            e
+                            for e in existing_entries
+                            if not e.lower().startswith(key + ":")
+                        ]
+                    existing_entries.append(fact)
 
-        self.save_identities([
-            Engram(text)
-            for text in existing_entries
-        ])
+            self._save_identities_unlocked([
+                Engram(text)
+                for text in existing_entries
+            ])
 
     def save_identities(self, entries: list[Engram]) -> None:
+        with self._file_lock(self._profile_path):
+            self._save_identities_unlocked(entries)
+
+    def _save_identities_unlocked(self, entries: list[Engram]) -> None:
+        """Rewrite profile.md from `entries`; the caller holds its writer lock."""
         self._dir.mkdir(parents=True, exist_ok=True)
         content = "# Profile\n" + "\n".join(f"- {_entry_text(e.text)}" for e in entries) + "\n"
-        self._encode_with_lock(self._profile_path, content, mode="write")
+        self._write_unlocked(self._profile_path, content, mode="write")
 
     def clear_identity(self) -> None:
         if self._profile_path.is_file():
@@ -294,28 +302,34 @@ class Hippocampus:
         return _filter_by_token_budget(entries, token_budget)
 
     def del_lesson(self, id):
-        entries = self.get_lessons()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
+        with self._file_lock(self._lessons_path):
+            entries = self.get_lessons()
+            entries_out = []
+            for entry in entries:
+                if entry.id != id:
+                    entries_out.append(entry)
 
-        if len(entries_out) != len(entries):
-            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries_out), mode="write")
+            if len(entries_out) != len(entries):
+                self._write_unlocked(
+                    self._lessons_path, self._lessons_to_text(entries_out), mode="write"
+                )
 
 
     def update_lesson(self, id, text):
-        entries = self.get_lessons()
+        with self._file_lock(self._lessons_path):
+            entries = self.get_lessons()
 
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
+            for entry in entries:
+                if entry.id != id:
+                    continue
+                entry.text = text
+                entry.updated_at = dt.datetime.now()
 
-            self._encode_with_lock(self._lessons_path, self._lessons_to_text(entries), mode="write")
+                self._write_unlocked(
+                    self._lessons_path, self._lessons_to_text(entries), mode="write"
+                )
 
-            break
+                break
 
     @staticmethod
     def _lessons_to_text(entries: list[Engram], header="Lessons") -> str:
@@ -456,27 +470,34 @@ class Hippocampus:
         return entries
 
     def del_rule(self, id):
-        entries = self.get_rules()
-        entries_out = []
-        for entry in entries:
-            if entry.id != id:
-                entries_out.append(entry)
+        with self._file_lock(self._rules_path):
+            entries = self.get_rules()
+            entries_out = []
+            for entry in entries:
+                if entry.id != id:
+                    entries_out.append(entry)
 
-        self.save_rules(entries_out)
+            self._save_rules_unlocked(entries_out)
 
     def update_rule(self, id, text):
-        entries = self.get_rules()
+        with self._file_lock(self._rules_path):
+            entries = self.get_rules()
 
-        for entry in entries:
-            if entry.id != id:
-                continue
-            entry.text = text
-            entry.updated_at = dt.datetime.now()
+            for entry in entries:
+                if entry.id != id:
+                    continue
+                entry.text = text
+                entry.updated_at = dt.datetime.now()
 
-            self.save_rules(entries)
-            return
+                self._save_rules_unlocked(entries)
+                return
 
     def save_rules(self, rules: list[Engram]) -> None:
+        with self._file_lock(self._rules_path):
+            self._save_rules_unlocked(rules)
+
+    def _save_rules_unlocked(self, rules: list[Engram]) -> None:
+        """Rewrite rules.md from `rules`; the caller holds its writer lock."""
         self._dir.mkdir(parents=True, exist_ok=True)
         sections: dict[str, list[Engram]] = {"always": [], "never": [], "when": []}
         for rule in rules:
@@ -491,7 +512,7 @@ class Hippocampus:
                 meta = f"<!-- confidence:{e.confidence} source:{e.source} ts:{ts} -->"
                 lines.append(f"- {_entry_text(e.text)} {meta}\n")
 
-        self._encode_with_lock(self._rules_path, "".join(lines), mode="write")
+        self._write_unlocked(self._rules_path, "".join(lines), mode="write")
 
     def encode_rule(
         self,
@@ -508,8 +529,6 @@ class Hippocampus:
         """
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        rules = self.get_rules()
-
         # Sanitize at ingest too, not just on write: the dedupe below compares
         # against text parsed back off disk, which is already sanitized.
         new_rule = Engram(
@@ -520,14 +539,19 @@ class Hippocampus:
             source=source,
         )
 
-        # Check for duplicate (exact entry match, ignoring metadata)
-        for rule in rules:
-            if rule.text == new_rule.text:
-                return
+        # The read, the dedupe and the rewrite share one lock, so a rule
+        # another session saves in between is in the file this one rewrites.
+        with self._file_lock(self._rules_path):
+            rules = self.get_rules()
 
-        rules.append(new_rule)
+            # Check for duplicate (exact entry match, ignoring metadata)
+            for rule in rules:
+                if rule.text == new_rule.text:
+                    return
 
-        self.save_rules(rules)
+            rules.append(new_rule)
+
+            self._save_rules_unlocked(rules)
 
     def encode_lesson(
         self,
@@ -549,19 +573,18 @@ class Hippocampus:
         topic_tag = f" topic:{topic}" if topic else ""
         entry = f"- {text} <!--{topic_tag} ts:{ts} -->\n"
 
-        # Append to lessons.md
-        if not self._lessons_path.is_file():
-            self._encode_with_lock(
-                self._lessons_path,
-                f"# Lessons\n{entry}",
-                mode="write",
-            )
-        else:
+        # The existence check and the dedupe read sit under the writer lock,
+        # so two sessions creating the file at once cannot replace each
+        # other's first entry.
+        with self._file_lock(self._lessons_path):
+            if not self._lessons_path.is_file():
+                self._write_unlocked(self._lessons_path, f"# Lessons\n{entry}", mode="write")
+                return
             # Check for duplicate (exact entry match, ignoring metadata)
             existing = self._lessons_path.read_text(encoding="utf-8")
             if text in self._extract_entry_texts(existing):
                 return
-            self._encode_with_lock(self._lessons_path, entry, mode="append")
+            self._write_unlocked(self._lessons_path, entry, mode="append")
 
 
     def entry_count(self) -> int:
@@ -615,11 +638,6 @@ class Hippocampus:
                 return False
             self._write_unlocked(path, text, mode="write")
             return True
-
-    def _encode_with_lock(self, path: Path, text: str, mode: str = "append") -> None:
-        """Write `text` to `path` under its writer lock (see `_file_lock`)."""
-        with self._file_lock(path):
-            self._write_unlocked(path, text, mode)
 
     @staticmethod
     def _write_unlocked(path: Path, text: str, mode: str) -> None:
