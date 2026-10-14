@@ -844,7 +844,8 @@ A host that serves several people can give every one of them the same rules and 
 - **Scratchpad tool description.** The layer's scratchpad wisdom comes first, then global, then project.
 - **Budgets.** The layer has its own budgets, counted apart from the person's tiers. It keeps about 4,000 characters of lessons and 8,000 of scratchpad wisdom. Its always and never rules load in full. Past 6,000 characters of rules, with at least 1,000 characters of when-rules, its when-rules go through the same relevance filter as the person's, in the same concurrent gather.
 - **Never written.** `encode`, compaction, vacuum and identity extraction name only `global_hc` and `project_hc`, so the cerebellum, the consolidator, `memorize` and the ACC can't reach it. The layer's entries don't count toward the compaction threshold. The ACC's end-of-turn de-dupe reads the layer's rules too, so it doesn't copy an operator rule into the person's tier.
-- **Never read.** The layer's `profile.md` and its `minds-datasource` topic.
+- **Never read.** The layer's `profile.md`. Identity comes only from `global_hc`.
+- **Topics.** The `## Minds — Datasource Context` section reads only `project_hc`, because the layer belongs to no project. A layer lesson tagged `topic:minds-datasource` is an ordinary operator lesson: it renders under `## Operator Memory — Lessons` and counts toward that layer's lesson budget.
 - **Project-profile move.** Each construction moves identity lines that landed in project scope up to `global_hc`, never to `managed_hc`. When `global_hc` can't be written (a read-only folder), the move logs `memory: project profile not moved (<error type>)`, leaves the project lines in place for a later turn, and the turn goes on.
 
 With `managed_hc` unset (the default), the system prompt and the scratchpad description are byte-identical to a Cortex without the layer.

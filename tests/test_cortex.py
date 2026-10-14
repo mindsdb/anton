@@ -1045,6 +1045,28 @@ class TestManagedLayer:
         )
         assert "Operator" not in cortex.get_scratchpad_context()
 
+    async def test_an_operator_datasource_lesson_renders_as_an_operator_lesson(
+        self, person, read_only_dir
+    ):
+        """The Minds section reads only the person's project tier, so a layer
+        lesson tagged `minds-datasource` shows once, with the operator's
+        lessons. Filtering it out of those, or adding it to the Minds section,
+        breaks the equality."""
+        managed = read_only_dir("managed", {
+            "lessons.md": (
+                "# Lessons\n- Revenue lives in fct_revenue"
+                " <!-- topic:minds-datasource ts:2026-10-01 -->\n"
+            ),
+        })
+
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+
+        assert prompt == (
+            "\n\n## Operator Memory — Lessons\n# Lessons"
+            "\n- Revenue lives in fct_revenue <!-- topic:minds-datasource ts:2026-10-01 -->\n"
+            + _TODAY_PROMPT
+        )
+
     async def test_operator_lessons_have_their_own_budget(self, dirs, read_only_dir):
         """Each tier keeps about 4,000 characters of lessons. Sharing one budget
         with the person's tiers would cut half of these."""
