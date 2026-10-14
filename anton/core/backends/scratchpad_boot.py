@@ -1135,6 +1135,9 @@ def _heartbeat_loop(stop: threading.Event) -> None:
 
 
 _MAX_OUTPUT = 10_000
+# Stdout kept past _MAX_OUTPUT so the parent scrubs before it cuts: a secret
+# across the limit stays whole. Mirrors _STDOUT_SCRUB_MARGIN in local.py.
+_STDOUT_SCRUB_MARGIN = 4_096
 
 
 def progress(message=""):
@@ -1464,24 +1467,20 @@ while True:
             _cell_log_handler.buf = None
 
         stdout_val = out_buf.getvalue()
-        if len(stdout_val) > _MAX_OUTPUT:
-            stdout_val = (
-                stdout_val[:_MAX_OUTPUT]
-                + f"\n\n... (truncated, {len(stdout_val)} chars total)"
-            )
+        stdout_total = len(stdout_val)
+        stdout_val = stdout_val[: _MAX_OUTPUT + _STDOUT_SCRUB_MARGIN]
 
         # Warn-only chdir visibility (ENG-578 fix #5): a cell's os.chdir
         # silently persists into every later cell of this pad — tell the
         # model instead of resetting, so deliberate chdir workflows keep
-        # working. Appended AFTER the truncation clamp so the note can never
-        # be truncated away, and regardless of `error` so a cell that raised
+        # working. Sent apart from stdout so the parent appends it after its
+        # truncation clamp, and regardless of `error` so a cell that raised
         # after the chdir still reports it.
+        cwd_note = ""
         _cwd_after = os.getcwd()
         if _cwd_after != _cwd_before:
-            stdout_val = (
-                stdout_val
-                + ("\n" if stdout_val and not stdout_val.endswith("\n") else "")
-                + f"Note: this cell changed the working directory from {_cwd_before} "
+            cwd_note = (
+                f"Note: this cell changed the working directory from {_cwd_before} "
                 f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
             )
 
@@ -1509,6 +1508,8 @@ while True:
 
     result = {
         "stdout": stdout_val,
+        "stdout_total": stdout_total,
+        "cwd_note": cwd_note,
         "stderr": err_buf.getvalue(),
         "logs": logs_val,
         "error": error,

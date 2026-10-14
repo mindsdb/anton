@@ -19,6 +19,7 @@ import pytest
 from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
 from anton.core.datasources.data_vault import LocalDataVault
+from anton.utils.datasources import begin_ds_turn_scope, restore_namespaced_env
 from anton.core.backends.local import LocalScratchpadRuntime, _add_salvage_chunk, _salvage_tail
 from anton.core.llm.provider import (
     LLMResponse,
@@ -157,6 +158,34 @@ async def test_a_printed_saved_secret_shows_its_placeholder_in_the_stream(tmp_pa
         assert _SAVED_PASSWORD not in copy
     assert "connecting with [DS_POSTGRES_PROD__PASSWORD]" in results[0]
     assert "connecting with [DS_POSTGRES_PROD__PASSWORD]" in recorded[-1].stdout
+
+
+@pytest.mark.parametrize("before, after", [
+    ("'x' * 9967 + ' '", "''"),
+    ("'x' * 14080", "'y' * 100"),
+    ("(secret + chr(10)) * 300 + 'x' * 4180", "'y' * 100"),
+], ids=["at-the-output-limit", "at-the-worker-cut", "after-text-the-scrub-shrinks"])
+async def test_a_saved_secret_cut_by_the_output_limit_is_still_redacted(tmp_path, monkeypatch, before, after):
+    """Long output is cut to its limit; a saved secret across a cut must not
+    lose its tail and with it the exact match that redacts it."""
+    vault = LocalDataVault(tmp_path / "vault")
+    vault.save("postgres", "prod", {"host": "db.example.com", "password": _SAVED_PASSWORD})
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text(_SAVED_PASSWORD)
+    begin_ds_turn_scope()
+    restore_namespaced_env(vault)
+    pad = LocalScratchpadRuntime(name="cut-secret-cell", **_DEFAULTS)
+    await pad.start()
+    code = f"secret = open({str(secret_file)!r}).read()\nprint({before} + secret + {after})\n"
+    try:
+        cell = await pad.execute(code)
+    finally:
+        await pad.close()
+
+    assert "chars total)" in cell.stdout
+    assert len(cell.stdout) < 10_100
+    for start in range(len(_SAVED_PASSWORD) - 8):
+        assert _SAVED_PASSWORD[start : start + 8] not in cell.stdout
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():
