@@ -1853,17 +1853,24 @@ class ChatSession:
         # has_similar_lesson: cheap substring check against the
         # current rules.md content. Avoids re-encoding the same
         # rule every turn. Embedding similarity is a v2 upgrade.
+        # Checks the operator's read-only layer too, so a rule it
+        # already gives every turn isn't copied into the person's tier.
         def _acc_has_similar(rule: str) -> bool:
-            cortex = getattr(self, "_cortex", None)
-            hc = getattr(cortex, "global_hc", None) if cortex else None
-            if hc is None:
-                return False
-            try:
-                existing = hc.recall_rules() or ""
-            except Exception:
-                return False
             probe = (rule or "")[:60].lower()
-            return bool(probe) and probe in existing.lower()
+            if not probe:
+                return False
+            cortex = getattr(self, "_cortex", None)
+            for tier in ("managed_hc", "global_hc"):
+                hc = getattr(cortex, tier, None) if cortex else None
+                if hc is None:
+                    continue
+                try:
+                    existing = hc.recall_rules() or ""
+                except Exception:
+                    continue
+                if probe in existing.lower():
+                    return True
+            return False
 
         self._acc = AnteriorCingulate(has_similar_lesson=_acc_has_similar)
         # ANTON_ACC_MODE controls how aggressively ACC affects the
