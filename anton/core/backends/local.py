@@ -32,7 +32,7 @@ from anton.core.backends.wire import (
 )
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
-from anton.utils.datasources import longest_exact_secret, scrub_output
+from anton.utils.datasources import exact_secret_prefix_at_end, longest_exact_secret, scrub_output
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
@@ -63,15 +63,17 @@ def _salvage_tail(chunks: list[str], dropped: bool) -> str:
     """Join salvaged stdout chunks, scrub them, then keep the last `_SALVAGE_MAX` characters.
 
     Chunks split wherever a heartbeat fell, so after a drop the kept text can
-    start with a token whose key was dropped. The scrub runs first, then the
-    region such a token can sit in goes. Returns the text, led by a note when
-    it is partial.
+    start with a token whose key was dropped, and the last chunk can end partway
+    through a saved secret. The scrub runs first, then both edges go. Returns
+    the text, led by a note when it is partial.
     """
     scrubbed = scrub_output("".join(chunks))
+    cut = exact_secret_prefix_at_end(scrubbed)
+    scrubbed = scrubbed[: len(scrubbed) - cut]
     if dropped:
         scrubbed = _without_orphan_region(scrubbed)
     tail = scrubbed[-_SALVAGE_MAX:]
-    if tail and (dropped or len(scrubbed) > _SALVAGE_MAX):
+    if tail and (dropped or cut or len(scrubbed) > _SALVAGE_MAX):
         return "(truncated to most recent output)\n" + tail
     return tail
 

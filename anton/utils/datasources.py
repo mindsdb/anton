@@ -369,6 +369,24 @@ def scrub_credentials(text: str) -> str:
     return text
 
 
+def _exact_secret_values() -> list[str]:
+    """Return the values `scrub_credentials` matches exactly this turn.
+
+    Mirrors the value rules in `scrub_credentials`: every registered secret,
+    unknown DS_* values over 8 characters, and provider keys over 8 characters.
+    """
+    values = [_ds_env_values.get(key) or "" for key in _DS_SECRET_VARS]
+    values += [
+        value for key, value in _ds_env_values.items()
+        if key not in _DS_KNOWN_VARS and value and len(value) > 8
+    ]
+    values += [
+        value for value in (os.environ.get(key, "") for key in _PROVIDER_SECRET_VARS)
+        if len(value) > 8
+    ]
+    return [value for value in values if value]
+
+
 def longest_exact_secret() -> int:
     """Return the length of the longest value `scrub_credentials` matches exactly this turn.
 
@@ -376,16 +394,23 @@ def longest_exact_secret() -> int:
     cut for such a value to match whole. Counts only what the scrub matches, so
     a long non-secret field does not hold output back. Returns 0 when there is none.
     """
-    lengths = [len(_ds_env_values.get(key) or "") for key in _DS_SECRET_VARS]
-    lengths += [
-        len(value) for key, value in _ds_env_values.items()
-        if key not in _DS_KNOWN_VARS and value and len(value) > 8
-    ]
-    lengths += [
-        len(value) for value in (os.environ.get(key, "") for key in _PROVIDER_SECRET_VARS)
-        if len(value) > 8
-    ]
-    return max(lengths, default=0)
+    return max((len(value) for value in _exact_secret_values()), default=0)
+
+
+def exact_secret_prefix_at_end(text: str) -> int:
+    """Return the length of the longest end of `text` that starts, but does not complete, an exact-match secret.
+
+    Output cut mid-write can end partway through a secret, which the exact-value
+    scrub cannot see. Call it on scrubbed text, so a whole secret at the end is
+    already a placeholder. Returns 0 when the end starts no such value.
+    """
+    longest = 0
+    for value in _exact_secret_values():
+        for length in range(min(len(value) - 1, len(text)), longest, -1):
+            if text.endswith(value[:length]):
+                longest = length
+                break
+    return longest
 
 
 def scrub_output(text: str) -> str:
