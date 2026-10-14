@@ -18,7 +18,7 @@ import pytest
 
 from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
-from anton.core.backends.local import LocalScratchpadRuntime, _add_salvage_chunk, _salvage_tail
+from anton.core.backends.local import _SALVAGE_RAW_MAX, LocalScratchpadRuntime, _add_salvage_chunk, _salvage_tail
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import (
     LLMResponse,
@@ -409,6 +409,80 @@ def test_salvage_that_ends_on_no_secret_is_unchanged(tmp_path):
 
     assert _salvage_tail(["sent 1/3\nsent 2/3 Px"], False) == "sent 1/3\nsent 2/3 Px"
     assert _salvage_tail(["sent 1/3\nsent 2/3"], False) == "sent 1/3\nsent 2/3"
+
+
+_PEM_LINES = [f"MIIEv{i:02d}" + "Q8" * 30 for i in range(20)]
+_PEM = "-----BEGIN PRIVATE KEY-----\n" + "\n".join(_PEM_LINES) + "\n-----END PRIVATE KEY-----"
+
+
+@pytest.mark.parametrize("register", [_save_password, _unknown_ds_value], ids=["saved-secret", "unknown-ds-var"])
+def test_dropped_salvage_starting_partway_through_a_multi_line_secret_withholds_the_part(tmp_path, register):
+    """A dropped chunk can cut a multi-line secret, such as a private key, so the
+    kept text starts with lines the exact-value scrub cannot match."""
+    register(tmp_path, _PEM)
+    kept: list[str] = []
+    _add_salvage_chunk(kept, "a" * (_SALVAGE_RAW_MAX - 100) + _PEM[:200])
+    dropped = _add_salvage_chunk(kept, _PEM[200:] + "\nsent 3/3\nsent 4/4\ndone\n")
+    salvaged = _salvage_tail(kept, dropped)
+
+    assert dropped
+    for line in _PEM_LINES:
+        assert line[5:] not in salvaged
+    assert salvaged == "(truncated to most recent output)\ndone\n"
+
+
+def test_dropped_salvage_ending_partway_through_a_secret_withholds_the_part(tmp_path):
+    """Both edges apply at once: a drop at the start and a cut secret at the end."""
+    secret = _secret_of(33)
+    _save_password(tmp_path, secret)
+    salvaged = _salvage_from("line\n" * 8000 + secret[:32])
+
+    for start in range(25):
+        assert secret[start : start + 8] not in salvaged
+    assert salvaged.startswith("(truncated to most recent output)\n")
+    assert salvaged.endswith("line\n")
+
+
+def test_salvage_ending_partway_through_a_provider_key_withholds_the_part(monkeypatch):
+    """Provider keys are exact-match secrets too, whatever their shape."""
+    key = "Zt7" + "Q8" * 15
+    monkeypatch.setenv("ANTON_MINDS_API_KEY", key)
+    begin_ds_turn_scope()
+    salvaged = _salvage_tail(["calling the gateway with " + key[:24]], False)
+
+    for start in range(17):
+        assert key[start : start + 8] not in salvaged
+    assert salvaged.endswith("calling the gateway with ")
+
+
+async def test_a_crashed_cell_ending_partway_through_a_saved_secret_withholds_the_part(tmp_path, monkeypatch):
+    """A crash right after the worker ships part of a saved secret keeps the
+    output before it and none of the secret."""
+    monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
+    secret = _secret_of(33)
+    _save_password(tmp_path, secret)
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text(secret)
+    pad = LocalScratchpadRuntime(name="crashed-mid-secret-cell", **_DEFAULTS)
+    await pad.start()
+    code = (
+        "import os, time\n"
+        f"secret = open({str(secret_file)!r}).read()\n"
+        "print('sent 1/3\\nconnecting with ' + secret[:32], end='', flush=True)\n"
+        "time.sleep(0.5)\n"
+        "os._exit(1)\n"
+    )
+    try:
+        items = [item async for item in pad.execute_streaming(code)]
+    finally:
+        await pad.close()
+
+    cells = [item for item in items if isinstance(item, Cell)]
+    assert len(cells) == 1
+    assert "exited unexpectedly" in cells[0].error.lower()
+    for start in range(25):
+        assert secret[start : start + 8] not in cells[0].stdout
+    assert "sent 1/3\nconnecting with " in cells[0].stdout
 
 
 async def test_a_killed_cell_with_a_saved_secret_keeps_its_last_line(tmp_path, monkeypatch):

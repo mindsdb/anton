@@ -413,6 +413,22 @@ def exact_secret_prefix_at_end(text: str) -> int:
     return longest
 
 
+def exact_secret_suffix_at_start(text: str) -> int:
+    """Return the length of the longest start of `text` that ends, but does not complete, an exact-match secret.
+
+    The start-of-text counterpart of `exact_secret_prefix_at_end`, for output
+    whose beginning was dropped. Call it on scrubbed text. Returns 0 when the
+    start ends no such value.
+    """
+    longest = 0
+    for value in _exact_secret_values():
+        for length in range(min(len(value) - 1, len(text)), longest, -1):
+            if text.startswith(value[-length:]):
+                longest = length
+                break
+    return longest
+
+
 def scrub_output(text: str) -> str:
     """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
 
