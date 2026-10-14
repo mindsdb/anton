@@ -20,6 +20,7 @@ from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.utils.datasources import begin_ds_turn_scope, restore_namespaced_env
+from anton.core.backends import local as local_backend
 from anton.core.backends.local import LocalScratchpadRuntime, _add_salvage_chunk, _salvage_tail
 from anton.core.llm.provider import (
     LLMResponse,
@@ -225,6 +226,30 @@ async def test_a_long_saved_value_that_is_not_secret_does_not_withhold_output(tm
     assert "withheld" not in cell.stdout
     assert cell.stdout.startswith("normal line\n")
     assert cell.stdout.count("normal line") > 800
+
+
+async def test_the_worker_sends_uncut_stdout_only_when_it_passes_the_limit(monkeypatch):
+    """Every reader of the worker's result gets the extra uncut copy, so it is
+    sent only for output the limit cuts."""
+    heads: list[int] = []
+    real_clip = local_backend._clip_stdout
+
+    def recording_clip(raw, total, cwd_note):
+        heads.append(total)
+        return real_clip(raw, total, cwd_note)
+
+    monkeypatch.setattr(local_backend, "_clip_stdout", recording_clip)
+    pad = LocalScratchpadRuntime(name="uncut-field-cell", **_DEFAULTS)
+    await pad.start()
+    try:
+        short = await pad.execute("print('short')\n")
+        long = await pad.execute("print('x' * 12000)\n")
+    finally:
+        await pad.close()
+
+    assert short.stdout == "short\n"
+    assert "(truncated, 12001 chars total)" in long.stdout
+    assert heads == [12001]
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():

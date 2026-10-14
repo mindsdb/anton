@@ -1513,16 +1513,17 @@ while True:
 
     result = {
         "stdout": stdout_val,
-        # For LocalScratchpadRuntime, which scrubs before it cuts; other readers
-        # of this result keep using "stdout" as it always was.
-        "stdout_head": stdout_full[: MAX_OUTPUT + STDOUT_SCRUB_MARGIN],
-        "stdout_total": len(stdout_full),
-        "cwd_note": cwd_note,
         "stderr": err_buf.getvalue(),
         "logs": logs_val,
         "error": error,
         "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
     }
+    if len(stdout_full) > MAX_OUTPUT:
+        # For LocalScratchpadRuntime, which scrubs before it cuts. Only for cut
+        # output: every reader of this result gets it, and "stdout" is unchanged.
+        result["stdout_head"] = stdout_full[: MAX_OUTPUT + STDOUT_SCRUB_MARGIN]
+        result["stdout_total"] = len(stdout_full)
+        result["cwd_note"] = cwd_note
     with _wire_lock:
         _real_stdout.write(RESULT_START + "\n")
         _real_stdout.write(json.dumps(result) + "\n")
