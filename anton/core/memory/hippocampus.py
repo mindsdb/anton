@@ -177,6 +177,7 @@ class Hippocampus:
         return engrams
 
     def del_identity(self, id):
+        """Remove the identity fact with `id`, rewriting profile.md under its lock."""
         with self._file_lock(self._profile_path):
             entries = self.get_identities()
             entries_out = []
@@ -187,6 +188,7 @@ class Hippocampus:
             self._save_identities_unlocked(entries_out)
 
     def update_identity(self, id, text):
+        """Replace the text of the identity fact with `id`; a no-op for an unknown id."""
         with self._file_lock(self._profile_path):
             entries = self.get_identities()
 
@@ -232,6 +234,8 @@ class Hippocampus:
             ])
 
     def save_identities(self, entries: list[Engram]) -> None:
+        """Rewrite profile.md from `entries` under its writer lock. A caller that
+        already holds the lock uses `_save_identities_unlocked` instead."""
         with self._file_lock(self._profile_path):
             self._save_identities_unlocked(entries)
 
@@ -302,6 +306,7 @@ class Hippocampus:
         return _filter_by_token_budget(entries, token_budget)
 
     def del_lesson(self, id):
+        """Remove the lesson with `id`, rewriting lessons.md under its lock."""
         with self._file_lock(self._lessons_path):
             entries = self.get_lessons()
             entries_out = []
@@ -316,6 +321,7 @@ class Hippocampus:
 
 
     def update_lesson(self, id, text):
+        """Replace the text of the lesson with `id`; a no-op for an unknown id."""
         with self._file_lock(self._lessons_path):
             entries = self.get_lessons()
 
@@ -470,6 +476,7 @@ class Hippocampus:
         return entries
 
     def del_rule(self, id):
+        """Remove the rule with `id`, rewriting rules.md under its lock."""
         with self._file_lock(self._rules_path):
             entries = self.get_rules()
             entries_out = []
@@ -480,6 +487,7 @@ class Hippocampus:
             self._save_rules_unlocked(entries_out)
 
     def update_rule(self, id, text):
+        """Replace the text of the rule with `id`; a no-op for an unknown id."""
         with self._file_lock(self._rules_path):
             entries = self.get_rules()
 
@@ -493,6 +501,8 @@ class Hippocampus:
                 return
 
     def save_rules(self, rules: list[Engram]) -> None:
+        """Rewrite rules.md from `rules` under its writer lock. A caller that
+        already holds the lock uses `_save_rules_unlocked` instead."""
         with self._file_lock(self._rules_path):
             self._save_rules_unlocked(rules)
 
