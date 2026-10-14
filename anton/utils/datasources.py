@@ -373,11 +373,19 @@ def longest_exact_secret() -> int:
     """Return the length of the longest value `scrub_credentials` matches exactly this turn.
 
     A caller that cuts output before scrubbing it needs this much text past the
-    cut for such a value to match whole. Returns 0 when there is none.
+    cut for such a value to match whole. Counts only what the scrub matches, so
+    a long non-secret field does not hold output back. Returns 0 when there is none.
     """
-    values = [value for _, value in _ds_env_values.items()]
-    values += [os.environ.get(key, "") for key in _PROVIDER_SECRET_VARS]
-    return max((len(value) for value in values if value), default=0)
+    lengths = [len(_ds_env_values.get(key) or "") for key in _DS_SECRET_VARS]
+    lengths += [
+        len(value) for key, value in _ds_env_values.items()
+        if key not in _DS_KNOWN_VARS and value and len(value) > 8
+    ]
+    lengths += [
+        len(value) for value in (os.environ.get(key, "") for key in _PROVIDER_SECRET_VARS)
+        if len(value) > 8
+    ]
+    return max(lengths, default=0)
 
 
 def scrub_output(text: str) -> str:
