@@ -338,6 +338,10 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         # And the shadow-replay finding: a failed attempt followed by asking
         # the user is WAITING. INCOMPLETE here IS ENG-716's incident.
         "asks_user_after_one_failed_attempt": "WAITING",
+        # A read-only ask the agent could act on is the stop to catch; under
+        # an explicit user restriction the same ask stays a valid stop.
+        "asks_leave_to_read_an_accessible_file": "INCOMPLETE",
+        "asks_under_a_user_restriction": "WAITING",
     }
     assert set(single) | {"implied_success_data_never_arrived", "disclaimered_fabrication"} == set(by_name), (
         "a new case was added without deciding here whether it is single-valued"
