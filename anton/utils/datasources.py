@@ -369,6 +369,17 @@ def scrub_credentials(text: str) -> str:
     return text
 
 
+def longest_exact_secret() -> int:
+    """Return the length of the longest value `scrub_credentials` matches exactly this turn.
+
+    A caller that cuts output before scrubbing it needs this much text past the
+    cut for such a value to match whole. Returns 0 when there is none.
+    """
+    values = [value for _, value in _ds_env_values.items()]
+    values += [os.environ.get(key, "") for key in _PROVIDER_SECRET_VARS]
+    return max((len(value) for value in values if value), default=0)
+
+
 def scrub_output(text: str) -> str:
     """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
 

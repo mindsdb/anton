@@ -23,22 +23,23 @@ from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
+    MAX_OUTPUT,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
     STDOUT_CHUNK_MARKER,
+    STDOUT_SCRUB_MARGIN,
 )
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
-from anton.utils.datasources import scrub_output
+from anton.utils.datasources import longest_exact_secret, scrub_output
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
-# Bound on a killed cell's reported salvage — mirrors the boot script's
-# _MAX_OUTPUT so a killed cell can never report more stdout than a successful
-# one would have.
-_SALVAGE_MAX = 10_000
+# Bound on a killed cell's reported salvage, so a killed cell can never report
+# more stdout than a successful one would have.
+_SALVAGE_MAX = MAX_OUTPUT
 
 # Raw salvage kept for the scrub, past which the oldest whole chunks are dropped.
 _SALVAGE_RAW_MAX = 4 * _SALVAGE_MAX
@@ -184,26 +185,25 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     return env
 
 
-_MAX_OUTPUT = 10_000
-# Mirrors the boot script: stdout the worker keeps past _MAX_OUTPUT for the scrub.
-_STDOUT_SCRUB_MARGIN = 4_096
+def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
+    """Scrub a cell's stdout, cut it to `MAX_OUTPUT`, then append the cwd note.
 
-
-def _clip_stdout(raw: str, total: int | None, cwd_note: str) -> str:
-    """Scrub a cell's stdout, cut it to `_MAX_OUTPUT`, then append the cwd note.
-
-    The worker cut `raw` at `_MAX_OUTPUT + _STDOUT_SCRUB_MARGIN` when `total` is
-    longer, which can split a secret the scrub then cannot match. That piece is
-    in the last margin of the scrubbed text, measured from the end because the
-    scrub changes lengths, so that margin goes. A `total` of None marks output
-    that is not the worker's, such as a crash's salvage, and is not cut.
+    When `total` is longer, the worker cut `raw` at `MAX_OUTPUT +
+    STDOUT_SCRUB_MARGIN`, which can split a secret the scrub then cannot match.
+    That piece is in the last margin, or the longest exact-match secret if
+    longer, of the scrubbed text; measured from the end because the scrub
+    changes lengths, so it goes.
     """
     text = scrub_output(raw)
-    if total is not None and total > _MAX_OUTPUT:
-        keep = _MAX_OUTPUT
+    if total > MAX_OUTPUT:
+        keep = MAX_OUTPUT
         if total > len(raw):
-            keep = min(keep, max(len(text) - _STDOUT_SCRUB_MARGIN, 0))
-        text = text[:keep] + f"\n\n... (truncated, {total} chars total)"
+            unsafe_tail = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
+            keep = min(keep, max(len(text) - unsafe_tail, 0))
+        if keep:
+            text = text[:keep] + f"\n\n... (truncated, {total} chars total)"
+        else:
+            text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
     if cwd_note:
         text += ("\n" if text and not text.endswith("\n") else "") + cwd_note
     return text
@@ -1232,14 +1232,16 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         logs = result_data.get("logs", "")
         if recovery_note:
             logs = f"{recovery_note}\n\n{logs}" if logs else recovery_note
-        raw_stdout = result_data.get("stdout", "")
+        stdout = result_data.get("stdout", "")
+        if "stdout_head" in result_data:
+            stdout = _clip_stdout(
+                result_data["stdout_head"],
+                result_data["stdout_total"],
+                result_data.get("cwd_note", ""),
+            )
         cell = Cell(
             code=code,
-            stdout=_clip_stdout(
-                raw_stdout,
-                result_data.get("stdout_total"),
-                result_data.get("cwd_note", ""),
-            ),
+            stdout=stdout,
             stderr=result_data.get("stderr", ""),
             error=result_data.get("error"),
             description=description,

@@ -184,7 +184,8 @@ def _secret_of(length: int) -> str:
 @pytest.mark.parametrize("length, printed", [
     (33, "'x' * 9967 + ' ' + secret"),
     (101, "(' ' + secret + chr(10)) * 130 + 'x' * 655 + ' ' + secret + 'y' * 100"),
-], ids=["at-the-output-limit", "at-the-worker-cut-after-text-the-scrub-shrinks"])
+    (6000, "'x' * 9095 + ' ' + secret + 'y' * 100"),
+], ids=["at-the-output-limit", "at-the-worker-cut-after-text-the-scrub-shrinks", "longer-than-the-margin"])
 async def test_a_saved_secret_cut_by_the_output_limit_is_still_redacted(tmp_path, length, printed):
     """Long output is cut to its limit; a saved secret across a cut must not
     lose its tail and with it the exact match that redacts it."""
@@ -195,6 +196,15 @@ async def test_a_saved_secret_cut_by_the_output_limit_is_still_redacted(tmp_path
     assert len(cell.stdout) < 10_100
     for start in range(len(secret) - 8):
         assert secret[start : start + 8] not in cell.stdout
+
+
+async def test_output_that_scrubs_away_entirely_says_it_was_withheld(tmp_path):
+    """When nothing safe is left to show, the cell says output was withheld."""
+    secret = _secret_of(300)
+    cell = await _print_saved_secret(tmp_path, secret, "(' ' + secret + chr(10)) * 100")
+
+    assert "withheld" in cell.stdout
+    assert secret[:8] not in cell.stdout
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():
