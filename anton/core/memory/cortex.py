@@ -34,7 +34,7 @@ from anton.core.llm.structured import (
 )
 from anton.core.memory.base import HippocampusProtocol
 from anton.core.memory.base import Engram
-from anton.core.memory.hippocampus import Hippocampus
+from anton.core.memory.hippocampus import Hippocampus, RULE_SECTIONS as _RULE_SECTIONS
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
@@ -161,11 +161,6 @@ You are a memory compaction system. The user message is a numbered list of memor
 
 An index you leave out is deleted. Be conservative — when in doubt, keep the entry: two overlapping entries cost less than losing what only one of them said.
 """
-
-# The `## ` headings of `rules.md`, in file order. `save_rules` writes exactly
-# these three and `get_rules` reads each entry's `kind` off them, so compaction
-# has to round-trip the same set. First one doubles as the fallback heading.
-_RULE_SECTIONS = ("always", "never", "when")
 
 
 class Cortex:
