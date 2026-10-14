@@ -168,6 +168,27 @@ An index you leave out is deleted. Be conservative — when in doubt, keep the e
 _RULE_SECTIONS = ("always", "never", "when")
 
 
+def _read_memory_entries(path: Path) -> tuple[list[str], list[str]]:
+    """Read a memory file's `- ` entries with the section each one sits under.
+
+    Entries above the first heading (a hand-edited file) are kept rather than
+    dropped, under the same heading the keyword pass defaulted to. Headings
+    outside `_RULE_SECTIONS` fold into the first one too.
+    """
+    sections: list[str] = []
+    entries: list[str] = []
+    section = _RULE_SECTIONS[0]
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].lower()
+            section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
+        elif stripped.startswith("- "):
+            sections.append(section)
+            entries.append(stripped)
+    return sections, entries
+
+
 class Cortex:
     """Executive coordinator for Anton's memory systems.
 
@@ -594,20 +615,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if not path.is_file():
             return
 
-        # Read with sections
-        sections: list[str] = []
-        entries: list[str] = []
-        # Entries above the first heading (a hand-edited file) are kept rather
-        # than dropped, under the same heading the keyword pass defaulted to.
-        section = _RULE_SECTIONS[0]
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                heading = stripped[3:].lower()
-                section = heading if heading in _RULE_SECTIONS else _RULE_SECTIONS[0]
-            elif stripped.startswith("- "):
-                sections.append(section)
-                entries.append(stripped)
+        sections, entries = _read_memory_entries(path)
 
         if len(entries) < 8:
             return
@@ -656,6 +664,17 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # Nothing usable came back — a model that named no valid index gets to
         # leave memory alone, not to empty it.
         if not kept:
+            return
+
+        # The rebuild below comes from the read above, and the model call sat
+        # between them. A memory written meanwhile is on disk but not in that
+        # read, so rewriting would erase it. Compaction can wait for a later
+        # pass; the memory cannot be recovered.
+        if _read_memory_entries(path) != (sections, entries):
+            logger.info(
+                "memory-compaction: %s changed during the model call, skipped",
+                path.name,
+            )
             return
 
         # Rebuild the file. Every entry still carries the `- ` prefix it was

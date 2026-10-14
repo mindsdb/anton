@@ -652,6 +652,36 @@ class TestCompactFile:
         await cortex._compact_file(hc, hc._lessons_path, "lesson")
         assert hc._lessons_path.read_text() == before
 
+    async def test_an_entry_saved_while_the_model_answers_survives(self, dirs):
+        """The rebuild comes from the read before the model call. A memory
+        written in between is on disk but not in that read, so a rewrite from
+        it would erase the memory."""
+        hc = self._lessons(dirs, 10)
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        llm = _Held(keep=list(range(1, 11)))
+        cortex = Cortex(global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=llm)
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._lessons_path, "lesson")
+        )
+        await reached_model.wait()
+        hc.encode_lesson("Fact learned while compaction waited", topic="late")
+        answer.set()
+        await compaction
+
+        entries = self._entries(hc)
+        assert any("while compaction waited" in e for e in entries)
+        assert len(entries) == 11
+
     async def test_short_file_is_not_sent_to_the_model(self, dirs):
         hc = self._lessons(dirs, 7)
         llm = await self._compact(dirs, hc, keep=[1])
