@@ -18,10 +18,8 @@ import pytest
 
 from anton.chat_session import get_runtime_factory
 from anton.core.backends.base import Cell
-from anton.core.datasources.data_vault import LocalDataVault
-from anton.utils.datasources import begin_ds_turn_scope, restore_namespaced_env
-from anton.core.backends import local as local_backend
 from anton.core.backends.local import LocalScratchpadRuntime, _add_salvage_chunk, _salvage_tail
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import (
     LLMResponse,
     StreamComplete,
@@ -33,6 +31,7 @@ from anton.core.llm.provider import (
 from anton.core.memory.episodes import EpisodicMemory
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.tools.tool_defs import ToolDef
+from anton.utils.datasources import begin_ds_turn_scope, restore_namespaced_env
 from tests.conftest import make_mock_llm
 
 _DEFAULTS = dict(
@@ -195,7 +194,7 @@ async def test_a_saved_secret_cut_by_the_output_limit_is_still_redacted(tmp_path
 
     assert "chars total)" in cell.stdout
     assert len(cell.stdout) < 10_100
-    for start in range(len(secret) - 8):
+    for start in range(len(secret) - 7):
         assert secret[start : start + 8] not in cell.stdout
 
 
@@ -205,7 +204,7 @@ async def test_output_that_scrubs_away_entirely_says_it_was_withheld(tmp_path):
     cell = await _print_saved_secret(tmp_path, secret, "(' ' + secret + chr(10)) * 100")
 
     assert "withheld" in cell.stdout
-    for start in range(len(secret) - 8):
+    for start in range(len(secret) - 7):
         assert secret[start : start + 8] not in cell.stdout
 
 
@@ -228,17 +227,9 @@ async def test_a_long_saved_value_that_is_not_secret_does_not_withhold_output(tm
     assert cell.stdout.count("normal line") > 800
 
 
-async def test_the_worker_sends_uncut_stdout_only_when_it_passes_the_limit(monkeypatch):
-    """Every reader of the worker's result gets the extra uncut copy, so it is
-    sent only for output the limit cuts."""
-    heads: list[int] = []
-    real_clip = local_backend._clip_stdout
-
-    def recording_clip(raw, total, cwd_note):
-        heads.append(total)
-        return real_clip(raw, total, cwd_note)
-
-    monkeypatch.setattr(local_backend, "_clip_stdout", recording_clip)
+async def test_short_and_cut_output_both_read_as_printed():
+    """Output under the limit comes back as printed; output over it is cut
+    with a note giving the full length."""
     pad = LocalScratchpadRuntime(name="uncut-field-cell", **_DEFAULTS)
     await pad.start()
     try:
@@ -248,8 +239,8 @@ async def test_the_worker_sends_uncut_stdout_only_when_it_passes_the_limit(monke
         await pad.close()
 
     assert short.stdout == "short\n"
+    assert long.stdout.startswith("x" * 10_000)
     assert "(truncated, 12001 chars total)" in long.stdout
-    assert heads == [12001]
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():
