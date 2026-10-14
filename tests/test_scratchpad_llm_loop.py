@@ -628,6 +628,17 @@ async def test_a_cell_sends_no_usage_when_the_host_log_is_off(tmp_path, monkeypa
     assert _usage_lines(caplog) == []
 
 
+@pytest.mark.slow
+async def test_a_cell_cannot_write_a_usage_line_when_the_host_log_is_off(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    caplog.set_level("INFO", logger="anton.usage")
+    forged = 'import sys\nsys.__stdout__.write(\'__ANTON_USAGE__ {"input": 1}\\n\')\nsys.__stdout__.flush()'
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", forged)
+
+    assert cell.error is None, cell.error
+    assert _usage_lines(caplog) == []
+
+
 def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):
     """Only the marker followed by a JSON object is a trace line."""
     (cell,) = _run_cells(

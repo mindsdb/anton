@@ -1339,8 +1339,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                         self._salvage_truncated = True
                 continue
 
-            if line.startswith(USAGE_MARKER):
+            if line.startswith(USAGE_MARKER) and usage_log_enabled():
                 # Logged as it arrives, so a cell killed later keeps the calls it made.
+                # Off, the pad was not asked to send usage, so a line like this is cell output.
                 try:
                     log_usage_record(json.loads(line[len(USAGE_MARKER) :]))
                 except json.JSONDecodeError:
