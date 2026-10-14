@@ -1083,8 +1083,10 @@ import threading
 
 from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
+    MAX_OUTPUT,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
+    STDOUT_SCRUB_MARGIN,
 )
 
 # All _real_stdout writes go through this lock: the heartbeat thread writes
@@ -1132,12 +1134,6 @@ def _heartbeat_loop(stop: threading.Event) -> None:
             else:
                 _real_stdout.write(HEARTBEAT_MARKER + "\n")
             _real_stdout.flush()
-
-
-_MAX_OUTPUT = 10_000
-# Stdout kept past _MAX_OUTPUT so the parent scrubs before it cuts: a secret
-# across the limit stays whole. Mirrors _STDOUT_SCRUB_MARGIN in local.py.
-_STDOUT_SCRUB_MARGIN = 4_096
 
 
 def progress(message=""):
@@ -1466,15 +1462,19 @@ while True:
             sys.stderr = sys.__stderr__
             _cell_log_handler.buf = None
 
-        stdout_val = out_buf.getvalue()
-        stdout_total = len(stdout_val)
-        stdout_val = stdout_val[: _MAX_OUTPUT + _STDOUT_SCRUB_MARGIN]
+        stdout_full = out_buf.getvalue()
+        stdout_val = stdout_full
+        if len(stdout_val) > MAX_OUTPUT:
+            stdout_val = (
+                stdout_val[:MAX_OUTPUT]
+                + f"\n\n... (truncated, {len(stdout_val)} chars total)"
+            )
 
         # Warn-only chdir visibility (ENG-578 fix #5): a cell's os.chdir
         # silently persists into every later cell of this pad — tell the
         # model instead of resetting, so deliberate chdir workflows keep
-        # working. Sent apart from stdout so the parent appends it after its
-        # truncation clamp, and regardless of `error` so a cell that raised
+        # working. Appended AFTER the truncation clamp so the note can never
+        # be truncated away, and regardless of `error` so a cell that raised
         # after the chdir still reports it.
         cwd_note = ""
         _cwd_after = os.getcwd()
@@ -1482,6 +1482,11 @@ while True:
             cwd_note = (
                 f"Note: this cell changed the working directory from {_cwd_before} "
                 f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
+            )
+            stdout_val = (
+                stdout_val
+                + ("\n" if stdout_val and not stdout_val.endswith("\n") else "")
+                + cwd_note
             )
 
         # Persist session after each cell. Keep the return value: a swallowed failure here
@@ -1508,7 +1513,10 @@ while True:
 
     result = {
         "stdout": stdout_val,
-        "stdout_total": stdout_total,
+        # For LocalScratchpadRuntime, which scrubs before it cuts; other readers
+        # of this result keep using "stdout" as it always was.
+        "stdout_head": stdout_full[: MAX_OUTPUT + STDOUT_SCRUB_MARGIN],
+        "stdout_total": len(stdout_full),
         "cwd_note": cwd_note,
         "stderr": err_buf.getvalue(),
         "logs": logs_val,
