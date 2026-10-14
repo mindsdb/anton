@@ -32,7 +32,12 @@ from anton.core.backends.wire import (
 )
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
-from anton.utils.datasources import exact_secret_prefix_at_end, longest_exact_secret, scrub_output
+from anton.utils.datasources import (
+    exact_secret_prefix_at_end,
+    exact_secret_suffix_at_start,
+    longest_exact_secret,
+    scrub_output,
+)
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
@@ -63,14 +68,15 @@ def _salvage_tail(chunks: list[str], dropped: bool) -> str:
     """Join salvaged stdout chunks, scrub them, then keep the last `_SALVAGE_MAX` characters.
 
     Chunks split wherever a heartbeat fell, so after a drop the kept text can
-    start with a token whose key was dropped, and the last chunk can end partway
-    through a saved secret. The scrub runs first, then both edges go. Returns
-    the text, led by a note when it is partial.
+    start partway through a saved secret or with a token whose key was dropped,
+    and the last chunk can end partway through a saved secret. The scrub runs
+    first, then both edges go. Returns the text, led by a note when it is partial.
     """
     scrubbed = scrub_output("".join(chunks))
     cut = exact_secret_prefix_at_end(scrubbed)
     scrubbed = scrubbed[: len(scrubbed) - cut]
     if dropped:
+        scrubbed = scrubbed[exact_secret_suffix_at_start(scrubbed) :]
         scrubbed = _without_orphan_region(scrubbed)
     tail = scrubbed[-_SALVAGE_MAX:]
     if tail and (dropped or cut or len(scrubbed) > _SALVAGE_MAX):
@@ -1174,7 +1180,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             elif self._salvage:
                 error_msg += (
                     "\n\nThe cell printed output before the kill, but it was "
-                    "withheld: its start was cut and could not be scrubbed "
+                    "withheld: it was cut and could not be scrubbed "
                     "safely. Do not assume no side effects happened."
                 )
             cell = Cell(
