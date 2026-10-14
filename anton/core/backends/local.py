@@ -185,6 +185,28 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
 
 
 _MAX_OUTPUT = 10_000
+# Mirrors the boot script: stdout the worker keeps past _MAX_OUTPUT for the scrub.
+_STDOUT_SCRUB_MARGIN = 4_096
+
+
+def _clip_stdout(raw: str, total: int | None, cwd_note: str) -> str:
+    """Scrub a cell's stdout, cut it to `_MAX_OUTPUT`, then append the cwd note.
+
+    The worker cut `raw` at `_MAX_OUTPUT + _STDOUT_SCRUB_MARGIN` when `total` is
+    longer, which can split a secret the scrub then cannot match. That piece is
+    in the last margin of the scrubbed text, measured from the end because the
+    scrub changes lengths, so that margin goes. A `total` of None marks output
+    that is not the worker's, such as a crash's salvage, and is not cut.
+    """
+    text = scrub_output(raw)
+    if total is not None and total > _MAX_OUTPUT:
+        keep = _MAX_OUTPUT
+        if total > len(raw):
+            keep = min(keep, max(len(text) - _STDOUT_SCRUB_MARGIN, 0))
+        text = text[:keep] + f"\n\n... (truncated, {total} chars total)"
+    if cwd_note:
+        text += ("\n" if text and not text.endswith("\n") else "") + cwd_note
+    return text
 
 
 # ── Namespace-snapshot layout (ENG-1124) ────────────────────────────────────
@@ -1210,9 +1232,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         logs = result_data.get("logs", "")
         if recovery_note:
             logs = f"{recovery_note}\n\n{logs}" if logs else recovery_note
+        raw_stdout = result_data.get("stdout", "")
         cell = Cell(
             code=code,
-            stdout=result_data.get("stdout", ""),
+            stdout=_clip_stdout(
+                raw_stdout,
+                result_data.get("stdout_total"),
+                result_data.get("cwd_note", ""),
+            ),
             stderr=result_data.get("stderr", ""),
             error=result_data.get("error"),
             description=description,
