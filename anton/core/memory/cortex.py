@@ -178,7 +178,12 @@ def _read_memory_entries(path: Path) -> tuple[list[str], list[str]]:
     sections: list[str] = []
     entries: list[str] = []
     section = _RULE_SECTIONS[0]
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # A file removed under a running compaction has no entries to keep.
+        return sections, entries
+    for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("## "):
             heading = stripped[3:].lower()
@@ -685,18 +690,15 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # sharing the file, is on disk but not in that read, so a rewrite would
         # erase it. The check and the replace run under the file's writer lock;
         # compaction can wait for a later pass, the memory cannot be recovered.
-        def current_entries(p: Path) -> tuple[list[str], list[str]]:
-            return _read_memory_entries(p) if p.is_file() else ([], [])
-
         if not hc.rewrite_if_unchanged(
-            path, new_content, read=current_entries, snapshot=(sections, entries)
+            path, new_content, read=_read_memory_entries, snapshot=(sections, entries)
         ):
             logger.info(
                 "memory-compaction: %s changed during the model call "
                 "(%d entries read, %d now), skipped",
                 path.name,
                 len(entries),
-                len(current_entries(path)[1]),
+                len(_read_memory_entries(path)[1]),
             )
             return
 

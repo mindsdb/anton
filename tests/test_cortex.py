@@ -690,6 +690,40 @@ class TestCompactFile:
         assert "10 entries read, 11 now" in skipped[0]
         assert "while compaction waited" not in skipped[0]
 
+    async def test_a_rule_saved_while_the_model_answers_survives(self, dirs, caplog):
+        """Rules go through a full-file rewrite on save, not an append, so the
+        change the re-read must notice is a rebuilt file."""
+        hc = Hippocampus(dirs[0])
+        for i in range(10):
+            hc.encode_rule(f"When topic {i} comes up, do thing {i}", kind="when")
+        reached_model = asyncio.Event()
+        answer = asyncio.Event()
+
+        class _Held(_CompactionLLM):
+            async def generate_object_code(self, schema, *, system, messages, max_tokens):
+                reached_model.set()
+                await answer.wait()
+                return await super().generate_object_code(
+                    schema, system=system, messages=messages, max_tokens=max_tokens
+                )
+
+        cortex = Cortex(
+            global_hc=hc, project_hc=Hippocampus(dirs[1]), llm_client=_Held(keep=[1])
+        )
+        compaction = asyncio.create_task(
+            cortex._compact_file(hc, hc._rules_path, "rules")
+        )
+        await reached_model.wait()
+        hc.encode_rule("When compaction is waiting, keep this rule", kind="when")
+        answer.set()
+        with caplog.at_level(logging.INFO, logger="anton.core.memory.cortex"):
+            await compaction
+
+        rules = [e.text for e in hc.get_rules()]
+        assert len(rules) == 11
+        assert "When compaction is waiting, keep this rule" in rules
+        assert any("10 entries read, 11 now" in r.getMessage() for r in caplog.records)
+
     async def test_a_file_removed_while_the_model_answers_stays_removed(self, dirs, caplog):
         hc = self._lessons(dirs, 10)
         reached_model = asyncio.Event()

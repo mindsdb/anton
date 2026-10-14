@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -348,14 +350,17 @@ class TestWriterLock:
     def test_an_append_waits_for_a_held_rewrite_lock(self, tmp_path):
         hc = Hippocampus(tmp_path)
         hc.encode_lesson("first", topic="t")
+        reached = threading.Event()
         done = threading.Event()
 
         def append():
+            reached.set()
             hc.encode_lesson("second", topic="t")
             done.set()
 
         with hc._file_lock(hc._lessons_path):
             threading.Thread(target=append, daemon=True).start()
+            assert reached.wait(5)
             assert not done.wait(0.3), "the append went through while the lock was held"
         assert done.wait(5)
         assert "second" in hc._lessons_path.read_text()
@@ -363,15 +368,18 @@ class TestWriterLock:
     def test_rewrite_if_unchanged_keeps_an_append_that_arrives_during_the_check(self, tmp_path):
         hc = Hippocampus(tmp_path)
         hc.encode_lesson("first", topic="t")
+        reached = threading.Event()
         appended = threading.Event()
 
         def append():
+            reached.set()
             hc.encode_lesson("late", topic="t")
             appended.set()
 
         def read_then_let_another_session_append(path):
             threading.Thread(target=append, daemon=True).start()
-            time.sleep(0.3)
+            assert reached.wait(5)
+            time.sleep(0.3)  # the thread is now blocked on the lock, or the lock is broken
             return "snapshot"
 
         written = hc.rewrite_if_unchanged(
@@ -392,3 +400,37 @@ class TestWriterLock:
         )
         assert written is False
         assert hc._lessons_path.read_text() == before
+
+    def test_an_append_from_another_process_lands_after_the_rewrite(self, tmp_path):
+        """Global memory is shared by every Anton process on the machine, so the
+        competing writer is a separate process, not a thread."""
+        hc = Hippocampus(tmp_path)
+        hc.encode_lesson("first", topic="t")
+        child_code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from anton.core.memory.hippocampus import Hippocampus\n"
+            "print('ready', flush=True)\n"
+            "Hippocampus(Path(sys.argv[1])).encode_lesson('from the other process', topic='t')\n"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_code, str(tmp_path)],
+            stdout=subprocess.PIPE, text=True,
+        )
+
+        def read_while_the_other_process_appends(path):
+            assert child.stdout.readline().strip() == "ready"
+            time.sleep(0.5)  # the child is now blocked on the lock, or the lock is broken
+            return "snapshot"
+
+        try:
+            written = hc.rewrite_if_unchanged(
+                hc._lessons_path, "# Lessons\n- rewritten\n",
+                read=read_while_the_other_process_appends, snapshot="snapshot",
+            )
+        finally:
+            child.wait(timeout=30)
+        assert written is True
+        assert child.returncode == 0
+        text = hc._lessons_path.read_text()
+        assert "rewritten" in text and "from the other process" in text, text
