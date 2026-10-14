@@ -13,9 +13,12 @@ from anton.tools import SCRUBBED_VALUE_RE
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
+    _PROVIDER_SECRET_VARS,
     _reset_registered_ds_vars,
+    longest_exact_secret,
     scrub_credentials,
     scrub_output,
+    set_ds_env_values,
 )
 
 
@@ -41,6 +44,51 @@ def clean_ds_state():
     _clean()
     yield
     _clean()
+
+
+class TestLongestExactSecret:
+    """Counts exactly the values scrub_credentials matches by exact value."""
+
+    def test_counts_secret_unknown_and_provider_values_only(self, monkeypatch):
+        """Secret fields, unknown DS_* over 8 chars and provider keys over 8
+        chars count; known non-secret fields and short values do not."""
+        _DS_SECRET_VARS.add("DS_PG_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_PG_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_PG_PROD__HOST")
+        set_ds_env_values({
+            "DS_PG_PROD__PASSWORD": "p" * 12,
+            "DS_PG_PROD__HOST": "h" * 50,
+            "DS_CUSTOM__TOKEN": "u" * 30,
+            "DS_CUSTOM__FLAG": "on",
+        })
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+        assert longest_exact_secret() == 30
+
+        monkeypatch.setenv("OPENAI_API_KEY", "k" * 40)
+        assert longest_exact_secret() == 40
+
+        monkeypatch.setenv("OPENAI_API_KEY", "k" * 8)
+        assert longest_exact_secret() == 30
+
+    def test_a_short_secret_field_counts(self, monkeypatch):
+        """Secret fields match at any length, unlike unknown and provider values."""
+        _DS_SECRET_VARS.add("DS_PG_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_PG_PROD__PASSWORD")
+        set_ds_env_values({"DS_PG_PROD__PASSWORD": "p" * 5})
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+        assert longest_exact_secret() == 5
+
+    def test_is_zero_with_nothing_to_match(self, monkeypatch):
+        """A known non-secret field, and unknown or provider values of 8 chars
+        or fewer, set nothing to hold back."""
+        _DS_KNOWN_VARS.add("DS_PG_PROD__HOST")
+        set_ds_env_values({"DS_PG_PROD__HOST": "h" * 50, "DS_CUSTOM__FLAG": "u" * 8})
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "k" * 8)
+        assert longest_exact_secret() == 0
 
 
 class TestScrubCredentials:
