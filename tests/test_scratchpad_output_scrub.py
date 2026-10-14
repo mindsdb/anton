@@ -241,16 +241,19 @@ def test_salvage_under_the_budget_is_kept_whole():
 
 
 async def test_a_crashed_cell_with_dropped_salvage_says_it_is_partial(monkeypatch):
-    """A crash reports salvaged stdout like a kill does, so cut output is
-    marked as cut instead of passing for the whole output."""
+    """A crash reports salvaged stdout like a kill does: the most recent
+    output, scrubbed, and marked as cut instead of passing for the whole output."""
     monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
     pad = LocalScratchpadRuntime(name="crashed-cell", **_DEFAULTS)
     await pad.start()
     code = (
-        "import os, time\n"
-        "for i in range(6):\n"
+        _MAKE_TOKEN
+        + "import os, time\n"
+        "for i in range(8):\n"
         "    print(f'line {i}\\n' + 'x' * 8000, flush=True)\n"
         "    time.sleep(0.4)\n"
+        "print('access_token: ' + tok, flush=True)\n"
+        "time.sleep(0.4)\n"
         "os._exit(1)\n"
     )
     try:
@@ -262,6 +265,37 @@ async def test_a_crashed_cell_with_dropped_salvage_says_it_is_partial(monkeypatc
     assert len(cells) == 1
     assert "exited unexpectedly" in cells[0].error.lower()
     assert cells[0].stdout.startswith("(truncated to most recent output)\n")
+    assert "line 7" in cells[0].stdout
+    assert "access_token: [REDACTED_TOKEN]" in cells[0].stdout
+    assert TOKEN not in cells[0].stdout
+
+
+async def test_a_killed_cell_whose_salvage_is_withheld_says_output_existed(monkeypatch):
+    """One long line with no line start to cut at cannot be shown safely after
+    a drop; the error still tells the agent the cell printed something."""
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "2")
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "2")
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "2")
+    monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "5")
+    monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.1")
+    pad = LocalScratchpadRuntime(name="withheld-salvage-cell", **_DEFAULTS)
+    await pad.start()
+    code = (
+        "import time\n"
+        "for i in range(7):\n"
+        "    print('x' * 8000, end='', flush=True)\n"
+        "    time.sleep(0.3)\n"
+        "time.sleep(30)\n"
+    )
+    try:
+        items = [item async for item in pad.execute_streaming(code)]
+    finally:
+        await pad.close()
+
+    cells = [item for item in items if isinstance(item, Cell)]
+    assert len(cells) == 1
+    assert cells[0].stdout == ""
+    assert "printed output" in cells[0].error and "withheld" in cells[0].error
 
 
 async def test_another_tool_result_keeps_quoted_placeholders(tmp_path):

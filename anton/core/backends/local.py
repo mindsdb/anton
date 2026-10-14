@@ -1147,6 +1147,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     "interval) — use it to determine which side effects "
                     "already happened."
                 )
+            elif self._salvage:
+                error_msg += (
+                    "\n\nThe cell printed output before the kill, but it was "
+                    "withheld: its start was cut and could not be scrubbed "
+                    "safely. Do not assume no side effects happened."
+                )
             cell = Cell(
                 code=code,
                 stdout=salvaged,
