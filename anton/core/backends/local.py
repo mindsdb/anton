@@ -1345,7 +1345,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 try:
                     log_usage_record(json.loads(line[len(USAGE_MARKER) :]))
                 except json.JSONDecodeError:
-                    logger.warning("unreadable scratchpad usage line: %.200s", line)
+                    # Length only: the line is raw cell output and may hold a secret.
+                    logger.warning("unreadable scratchpad usage line (%d chars)", len(line))
                 continue
 
             if line.startswith(PROGRESS_MARKER):

@@ -639,6 +639,18 @@ async def test_a_cell_cannot_write_a_usage_line_when_the_host_log_is_off(tmp_pat
     assert _usage_lines(caplog) == []
 
 
+@pytest.mark.slow
+async def test_an_unreadable_usage_line_is_logged_without_its_content(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO")
+    broken = "import sys\nsys.__stdout__.write('__ANTON_USAGE__ token=secret-value\\n')\nsys.__stdout__.flush()"
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", broken)
+
+    assert cell.error is None, cell.error
+    assert "unreadable scratchpad usage line" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
 def test_a_cell_line_that_starts_like_the_trace_marker_stays_code(tmp_path):
     """Only the marker followed by a JSON object is a trace line."""
     (cell,) = _run_cells(
