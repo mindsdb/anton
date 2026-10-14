@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -221,14 +222,26 @@ _TOKEN_KEY = (
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
 # A quoted value after a token key or `Bearer` is a string literal, so it is
-# redacted whatever its characters; only a placeholder or a marker is kept.
-# No closing quote is required: clipped output can end mid-value.
-_QUOTED_TOKEN_VALUE_PATTERN = re.compile(
-    r"(" + _TOKEN_KEY + r"\\?[\"']?\s*[:=]\s*\\?[\"']"
-    r"|\\?[\"'](?i:bearer)[ \t]+)"
+# redacted; only a placeholder or a marker is kept. No closing quote is
+# required: clipped output can end mid-value.
+_NARROW_QUOTED_VALUE = (
     r"(?!(?:\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\])(?![^\"'\\\s]))"
     r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4}){16,}"
 )
+# A Bearer value cannot hold a space or a quote, so prose after `"Bearer ` stays.
+_QUOTED_BEARER_VALUE_PATTERN = re.compile(r"(\\?[\"'](?i:bearer)[ \t]+)" + _NARROW_QUOTED_VALUE)
+_NARROW_QUOTED_VALUE_PATTERN = re.compile(_NARROW_QUOTED_VALUE)
+# Group 1 is the backslashes before the value's quote: how many times the
+# encoders above it escaped it, and so what its closing quote looks like. Seven
+# covers three levels of JSON in JSON.
+_QUOTED_TOKEN_OPENER_PATTERN = re.compile(_TOKEN_KEY + r"\\*[\"']?\s*[:=]\s*(\\{0,7})([\"'])")
+# Scanned length of one value; longer than any token or secret a cell prints.
+_QUOTED_VALUE_SCAN_MAX = 16_384
+_WHOLE_MARKER_PATTERN = re.compile(r"\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\]")
+_CODE_OPERATOR_AFTER = re.compile(r"\s*(?:[+,()%]|(?:if|else|or|and)\b)")
+_CODE_OPERATOR_BEFORE = re.compile(r"(?:[+,()%]|\b(?:if|else|or|and))\s*$")
+_CODE_OPERATOR_BEFORE_WINDOW = 64
+_CODE_LEADING_OPERATOR = re.compile(r"\s*[+,)](?:\s|$)")
 # Unquoted values can be source code the model reads and may write back: after a
 # key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
 # type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
@@ -429,6 +442,89 @@ def exact_secret_suffix_at_start(text: str) -> int:
     return longest
 
 
+@functools.cache
+def _value_end_pattern(quote: str, depth: int) -> re.Pattern[str]:
+    """Return the pattern for what ends a value opened by `quote` after `depth` backslashes.
+
+    That is the same quote after exactly `depth` backslashes, or a line break
+    for a value cut off early.
+    """
+    return re.compile(r"(?<!\\)\\{%d}%s|[\r\n]" % (depth, quote))
+
+
+@functools.cache
+def _string_boundary_pattern(quote: str, depth: int) -> re.Pattern[str]:
+    """Return the pattern for a code string boundary inside a value opened by `quote` after `depth` backslashes.
+
+    A boundary is the other quote after exactly `depth` backslashes, or the
+    same quote after fewer.
+    """
+    other = "'" if quote == '"' else '"'
+    pattern = r"(?<!\\)\\{%d}%s" % (depth, other)
+    if depth:
+        pattern += r"|(?<!\\)\\{0,%d}%s" % (depth - 1, quote)
+    return re.compile(pattern)
+
+
+def _quoted_value_end(text: str, start: int, quote: str, depth: int) -> int:
+    """Return where a quoted value starting at `start` ends.
+
+    It ends at the first `quote` preceded by exactly `depth` backslashes, the
+    escaping its opening quote had; a quote with more backslashes is part of
+    the value. A line break, the end of `text` or `_QUOTED_VALUE_SCAN_MAX`
+    ends a value cut off early.
+    """
+    limit = min(len(text), start + _QUOTED_VALUE_SCAN_MAX)
+    found = _value_end_pattern(quote, depth).search(text, start, limit)
+    return found.start() if found else limit
+
+
+def _looks_like_code(text: str, start: int, end: int, quote: str, depth: int) -> bool:
+    """Return whether `text[start:end]`, a quoted value, is really code between two string literals.
+
+    The opening quote then closed a code string, so the value holds another
+    string boundary next to an operator. A leading `+ `, `, ` or `)` is code too.
+    """
+    if _CODE_LEADING_OPERATOR.match(text, start, end):
+        return True
+    for boundary in _string_boundary_pattern(quote, depth).finditer(text, start, end):
+        if _CODE_OPERATOR_AFTER.match(text, boundary.end(), end):
+            return True
+        window_start = max(start, boundary.start() - _CODE_OPERATOR_BEFORE_WINDOW)
+        if _CODE_OPERATOR_BEFORE.search(text, window_start, boundary.start()):
+            return True
+    return False
+
+
+def _redact_quoted_token_values(text: str) -> str:
+    """Redact each quoted value after a token key, up to its real closing quote.
+
+    The value may hold quotes, spaces and escapes at any nesting depth. A
+    value that looks like code falls back to the narrow grammar, so source
+    lines read as written. Returns `text` with each redacted value replaced.
+    """
+    parts: list[str] = []
+    position = 0
+    for opener in _QUOTED_TOKEN_OPENER_PATTERN.finditer(text):
+        if opener.start() < position:
+            continue
+        start = opener.end()
+        depth, quote = len(opener.group(1)), opener.group(2)
+        end = _quoted_value_end(text, start, quote, depth)
+        if _looks_like_code(text, start, end, quote, depth):
+            narrow = _NARROW_QUOTED_VALUE_PATTERN.match(text, start)
+            if narrow is None:
+                continue
+            end = narrow.end()
+        elif end - start < 16 or _WHOLE_MARKER_PATTERN.fullmatch(text, start, end):
+            continue
+        parts.append(text[position:start])
+        parts.append("[REDACTED_TOKEN]")
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
+
+
 def scrub_output(text: str) -> str:
     """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
 
@@ -440,7 +536,8 @@ def scrub_output(text: str) -> str:
     """
     text = scrub_credentials(text)
     text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
-    text = _QUOTED_TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    text = _redact_quoted_token_values(text)
+    text = _QUOTED_BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
     return _TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
 
 
