@@ -1584,6 +1584,8 @@ async def _chat_loop(
         surface=SURFACE_CLI,
         # The CLI footer shows a streaming tool's live tail (`tool_peek`).
         live_tool_peek=True,
+        # The CLI prints a tool's message to the user as markdown.
+        tool_messages=True,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,
@@ -1635,7 +1637,7 @@ async def _chat_loop(
     _query_count = 0
     _total_questions = 0  # tracks first 10 questions for time estimates
 
-    from anton.chat_ui import StreamDisplay, EscapeWatcher, ClosingSpinner, QuestionRenderTracker
+    from anton.chat_ui import StreamDisplay, EscapeWatcher, ClosingSpinner, QuestionRenderTracker, is_displayed_tool_result
 
     toolbar = {"stats": "", "status": ""}
     display = StreamDisplay(console, toolbar=toolbar)
@@ -2114,7 +2116,7 @@ async def _chat_loop(
                                 ttft = time.monotonic() - t0
                             display.append_text(event.text)
                         elif isinstance(event, StreamToolResult):
-                            if event.name == "scratchpad" and event.action == "dump":
+                            if is_displayed_tool_result(event):
                                 display.show_tool_result(event.content)
                         elif isinstance(event, StreamToolUseStart):
                             display.on_tool_use_start(event.id, event.name)
