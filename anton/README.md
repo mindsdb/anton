@@ -131,7 +131,7 @@ And the Hipocampus also is controlled as follows:
 | Brain Structure | Module | What It Does |
 |---|---|---|
 | **Hippocampus** (CA3/CA1) | `hippocampus.py` | The storage engine. Reads and writes individual memory traces (engrams) to markdown files. One instance per scope — it doesn't decide *what* to remember, just executes storage and retrieval. |
-| **Prefrontal Cortex** (dlPFC/vmPFC) | `cortex.py` | The executive coordinator. Manages two hippocampi (global + project), decides which memories to load into the LLM's context window, gates whether new memories need confirmation. |
+| **Prefrontal Cortex** (dlPFC/vmPFC) | `cortex.py` | The executive coordinator. Manages two hippocampi (global + project), plus an optional read-only one an operator manages, decides which memories to load into the LLM's context window, gates whether new memories need confirmation. |
 | **Medial Temporal Lobe** (episodic) | `episodes.py` | Raw episodic memory. Logs every conversation turn as timestamped JSONL — user input, assistant responses, tool calls, scratchpad output. Searchable via the `recall` tool. Like HSAM: never forgets. |
 | **Hippocampal Replay** (SWS consolidation) | `consolidator.py` | After a scratchpad session ends, replays what happened in compressed form and extracts durable lessons via a fast LLM call. Like sleep — offline, post-hoc, selective. |
 | **Striatum** (procedural memory) | `skills.py` | Long-term procedural memory. Stores reusable skills as multi-stage directories (declarative → chunks → code). The LLM retrieves skills on demand via the `recall_skill` tool, the way the basal ganglia activates a learned action sequence in response to a familiar context. |
@@ -295,6 +295,8 @@ When a turn begins, the Cortex assembles memories into the system prompt. This i
 
 Total budget: ~5800 tokens, about 3% of a 200K context window.
 
+When the host passes an operator's read-only layer (`managed_hc`, see [the Cortex section](#cortexpy--executive-coordinator)), its rules and lessons come first, under `## Operator Memory — Rules` and `## Operator Memory — Lessons`, ahead of Identity.
+
 The Cortex inserts these as labeled sections in the system prompt (`## Your Memory — Identity`, `## Your Memory — Global Rules`, etc.) so the LLM knows they're its own memories, not user instructions. The `anton.md` user-written context is injected *after* memory, giving user instructions higher priority.
 
 ### Moment B — Scratchpad Tool Description (Procedural Priming)
@@ -305,7 +307,7 @@ When scratchpads are active, relevant lessons are appended to the scratchpad too
 scratchpad_tool["description"] += f"\n\nLessons from past sessions:\n{wisdom}"
 ```
 
-This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi.
+This combines scratchpad-related "when" rules + scratchpad-related lessons from both scopes, ordered by confidence tier (high, then medium/unset, then low) and recency within a tier, trimmed to a token budget (default 2000/scope, ~4 chars/token). The content comes from `cortex.get_scratchpad_context()`, which calls `recall_scratchpad_wisdom()` on both hippocampi, after the operator's layer when there is one.
 
 ## The `memorize` Tool
 
@@ -822,7 +824,7 @@ The Hippocampus handles one scope (global OR project) and is the canonical file-
 
 ### `cortex.py` — Executive Coordinator
 
-The Cortex manages two Hippocampus instances and orchestrates all declarative memory operations. It is also the encoding endpoint that the cerebellum and consolidator route their generated lessons through.
+The Cortex manages two Hippocampus instances (plus an optional read-only third, below) and orchestrates all declarative memory operations. It is also the encoding endpoint that the cerebellum and consolidator route their generated lessons through.
 
 | Method | Purpose |
 |---|---|
@@ -833,6 +835,19 @@ The Cortex manages two Hippocampus instances and orchestrates all declarative me
 | `needs_compaction()` | Check if any file exceeds the threshold |
 | `compact_all()` | LLM-assisted deduplication on all oversized files. Uses `generate_object_code(_CompactionResult, ...)`. The model names survivors by index, so compaction drops entries — it never rewrites or merges them. |
 | `maybe_update_identity(message)` | Extract identity facts from user message via `generate_object_code(_IdentityFacts, ...)`. Background, fires every 5 turns. |
+
+#### The operator's read-only layer (`managed_hc`)
+
+A host that serves several people can give every one of them the same rules and lessons. It passes a third store, keyword-only: `Cortex(global_hc=..., project_hc=..., managed_hc=Hippocampus(<read-only folder>))`. The folder holds the usual `rules.md` and `lessons.md`. In `rules.md`, only `- ` bullets under `## Always`, `## Never` and `## When` reach the agent.
+
+- **System prompt.** The layer's rules render first, under `## Operator Memory — Rules`, then its lessons under `## Operator Memory — Lessons`. Identity and the person's own sections follow, unchanged.
+- **Scratchpad tool description.** The layer's scratchpad wisdom comes first, then global, then project.
+- **Budgets.** The layer has its own budgets, counted apart from the person's tiers. It keeps about 4,000 characters of lessons and 8,000 of scratchpad wisdom. Its always and never rules load in full. Past 6,000 characters of rules, with at least 1,000 characters of when-rules, its when-rules go through the same relevance filter as the person's, in the same concurrent gather.
+- **Never written.** `encode`, compaction, vacuum and identity extraction name only `global_hc` and `project_hc`, so the cerebellum, the consolidator, `memorize` and the ACC can't reach it. The layer's entries don't count toward the compaction threshold. The ACC's end-of-turn de-dupe reads the layer's rules too, so it doesn't copy an operator rule into the person's tier.
+- **Never read.** The layer's `profile.md` and its `minds-datasource` topic.
+- **Project-profile move.** Each construction moves identity lines that landed in project scope up to `global_hc`, never to `managed_hc`. When `global_hc` can't be written (a read-only folder), the move logs `memory: project profile not moved (<error type>)`, leaves the project lines in place for a later turn, and the turn goes on.
+
+With `managed_hc` unset (the default), the system prompt and the scratchpad description are byte-identical to a Cortex without the layer.
 
 ### `episodes.py` — Episodic Memory
 
