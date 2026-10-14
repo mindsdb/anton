@@ -21,18 +21,45 @@ def _verified_env(stub):
 
 
 @pytest.mark.stub_only
-def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
-    # Backstop fires at effective_cap + 1 — the one-time grace extension
-    # (ENG-1893) runs first, so it takes effective_cap + 1 queued tool calls
-    # to actually reach the ask.
+def test_keep_going_at_the_round_cap_finishes_the_turn(cfg, stub, tmp_path):
+    """Answering 1 ("Keep going") at the cap raises it, and the same turn
+    finishes: no hand-back, no second prompt from the user."""
     for i in range(_EFFECTIVE_CAP + 1):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"loop_{i}", "code": f"print({i})"})
-    stub.queue_text("Summarising. CIRCUIT_FIRED")
-    result = run_anton(["--folder", str(tmp_path)], ["run forever", "exit"],
+    stub.queue_finish_authorization(False)
+    for i in range(3):
+        stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"more_{i}", "code": f"print({i})"})
+    stub.queue_text("All done. FINISHED_AFTER_KEEP_GOING")
+    stub.queue_verification_ok()
+    result = run_anton(["--folder", str(tmp_path)], ["run until done", "1", "exit"],
                        env=base_env(stub), timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
+    assert_output(result, "Keep going?", "FINISHED_AFTER_KEEP_GOING")
+    assert not any(
+        "tool-call rounds on this turn" in json.dumps(r.get("messages", []))
+        for r in stub.requests
+    ), "the turn handed back instead of continuing"
+
+
+@pytest.mark.stub_only
+def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
+    # Backstop fires at effective_cap + 1 — the one-time grace extension
+    # (ENG-1893) runs first, so it takes effective_cap + 1 queued tool calls
+    # to actually reach the cap. There the turn checks whether the user already
+    # said "keep going" (queued: no) and asks; answering 2 ("Stop here") must
+    # still hand back.
+    for i in range(_EFFECTIVE_CAP + 1):
+        stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"loop_{i}", "code": f"print({i})"})
+    stub.queue_finish_authorization(False)
+    stub.queue_text("Summarising. CIRCUIT_FIRED")
+    result = run_anton(["--folder", str(tmp_path)], ["run forever", "2", "exit"],
+                       env=base_env(stub), timeout=cfg.timeout(60))
+
+    assert_exit_ok(result)
+    assert_not_output(result, "Traceback (most recent call last)")
+    assert_output(result, "Keep going?")
     assert_output(result, "CIRCUIT_FIRED")
     assert any(
         f"You have used {_EFFECTIVE_CAP} tool-call rounds" in json.dumps(r.get("messages", []))
@@ -118,7 +145,7 @@ def test_waiting_verdict_stops_without_continuation(cfg, stub, tmp_path):
     assert_output(result, "WAITING_ON_USER")
     # WAITING is a valid stop: no continuation injection may be sent.
     assert not any(
-        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        "judged the answer above unfinished" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "WAITING verdict must not trigger a continuation injection"
     # The verifier must receive truncated tool-result evidence (not just a flag),
@@ -154,11 +181,11 @@ def test_stuck_verdict_diagnoses_without_continuation(cfg, stub, tmp_path):
     assert_output(result, "STUCK_DIAGNOSIS")
     # STUCK is a stop, not unfinished work.
     assert not any(
-        "Continue working on the original request" in json.dumps(r.get("messages", []))
+        "judged the answer above unfinished" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), "STUCK verdict must not trigger a continuation injection"
     assert any(
-        "determined this task is stuck" in json.dumps(r.get("messages", []))
+        "judged this task stuck" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), f"STUCK diagnosis request not found. Request count: {stub.request_count}"
 

@@ -24,19 +24,22 @@ def test_alternating_errors_evade_circuit_breaker(cfg, stub, tmp_path):
     # too, see _EFFECTIVE_CAP) — exactly that many tool-call slots, or the
     # extra queued response gets consumed by the hand-back diagnosis call
     # instead of the text reply below. Pairs keep the error streak at ≤1 per
-    # tool; a trailing odd slot rounds up to effective_cap + 1.
+    # tool; a trailing odd slot rounds up to effective_cap + 1. At the cap the
+    # turn checks for a "keep going" (queued: no) and asks; 2 is "Stop here".
     pairs, odd_one = divmod(_EFFECTIVE_CAP + 1, 2)
     for i in range(pairs):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"bad_{i}", "code": _BAD_CODE})
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"good_{i}", "code": _GOOD_CODE})
     if odd_one:
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"bad_{pairs}", "code": _BAD_CODE})
+    stub.queue_finish_authorization(False)
     stub.queue_text("Max rounds hit. ROUNDS_EXHAUSTED")
-    result = run_anton(["--folder", str(tmp_path)], ["keep trying", "exit"],
+    result = run_anton(["--folder", str(tmp_path)], ["keep trying", "2", "exit"],
                        env=base_env(stub), timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
+    assert_output(result, "Keep going?")
     assert_output(result, "ROUNDS_EXHAUSTED")
 
     all_messages = json.dumps([r.get("messages", []) for r in stub.requests])

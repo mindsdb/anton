@@ -28,7 +28,6 @@ from anton.core.tools.tool_handlers import (
     snapshot_existing_artifact_mtimes,
     track_edits_since,
     handle_create_artifact,
-    handle_open_artifact,
     handle_update_artifact_metadata,
 )
 
@@ -87,18 +86,6 @@ async def test_create_tracks_the_slug_for_this_turn(session, root):
     assert session._artifacts_touched == {slug}
 
 
-async def test_open_tracks_the_slug_for_this_turn(session, root):
-    """Opening is how the agent gets a path to write into, so it counts as
-    intent to modify — the writes themselves happen in scratchpad cells the
-    tool layer never observes."""
-    slug = await _create(session)
-    session._artifacts_touched.clear()
-
-    await handle_open_artifact(session, {"slug": slug})
-
-    assert session._artifacts_touched == {slug}
-
-
 async def test_update_metadata_tracks_the_slug(session, root):
     slug = await _create(session)
     session._artifacts_touched.clear()
@@ -119,15 +106,6 @@ async def test_untouched_artifact_is_not_tracked(session, root):
 
     assert session._artifacts_touched == {slug}
     assert sibling_slug not in session._artifacts_touched
-
-
-async def test_open_of_a_missing_slug_tracks_nothing(session, root):
-    await _create(session)
-    session._artifacts_touched.clear()
-
-    await handle_open_artifact(session, {"slug": "no-such-artifact"})
-
-    assert session._artifacts_touched == set()
 
 
 # ─── durable provenance ─────────────────────────────────────────────────────
@@ -157,7 +135,7 @@ async def test_two_conversations_accumulate_separate_provenance(session, root):
     slug = await _create(session)
 
     other = FakeSession(root, session_id="conv-2")
-    await handle_open_artifact(other, {"slug": slug})
+    await handle_update_artifact_metadata(other, {"slug": slug, "primary": "index.html"})
 
     assert [e["conversation"] for e in _provenance(root, slug)] == ["conv-1", "conv-2"]
 
@@ -188,14 +166,11 @@ async def test_tracking_failure_never_fails_the_tool_call(session, root, monkeyp
     assert (root / slug / "metadata.json").is_file()
 
 
-# ─── edits made without re-opening (scratchpad mtime fallback) ─────────────
+# ─── edits made from the scratchpad (mtime diff) ───────────────────────────
 #
-# `open_artifact` is how attribution is SUPPOSED to work, but nothing forces
-# the agent to call it again once it already has an artifact's path from
-# earlier in the conversation — it can (and in practice does) just write
-# straight into a remembered folder via the scratchpad. `track_edits_since`
-# is the fallback: a before/after mtime diff scoped to one scratchpad cell's
-# own execution window, so that edit still gets attributed.
+# The agent edits artifact files from scratchpad cells, which the tool layer
+# never sees. `track_edits_since` attributes those edits: a before/after mtime
+# diff scoped to one scratchpad cell's own execution window.
 
 
 def _bump_mtime(path: Path, delta_s: int = 2) -> None:
@@ -208,7 +183,7 @@ async def test_edit_without_reopening_is_tracked_via_mtime(session, root):
     session._artifacts_touched.clear()
 
     before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
-    # The scratchpad writing straight into the folder, bypassing open_artifact.
+    # The scratchpad writing straight into the folder.
     index = root / slug / "index.html"
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
@@ -346,11 +321,11 @@ async def test_a_slug_that_did_not_exist_before_is_not_claimed_as_an_edit(sessio
     assert session._artifacts_touched == set()
 
 
-async def test_reopened_slug_is_not_double_tracked_by_the_fallback(session, root):
-    """When open_artifact WAS called this turn, the fallback is a no-op for
-    that slug — it only fills in what the tools missed."""
+async def test_a_slug_already_tracked_is_not_tracked_again(session, root):
+    """When a tool already tracked the slug this turn, the mtime diff adds
+    nothing for it."""
     slug = await _create(session)
-    await handle_open_artifact(session, {"slug": slug})
+    await handle_update_artifact_metadata(session, {"slug": slug, "primary": "index.html"})
     assert session._artifacts_touched == {slug}
 
     before = snapshot_existing_artifact_mtimes(ArtifactStore(root))
