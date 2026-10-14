@@ -9,7 +9,7 @@ verifier coverage is ENG-1211's scope.
 
 from __future__ import annotations
 
-from anton.core.session import _VerifierVerdict
+from anton.core.session import _VERIFIER_JUDGMENT_RUBRIC, _VerifierVerdict
 
 
 def _status_description() -> str:
@@ -195,3 +195,4 @@ def test_asking_leave_for_a_read_only_step_is_not_waiting():
     waiting = desc[desc.index("- WAITING:"):desc.index("- INCOMPLETE:")]
     assert "asking permission for a read-only step" in waiting
     assert "that stop is INCOMPLETE" in waiting
+    assert "only asks leave to open, read or search files" in _VERIFIER_JUDGMENT_RUBRIC
