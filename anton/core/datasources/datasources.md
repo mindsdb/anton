@@ -1,8 +1,8 @@
 # Datasource Knowledge
 
 Anton reads this file when connecting data sources. For each source, the YAML
-block defines the fields Python collects. The prose below describes auth flows
-and common errors.
+block defines the fields Python collects. The prose below describes auth flows,
+common errors, and how to handle OAuth2 — Anton handles those using the scratchpad.
 
 Credentials are injected as `DS_<FIELD_UPPER>` environment variables
 before any scratchpad code runs. Never embed raw values in code strings.
@@ -311,6 +311,16 @@ auth_methods:
     display: "Private App Token (recommended)"
     fields:
       - { name: access_token, required: true, secret: true, description: "HubSpot Private App token (starts with pat-na1-)" }
+  - name: oauth2
+    display: "OAuth2 (for multi-account or publishable apps)"
+    fields:
+      - { name: client_id,     required: true,  secret: false, description: "OAuth2 client ID" }
+      - { name: client_secret, required: true,  secret: true,  description: "OAuth2 client secret" }
+    oauth2:
+      auth_url: https://app.hubspot.com/oauth/authorize
+      token_url: https://api.hubapi.com/oauth/v1/token
+      scopes: [crm.objects.contacts.read, crm.objects.deals.read]
+      store_fields: [access_token, refresh_token]
 test_snippet: |
   import hubspot, os
   client = hubspot.Client.create(access_token=os.environ['DS_ACCESS_TOKEN'])
@@ -321,13 +331,13 @@ test_snippet: |
 For Private App Token: HubSpot → Settings → Integrations → Private Apps → Create.
 Recommended scopes: `crm.objects.contacts.read`, `crm.objects.deals.read`, `crm.objects.companies.read`.
 
-OAuth2 is not offered here: finishing it in the scratchpad would print the
-tokens, and scratchpad output redacts them. If the user asks for OAuth2, use the
-Private App token instead.
+For OAuth2: collect client_id and client_secret, then use the scratchpad to:
 
-A HubSpot connection saved earlier with OAuth2 has no way to refresh its token
-and stops working once the token expires. When one fails to authenticate, tell
-the user, and reconnect it with a Private App token.
+1. Build the authorization URL using `auth_url` + params above
+2. Start a local HTTP server on port 8099 to catch the callback
+3. Open the URL in the user's browser with `webbrowser.open()`
+4. Extract the `code` from the callback, POST to `token_url` for tokens
+5. Return `access_token` and `refresh_token` to store in wallet
 
 ---
 
