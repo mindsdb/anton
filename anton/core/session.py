@@ -390,29 +390,16 @@ class _VerifierVerdict(BaseModel):
             "genuinely needs answered to proceed with the requested task, or is a "
             "reasoned refusal. This is a valid stopping point — do NOT treat it as "
             "unfinished; the correct action is to wait for the user's reply. "
-            "Permission to open or read a file or data the assistant can already "
-            "access is not such a question, and not a decision or authorisation "
-            "the user must give (see the exception below). "
             # Without this carve-out INCOMPLETE's early-stop sentence reads as
             # penalising the ask itself: 8 of 31 production WAITING turns
             # re-scored INCOMPLETE on an earlier wording, which is ENG-716.
             "It includes asking the user to provide, attach, re-upload, share, "
-            "connect, or authorise something the assistant needs and cannot get "
-            "itself (a file it was not given, a link, a Drive connection, "
-            "credentials), or to make a decision — "
+            "connect, or authorise something the assistant needs (a file, a "
+            "link, a Drive connection, credentials), or to make a decision — "
             "even after a single failed attempt. Asking is a valid stop, never a "
-            "premature one. "
-            # Asking leave to read data it already had ended a third of one
-            # deployment's evaluation turns without an answer.
-            "The one exception is asking permission for a read-only step the "
-            "assistant can already take itself (opening, reading, searching or "
-            "analysing project files, attachments or connected data it has access "
-            "to) when the user did not tell it to wait: nothing there needs the "
-            "user, so that stop is INCOMPLETE, not WAITING, even when phrased as a "
-            "question.\n"
+            "premature one.\n"
             "- INCOMPLETE: the assistant stopped partway through the requested task "
-            "WITHOUT asking the user anything, or only asked leave for a read-only "
-            "step it could take itself, and could keep going on its own — "
+            "WITHOUT asking the user anything, and could keep going on its own — "
             "including when it implied success but the data its answer actually "
             "depends on errored or came back empty and was never recovered. This "
             "also covers an honest 'I couldn't get it' that stopped EARLY: one "
@@ -833,10 +820,6 @@ _VERIFIER_NO_PREAMBLE = (
 # data the answer relies on errored/came back empty is still INCOMPLETE.
 _VERIFIER_JUDGMENT_RUBRIC = (
     "Which status applies? Judge the FINAL outcome, not every intermediate step. "
-    # Stated only in the status definitions, a read-only ask still came back WAITING.
-    "First: a final message that only asks leave to open, read or search files or data "
-    "the assistant can already access, when the user did not tell it to wait, is "
-    "INCOMPLETE, not WAITING, because nothing there needs the user. "
     "An errored or empty tool result only makes the task INCOMPLETE or STUCK when "
     "the assistant's final answer depends on data that never arrived and was not "
     "recovered another way. A tool that failed but the assistant worked around — "

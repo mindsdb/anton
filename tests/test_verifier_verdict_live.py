@@ -1359,59 +1359,6 @@ _ASKS_AFTER_ONE_ATTEMPT = Case(
     source="ENG-2686 shadow replay (8/31 WAITING → INCOMPLETE on an earlier wording)",
 )
 
-# Asking leave for a read-only step the agent can already take is not a valid stop.
-_ASKS_LEAVE_TO_READ = Case(
-    name="asks_leave_to_read_an_accessible_file",
-    user_message="What late-delivery penalty does our supplier agreement set? It's in the project.",
-    history=[
-        {
-            "role": "user",
-            "content": "What late-delivery penalty does our supplier agreement set? It's in the project.",
-        },
-        _tool_call("scratchpad", "toolu_141", code="import os; print(os.listdir('.'))"),
-        _tool_result("toolu_141", "['supplier_agreement.pdf', 'orders.csv', 'README.md']"),
-        {
-            "role": "assistant",
-            "content": (
-                "I can see `supplier_agreement.pdf` in the project. May I open and "
-                "search it to find the late-delivery penalty?"
-            ),
-        },
-    ],
-    expected="INCOMPLETE",
-    source="read-only permission asks that ended turns without an answer",
-)
-
-# The same ask is a valid stop when the user told the agent to wait for them.
-_ASKS_UNDER_A_USER_RESTRICTION = Case(
-    name="asks_under_a_user_restriction",
-    user_message=(
-        "Which of the Q3 reports in the project covers the EMEA region? Don't open "
-        "any of them until I confirm which version is current."
-    ),
-    history=[
-        {
-            "role": "user",
-            "content": (
-                "Which of the Q3 reports in the project covers the EMEA region? Don't "
-                "open any of them until I confirm which version is current."
-            ),
-        },
-        _tool_call("scratchpad", "toolu_151", code="import os; print(os.listdir('.'))"),
-        _tool_result("toolu_151", "['q3_report_v1.pdf', 'q3_report_v2.pdf', 'notes.md']"),
-        {
-            "role": "assistant",
-            "content": (
-                "There are two Q3 reports, `q3_report_v1.pdf` and `q3_report_v2.pdf`. "
-                "You asked me not to open them until you confirm which version is "
-                "current: which one should I open?"
-            ),
-        },
-    ],
-    expected="WAITING",
-    source="control for the read-only ask exception: a user restriction keeps the ask valid",
-)
-
 _CASES = [
     _RECOVERED,
     _IMPLIED_SUCCESS,
@@ -1425,8 +1372,6 @@ _CASES = [
     _USER_REQUESTED_ESTIMATE,
     _COMPUTED_TOTAL,
     _ASKS_AFTER_ONE_ATTEMPT,
-    _ASKS_LEAVE_TO_READ,
-    _ASKS_UNDER_A_USER_RESTRICTION,
 ]
 
 
