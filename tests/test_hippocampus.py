@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -337,3 +339,56 @@ class TestEntryTextSanitization:
         before = hc.get_rules()[0].text
         hc.encode_rule("Second rule", kind="always")        # rewrites rules.md
         assert [r.text for r in hc.get_rules() if r.text == before] == [before]
+
+
+class TestWriterLock:
+    """Every writer to a memory file takes the same per-file lock, so an append
+    from another session cannot land between a rewrite's check and its replace."""
+
+    def test_an_append_waits_for_a_held_rewrite_lock(self, tmp_path):
+        hc = Hippocampus(tmp_path)
+        hc.encode_lesson("first", topic="t")
+        done = threading.Event()
+
+        def append():
+            hc.encode_lesson("second", topic="t")
+            done.set()
+
+        with hc._file_lock(hc._lessons_path):
+            threading.Thread(target=append, daemon=True).start()
+            assert not done.wait(0.3), "the append went through while the lock was held"
+        assert done.wait(5)
+        assert "second" in hc._lessons_path.read_text()
+
+    def test_rewrite_if_unchanged_keeps_an_append_that_arrives_during_the_check(self, tmp_path):
+        hc = Hippocampus(tmp_path)
+        hc.encode_lesson("first", topic="t")
+        appended = threading.Event()
+
+        def append():
+            hc.encode_lesson("late", topic="t")
+            appended.set()
+
+        def read_then_let_another_session_append(path):
+            threading.Thread(target=append, daemon=True).start()
+            time.sleep(0.3)
+            return "snapshot"
+
+        written = hc.rewrite_if_unchanged(
+            hc._lessons_path, "# Lessons\n- rewritten\n",
+            read=read_then_let_another_session_append, snapshot="snapshot",
+        )
+        assert written is True
+        assert appended.wait(5)
+        text = hc._lessons_path.read_text()
+        assert "rewritten" in text and "late" in text, text
+
+    def test_rewrite_if_unchanged_writes_nothing_on_a_changed_snapshot(self, tmp_path):
+        hc = Hippocampus(tmp_path)
+        hc.encode_lesson("first", topic="t")
+        before = hc._lessons_path.read_text()
+        written = hc.rewrite_if_unchanged(
+            hc._lessons_path, "# Lessons\n", read=lambda p: "now", snapshot="then"
+        )
+        assert written is False
+        assert hc._lessons_path.read_text() == before

@@ -19,6 +19,8 @@ Each Hippocampus instance manages one scope's files:
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
+from contextlib import contextmanager
 import re
 import sys
 import time
@@ -576,47 +578,62 @@ class Hippocampus:
                     continue
         return count
 
-    def _encode_with_lock(self, path: Path, text: str, mode: str = "append") -> None:
-        """Write with file locking (fcntl.flock on Unix, no-op on Windows).
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Hold the writer lock for `path`: a sibling `.lock` file, flocked.
 
-        Prevents corruption from concurrent Anton sessions writing to
-        global memory — like synaptic tagging ensuring encoding fidelity
-        despite concurrent neural activity.
+        One lock for every writer of the file, append or rewrite, in every
+        process that shares it, so a rewrite's check and replace and another
+        session's append cannot interleave. Readers do not take it: a rewrite
+        is an atomic replace, so a reader always sees one complete version.
+        No-op on Windows, where fcntl is unavailable, as the lock was before.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(path.name + ".lock")
+        with open(lock_path, "a", encoding="utf-8") as lock:
+            if sys.platform != "win32":
+                import fcntl
 
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if sys.platform != "win32":
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def rewrite_if_unchanged(
+        self, path: Path, text: str, *, read: Callable[[Path], object], snapshot: object
+    ) -> bool:
+        """Replace `path` with `text` unless `read(path)` no longer equals `snapshot`.
+
+        The writer lock is held across the check and the replace, so an append
+        from another session waits and lands on the new file instead of being
+        erased by it. Returns whether the file was written.
+        """
+        with self._file_lock(path):
+            if read(path) != snapshot:
+                return False
+            self._write_unlocked(path, text, mode="write")
+            return True
+
+    def _encode_with_lock(self, path: Path, text: str, mode: str = "append") -> None:
+        """Write `text` to `path` under its writer lock (see `_file_lock`)."""
+        with self._file_lock(path):
+            self._write_unlocked(path, text, mode)
+
+    @staticmethod
+    def _write_unlocked(path: Path, text: str, mode: str) -> None:
+        """Replace the file atomically (temp file + rename) or append; the
+        caller holds the writer lock."""
         if mode == "write":
-            # Atomic write via temp file + rename
             tmp_path = path.with_suffix(path.suffix + ".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
-                if sys.platform != "win32":
-                    import fcntl
-
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                f.write(text)
+                f.flush()
             tmp_path.replace(path)
         else:
-            # Append mode
             with open(path, "a", encoding="utf-8") as f:
-                if sys.platform != "win32":
-                    import fcntl
-
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(text)
-                    f.flush()
-                finally:
-                    if sys.platform != "win32":
-                        import fcntl
-
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                f.write(text)
 
     @staticmethod
     def _extract_entry_texts(content: str) -> set[str]:

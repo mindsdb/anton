@@ -666,21 +666,6 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if not kept:
             return
 
-        # The rebuild below comes from the read above, and the model call sat
-        # between them. A memory written meanwhile is on disk but not in that
-        # read, so rewriting would erase it. Compaction can wait for a later
-        # pass; the memory cannot be recovered.
-        current = _read_memory_entries(path) if path.is_file() else ([], [])
-        if current != (sections, entries):
-            logger.info(
-                "memory-compaction: %s changed during the model call "
-                "(%d entries read, %d now), skipped",
-                path.name,
-                len(entries),
-                len(current[1]),
-            )
-            return
-
         # Rebuild the file. Every entry still carries the `- ` prefix it was
         # selected by, so nothing here has to re-add one.
         if kind == "rules":
@@ -695,7 +680,25 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         else:
             new_content = "\n".join(["# Lessons", *(e for _, e in kept)]) + "\n"
 
-        hc._encode_with_lock(path, new_content, mode="write")
+        # The rebuild comes from the read above, and the model call sat between
+        # them. A memory written meanwhile, by this session or another process
+        # sharing the file, is on disk but not in that read, so a rewrite would
+        # erase it. The check and the replace run under the file's writer lock;
+        # compaction can wait for a later pass, the memory cannot be recovered.
+        def current_entries(p: Path) -> tuple[list[str], list[str]]:
+            return _read_memory_entries(p) if p.is_file() else ([], [])
+
+        if not hc.rewrite_if_unchanged(
+            path, new_content, read=current_entries, snapshot=(sections, entries)
+        ):
+            logger.info(
+                "memory-compaction: %s changed during the model call "
+                "(%d entries read, %d now), skipped",
+                path.name,
+                len(entries),
+                len(current_entries(path)[1]),
+            )
+            return
 
         # The only record that the file changed size, and the only pressure
         # against over-pruning: naming survivors by index makes dropping most
