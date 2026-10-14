@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import select
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -353,6 +356,7 @@ _OTHER_PROCESS = (
 _OTHER_PROCESS_ON_GO = _OTHER_PROCESS + "sys.stdin.readline()\nprint('ready', flush=True)\n"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the writer lock is a no-op without fcntl")
 class TestWriterLock:
     """Every writer to a memory file takes the same per-file lock, so an append
     from another session cannot land between a rewrite's check and its replace."""
@@ -446,61 +450,78 @@ class TestWriterLock:
         assert "rewritten" in text and "from the other process" in text, text
 
     @staticmethod
-    def _finish(*children: subprocess.Popen) -> None:
-        """Reap every child, killing any that hangs, and fail with its stderr."""
-        try:
-            for child in children:
-                try:
-                    _, err = child.communicate(timeout=60)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    _, err = child.communicate()
-                    raise AssertionError(f"child process hung; stderr: {err}") from None
-                assert child.returncode == 0, err
-        finally:
-            for child in children:
-                if child.poll() is None:
-                    child.kill()
+    def _reap(children: list[tuple[subprocess.Popen, "tempfile.TemporaryFile"]]) -> list[tuple[int, str]]:
+        """Wait on every child, killing any that hangs; return each exit code with its stderr."""
+        results = []
+        for child, err in children:
+            try:
+                child.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            err.seek(0)
+            results.append((child.returncode, err.read()))
+        return results
 
     def test_rules_saved_by_several_processes_at_once_are_all_kept(self, tmp_path):
         """Six processes each save three rules with no coordination. A stress
         check, not a proof: it fails on the old code almost every run."""
         hc = Hippocampus(tmp_path)
         hc.encode_rule("seed rule", kind="when")
-        children = [
-            subprocess.Popen(
-                [sys.executable, "-c", _OTHER_PROCESS + "for i in range(3):\n"
-                 "    hc.encode_rule(f'rule {sys.argv[2]} {i}', kind='when')\n",
-                 str(tmp_path), str(n)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            )
-            for n in range(6)
-        ]
-        self._finish(*children)
+        children = []
+        try:
+            for n in range(6):
+                err = tempfile.TemporaryFile("w+")
+                children.append((subprocess.Popen(
+                    [sys.executable, "-c", _OTHER_PROCESS + "for i in range(3):\n"
+                     "    hc.encode_rule(f'rule {sys.argv[2]} {i}', kind='when')\n",
+                     str(tmp_path), str(n)],
+                    stdout=subprocess.DEVNULL, stderr=err, text=True,
+                ), err))
+            results = self._reap(children)
+        finally:
+            for child, err in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+                err.close()
+        assert all(rc == 0 for rc, _ in results), results
         rules = {e.text for e in hc.get_rules()}
         assert rules == {"seed rule"} | {f"rule {n} {i}" for n in range(6) for i in range(3)}
 
-    def _other_process_writes_during(
+    @contextmanager
+    def _other_process_writing_during(
         self, monkeypatch, hc, hook: str, child_write: str, tmp_path, *, before: bool = False
     ):
-        """Make the other process write while `hook` runs on this one.
+        """Run the block with another process writing while `hook` runs.
 
         `hook` is a method the one under test calls while it holds the lock.
         After it has run (or before, with `before`), the child is told to go,
         prints ready right before its own write, and gets half a second: under
-        the lock it waits there, without the lock its write lands now and the
-        method's own write erases it.
+        the lock it waits there; without the lock its write lands now and the
+        method's own write erases it. A pass on broken code is possible only if
+        the child needs more than that half second for one small write; a
+        false failure is not, since under the lock the child waits regardless.
+        On exit the child is reaped, and a child that failed fails the test
+        with its stderr.
         """
+        err = tempfile.TemporaryFile("w+")
         child = subprocess.Popen(
             [sys.executable, "-c", _OTHER_PROCESS_ON_GO + child_write, str(tmp_path), "0"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True,
         )
         original = getattr(hc, hook)
 
         def let_the_other_process_in():
             child.stdin.write("go\n")
             child.stdin.flush()
-            assert child.stdout.readline().strip() == "ready"
+            readable, _, _ = select.select([child.stdout], [], [], 30)
+            line = child.stdout.readline().strip() if readable else ""
+            if line != "ready":
+                child.kill()
+                child.wait()
+                err.seek(0)
+                raise AssertionError(f"child never reported ready ({line!r}); stderr: {err.read()}")
             time.sleep(0.5)
 
         def run_then_let_the_other_process_in(*args, **kwargs):
@@ -514,53 +535,93 @@ class TestWriterLock:
             return result
 
         monkeypatch.setattr(hc, hook, run_then_let_the_other_process_in)
-        return child
+        try:
+            yield child
+            [(returncode, stderr)] = self._reap([(child, err)])
+            assert returncode == 0, stderr
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            child.stdin.close()
+            child.stdout.close()
+            err.close()
+
+    _APPEND_LESSON = "hc.encode_lesson('from the other process', topic='t')\n"
+    _SAVE_RULE = "hc.encode_rule('from the other process', kind='when')\n"
+    _REWRITE_IDENTITY = "hc.rewrite_identity(['Timezone: UTC'])\n"
 
     def test_a_lesson_deleted_while_another_process_appends_keeps_the_append(self, tmp_path, monkeypatch):
+        """`del_lesson` reads, drops one, rewrites; the append must land after."""
         hc = Hippocampus(tmp_path)
         hc.encode_lesson("keep me", topic="t")
         hc.encode_lesson("delete me", topic="t")
         target = next(e for e in hc.get_lessons() if e.text == "delete me")
-        child = self._other_process_writes_during(
-            monkeypatch, hc, "get_lessons",
-            "hc.encode_lesson('from the other process', topic='t')\n", tmp_path,
-        )
-        hc.del_lesson(target.id)
-        self._finish(child)
+        with self._other_process_writing_during(monkeypatch, hc, "get_lessons", self._APPEND_LESSON, tmp_path):
+            hc.del_lesson(target.id)
         assert {e.text for e in hc.get_lessons()} == {"keep me", "from the other process"}
 
+    def test_a_lesson_updated_while_another_process_appends_keeps_the_append(self, tmp_path, monkeypatch):
+        """`update_lesson` rewrites the whole file from its read."""
+        hc = Hippocampus(tmp_path)
+        hc.encode_lesson("old wording", topic="t")
+        target = next(e for e in hc.get_lessons() if e.text == "old wording")
+        with self._other_process_writing_during(monkeypatch, hc, "get_lessons", self._APPEND_LESSON, tmp_path):
+            hc.update_lesson(target.id, "new wording")
+        assert {e.text for e in hc.get_lessons()} == {"new wording", "from the other process"}
+
     def test_a_rule_updated_while_another_process_saves_one_keeps_both(self, tmp_path, monkeypatch):
+        """`update_rule` rewrites the whole file from its read."""
         hc = Hippocampus(tmp_path)
         hc.encode_rule("old wording", kind="when")
         target = next(e for e in hc.get_rules() if e.text == "old wording")
-        child = self._other_process_writes_during(
-            monkeypatch, hc, "get_rules",
-            "hc.encode_rule('from the other process', kind='when')\n", tmp_path,
-        )
-        hc.update_rule(target.id, "new wording")
-        self._finish(child)
+        with self._other_process_writing_during(monkeypatch, hc, "get_rules", self._SAVE_RULE, tmp_path):
+            hc.update_rule(target.id, "new wording")
         assert {e.text for e in hc.get_rules()} == {"new wording", "from the other process"}
 
+    def test_a_rule_deleted_while_another_process_saves_one_keeps_the_saved_one(self, tmp_path, monkeypatch):
+        """`del_rule` rewrites the whole file from its read."""
+        hc = Hippocampus(tmp_path)
+        hc.encode_rule("keep me", kind="when")
+        hc.encode_rule("delete me", kind="when")
+        target = next(e for e in hc.get_rules() if e.text == "delete me")
+        with self._other_process_writing_during(monkeypatch, hc, "get_rules", self._SAVE_RULE, tmp_path):
+            hc.del_rule(target.id)
+        assert {e.text for e in hc.get_rules()} == {"keep me", "from the other process"}
+
     def test_identity_rewritten_by_two_processes_keeps_both_facts(self, tmp_path, monkeypatch):
+        """`rewrite_identity` merges into its read and rewrites profile.md."""
         hc = Hippocampus(tmp_path)
         hc.rewrite_identity(["Name: Someone"])
-        child = self._other_process_writes_during(
-            monkeypatch, hc, "get_identities",
-            "hc.rewrite_identity(['Timezone: UTC'])\n", tmp_path,
-        )
-        hc.rewrite_identity(["Editor: vim"])
-        self._finish(child)
+        with self._other_process_writing_during(monkeypatch, hc, "get_identities", self._REWRITE_IDENTITY, tmp_path):
+            hc.rewrite_identity(["Editor: vim"])
         assert {e.text for e in hc.get_identities()} == {"Name: Someone", "Editor: vim", "Timezone: UTC"}
+
+    def test_an_identity_fact_deleted_while_another_process_writes_one_keeps_it(self, tmp_path, monkeypatch):
+        """`del_identity` rewrites profile.md from its read."""
+        hc = Hippocampus(tmp_path)
+        hc.rewrite_identity(["Name: Someone", "Editor: vim"])
+        target = next(e for e in hc.get_identities() if e.text == "Editor: vim")
+        with self._other_process_writing_during(monkeypatch, hc, "get_identities", self._REWRITE_IDENTITY, tmp_path):
+            hc.del_identity(target.id)
+        assert {e.text for e in hc.get_identities()} == {"Name: Someone", "Timezone: UTC"}
+
+    def test_an_identity_fact_updated_while_another_process_writes_one_keeps_it(self, tmp_path, monkeypatch):
+        """`update_identity` rewrites profile.md from its read."""
+        hc = Hippocampus(tmp_path)
+        hc.rewrite_identity(["Name: Someone"])
+        target = next(e for e in hc.get_identities() if e.text == "Name: Someone")
+        with self._other_process_writing_during(monkeypatch, hc, "get_identities", self._REWRITE_IDENTITY, tmp_path):
+            hc.update_identity(target.id, "Name: Someone Else")
+        assert {e.text for e in hc.get_identities()} == {"Name: Someone Else", "Timezone: UTC"}
 
     def test_the_first_lesson_survives_another_process_creating_the_file(self, tmp_path, monkeypatch):
         """With no lessons.md, both writers would create it. The existence check
         is under the lock, so the second one appends instead."""
         hc = Hippocampus(tmp_path)
         assert not hc._lessons_path.exists()
-        child = self._other_process_writes_during(
-            monkeypatch, hc, "_write_unlocked",
-            "hc.encode_lesson('from the other process', topic='t')\n", tmp_path, before=True,
-        )
-        hc.encode_lesson("first", topic="t")
-        self._finish(child)
+        with self._other_process_writing_during(
+            monkeypatch, hc, "_write_unlocked", self._APPEND_LESSON, tmp_path, before=True
+        ):
+            hc.encode_lesson("first", topic="t")
         assert {e.text for e in hc.get_lessons()} == {"first", "from the other process"}
