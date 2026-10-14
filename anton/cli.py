@@ -1492,14 +1492,14 @@ def _setup_custom_openai(settings, ws) -> None:
 
     # The custom endpoint is generic openai-compatible (i.e. NOT mdb.ai
     # passthrough), so the LLM provider doesn't expose web_search natively.
-    # Offer to configure Exa or Brave so the agent has search available.
+    # Offer provider selection; Parallel already works without setup.
     # Skip the prompt in non-interactive contexts (tests, CI) — the user can
     # always run ``anton setup-search`` later.
     if not _looks_like_mdb_ai(base_url, settings) and sys.stdout.isatty():
         console.print()
         console.print(
-            "  [anton.muted]Web search needs an external provider on this endpoint. "
-            "You can configure one now or run [bold]anton setup-search[/] later.[/]"
+            "  [anton.muted]Web search uses free Parallel Search on this endpoint. "
+            "You can choose another provider now or run [bold]anton setup-search[/] later.[/]"
         )
         try:
             _setup_search_provider(settings, ws)
@@ -1521,13 +1521,14 @@ def _looks_like_mdb_ai(base_url: str, settings) -> bool:
 def _current_search_label(settings) -> str:
     """Human-readable summary of the currently-configured search provider.
 
-    Returns ``"none"`` if nothing is set, otherwise the provider name plus a
-    masked tail of the stored key so the user can recognize which key is
-    active without exposing it.
+    Show the built-in default or the selected provider. Mask stored keys.
     """
-    provider = (getattr(settings, "external_search_provider", None) or "").lower()
+    selected = getattr(settings, "external_search_provider", None)
+    provider = selected.lower() if isinstance(selected, str) else "parallel"
+    if provider == "parallel":
+        return "Parallel Search (no key)"
     if not provider:
-        return "none"
+        return "disabled"
     if provider == "exa":
         key = getattr(settings, "exa_api_key", None) or ""
         label = "Exa.ai"
@@ -1553,7 +1554,7 @@ def _skip_search_provider(settings, ws) -> None:
         if confirm not in ("y", "yes"):
             console.print("  [anton.muted]Keeping current search provider.[/]")
             return
-    settings.external_search_provider = None
+    settings.external_search_provider = ""
     ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "")
     console.print(
         "  [anton.muted]web_search will be unavailable until you run "
@@ -1562,13 +1563,12 @@ def _skip_search_provider(settings, ws) -> None:
 
 
 def _setup_search_provider(settings, ws) -> None:
-    """Configure an external search provider (Exa.ai or Brave Search).
+    """Choose Parallel Search or configure an Exa/Brave key.
 
     Used by Case 3 in the web-tools design (generic OpenAI-compatible endpoints
     that don't have a native ``web_search`` capability). The user picks a
-    provider and supplies a key; we validate the key with a probe call before
-    persisting it to the global ``~/.anton/.env`` so it survives across
-    sessions and workspaces — same scope as the LLM provider keys.
+    provider. Exa and Brave keys are validated and persisted to the global
+    ``~/.anton/.env`` so they survive across sessions and workspaces.
     """
     console.print()
     console.print("[anton.cyan]Search provider[/]")
@@ -1577,30 +1577,39 @@ def _setup_search_provider(settings, ws) -> None:
     )
     console.print()
     console.print(
-        "  [bold]1[/]  [link=https://exa.ai][anton.cyan]Exa.ai[/][/link] "
+        "  [bold]1[/]  [link=https://docs.parallel.ai/integrations/mcp/search-mcp]"
+        "[anton.cyan]Parallel Search[/][/link] "
+        "[anton.muted]free, no key required (default)[/]"
+    )
+    console.print(
+        "  [bold]2[/]  [link=https://exa.ai][anton.cyan]Exa.ai[/][/link] "
         "[anton.muted]AI-native semantic search[/]"
     )
     console.print(
-        "  [bold]2[/]  [link=https://brave.com/search/api][anton.cyan]Brave Search[/][/link] "
+        "  [bold]3[/]  [link=https://brave.com/search/api][anton.cyan]Brave Search[/][/link] "
         "[anton.muted]privacy-focused web search[/]"
     )
-    console.print("  [bold]3[/]  [anton.muted]Skip — disable web_search[/]")
+    console.print("  [bold]4[/]  [anton.muted]Skip — disable web_search[/]")
     console.print()
 
     # ``_setup_prompt`` (prompt_toolkit) gives us ESC-to-go-back support and
     # matches every other ``_setup_*`` helper in this file. Loop on invalid
     # input — the underlying prompt has no built-in choice validation.
     while True:
-        choice = _setup_prompt("Choose [1/2/3]", default="1").strip()
-        if choice in ("1", "2", "3"):
+        choice = _setup_prompt("Choose [1/2/3/4]", default="1").strip()
+        if choice in ("1", "2", "3", "4"):
             break
-        console.print("  [anton.warning]Please enter 1, 2, or 3.[/]")
+        console.print("  [anton.warning]Please enter 1, 2, 3, or 4.[/]")
 
-    if choice == "3":
+    if choice == "4":
         _skip_search_provider(settings, ws)
         return
 
     if choice == "1":
+        settings.external_search_provider = "parallel"
+        ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "parallel")
+        console.print("  [anton.success]Parallel Search configured.[/]")
+    elif choice == "2":
         _setup_exa(settings, ws)
     else:
         _setup_brave(settings, ws)
@@ -1759,13 +1768,13 @@ def setup(ctx: typer.Context) -> None:
 
 @app.command("setup-search")
 def setup_search(ctx: typer.Context) -> None:
-    """Configure an external search provider (Exa.ai or Brave Search).
+    """Choose a search provider for generic OpenAI-compatible endpoints.
 
     Only used when the active LLM endpoint is a generic OpenAI-compatible
     third-party (i.e. NOT Anthropic, OpenAI BYOK, or the mdb.ai passthrough —
-    those expose web_search natively on the LLM provider's key). The chosen
-    key is persisted to the global ``~/.anton/.env`` so it survives across
-    sessions and workspaces, exactly like LLM provider keys.
+    those expose web_search natively on the LLM provider's key). Parallel
+    needs no key; Exa and Brave keys are persisted to the global
+    ``~/.anton/.env`` across sessions and workspaces.
     """
     from pathlib import Path
     from anton.workspace import Workspace

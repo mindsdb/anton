@@ -102,14 +102,14 @@ class AntonSettings(CoreSettings):
     # Web tools — on by default. For LLM providers that ship native server-side
     # web search/fetch (Anthropic, OpenAI, mdb.ai passthrough), the tools execute
     # inside the provider on the user's existing key. For generic
-    # openai-compatible endpoints, web_search needs an external provider key
-    # (Exa or Brave); web_fetch always falls back to stdlib HTTP.
+    # openai-compatible endpoints, web_search uses keyless Parallel by default
+    # or an explicitly selected Exa/Brave key; web_fetch uses stdlib HTTP.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
 
     # Case 3 fallback — only consulted when the LLM provider lacks native web
     # search and the user is on a generic OpenAI-compatible endpoint.
-    external_search_provider: str | None = None  # "exa" | "brave" | None
+    external_search_provider: str | None = None  # None/parallel default | exa | brave | "" disabled
     exa_api_key: str | None = None
     brave_api_key: str | None = None
 
