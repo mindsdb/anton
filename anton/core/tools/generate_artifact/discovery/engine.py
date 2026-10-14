@@ -69,7 +69,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
         `finish_gathering` — both are the best-effort case the caller
         (orchestrator.run) falls back on.
     """
-    budget = gathering_question_budget(state.session)
+    budget = gathering_question_budget(state.session, act_first=state.act_first)
     # One array for the whole shared-prefix region; availability per step is
     # decided in code by `sub_tools.rejection_for`, not by dropping entries.
     tools = state.pipeline_tools

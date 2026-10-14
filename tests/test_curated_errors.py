@@ -358,21 +358,25 @@ async def test_a_curated_error_on_the_summarize_path_fails_the_turn(exc_type):
         _ = [e async for e in s.turn_stream("do it")]
 
 
-async def test_an_uncurated_error_still_becomes_prose_without_rephrase_advice():
-    """The fallback still exists for genuinely unexpected failures — it just no
-    longer claims the user's wording was the problem."""
+async def test_an_uncurated_error_on_the_summarize_path_fails_the_turn_too():
+    """An unlisted type fails the turn too, rather than becoming prose. Its
+    message can be anything, such as a provider's raw body. As prose it would
+    skip the host's redaction and be saved as the turn's reply."""
     s = _session()
 
     class _Boom(Exception):
         pass
 
     s._stream_and_handle_tools = _always_raise(lambda: _Boom("first failure"))
-    s._llm.plan_stream = _summarize_raises(lambda: _Boom("and again"))
+    s._llm.plan_stream = _summarize_raises(lambda: _Boom("<Error>raw body</Error>"))
 
-    events = [e async for e in s.turn_stream("do it")]
+    events: list = []
+    with pytest.raises(_Boom):
+        async for event in s.turn_stream("do it"):
+            events.append(event)
     text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
-    assert "An unexpected error occurred" in text
-    assert "rephrase" not in text.lower()
+    assert "raw body" not in text
+    assert "An unexpected error occurred" not in text
 
 
 # --------------------------------------------------------------------------- #
