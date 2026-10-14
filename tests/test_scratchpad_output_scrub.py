@@ -31,7 +31,7 @@ from anton.core.llm.provider import (
 from anton.core.memory.episodes import EpisodicMemory
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.tools.tool_defs import ToolDef
-from anton.utils.datasources import begin_ds_turn_scope, restore_namespaced_env
+from anton.utils.datasources import begin_ds_turn_scope, restore_namespaced_env, set_ds_env_values
 from tests.conftest import make_mock_llm
 
 _DEFAULTS = dict(
@@ -364,6 +364,75 @@ def test_dropped_salvage_on_one_long_line_reports_nothing_rather_than_a_bare_tok
 def test_salvage_under_the_budget_is_kept_whole():
     """Nothing is dropped or cut, so the salvage comes back as printed."""
     assert _salvage_from("sent 1/3\nsent 2/3\n") == "sent 1/3\nsent 2/3\n"
+
+
+def _save_password(tmp_path, secret: str) -> None:
+    """Register `secret` as this turn's saved postgres password."""
+    vault = LocalDataVault(tmp_path / "vault")
+    vault.save("postgres", "prod", {"host": "db.example.com", "password": secret})
+    begin_ds_turn_scope()
+    restore_namespaced_env(vault)
+
+
+def _unknown_ds_value(tmp_path, secret: str) -> None:
+    """Make `secret` this turn's value of a DS_* var no engine registered."""
+    begin_ds_turn_scope()
+    set_ds_env_values({"DS_CUSTOM_PROD__TOKEN": secret})
+
+
+@pytest.mark.parametrize("register", [_save_password, _unknown_ds_value], ids=["saved-secret", "unknown-ds-var"])
+def test_salvage_ending_partway_through_a_secret_withholds_the_part(tmp_path, register):
+    """A crash right after a heartbeat leaves the last chunk ending partway
+    through a secret, which an exact-value scrub cannot match."""
+    secret = _secret_of(33)
+    register(tmp_path, secret)
+    salvaged = _salvage_tail(["x" * 8159 + " " + secret[:32]], False)
+
+    for start in range(25):
+        assert secret[start : start + 8] not in salvaged
+    assert salvaged.startswith("(truncated to most recent output)\n")
+    assert salvaged.endswith("x ")
+
+
+def test_salvage_ending_with_a_whole_secret_shows_its_placeholder(tmp_path):
+    """A secret whose end repeats its start is whole, so it is redacted, not cut."""
+    secret = "Ab3" + "Q8" * 15 + "Ab3"
+    _save_password(tmp_path, secret)
+    salvaged = _salvage_tail(["sent 1/3\nconnecting with " + secret], False)
+
+    assert salvaged == "sent 1/3\nconnecting with [DS_POSTGRES_PROD__PASSWORD]"
+
+
+def test_salvage_that_ends_on_no_secret_is_unchanged(tmp_path):
+    """Only the start of a secret is withheld; other text keeps its last characters."""
+    _save_password(tmp_path, _SAVED_PASSWORD)
+
+    assert _salvage_tail(["sent 1/3\nsent 2/3 Px"], False) == "sent 1/3\nsent 2/3 Px"
+    assert _salvage_tail(["sent 1/3\nsent 2/3"], False) == "sent 1/3\nsent 2/3"
+
+
+async def test_a_killed_cell_with_a_saved_secret_keeps_its_last_line(tmp_path, monkeypatch):
+    """A saved secret in the turn must not cost a killed cell its latest
+    output, which says what side effects already happened."""
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_TIMEOUT", "1")
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_MAX", "1")
+    monkeypatch.setenv("ANTON_CELL_INACTIVITY_AFTER_PROGRESS", "1")
+    monkeypatch.setenv("ANTON_CELL_TIMEOUT_DEFAULT", "2")
+    monkeypatch.setenv("ANTON_SCRATCHPAD_HEARTBEAT_INTERVAL", "0.2")
+    _save_password(tmp_path, _SAVED_PASSWORD)
+    pad = LocalScratchpadRuntime(name="killed-saved-secret-cell", **_DEFAULTS)
+    await pad.start()
+    try:
+        items = [item async for item in pad.execute_streaming(
+            "print('sent 1/3', flush=True)\nimport time; time.sleep(30)\n"
+        )]
+    finally:
+        await pad.close()
+
+    cells = [item for item in items if isinstance(item, Cell)]
+    assert len(cells) == 1
+    assert "timed out" in cells[0].error.lower()
+    assert cells[0].stdout == "sent 1/3\n"
 
 
 async def test_a_crashed_cell_with_dropped_salvage_says_it_is_partial(monkeypatch):
