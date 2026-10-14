@@ -73,7 +73,11 @@ async def discover_tool_defs(
             description=tool.description or "",
             input_schema=tool.input_schema,
             handler=_make_handler(
-                mcp_session, engine=engine, bare_tool_name=tool.name, input_schema=tool.input_schema or {}
+                mcp_session,
+                engine=engine,
+                bare_tool_name=tool.name,
+                input_schema=tool.input_schema or {},
+                drop_empty_optionals=allowed_for_mode(engine, tool.name, "read"),
             ),
         )
         for tool in tools
@@ -109,6 +113,8 @@ def without_empty_optionals(value: Any, schema: Any, root: dict, depth: int = 0)
     Some models fill optional fields with "" or null instead of omitting them,
     and servers validate those as real values: Notion and HubSpot both reject
     cursor="" as an invalid cursor, HubSpot's one level down inside `query`.
+    Applied to read tools only: on a write tool "" or null can be a deliberate
+    "clear this field", which must reach the server.
     """
     if depth > _MAX_SCHEMA_DEPTH:
         return value
@@ -132,9 +138,13 @@ def without_empty_optionals(value: Any, schema: Any, root: dict, depth: int = 0)
     return value
 
 
-def _make_handler(mcp_session: McpSession, *, engine: str, bare_tool_name: str, input_schema: dict):
+def _make_handler(
+    mcp_session: McpSession, *, engine: str, bare_tool_name: str, input_schema: dict, drop_empty_optionals: bool
+):
     async def handle_mcp_call(session, tc_input: dict) -> ToolOutcome:  # noqa: ARG001 - session unused, contract requires it
-        arguments = without_empty_optionals(tc_input or {}, input_schema, input_schema)
+        arguments = tc_input or {}
+        if drop_empty_optionals:
+            arguments = without_empty_optionals(arguments, input_schema, input_schema)
         try:
             content, is_error = await mcp_session.call_tool(bare_tool_name, arguments)
         except McpPermanentError:
