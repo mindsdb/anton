@@ -670,10 +670,14 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # between them. A memory written meanwhile is on disk but not in that
         # read, so rewriting would erase it. Compaction can wait for a later
         # pass; the memory cannot be recovered.
-        if _read_memory_entries(path) != (sections, entries):
+        current = _read_memory_entries(path) if path.is_file() else ([], [])
+        if current != (sections, entries):
             logger.info(
-                "memory-compaction: %s changed during the model call, skipped",
+                "memory-compaction: %s changed during the model call "
+                "(%d entries read, %d now), skipped",
                 path.name,
+                len(entries),
+                len(current[1]),
             )
             return
 
