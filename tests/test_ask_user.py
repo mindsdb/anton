@@ -1169,3 +1169,28 @@ def test_gui_answer_hint_mentions_buttons_text_and_skip():
     assert "buttons" in GUI_ANSWER_HINT
     assert "free-form" in GUI_ANSWER_HINT
     assert "skip" in GUI_ANSWER_HINT
+
+
+async def test_cli_choice_accepts_an_option_label_typed_out(cli_elicitor, monkeypatch):
+    """The labels are what the user sees, so typing one picks that option."""
+    monkeypatch.setattr(
+        "anton.utils.prompt.prompt_or_cancel", AsyncMock(return_value="MySQL")
+    )
+    assert await cli_elicitor.ask("q1", _choice()) == AskAnswer(status="answered", values=("my",))
+
+
+async def test_cli_closed_choice_asks_again_instead_of_returning_text(cli_elicitor, monkeypatch):
+    """`allow_custom=False` has no own wording: unrecognised input is asked
+    again, and the caption never invites typing an answer."""
+    prompt = AsyncMock(side_effect=["sqlite please", "2"])
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", prompt)
+    answer = await cli_elicitor.ask("q1", _choice(allow_custom=False))
+    assert answer == AskAnswer(status="answered", values=("my",))
+    assert prompt.await_count == 2
+    assert "type your own" not in prompt.await_args_list[0].args[0]
+
+
+async def test_cli_closed_choice_can_still_be_cancelled(cli_elicitor, monkeypatch):
+    prompt = AsyncMock(side_effect=["nope", ""])
+    monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", prompt)
+    assert (await cli_elicitor.ask("q1", _choice(allow_custom=False))).status == "cancelled"

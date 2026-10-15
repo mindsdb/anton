@@ -27,6 +27,7 @@ from anton.core.llm.provider import (
     StreamToolUseDelta,
     StreamToolUseEnd,
     StreamToolUseStart,
+    StreamTurnEnded,
     WalletEmptyError,
 )
 
@@ -169,6 +170,19 @@ def test_step_events_go_on_the_wire():
     assert {"kind": "round_end", "stop_reason": "end_turn",
             "had_tool_calls": False} in events
     assert events[-1] == {"kind": "turn_completed"}
+
+
+def test_handback_reason_goes_on_the_wire_before_the_terminal():
+    class _S(_FakeSession):
+        async def turn_stream(self, user_input, **kwargs):
+            yield StreamTextDelta(text="stopped at a limit")
+            yield StreamTurnEnded(ended_by="spend_ceiling")
+
+    events = _drive(_S())
+    assert events[-2:] == [
+        {"kind": "turn_ended", "ended_by": "spend_ceiling"},
+        {"kind": "turn_completed"},
+    ]
 
 
 def test_result_clip_preserves_error_verdict():

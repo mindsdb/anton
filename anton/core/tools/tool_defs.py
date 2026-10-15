@@ -6,13 +6,15 @@ from anton.core.tools.tool_handlers import (
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
-    handle_open_artifact,
     handle_read_image,
+    handle_read_text_file,
     handle_recall,
     handle_scratchpad,
     handle_select_path,
     handle_update_artifact_metadata,
 )
+from anton.core.artifacts.listing import FIELDS as ARTIFACT_LIST_FIELDS
+from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
@@ -83,7 +85,9 @@ SCRATCHPAD_TOOL = ToolDef(
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
         "get_llm, agentic_loop, web_search, sample, and progress are already available "
         "as globals in the scratchpad — do not import them.\n"
-        "All .anton/.env secrets are available as environment variables (os.environ)."
+        "All .anton/.env secrets are available as environment variables (os.environ).\n"
+        "Never print a credential or a token endpoint's response: keep the token in a "
+        "variable and print only its status and expiry."
     ),
     input_schema={
         "type": "object",
@@ -177,7 +181,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "Claim a folder for a user-facing output (HTML dashboard, document, "
         "dataset, image, fullstack app, etc.). Call this BEFORE writing the "
         "files — the tool returns the absolute folder path you should write "
-        "into. Each artifact gets its own subfolder under `<workspace>/artifacts/`, "
+        "into. Each artifact gets its own folder, "
         "with a `metadata.json` + `README.md` written automatically.\n\n"
         "AFTER REGISTERING a web artifact (html-app, fullstack-stateless-app, "
         "or fullstack-stateful-app): a report the user has fully specified you "
@@ -219,8 +223,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "Skip when you don't know yet — the renderer falls back to a "
         "heuristic, and you can set it later via `update_artifact`.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
-        "`list_artifacts` first to find it, then `open_artifact(slug)` to get "
-        "the path."
+        "`list_artifacts` to find it; its folder is `<root>/<slug>`."
     ),
     input_schema={
         "type": "object",
@@ -312,42 +315,28 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
 LIST_ARTIFACTS_TOOL = ToolDef(
     name="list_artifacts",
     description=(
-        "List every artifact in the current workspace (newest first). "
-        "Use this to find an existing artifact you want to modify — paired "
-        "with `open_artifact(slug)` for the actual edit. Each entry includes "
-        "the slug, human name, type, description, file count, and last-update "
-        "timestamp. Returns an empty list when no artifacts exist yet."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {},
-    },
-    handler=handle_list_artifacts,
-)
-
-
-OPEN_ARTIFACT_TOOL = ToolDef(
-    name="open_artifact",
-    description=(
-        "Load an existing artifact by slug. Returns the folder path plus the "
-        "list of files so you can decide what to edit, and the primary file's "
-        "current text as `primary_content` when it is a small text file. Combine "
-        "with the scratchpad to read other files (`open(path).read()`) or write "
-        "updates back into the folder. Provenance is updated automatically — "
-        "every turn that modifies a file in the folder is appended to the "
-        "artifact's metadata.json."
+        "List the artifacts in this workspace, newest first. An artifact's folder "
+        "is `<root>/<slug>`, and paths in the result are relative to it. Without "
+        "`match` you get a summary (name, type, updatedAt, description, primary); "
+        "with `match` the full record, including id, files and service_files "
+        "(housekeeping and generation files, not what was built)."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "slug": {
-                "type": "string",
-                "description": "Folder slug (returned by `list_artifacts` or the previous `create_artifact`).",
+            "fields": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
+                "description": "Fields to return instead of the default set; `slug` is always included.",
+            },
+            "match": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Slugs or ids of the artifacts to return. Default: all.",
             },
         },
-        "required": ["slug"],
     },
-    handler=handle_open_artifact,
+    handler=handle_list_artifacts,
 )
 
 
@@ -573,7 +562,8 @@ RECALL_TOOL = ToolDef(
         "ONLY use this when the user explicitly asks about a previous conversation "
         "or session (e.g. 'what did we talk about last time?', 'remember when we...', "
         "'have we discussed X before?'). Do NOT use this for questions about code, "
-        "files, or data in the workspace — use the scratchpad to explore those directly.\n\n"
+        "files, or data in the workspace — use `read_text_file` or the "
+        "scratchpad to explore those directly.\n\n"
         "Returns timestamped episodes matching the query (newest first). "
         "A single call is enough — do not call multiple times with different queries."
     ),
@@ -621,6 +611,43 @@ READ_IMAGE_TOOL = ToolDef(
         "required": ["file_path"],
     },
     handler=handle_read_image,
+)
+
+
+READ_TEXT_FILE_TOOL = ToolDef(
+    name="read_text_file",
+    description=(
+        "Read a text file: an artifact's source, a project file or a conversation "
+        "attachment. Files elsewhere, dot-files, and binary or non-UTF-8 files are "
+        "refused.\n\n"
+        f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
+        f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
+        "characters. The first line of the result is a header naming the lines "
+        "returned and where to continue; the file's text starts on the next line."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute, or relative to the project root.",
+            },
+            "start_line": {
+                "type": "integer",
+                "description": "First line, from 1; negative counts from the end (-20: the last 20 lines). Default: 1.",
+            },
+            "end_line": {
+                "type": "integer",
+                "description": f"Last line, inclusive; -1 is the last line. Default: start_line + {DEFAULT_LINE_COUNT - 1}.",
+            },
+            "line_numbers": {
+                "type": "boolean",
+                "description": "Prefix each line with its number and a tab, which are not part of the file. Default: false.",
+            },
+        },
+        "required": ["path"],
+    },
+    handler=handle_read_text_file,
 )
 
 

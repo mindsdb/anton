@@ -1,6 +1,7 @@
-"""Project-visible artifacts.
+"""User-facing artifacts.
 
-Each artifact is a folder under `<workspace>/artifacts/<slug>/` carrying:
+Each artifact is a folder under `Workspace.artifacts_dir/<slug>/`
+(`<workspace>/.anton/artifacts/<slug>/` by default) carrying:
   - `metadata.json` — structured truth (Pydantic-validated)
   - `README.md`     — human-readable rendering of the metadata
   - The artifact's own files (HTML, datasets, etc.)
@@ -8,7 +9,6 @@ Each artifact is a folder under `<workspace>/artifacts/<slug>/` carrying:
 Replaces the legacy flat `<workspace>/.anton/output/` dump:
   - One subfolder per artifact (multi-file outputs cluster)
   - Per-folder metadata + provenance (which conversation, which turns)
-  - Visible at the project root (not hidden under `.anton/`)
 
 Provenance is server-managed (deterministic). Only `name`,
 `description`, and `type` are agent-supplied at creation time.

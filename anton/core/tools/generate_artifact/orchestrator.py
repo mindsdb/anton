@@ -21,6 +21,7 @@ from anton.core.artifacts.internal_files import (
     TECH_SPEC_FILENAME,
 )
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+from anton.utils.datasources import scrub_output
 
 from . import attachments, engine, prompts, verifiers
 from .discovery import checkpoint as cp
@@ -887,8 +888,11 @@ async def _tail_log(state: GenState, limit: int = 2000) -> str:
     log = state.artifact_path / BACKEND_LOG_FILENAME
     if not log.is_file():
         return ""
-    text = log.read_text(encoding="utf-8", errors="replace")
-    return text[-limit:]
+    # Scrubbed before the cut, so a cut between a key and its token cannot strip the
+    # key; in a thread, since the whole log is read and it grows across relaunches.
+    return await asyncio.to_thread(
+        lambda: scrub_output(log.read_text(encoding="utf-8", errors="replace"))[-limit:]
+    )
 
 
 def _launch_datasource_env(state: GenState) -> dict[str, str]:
