@@ -281,6 +281,17 @@ class StreamReasoningDelta:
     text: str
 
 
+@dataclass
+class StreamTurnEnded:
+    """Last event of a turn that handed back before finishing.
+
+    `ended_by` is the turn's `TurnCost.ended_by` (e.g. `spend_ceiling`,
+    `round_cap`). Not sent for a completed, cancelled or failed turn.
+    """
+
+    ended_by: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -293,6 +304,7 @@ StreamEvent = (
     | StreamAskUser
     | StreamAskUserAnswered
     | StreamReasoningDelta
+    | StreamTurnEnded
 )
 
 

@@ -61,6 +61,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StreamTurnEnded,
     StructuredOutputError,
     TokenLimitExceeded,
     ToolCall,
@@ -842,6 +843,13 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+
+# Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
+_NO_GUESS_AT_LIMIT = (
+    "Report only what your tool results actually showed. If you have not found the "
+    "answer, say plainly that you could not find it; do not estimate, extrapolate or "
+    "state a figure you did not retrieve."
+)
 
 
 def _safe_error_detail(exc: BaseException) -> str:
@@ -4238,6 +4246,7 @@ class ChatSession:
             "work, so the user can decide whether it is worth continuing. "
             "If you are on a good track and can finish, say so and ask if they'd "
             "like you to continue. "
+            f"{_NO_GUESS_AT_LIMIT} "
             "Do NOT retry automatically — wait for the user's response. "
             + _limit_handback_clause(self._limit_reached("spend_ceiling"))
             + _HANDBACK_NOT_USER_CLAUSE
@@ -5418,6 +5427,11 @@ class ChatSession:
         self._schedule_cerebellum_flush()
         self._schedule_acc_flush()
 
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
+
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
 
@@ -5709,6 +5723,7 @@ class ChatSession:
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
+                                f"{_NO_GUESS_AT_LIMIT} "
                                 "Do NOT retry automatically — wait for the user's response. "
                                 + _limit_handback_clause(self._limit_reached("round_cap"))
                                 + _HANDBACK_NOT_USER_CLAUSE

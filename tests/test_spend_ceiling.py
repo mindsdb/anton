@@ -212,6 +212,8 @@ async def test_handback_asks_the_user_and_is_persisted_as_streamed(workspace):
     text = _history_text(session)
     assert "Do NOT retry automatically" in text
     assert "ask if they'd like you to continue" in text
+    # A stop mid-search must not fill the gap with a guess.
+    assert "do not estimate, extrapolate or state a figure you did not retrieve" in text
     # The streamed diagnosis, not the pre-stop reply, is the tail of history.
     assert session._history[-1]["role"] == "assistant"
 
