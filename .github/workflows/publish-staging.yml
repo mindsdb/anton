@@ -39,11 +39,12 @@ jobs:
       runs-on: ubuntu-latest
 
   # The worker image staging scratchpad-controller and the PR environments pull
-  # as minds-anton-scratchpad:staging (ENG-2129).
+  # as minds-anton-scratchpad-dev:staging.
   scratchpad-image:
     needs: release
     permissions:
       contents: read
+      id-token: write  # the build job assumes its ECR writer role through GitHub OIDC
     uses: ./.github/workflows/scratchpad-dev-build.yml
     with:
       environment: staging
