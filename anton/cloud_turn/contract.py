@@ -78,7 +78,9 @@ Events written back on stdout (JSONL):
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
-`round_end`. A `heartbeat` only resets the controller's stall timer.
+`round_end`, and `turn_ended` ({"ended_by": "..."}, sent before the terminal
+event when a turn handed back early). A `heartbeat` only resets the
+controller's stall timer.
 A `tool_result` with `action: "message"` is a tool's message to the user,
 rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.

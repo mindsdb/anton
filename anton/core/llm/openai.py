@@ -1121,6 +1121,10 @@ class OpenAIProvider(LLMProvider):
         """The key for the next request: the live supplier's, since a refresh makes the stored one stale."""
         return await self._api_key_provider() if self._api_key_provider else self._api_key
 
+    def trace_headers(self) -> dict[str, str]:
+        """The Langfuse headers this provider's own requests would carry now; empty outside a turn."""
+        return self._build_trace_headers() or {}
+
     def native_web_tools(self) -> set[str]:
         # BYOK OpenAI exposes web_search via Responses API (which covers fetch
         # implicitly). The mdb.ai passthrough accepts both web_search and fetch

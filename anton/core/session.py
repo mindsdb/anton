@@ -61,6 +61,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StreamTurnEnded,
     StructuredOutputError,
     TokenLimitExceeded,
     ToolCall,
@@ -71,8 +72,10 @@ from anton.core.llm.provider import (
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
+    JEV_CALL_ROLE,
     VALID_SURFACES,
     TraceContext,
+    call_role,
     reset_trace_context,
     set_trace_context,
 )
@@ -121,6 +124,7 @@ from anton.utils.datasources import (
     build_datasource_context,
     restore_namespaced_env,
     scrub_credentials,
+    scrub_output,
 )
 from anton.core.settings import CoreSettings
 
@@ -841,6 +845,13 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+
+# Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
+_NO_GUESS_AT_LIMIT = (
+    "Report only what your tool results actually showed. If you have not found the "
+    "answer, say plainly that you could not find it; do not estimate, extrapolate or "
+    "state a figure you did not retrieve."
+)
 
 
 def _safe_error_detail(exc: BaseException) -> str:
@@ -4244,6 +4255,7 @@ class ChatSession:
             "work, so the user can decide whether it is worth continuing. "
             "If you are on a good track and can finish, say so and ask if they'd "
             "like you to continue. "
+            f"{_NO_GUESS_AT_LIMIT} "
             "Do NOT retry automatically — wait for the user's response. "
             + _limit_handback_clause(self._limit_reached("spend_ceiling"))
             + _HANDBACK_NOT_USER_CLAUSE
@@ -4265,12 +4277,27 @@ class ChatSession:
             return _jev.JevVerdict(error="credentials")
         if not api_key:
             return None
+        # Traced like the LLM verifier it stands in for (same turn and harness);
+        # without these headers the gateway files the check as direct-API use. Its
+        # own role: it runs on Jev, not on any of the session's model slots.
+        with call_role(JEV_CALL_ROLE):
+            headers = provider.trace_headers()
+        # Kept out of the conversation's session: the console marks a conversation
+        # failed when any call in it fails, and a refused check is one the turn
+        # recovers from. The conversation rides in the metadata instead, so the
+        # check can still be joined to it.
+        conversation_id = headers.pop("Langfuse-Session-Id", None)
+        if conversation_id and "Langfuse-Metadata" in headers:
+            metadata = json.loads(headers["Langfuse-Metadata"])
+            metadata["conversation_id"] = conversation_id
+            headers["Langfuse-Metadata"] = json.dumps(metadata)
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
         return await _jev.classify(
             base_url=base_url,
             api_key=api_key,
+            headers=headers,
             model=self._jev_model,
             state={
                 "request": (user_message or "").strip(),
@@ -5424,6 +5451,11 @@ class ChatSession:
         self._schedule_cerebellum_flush()
         self._schedule_acc_flush()
 
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
+
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
 
@@ -5715,6 +5747,7 @@ class ChatSession:
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
+                                f"{_NO_GUESS_AT_LIMIT} "
                                 "Do NOT retry automatically — wait for the user's response. "
                                 + _limit_handback_clause(self._limit_reached("round_cap"))
                                 + _HANDBACK_NOT_USER_CLAUSE
@@ -5929,7 +5962,7 @@ class ChatSession:
                                         break
                                     if isinstance(item, str):
                                         yield StreamTaskProgress(
-                                            phase="scratchpad", message=item, id=tc.id,
+                                            phase="scratchpad", message=scrub_output(item), id=tc.id,
                                         )
                                     elif isinstance(item, Cell):
                                         cell = item
@@ -6257,6 +6290,9 @@ class ChatSession:
                         )
                         continue
 
+                    # Process output gets scrub_output where it is read, such as scratchpad cells
+                    # and backend logs. Other tools return source the model may write back.
+                    result_text = scrub_credentials(result_text)
                     if self._episodic is not None:
                         self._episodic.log_turn(
                             self._turn_count + 1,
@@ -6264,7 +6300,6 @@ class ChatSession:
                             result_text,
                             tool=tc.name,
                         )
-                    result_text = scrub_credentials(result_text)
                     self._record_root_cause(tool_ok, tool_reason, result_text)
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,

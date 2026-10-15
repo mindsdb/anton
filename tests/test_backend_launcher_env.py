@@ -1,10 +1,14 @@
 import os
+import sys
+import threading
 from pathlib import Path
 
 import anton_state
+from anton.core.artifacts import backend_launcher
 from anton.core.artifacts.backend_launcher import (
     _anton_state_pythonpath_dir,
     build_backend_env,
+    launch_artifact_backend,
 )
 
 
@@ -219,3 +223,95 @@ def test_both_launch_paths_build_ds_env_through_the_shared_helper():
         "core/tools/tool_handlers.py",
         "core/tools/generate_artifact/orchestrator.py",
     }, f"a launch path stopped using the shared helper: {sorted(callers)}"
+
+
+class _PoolWithHostPython:
+    async def venv_python(self, slug):
+        return sys.executable
+
+
+_LOGGED_TOKEN = "FAKE0tok3nZr1xK2mN4pL7vT9wY3sB6dF"
+
+
+async def test_an_early_exit_log_tail_redacts_a_logged_token(tmp_path):
+    """A backend that logs a token response and dies returns its log tail as
+    the tool result; the token must not ride along to the model."""
+    (tmp_path / "backend.py").write_text(
+        f"print({{'access_token': '{_LOGGED_TOKEN}'}}, flush=True)\n"
+        "raise SystemExit(1)\n"
+    )
+
+    result = await launch_artifact_backend(
+        slug="app",
+        artifact_folder=tmp_path,
+        scratchpad_pool=_PoolWithHostPython(),
+        tracked_backends={},
+    )
+
+    assert isinstance(result, str) and "exited early" in result
+    assert "access_token" in result
+    assert _LOGGED_TOKEN not in result
+
+
+async def test_a_not_ready_log_tail_redacts_a_logged_token(tmp_path):
+    """The readiness timeout path returns the same log tail."""
+    (tmp_path / "backend.py").write_text(
+        "import time\n"
+        f"print('Authorization: Bearer {_LOGGED_TOKEN}', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+
+    result = await launch_artifact_backend(
+        slug="app",
+        artifact_folder=tmp_path,
+        scratchpad_pool=_PoolWithHostPython(),
+        tracked_backends={},
+        health_timeout=1.0,
+    )
+
+    assert isinstance(result, str) and "did not become ready" in result
+    assert "Authorization: Bearer" in result
+    assert _LOGGED_TOKEN not in result
+
+
+async def test_a_log_tail_cut_between_key_and_token_still_redacts_it(tmp_path):
+    """The tail is the last 2000 characters; a cut just before the token must
+    not leave it without the key that identifies it."""
+    filler = "x" * (2000 - len(_LOGGED_TOKEN) - len('"}') - len("\n"))
+    (tmp_path / "backend.py").write_text(
+        f"print('INFO got {{\"access_token\": \"{_LOGGED_TOKEN}\"}}{filler}', flush=True)\n"
+        "raise SystemExit(1)\n"
+    )
+
+    result = await launch_artifact_backend(
+        slug="app",
+        artifact_folder=tmp_path,
+        scratchpad_pool=_PoolWithHostPython(),
+        tracked_backends={},
+    )
+
+    assert isinstance(result, str) and "exited early" in result
+    assert _LOGGED_TOKEN not in result
+
+
+async def test_the_log_tail_is_scrubbed_off_the_event_loop(tmp_path, monkeypatch):
+    """The whole log is scrubbed and it grows across relaunches, so the work
+    must not block the event loop."""
+    loop_thread = threading.get_ident()
+    scrub_threads: list[int] = []
+
+    def recording_scrub(text):
+        scrub_threads.append(threading.get_ident())
+        return text
+
+    monkeypatch.setattr(backend_launcher, "scrub_output", recording_scrub)
+    (tmp_path / "backend.py").write_text("raise SystemExit(1)\n")
+
+    await launch_artifact_backend(
+        slug="app",
+        artifact_folder=tmp_path,
+        scratchpad_pool=_PoolWithHostPython(),
+        tracked_backends={},
+    )
+
+    assert scrub_threads and loop_thread not in scrub_threads

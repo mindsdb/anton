@@ -714,9 +714,9 @@ class TestScratchpadEnvironment:
         await pad.start()
         try:
             cell = await pad.execute(
-                "import os; print(os.environ.get('ANTHROPIC_API_KEY', 'MISSING'))"
+                "import os; print(os.environ.get('ANTHROPIC_API_KEY') == 'sk-ant-test-123')"
             )
-            assert cell.stdout.strip() == "sk-ant-test-123"
+            assert cell.stdout.strip() == "True"
         finally:
             await pad.close()
 
@@ -728,9 +728,9 @@ class TestScratchpadEnvironment:
         await pad.start()
         try:
             cell = await pad.execute(
-                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD', 'NOT_FOUND'))"
+                "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD') == 'inherited-secret')"
             )
-            assert cell.stdout.strip() == "inherited-secret"
+            assert cell.stdout.strip() == "True"
         finally:
             await pad.close()
 

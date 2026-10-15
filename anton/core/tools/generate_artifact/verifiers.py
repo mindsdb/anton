@@ -17,6 +17,7 @@ from pathlib import Path
 from anton.core.artifacts import html_lint
 from anton.core.artifacts.html_lint import lint_html, lint_url
 from anton.core.utils.scratchpad import install_call_failed
+from anton.utils.datasources import scrub_output
 
 from .state import VerifyResult
 
@@ -613,7 +614,7 @@ def evaluate_backend(
     if not introspection.get("import_ok"):
         errors.append(
             "backend.py failed to import in the venv: "
-            + (introspection.get("import_error") or "unknown error")
+            + scrub_output(introspection.get("import_error") or "unknown error")
         )
         # Without a successful import, route/contract data is unreliable — stop here.
         return VerifyResult(errors=errors, warnings=warnings), _ds_keys(source)
@@ -861,7 +862,7 @@ async def verify_backend(
         introspection = json.loads(line)
     except json.JSONDecodeError:
         return VerifyResult(
-            errors=["backend introspection produced no JSON. stderr:\n" + err.decode(errors="replace")]
+            errors=["backend introspection produced no JSON. stderr:\n" + scrub_output(err.decode(errors="replace"))]
         ), _ds_keys(source)
 
     return evaluate_backend(

@@ -1083,8 +1083,10 @@ import threading
 
 from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
+    MAX_OUTPUT,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
+    STDOUT_SCRUB_MARGIN,
 )
 
 # All _real_stdout writes go through this lock: the heartbeat thread writes
@@ -1132,9 +1134,6 @@ def _heartbeat_loop(stop: threading.Event) -> None:
             else:
                 _real_stdout.write(HEARTBEAT_MARKER + "\n")
             _real_stdout.flush()
-
-
-_MAX_OUTPUT = 10_000
 
 
 def progress(message=""):
@@ -1463,10 +1462,11 @@ while True:
             sys.stderr = sys.__stderr__
             _cell_log_handler.buf = None
 
-        stdout_val = out_buf.getvalue()
-        if len(stdout_val) > _MAX_OUTPUT:
+        stdout_full = out_buf.getvalue()
+        stdout_val = stdout_full
+        if len(stdout_val) > MAX_OUTPUT:
             stdout_val = (
-                stdout_val[:_MAX_OUTPUT]
+                stdout_val[:MAX_OUTPUT]
                 + f"\n\n... (truncated, {len(stdout_val)} chars total)"
             )
 
@@ -1476,13 +1476,17 @@ while True:
         # working. Appended AFTER the truncation clamp so the note can never
         # be truncated away, and regardless of `error` so a cell that raised
         # after the chdir still reports it.
+        cwd_note = ""
         _cwd_after = os.getcwd()
         if _cwd_after != _cwd_before:
+            cwd_note = (
+                f"Note: this cell changed the working directory from {_cwd_before} "
+                f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
+            )
             stdout_val = (
                 stdout_val
                 + ("\n" if stdout_val and not stdout_val.endswith("\n") else "")
-                + f"Note: this cell changed the working directory from {_cwd_before} "
-                f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
+                + cwd_note
             )
 
         # Persist session after each cell. Keep the return value: a swallowed failure here
@@ -1514,6 +1518,12 @@ while True:
         "error": error,
         "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
     }
+    if len(stdout_full) > MAX_OUTPUT:
+        # For LocalScratchpadRuntime, which scrubs before it cuts. Only for cut
+        # output: every reader of this result gets it, and "stdout" is unchanged.
+        result["stdout_head"] = stdout_full[: MAX_OUTPUT + STDOUT_SCRUB_MARGIN]
+        result["stdout_total"] = len(stdout_full)
+        result["cwd_note"] = cwd_note
     with _wire_lock:
         _real_stdout.write(RESULT_START + "\n")
         _real_stdout.write(json.dumps(result) + "\n")

@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.state import (
@@ -305,6 +307,39 @@ def test_declared_api_paths_come_from_the_backend_section_only():
     assert engine._declared_api_paths("## Product requirements\nX") == {}
 
 
+def test_declared_api_paths_drop_markdown_punctuation_and_query():
+    """The paths are quoted back to the model to copy character for
+    character, so bold markers, a sentence's full stop and a query string
+    must not become part of a path."""
+    section = (
+        "## Backend\n"
+        "- **GET /api/poll**: current results.\n"
+        "- Then GET /api/results.\n"
+        "- POST /api/vote?option=Pizza records a vote.\n"
+    )
+    assert engine._declared_api_paths(section) == {
+        "/api/poll": "/api/poll",
+        "/api/results": "/api/results",
+        "/api/vote": "/api/vote",
+    }
+
+
+@pytest.mark.parametrize("line, path", [
+    ("- **GET** /api/poll", "/api/poll"),
+    ("- GET `/api/poll`", "/api/poll"),
+    ('- "GET /api/poll"', "/api/poll"),
+    ("- [GET /api/poll]", "/api/poll"),
+    ("- GET /api/poll! Then vote", "/api/poll"),
+    ("- `GET /api/files/{file_path:path}`", "/api/files/{file_path:path}"),
+    ("- GET /api/items/:id", "/api/items/{id}"),
+    ("- GET /api/v1.2/items.", "/api/v1.2/items"),
+])
+def test_declared_api_paths_take_the_whole_path_and_nothing_after_it(line, path):
+    """A path that is missed or cut is quoted to the model as exact, and the
+    check then rejects any path it did not list."""
+    assert list(engine._declared_api_paths("## Backend\n" + line + "\n").values()) == [path]
+
+
 def _doc(*paths: str) -> dict:
     return {"paths": {p: {"get": {"responses": {"200": {}}}} for p in paths}}
 
@@ -345,6 +380,29 @@ async def test_a_renamed_path_is_sent_back_with_spec_md_quoted():
     assert "## Previous reply rejected" in calls[1]
     assert "`spec.md` lists `/api/rooms/{code}/state`" in calls[1]
     assert '"/api/rooms/{code}/state"' in out
+
+
+async def test_the_first_api_spec_request_already_names_the_exact_paths():
+    """Told only to copy the paths from spec.md, the model renamed them on the
+    first attempt in most live runs; the list must not wait for a rejection."""
+    calls: list[str] = []
+
+    def _capture(*, system, messages, max_tokens=None, tools=None):
+        calls.append(messages[-1]["content"])
+        doc = _doc("/api/rooms", "/api/rooms/{code}/state", "/api/rooms/{code}/action")
+        return _one_event_stream(_response(json.dumps(doc), output_tokens=50))
+
+    session = SimpleNamespace(_llm=SimpleNamespace(plan_stream=Mock(side_effect=_capture)))
+    out = await engine._generate_api_spec(
+        session, _BACKEND_SECTION, messages=[{"role": "user", "content": "kickoff"}],
+        system_override="pipeline-system",
+    )
+    assert not out.startswith("Error:")
+    assert len(calls) == 1
+    assert (
+        "`paths` must be exactly these, character for character: `/api/rooms`, "
+        "`/api/rooms/{code}/state`, `/api/rooms/{code}/action`"
+    ) in calls[0]
 
 
 async def test_a_recovered_tech_spec_is_written_normally(tmp_path: Path):

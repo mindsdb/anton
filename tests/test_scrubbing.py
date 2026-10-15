@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 from unittest.mock import patch
 
 import pytest
 
 from anton.core.session import _scrub_user_input
+from anton.tools import SCRUBBED_VALUE_RE
 from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
+    _PROVIDER_SECRET_VARS,
     _reset_registered_ds_vars,
+    longest_exact_secret,
     scrub_credentials,
+    scrub_output,
+    set_ds_env_values,
 )
 
 
@@ -37,6 +44,51 @@ def clean_ds_state():
     _clean()
     yield
     _clean()
+
+
+class TestLongestExactSecret:
+    """Counts exactly the values scrub_credentials matches by exact value."""
+
+    def test_counts_secret_unknown_and_provider_values_only(self, monkeypatch):
+        """Secret fields, unknown DS_* over 8 chars and provider keys over 8
+        chars count; known non-secret fields and short values do not."""
+        _DS_SECRET_VARS.add("DS_PG_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_PG_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_PG_PROD__HOST")
+        set_ds_env_values({
+            "DS_PG_PROD__PASSWORD": "p" * 12,
+            "DS_PG_PROD__HOST": "h" * 50,
+            "DS_CUSTOM__TOKEN": "u" * 30,
+            "DS_CUSTOM__FLAG": "on",
+        })
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+        assert longest_exact_secret() == 30
+
+        monkeypatch.setenv("OPENAI_API_KEY", "k" * 40)
+        assert longest_exact_secret() == 40
+
+        monkeypatch.setenv("OPENAI_API_KEY", "k" * 8)
+        assert longest_exact_secret() == 30
+
+    def test_a_short_secret_field_counts(self, monkeypatch):
+        """Secret fields match at any length, unlike unknown and provider values."""
+        _DS_SECRET_VARS.add("DS_PG_PROD__PASSWORD")
+        _DS_KNOWN_VARS.add("DS_PG_PROD__PASSWORD")
+        set_ds_env_values({"DS_PG_PROD__PASSWORD": "p" * 5})
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+        assert longest_exact_secret() == 5
+
+    def test_is_zero_with_nothing_to_match(self, monkeypatch):
+        """A known non-secret field, and unknown or provider values of 8 chars
+        or fewer, set nothing to hold back."""
+        _DS_KNOWN_VARS.add("DS_PG_PROD__HOST")
+        set_ds_env_values({"DS_PG_PROD__HOST": "h" * 50, "DS_CUSTOM__FLAG": "u" * 8})
+        for key in _PROVIDER_SECRET_VARS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "k" * 8)
+        assert longest_exact_secret() == 0
 
 
 class TestScrubCredentials:
@@ -128,6 +180,208 @@ class TestScrubProviderKeys:
         result = scrub_credentials("sk-abc connecting to https://api.openai.com/v1")
         assert "sk-abc" in result
         assert "https://api.openai.com/v1" in result
+
+
+def _b64url(payload: dict) -> str:
+    """Encode ``payload`` as one unpadded base64url JWT segment."""
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+
+
+# Built at runtime: a realistic token literal trips GitHub push protection.
+FAKE_JWT = ".".join([
+    _b64url({"alg": "HS256", "typ": "JWT"}),
+    _b64url({"sub": "scrub-test", "exp": 0}),
+    "s" * 43,
+])
+OPAQUE_TOKEN = "opq" + "Z9" * 15
+B64URL_TOKEN = "ab_" + "Cd-Ef.Gh9" * 3
+TOKEN_SAMPLES = [OPAQUE_TOKEN, B64URL_TOKEN]
+
+
+class TestScrubOutput:
+    """OAuth tokens a cell fetches at runtime must not leave the scratchpad readable."""
+
+    def test_printed_token_response_keeps_keys_and_drops_the_token(self):
+        """A printed token endpoint response keeps every key and loses only the token."""
+        body = json.dumps({"access_token": OPAQUE_TOKEN, "token_type": "Bearer", "expires_in": 3600})
+        result = scrub_output(body)
+        assert OPAQUE_TOKEN not in result
+        assert '"access_token": "[REDACTED_TOKEN]"' in result
+        assert '"token_type": "Bearer"' in result
+        assert '"expires_in": 3600' in result
+
+    @pytest.mark.parametrize("token", TOKEN_SAMPLES)
+    @pytest.mark.parametrize("key", [
+        "access_token", "refresh_token", "id_token", "client_secret",
+        "accessToken", "refreshToken", "clientSecret", "ACCESS_TOKEN",
+        "client-secret", "access-token",
+    ])
+    def test_every_token_key_form_is_redacted(self, key, token):
+        """Snake, camel, upper and kebab key spellings all redact their value."""
+        result = scrub_output(f"{key}={token}")
+        assert result == f"{key}=[REDACTED_TOKEN]"
+
+    def test_whitespace_separated_column_is_redacted(self):
+        """A printed table row with no separator but spaces still redacts the value."""
+        result = scrub_output(f"access_token    {OPAQUE_TOKEN}\nexpires_in      3600")
+        assert result == "access_token    [REDACTED_TOKEN]\nexpires_in      3600"
+
+    def test_url_encoded_value_is_redacted_whole(self):
+        """Percent-encoded characters do not split a token into a visible tail."""
+        token = "abc%2FdefGhijk%3D" + OPAQUE_TOKEN
+        assert scrub_output(f"'access_token': '{token}'") == "'access_token': '[REDACTED_TOKEN]'"
+
+    @pytest.mark.parametrize("token", [
+        "00Dxx0000001gPL!AR8AQJXg5oj8ZnP9kQ2wRtY",
+        "AbCdEfGh.IjKlMnOpQr",
+        "abcdefabcdefabcdefabcd",
+        "Ab*Cd$Ef9Gh*Ij$Kl9Mn",
+    ])
+    def test_any_quoted_value_after_a_token_key_is_redacted(self, token):
+        """A quoted value is a literal, so its characters never decide whether it is a token."""
+        result = scrub_output(json.dumps({"access_token": token, "expires_in": 3600}))
+        assert result == '{"access_token": "[REDACTED_TOKEN]", "expires_in": 3600}'
+
+    @pytest.mark.parametrize("text", [
+        f'{{"access_token": "{OPAQUE_TOKEN}',
+        f"'refresh_token': '{B64URL_TOKEN}",
+        f'\\"access_token\\": \\"{OPAQUE_TOKEN}',
+    ])
+    def test_a_quoted_value_cut_off_before_its_closing_quote_is_redacted(self, text):
+        """Clipped or killed-cell output can end mid-value; the value is still redacted."""
+        result = scrub_output(text)
+        assert OPAQUE_TOKEN not in result and B64URL_TOKEN not in result
+        assert result.endswith("[REDACTED_TOKEN]")
+
+    def test_value_on_the_line_after_its_key_is_redacted(self):
+        """Pretty-printed JSON can put a long value on the line after its key."""
+        result = scrub_output(f'"access_token":\n  "{OPAQUE_TOKEN}"')
+        assert result == '"access_token":\n  "[REDACTED_TOKEN]"'
+
+    @pytest.mark.parametrize("text", [
+        '{"access_token":"AAAAAAAAAAAAAAAAAAAAAA\\/BBBBBBBBBBBBB"}',
+        '{"access_token":"1\\/\\/0gAbCdEfGhIjKlMnOp"}',
+    ])
+    def test_json_escaped_slashes_do_not_leave_a_tail(self, text):
+        """Some JSON encoders escape `/`; the whole value is still one token."""
+        assert scrub_output(text) == '{"access_token":"[REDACTED_TOKEN]"}'
+
+    @pytest.mark.parametrize("text", [
+        f'{{"access_token": "[X]{OPAQUE_TOKEN}"}}',
+        f'{{"access_token": "${OPAQUE_TOKEN}"}}',
+        f'{{"access_token": "{{a}}{OPAQUE_TOKEN}"}}',
+        f"'Bearer {{x}}{OPAQUE_TOKEN}'",
+    ])
+    def test_a_value_that_only_starts_like_a_marker_or_placeholder_is_redacted(self, text):
+        """Only a whole marker or template placeholder is kept, never a prefix of a token."""
+        assert OPAQUE_TOKEN not in scrub_output(text)
+
+    def test_python_dict_repr_is_redacted(self):
+        """A printed dict uses single quotes around keys and values."""
+        result = scrub_output(str({"refresh_token": OPAQUE_TOKEN}))
+        assert result == "{'refresh_token': '[REDACTED_TOKEN]'}"
+
+    def test_token_inside_escaped_json_is_redacted(self):
+        """A cell result is JSON inside a JSON string, so its quotes are escaped."""
+        cell_json = json.dumps({"stdout": json.dumps({"access_token": OPAQUE_TOKEN})})
+        result = scrub_output(cell_json)
+        assert OPAQUE_TOKEN not in result
+        assert '\\"access_token\\": \\"[REDACTED_TOKEN]\\"' in result
+
+    def test_query_string_value_stops_at_the_next_parameter(self):
+        """Only the token is redacted; the parameters after it stay readable."""
+        result = scrub_output(f"https://idp.example/cb?access_token={OPAQUE_TOKEN}&scope=read")
+        assert result == "https://idp.example/cb?access_token=[REDACTED_TOKEN]&scope=read"
+
+    def test_unquoted_value_with_a_bang_is_redacted_whole(self):
+        """Tokens such as Salesforce's contain `!`; nothing after it may show."""
+        result = scrub_output("access_token=AbCdEfGhIjKlMnOpQr!secretTailXYZ")
+        assert result == "access_token=[REDACTED_TOKEN]"
+
+    @pytest.mark.parametrize("token", TOKEN_SAMPLES)
+    @pytest.mark.parametrize("word", ["Bearer", "bearer", "BEARER"])
+    def test_bearer_value_is_redacted_and_the_word_kept(self, word, token):
+        """Any casing of `Bearer` redacts the value and keeps the word."""
+        result = scrub_output(f"Authorization: {word} {token}")
+        assert result == f"Authorization: {word} [REDACTED_TOKEN]"
+
+    @pytest.mark.parametrize("text, expected", [
+        ("{'Authorization': 'Bearer AbCdEfGh.IjKlMnOpQr'}",
+         "{'Authorization': 'Bearer [REDACTED_TOKEN]'}"),
+        ("Authorization: Bearer 00Dxx0000001gPL!AR8AQJXg5oj8ZnP9kQ2wRtY",
+         "Authorization: Bearer [REDACTED_TOKEN]"),
+        ("Bearer\n" + OPAQUE_TOKEN, "Bearer\n[REDACTED_TOKEN]"),
+        ("Bearer\r\n" + OPAQUE_TOKEN, "Bearer\r\n[REDACTED_TOKEN]"),
+        ('{"access_token":"AAAA\\u002fBBBBBBBBBBBBBBBBBBBBB"}', '{"access_token":"[REDACTED_TOKEN]"}'),
+        ("client_secret = '$2b$12$AbCdEfGhIjKlMnOpQrStUv'", "client_secret = '[REDACTED_TOKEN]'"),
+        ("access_token: Abc.Def.Ghi_jklmnopq", "access_token: [REDACTED_TOKEN]"),
+        ("access_token=Ab9CdEfGhIjKlMnOpQr", "access_token=[REDACTED_TOKEN]"),
+        ("access_token=ABCDEFGHIJKLMNOPQRST", "access_token=[REDACTED_TOKEN]"),
+        ("access_token=AB_cdEFgh_IJklMNop", "access_token=[REDACTED_TOKEN]"),
+        ("access_token=AbCdEfGhIjKlMnOpQr", "access_token=[REDACTED_TOKEN]"),
+        ("refresh_token=A1B2C3D4_E5F6G7H8_I9J0", "refresh_token=[REDACTED_TOKEN]"),
+        ("access_token=AB12_CD34_EF56_GH78", "access_token=[REDACTED_TOKEN]"),
+    ])
+    def test_tokens_that_resemble_code_are_still_redacted(self, text, expected):
+        """Printed headers and token_type/token pairs are output, not source code."""
+        assert scrub_output(text) == expected
+
+    def test_bare_jwt_is_redacted(self):
+        """A JWT is caught by its shape with no key or word in front of it."""
+        result = scrub_output(f"token is {FAKE_JWT} now")
+        assert result == "token is [REDACTED_TOKEN] now"
+
+    def test_google_oauth_token_is_redacted(self):
+        """Google `ya29.` access tokens are caught by their prefix."""
+        token = "ya29." + "a0B1" * 8
+        assert scrub_output(f"got {token}") == "got [REDACTED_TOKEN]"
+
+    @pytest.mark.parametrize("text", [
+        "send a Bearer token in the Authorization header",
+        "access_token=short",
+        '{"access_token": null, "token_type": "Bearer"}',
+        "access_token=[DS_CRM_PROD__TOKEN]",
+        '{"access_token": "[DS_CRM_PROD__ACCESS_TOKEN]"}',
+        "valid_token=" + OPAQUE_TOKEN,
+        "the bearer tokens/credentials are sent",
+        "token_type    Bearer\nrefresh_token_expires_in    7200",
+        "uses Bearer token-based-authentication-scheme",
+    ])
+    def test_prose_short_values_and_markers_are_left_alone(self, text):
+        """Prose, short values and existing scrub markers stay as they are."""
+        assert scrub_output(text) == text
+
+    @pytest.mark.parametrize("line", [
+        'const accessToken = window.localStorage.getItem("t")',
+        "refreshToken: response.data.refresh_token,",
+        "access_token = self.config.access_token_value",
+        "client_secret = load_client_secret_from_vault()",
+        "accessToken = fetchAccessTokenNow(session)",
+        "headers = {'Authorization': 'Bearer ' + access_token}",
+        'headers = {"Authorization": f"Bearer {self.config.access_token_value}"}',
+        "const auth = `Bearer ${process.env.API_ACCESS_TOKEN}`",
+        "if access_token !=expected_access_token_value:",
+        "def refresh(access_token: AccessTokenResponse) -> None:",
+        "client_secret = CLIENT_SECRET_ENV_VAR",
+        "    access_token=ACCESS_TOKEN_DEFAULT_NAME,",
+    ])
+    def test_source_code_the_model_reads_is_left_alone(self, line):
+        """Code the model reads and may write back is never rewritten."""
+        assert scrub_output(line) == line
+
+    def test_marker_is_one_the_connect_flow_refuses_to_save(self):
+        """An echoed marker is never saved as a real credential."""
+        assert SCRUBBED_VALUE_RE.match("[REDACTED_TOKEN]")
+
+    def test_known_credentials_are_still_scrubbed(self):
+        """scrub_output keeps everything scrub_credentials already redacts."""
+        result = scrub_output("key mdb_AAAAAAAAAA.BBBBBBBBBBBBCCCC")
+        assert "[REDACTED_API_KEY]" in result
+
+    def test_scrub_credentials_leaves_tokens_for_input_paths(self):
+        """Input paths keep the narrower filter, so pasted connect credentials still save."""
+        text = f"client_secret={OPAQUE_TOKEN} and {FAKE_JWT}"
+        assert scrub_credentials(text) == text
 
 
 class TestScrubUserInput:

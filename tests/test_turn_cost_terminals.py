@@ -314,6 +314,10 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
 
     kwargs = send.call_args.kwargs
     assert kwargs["ended_by"] == "round_cap"
+    # The cap pause forbids guessing, like the spend-ceiling pause.
+    notes = [m["content"] for m in session.history
+             if m.get("role") == "user" and "tool-call rounds on this turn" in str(m.get("content"))]
+    assert notes and "you could not find it" in notes[-1]
     expected = 2 + _ROUND_CAP_GRACE_ROUNDS
     assert kwargs["rounds"] == str(expected), (
         f"effective cap is {expected}, reported {kwargs['rounds']}"
