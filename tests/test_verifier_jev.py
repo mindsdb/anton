@@ -350,8 +350,11 @@ async def test_the_check_is_traced_like_the_llm_verifier_it_replaces(workspace):
         await provider.aclose()
 
     assert send.call_args.kwargs["jev_decided"] == "1"
-    assert seen["langfuse-session-id"] == "conv-jev"
     metadata = json.loads(seen["langfuse-metadata"])
+    # Joinable to the conversation without being one of its calls: a refused check
+    # would otherwise mark a conversation failed that the turn recovered.
+    assert "langfuse-session-id" not in seen
+    assert metadata["conversation_id"] == "conv-jev"
     assert (metadata["harness"], metadata["surface"], metadata["turn_id"]) == ("anton", "desktop", 1)
     assert metadata["role"] == "decision"
     assert seen["langfuse-tags"] == "anton,surface:desktop"
