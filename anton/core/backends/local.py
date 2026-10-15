@@ -16,28 +16,92 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from anton.core.backends.base import Cell, ScratchpadRuntime
+from anton.core.backends.base import Cell, ScratchpadRuntime, scrub_cell
 from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_TRACE_MARKER,
     HEARTBEAT_MARKER,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
+    MAX_OUTPUT,
     PROGRESS_MARKER,
     RESULT_END,
     RESULT_START,
     STDOUT_CHUNK_MARKER,
+    STDOUT_SCRUB_MARGIN,
 )
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
+from anton.utils.datasources import (
+    exact_secret_prefix_at_end,
+    exact_secret_suffix_at_start,
+    longest_exact_secret,
+    scrub_output,
+)
 from anton.core.backends.utils import compute_timeouts
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
-# Bound on accumulated salvage chunks per cell — mirrors the boot script's
-# _MAX_OUTPUT so a killed cell can never report more stdout than a successful
-# one would have.
-_SALVAGE_MAX = 10_000
+# Bound on a killed cell's reported salvage, so a killed cell can never report
+# more stdout than a successful one would have.
+_SALVAGE_MAX = MAX_OUTPUT
+
+# Raw salvage kept for the scrub, past which the oldest whole chunks are dropped.
+_SALVAGE_RAW_MAX = 4 * _SALVAGE_MAX
+
+
+def _add_salvage_chunk(chunks: list[str], chunk: str) -> bool:
+    """Append a salvaged stdout chunk, dropping the oldest past `_SALVAGE_RAW_MAX`.
+
+    Mutates `chunks` in place. Returns whether any chunk was dropped.
+    """
+    chunks.append(chunk)
+    total = sum(len(c) for c in chunks)
+    dropped = False
+    while total > _SALVAGE_RAW_MAX and len(chunks) > 1:
+        total -= len(chunks.pop(0))
+        dropped = True
+    return dropped
+
+
+def _salvage_tail(chunks: list[str], dropped: bool) -> str:
+    """Join salvaged stdout chunks, scrub them, then keep the last `_SALVAGE_MAX` characters.
+
+    Chunks split wherever a heartbeat fell, so after a drop the kept text can
+    start partway through a saved secret or with a token whose key was dropped,
+    and the last chunk can end partway through a saved secret. The scrub runs
+    first, then both edges go. Returns the text, led by a note when it is partial.
+    """
+    scrubbed = scrub_output("".join(chunks))
+    cut = exact_secret_prefix_at_end(scrubbed)
+    scrubbed = scrubbed[: len(scrubbed) - cut]
+    if dropped:
+        scrubbed = scrubbed[exact_secret_suffix_at_start(scrubbed) :]
+        scrubbed = _without_orphan_region(scrubbed)
+    tail = scrubbed[-_SALVAGE_MAX:]
+    if tail and (dropped or cut or len(scrubbed) > _SALVAGE_MAX):
+        return "(truncated to most recent output)\n" + tail
+    return tail
+
+
+def _without_orphan_region(text: str) -> str:
+    """Drop the partial first line and the next two non-blank lines.
+
+    The scrub pairs a key with its value across any whitespace on both sides of
+    the `:` or `=`, so a key on the partial line can have its separator and its
+    value on the next two non-blank lines; the value's opening quote sits on
+    the value's own line.
+    """
+    end = text.find("\n")
+    for _ in range(2):
+        if end == -1:
+            return ""
+        start = end + 1
+        while start < len(text) and text[start].isspace():
+            start += 1
+        end = text.find("\n", start)
+    return text[end + 1 :] if end != -1 else ""
+
 
 # The liveness heartbeat (ENG-578) proves a quiet cell is alive but not that
 # it's progressing, so a wedged cell stays silent — for as long as
@@ -129,7 +193,28 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     return env
 
 
-_MAX_OUTPUT = 10_000
+def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
+    """Scrub a cell's stdout, cut it to `MAX_OUTPUT`, then append the cwd note.
+
+    When `total` is longer, the worker cut `raw` at `MAX_OUTPUT +
+    STDOUT_SCRUB_MARGIN`, which can split a secret the scrub then cannot match.
+    That piece is in the last margin, or the longest exact-match secret if
+    longer, of the scrubbed text; measured from the end because the scrub
+    changes lengths, so it goes.
+    """
+    text = scrub_output(raw)
+    if total > MAX_OUTPUT:
+        keep = MAX_OUTPUT
+        if total > len(raw):
+            unsafe_tail = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
+            keep = min(keep, max(len(text) - unsafe_tail, 0))
+        if keep:
+            text = text[:keep] + f"\n\n... (truncated, {total} chars total)"
+        else:
+            text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
+    if cwd_note:
+        text += ("\n" if text and not text.endswith("\n") else "") + cwd_note
+    return text
 
 
 # ── Namespace-snapshot layout (ENG-1124) ────────────────────────────────────
@@ -972,7 +1057,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             await asyncio.wait_for(self._proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
-        self.cells.append(
+        self._record_cell(
             Cell(
                 code="# (cancelled by user)",
                 stdout="",
@@ -1013,7 +1098,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # discover it and call reset — which used to be the only path,
             # and which throws away the very state ENG-1124 started saving.
             if not await self._auto_resume():
-                yield Cell(
+                yield scrub_cell(Cell(
                     code=code,
                     stdout="",
                     stderr="",
@@ -1025,7 +1110,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     ),
                     description=description,
                     estimated_time=estimated_time,
-                )
+                ))
                 return
             # Grabbed once and cleared immediately: whatever happens to THIS
             # cell (succeeds, errors, or is killed again), the note must
@@ -1037,7 +1122,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # Fresh salvage state per cell: _read_result accumulates the worker's
         # stdout chunks here so a kill/crash can still report partial output.
         self._salvage: list[str] = []
-        self._salvage_truncated = False
+        self._salvage_dropped = False
 
         payload = code + "\n" + CELL_DELIM + "\n"
         trace = get_trace_context()
@@ -1084,15 +1169,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             # A cancellation carries no message; name it so the error still
             # leads with its cause like every other kill.
             error_msg = f"{str(exc) or 'Cancelled'}. {state_note}"
-            salvaged = "".join(self._salvage)
+            salvaged = _salvage_tail(self._salvage, self._salvage_dropped)
             if salvaged:
-                if self._salvage_truncated:
-                    salvaged = "(truncated to most recent output)\n" + salvaged
                 error_msg += (
                     "\n\nPartial output from before the kill was recovered "
                     "and is shown in stdout (current to within one heartbeat "
                     "interval) — use it to determine which side effects "
                     "already happened."
+                )
+            elif self._salvage:
+                error_msg += (
+                    "\n\nThe cell printed output before the kill, but it was "
+                    "withheld: it was cut and could not be scrubbed "
+                    "safely. Do not assume no side effects happened."
                 )
             cell = Cell(
                 code=code,
@@ -1103,7 +1192,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
             )
-            self.cells.append(cell)
+            cell = self._record_cell(cell)
             # A Stop or a host's watchdog cancels the task running this cell.
             # With the cell killed and recorded, that cancel goes on up and
             # ends the turn; stopped here, the turn would read the error cell
@@ -1134,7 +1223,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 estimated_time=estimated_time,
                 logs=recovery_note or "",
             )
-            self.cells.append(cell)
+            cell = self._record_cell(cell)
             yield cell
             return
 
@@ -1151,16 +1240,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         logs = result_data.get("logs", "")
         if recovery_note:
             logs = f"{recovery_note}\n\n{logs}" if logs else recovery_note
+        stdout = result_data.get("stdout", "")
+        if "stdout_head" in result_data:
+            stdout = _clip_stdout(
+                result_data["stdout_head"],
+                result_data["stdout_total"],
+                result_data.get("cwd_note", ""),
+            )
         cell = Cell(
             code=code,
-            stdout=result_data.get("stdout", ""),
+            stdout=stdout,
             stderr=result_data.get("stderr", ""),
             error=result_data.get("error"),
             description=description,
             estimated_time=estimated_time,
             logs=logs,
         )
-        self.cells.append(cell)
+        cell = self._record_cell(cell)
         # The process proved itself alive by completing this round trip —
         # whatever earlier death streak led here (if any) is over. This is
         # in addition to (not instead of) the reset inside _auto_resume()
@@ -1269,7 +1365,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # Crash/EOF: attach whatever stdout chunks were salvaged —
                 # the process died with side effects possibly already done.
                 yield {
-                    "stdout": "".join(self._salvage),
+                    "stdout": _salvage_tail(self._salvage, self._salvage_dropped),
                     "stderr": "",
                     "error": (
                         f"Process exited unexpectedly while auto-installing "
@@ -1319,11 +1415,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     chunk = ""
                 if isinstance(chunk, str) and chunk:
                     last_output = elapsed
-                    self._salvage.append(chunk)
-                    total = sum(len(c) for c in self._salvage)
-                    while total > _SALVAGE_MAX and len(self._salvage) > 1:
-                        total -= len(self._salvage.pop(0))
-                        self._salvage_truncated = True
+                    if _add_salvage_chunk(self._salvage, chunk):
+                        self._salvage_dropped = True
                 continue
 
             if line.startswith(PROGRESS_MARKER):

@@ -190,6 +190,9 @@ class TestScratchpadRemoveViaChat:
                 _text_response("Cleaned up."),
             ]
         )
+        mock_llm.generate_object_code = AsyncMock(
+            return_value=_VerifierVerdict(status="COMPLETE", reason="test")
+        )
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
         try:

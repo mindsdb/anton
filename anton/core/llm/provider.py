@@ -281,6 +281,17 @@ class StreamReasoningDelta:
     text: str
 
 
+@dataclass
+class StreamTurnEnded:
+    """Last event of a turn that handed back before finishing.
+
+    `ended_by` is the turn's `TurnCost.ended_by` (e.g. `spend_ceiling`,
+    `round_cap`). Not sent for a completed, cancelled or failed turn.
+    """
+
+    ended_by: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -293,6 +304,7 @@ StreamEvent = (
     | StreamAskUser
     | StreamAskUserAnswered
     | StreamReasoningDelta
+    | StreamTurnEnded
 )
 
 
@@ -1993,6 +2005,34 @@ def classify_404(
     return EndpointConfigurationError(
         f"The model endpoint returned 404 — check the endpoint URL and model "
         f"configuration.{suffix}"
+    )
+
+
+def classify_markup_bad_request(body: object) -> "EndpointConfigurationError | None":
+    """Classify a 400 whose body is HTML or XML as a misrouted request.
+
+    Shared by the OpenAI-compatible and Anthropic 400 paths. Both SDKs keep a
+    body that is not JSON as the raw string, and use that string as the
+    exception's message too. A model API answers in JSON, so markup means the
+    request reached some other service, such as a web server, a proxy, a CDN
+    or a storage bucket.
+
+    The 400 path is the one that needs this. Its unclassified errors re-raise
+    the SDK error, raw body included. Other statuses go through
+    ``_raise_for_status_error``, which always ends in anton's own copy.
+
+    The identical request fails identically on a retry, and the raw body is
+    neither safe nor useful to show. So this returns curated copy that leaves
+    the body out, and the session fails the turn at once instead of spending
+    its retries. Returns None for any other body, so JSON 400s keep their
+    existing handling.
+    """
+    if not (isinstance(body, str) and body.lstrip().startswith("<")):
+        return None
+    return EndpointConfigurationError(
+        "The model endpoint returned 400 with a web page or other non-API "
+        "response, so the request likely reached the wrong service — check "
+        "the endpoint URL configuration."
     )
 
 
