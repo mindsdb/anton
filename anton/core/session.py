@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import hashlib
 import httpx2 as httpx
@@ -69,6 +70,7 @@ from anton.core.llm.provider import (
     context_window,
     damaged_tool_call_result,
     provider_failure_kind,
+    usage_log_enabled,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
@@ -4891,19 +4893,18 @@ class ChatSession:
         # talking to MindsHub and attaches langfuse-style headers so the
         # router can attribute every LLM call (and any spans nested
         # inside this turn via tools / scratchpad) to the right session.
-        # ContextVar propagation also covers `asyncio.create_task` spawns
-        # — the cerebellum flush + identity extraction tasks scheduled
-        # below inherit a copy of this context.
-        _trace_token = set_trace_context(
-            TraceContext(
-                session_id=self._session_id,
-                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
-                harness=self._harness,
-                surface=self._surface,
-                tags=tuple(trace_tags or ()),
-                metadata=trace_metadata or None,
-            )
+        # ContextVar propagation also covers `asyncio.create_task` spawns made
+        # during the turn. The end-of-turn memory tasks are scheduled after the
+        # reset and carry it only when the usage log is on.
+        _turn_trace = TraceContext(
+            session_id=self._session_id,
+            turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+            harness=self._harness,
+            surface=self._surface,
+            tags=tuple(trace_tags or ()),
+            metadata=trace_metadata or None,
         )
+        _trace_token = set_trace_context(_turn_trace)
 
         # Open the turn's cost books and listen at the LLM-client narrow
         # waist — planning, coding (incl. verifier verdicts), and router
@@ -5402,9 +5403,25 @@ class ChatSession:
                 "".join(assistant_text_parts)[:2000],
             )
 
-        # Identity extraction (Default Mode Network — every 5 turns)
         self._turn_count += 1
         self._persist_history()
+        if usage_log_enabled():
+            # Evals only: the turn's trace is already reset here, so without
+            # it this work's model calls could not be attributed or priced.
+            background = contextvars.copy_context()
+            background.run(set_trace_context, _turn_trace)
+            background.run(self._start_background_work, user_input)
+        else:
+            self._start_background_work(user_input)
+
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
+
+    def _start_background_work(self, user_input: str | list[dict]) -> None:
+        """Schedule the end-of-turn memory passes; none of them blocks the reply."""
+        # Identity extraction (Default Mode Network — every 5 turns)
         if self._background_memory_active:
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
                 if self._episodic:
@@ -5426,11 +5443,6 @@ class ChatSession:
         # immediately while supervised error learning runs in the background.
         self._schedule_cerebellum_flush()
         self._schedule_acc_flush()
-
-        # The books are closed, so ended_by is final. A clean exit can still book
-        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
-        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
-            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
 
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
