@@ -576,6 +576,45 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     return session
 
 
+def _hermetic_limits_env(monkeypatch):
+    for name in ("ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_tenants_limits_from_the_wire_bound_the_real_session(tmp_path, monkeypatch):
+    _hermetic_limits_env(monkeypatch)
+    line = json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
+        "limits": {"max_tool_rounds": 250, "max_continuations": 10, "max_turn_tokens": 25_000_000},
+    })
+    request = TurnRequestV1.from_json(line)
+    session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
+    assert session._max_tool_rounds == 250
+    assert session._max_continuations == 10
+    assert session._max_turn_tokens == 25_000_000
+
+
+def test_a_turn_without_limits_keeps_antons_defaults(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch)
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+    assert session._max_continuations == defaults.max_continuations
+    assert session._max_turn_tokens == defaults.max_turn_tokens
+
+
+def test_one_limit_replaces_only_its_own_default(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch, limits={"max_turn_tokens": 3_000_000})
+    assert session._max_turn_tokens == 3_000_000
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+
+
 def _pin_today(monkeypatch, moment):
     """Pin what the session sees as "now".
 
