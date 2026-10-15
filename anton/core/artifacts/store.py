@@ -505,6 +505,7 @@ class ArtifactStore:
         inputs (`prd.md` / `spec.md` / `openapi.json`) — the last group sits
         in the folder but is not what the user asked to be built, and listing
         it invites the agent to present a spec as a deliverable.
+        Python bytecode (`is_bytecode_name`) is skipped at any depth.
         """
         folder = self.folder_for(artifact.slug)
         entries: list[FileEntry] = []
@@ -517,6 +518,8 @@ class ArtifactStore:
             # with the same artifact written anywhere else.
             rel = p.relative_to(folder).as_posix()
             if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in HOUSEKEEPING_DIRS:
+                continue
+            if any(is_bytecode_name(part) for part in rel.split("/")):
                 continue
             try:
                 st = p.stat()
