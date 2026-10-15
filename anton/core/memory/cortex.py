@@ -265,6 +265,13 @@ If all rules are relevant, return them all. If none are relevant, return "NONE".
 Do NOT add, modify, or summarize rules — return them verbatim.
 """
 
+    # Rendering first doesn't tell the model which tier wins, so the first
+    # Operator Memory heading says it.
+    _OPERATOR_PRECEDENCE = (
+        "The operator's rules and lessons apply to everyone and win over Your Memory "
+        "when the two conflict."
+    )
+
     async def build_memory_context(self, user_message: str = "") -> str:
         """Assemble memories for the system prompt — the 'working memory' load.
 
@@ -306,18 +313,21 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         )
 
         # 1. Operator rules and lessons, ahead of everything the person's own
-        # tiers hold. The lessons get the same budget as each of the person's
-        # tiers, counted apart from theirs.
+        # tiers hold. The first operator heading carries the precedence line.
+        # The lessons get the same budget as each of the person's tiers,
+        # counted apart from theirs.
         if managed_engrams:
             sections.append(
-                f"## Operator Memory — Rules\n{self._format_rules_engrams(managed_engrams)}"
+                f"## Operator Memory — Rules\n{self._OPERATOR_PRECEDENCE}\n"
+                f"{self._format_rules_engrams(managed_engrams)}"
             )
         if self.managed_hc is not None:
             managed_lessons = self.managed_hc.recall_lessons(
                 token_budget=1000, exclude_scratchpad=True
             )
             if managed_lessons:
-                sections.append(f"## Operator Memory — Lessons\n{managed_lessons}")
+                precedence = "" if managed_engrams else f"{self._OPERATOR_PRECEDENCE}\n"
+                sections.append(f"## Operator Memory — Lessons\n{precedence}{managed_lessons}")
 
         # 2. Identity
         if identity:

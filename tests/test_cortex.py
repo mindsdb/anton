@@ -936,8 +936,15 @@ _MANAGED_FILES = {
     ),
     "profile.md": "# Profile\n- Name: Operator\n",
 }
+# The line the first operator heading carries, so the model knows the
+# operator's entries win over the person's own.
+_OPERATOR_WINS = (
+    "The operator's rules and lessons apply to everyone and win over Your Memory "
+    "when the two conflict.\n"
+)
 _OPERATOR_SECTIONS = (
-    "\n\n## Operator Memory — Rules\n## Always\n- Write requirements.txt with package names only"
+    "\n\n## Operator Memory — Rules\n" + _OPERATOR_WINS
+    + "## Always\n- Write requirements.txt with package names only"
     "\n## Never\n- Never print a connection's password"
     "\n## When\n- If the question names a quarter, use calendar quarters"
     "\n\n## Operator Memory — Lessons\n# Lessons"
@@ -1029,6 +1036,20 @@ class TestManagedLayer:
         assert positions == sorted(positions)
         assert prompt.index("## Operator Memory — Rules") < positions[0]
 
+    async def test_the_operator_heading_says_operator_entries_win(self, person, managed):
+        """Rendering first doesn't say which tier wins, so the first operator
+        heading says it, once. Without the layer the line never renders."""
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+        assert prompt.count(_OPERATOR_WINS) == 1
+        assert "## Operator Memory — Rules\n" + _OPERATOR_WINS in prompt
+
+        g, p = person
+        bare = Cortex(
+            global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot",
+            managed_hc=None,
+        )
+        assert _OPERATOR_WINS.strip() not in await bare.build_memory_context("hola")
+
     async def test_operator_wisdom_leads_the_scratchpad_context(self, person, managed):
         context = _managed_cortex(person, managed).get_scratchpad_context()
         # Within the operator's tier, Hippocampus's own order: the dated
@@ -1062,7 +1083,7 @@ class TestManagedLayer:
         prompt = await _managed_cortex(person, managed).build_memory_context("hola")
 
         assert prompt == (
-            "\n\n## Operator Memory — Lessons\n# Lessons"
+            "\n\n## Operator Memory — Lessons\n" + _OPERATOR_WINS + "# Lessons"
             "\n- Revenue lives in fct_revenue <!-- topic:minds-datasource ts:2026-10-01 -->\n"
             + _TODAY_PROMPT
         )
