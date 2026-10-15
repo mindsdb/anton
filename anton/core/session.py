@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import hashlib
 import httpx2 as httpx
@@ -76,6 +77,7 @@ from anton.core.llm.tracing import (
     VALID_SURFACES,
     TraceContext,
     call_role,
+    detached_from_session,
     reset_trace_context,
     set_trace_context,
 )
@@ -4622,7 +4624,18 @@ class ChatSession:
 
         asyncio.create_task(_drain())
 
-    def _schedule_cerebellum_flush(self) -> None:
+    def _spawn_background(self, coro, trace: TraceContext | None) -> asyncio.Task:
+        """Start `coro` as background work of the turn `trace` identifies.
+
+        Its LLM calls are attributed to that turn, but kept out of the
+        conversation's session (see `detached_from_session`).
+        """
+        context = contextvars.copy_context()
+        if trace is not None:
+            context.run(set_trace_context, detached_from_session(trace))
+        return asyncio.create_task(coro, context=context)
+
+    def _schedule_cerebellum_flush(self, trace: TraceContext | None = None) -> None:
         """Fire the cerebellum's batched diff pass without blocking the turn.
 
         The cerebellum buffered any errored / warning cells across the
@@ -4644,7 +4657,7 @@ class ChatSession:
         if cb.buffered_count == 0:
             return
         try:
-            asyncio.create_task(cb.flush())
+            self._spawn_background(cb.flush(), trace)
         except RuntimeError:
             # No running loop (e.g. called from a sync context in tests).
             # Cerebellum learning is best-effort, so just drop the buffer.
@@ -4912,19 +4925,17 @@ class ChatSession:
         # talking to MindsHub and attaches langfuse-style headers so the
         # router can attribute every LLM call (and any spans nested
         # inside this turn via tools / scratchpad) to the right session.
-        # ContextVar propagation also covers `asyncio.create_task` spawns
-        # — the cerebellum flush + identity extraction tasks scheduled
-        # below inherit a copy of this context.
-        _trace_token = set_trace_context(
-            TraceContext(
-                session_id=self._session_id,
-                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
-                harness=self._harness,
-                surface=self._surface,
-                tags=tuple(trace_tags or ()),
-                metadata=trace_metadata or None,
-            )
+        # Tasks spawned during the turn inherit it. The end-of-turn memory
+        # tasks start after it is reset, so they get it from `_spawn_background`.
+        _turn_trace = TraceContext(
+            session_id=self._session_id,
+            turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+            harness=self._harness,
+            surface=self._surface,
+            tags=tuple(trace_tags or ()),
+            metadata=trace_metadata or None,
         )
+        _trace_token = set_trace_context(_turn_trace)
 
         # Open the turn's cost books and listen at the LLM-client narrow
         # waist — planning, coding (incl. verifier verdicts), and router
@@ -5438,14 +5449,14 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                asyncio.create_task(self._cortex.maybe_update_identity(messages_str))
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
             # Periodic memory vacuum (Systems Consolidation)
             self._cortex.maybe_vacuum()
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush()
+        self._schedule_cerebellum_flush(_turn_trace)
         self._schedule_acc_flush()
 
         # The books are closed, so ended_by is final. A clean exit can still book

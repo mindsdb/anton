@@ -113,6 +113,22 @@ _trace_ctx: ContextVar[TraceContext | None] = ContextVar(
 )
 
 
+def detached_from_session(ctx: TraceContext) -> TraceContext:
+    """`ctx` for background work of the same turn, outside the conversation's session.
+
+    The console marks a conversation failed when any call carrying its session
+    fails, and a background call is one the turn does not depend on. Its
+    conversation rides in the metadata instead, so the call stays joinable.
+    """
+    if not ctx.session_id:
+        return ctx
+    return replace(
+        ctx,
+        session_id=None,
+        metadata={**(ctx.metadata or {}), "conversation_id": ctx.session_id},
+    )
+
+
 def get_trace_context() -> TraceContext | None:
     """Return the active trace context, or None if no turn is in flight."""
     return _trace_ctx.get()
