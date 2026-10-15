@@ -640,6 +640,24 @@ async def test_a_cell_cannot_write_a_usage_line_when_the_host_log_is_off(tmp_pat
 
 
 @pytest.mark.slow
+async def test_a_cell_cannot_put_its_usage_on_another_conversation(tmp_path, monkeypatch, caplog):
+    """The host names the conversation and turn; the pad only reports counts and models."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    caplog.set_level("INFO", logger="anton.usage")
+    sent = {"conversation": "conv-2", "turn": "9", "input": 1000000, "output": True,
+            "cache_read": -5, "model": "m", "note": "anything"}
+    forged = (f"import sys\nsys.__stdout__.write('__ANTON_USAGE__ {json.dumps(sent)}\\n')\n"
+              "sys.__stdout__.flush()")
+    cell = await _run_on_pad(tmp_path, "http://127.0.0.1:9/v1", forged)
+
+    assert cell.error is None, cell.error
+    (line,) = _usage_lines(caplog)
+    assert (line["conversation"], line["turn"]) == ("conv-1", "1")
+    assert (line["input"], line["output"], line["cache_read"], line["model"]) == (1000000, 0, 0, "m")
+    assert "note" not in line
+
+
+@pytest.mark.slow
 async def test_an_unreadable_usage_line_is_logged_without_its_content(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("ANTON_USAGE_LOG", "1")
     caplog.set_level("INFO")

@@ -32,6 +32,50 @@ def log_usage_record(record: dict) -> None:
     _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
 
 
+def _usage_record(*, role: str | None, model: str | None, served_model: str | None,
+                  input_tokens: int, output_tokens: int, cache_read: int,
+                  cache_creation: int) -> dict:
+    """One call's usage, named by the conversation, turn and tags of the current trace."""
+    ctx = get_trace_context()
+    return {
+        "conversation": ctx.session_id if ctx else None,
+        "turn": (ctx.metadata or {}).get("turn") if ctx else None,
+        "tags": list(ctx.tags) if ctx else [],
+        "role": role,
+        "model": model,
+        "served_model": served_model,
+        "input": input_tokens,
+        "output": output_tokens,
+        "cache_read": cache_read,
+        "cache_creation": cache_creation,
+    }
+
+
+def scratchpad_usage_record(sent: object) -> dict | None:
+    """The record for a usage line a scratchpad sent, or None when it is not a JSON object.
+
+    The pad runs cell code, so the host names the conversation, turn and tags from
+    its own trace and keeps only counts, models and role from what the pad sent.
+    """
+    if not isinstance(sent, dict):
+        return None
+
+    def count(key: str) -> int:
+        value = sent.get(key)
+        valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        return value if valid else 0
+
+    def text(key: str) -> str | None:
+        value = sent.get(key)
+        return value if isinstance(value, str) else None
+
+    return _usage_record(
+        role=text("role"), model=text("model"), served_model=text("served_model"),
+        input_tokens=count("input"), output_tokens=count("output"),
+        cache_read=count("cache_read"), cache_creation=count("cache_creation"),
+    )
+
+
 # Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
 # event loop finalizes its async generators, so entry points that own the loop
 # drain this registry before it dies. Weak refs: long-lived hosts that consume
@@ -2242,19 +2286,11 @@ class LLMProvider(ABC):
         """
         if self.usage_sink is None and not usage_log_enabled():
             return
-        ctx = get_trace_context()
-        record = {
-            "conversation": ctx.session_id if ctx else None,
-            "turn": (ctx.metadata or {}).get("turn") if ctx else None,
-            "tags": list(ctx.tags) if ctx else [],
-            "role": get_call_role() or self.trace_role,
-            "model": model,
-            "served_model": served_model,
-            "input": usage.input_tokens,
-            "output": usage.output_tokens,
-            "cache_read": usage.cache_read_tokens,
-            "cache_creation": usage.cache_creation_tokens,
-        }
+        record = _usage_record(
+            role=get_call_role() or self.trace_role, model=model, served_model=served_model,
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+            cache_read=usage.cache_read_tokens, cache_creation=usage.cache_creation_tokens,
+        )
         if self.usage_sink is not None:
             self.usage_sink(record)
         else:

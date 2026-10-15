@@ -31,7 +31,12 @@ from anton.core.backends.wire import (
     USAGE_MARKER,
     USAGE_MARKER_ENV,
 )
-from anton.core.llm.provider import USAGE_LOG_ENV, log_usage_record, usage_log_enabled
+from anton.core.llm.provider import (
+    USAGE_LOG_ENV,
+    log_usage_record,
+    scratchpad_usage_record,
+    usage_log_enabled,
+)
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
 from anton.core.backends.utils import compute_timeouts
@@ -1343,10 +1348,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # Logged as it arrives, so a cell killed later keeps the calls it made.
                 # Off, the pad was not asked to send usage, so a line like this is cell output.
                 try:
-                    log_usage_record(json.loads(line[len(USAGE_MARKER) :]))
+                    record = scratchpad_usage_record(json.loads(line[len(USAGE_MARKER) :]))
                 except json.JSONDecodeError:
+                    record = None
+                if record is None:
                     # Length only: the line is raw cell output and may hold a secret.
                     logger.warning("unreadable scratchpad usage line (%d chars)", len(line))
+                else:
+                    log_usage_record(record)
                 continue
 
             if line.startswith(PROGRESS_MARKER):
