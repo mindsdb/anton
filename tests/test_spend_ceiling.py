@@ -659,3 +659,12 @@ async def test_filtered_handback_at_the_continuation_gate_sends_anton_s_own_repo
     assert len(handbacks) == 2
     assert ended_by == "content_filter"
     assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+def test_the_built_in_limits_are_the_safety_limits():
+    """A host that sets nothing gets these; they are sized from production, so
+    a change here is a product decision, not a refactor."""
+    from anton.core.settings import CoreSettings
+
+    s = CoreSettings(_env_file=None)
+    assert (s.max_tool_rounds, s.max_continuations, s.max_turn_tokens) == (250, 10, 25_000_000)
