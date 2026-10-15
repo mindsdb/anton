@@ -45,6 +45,7 @@ from anton.core.artifacts.internal_files import (
     METADATA_FILENAME,
     NON_CONTENT_NAMES,
     README_FILENAME,
+    is_bytecode_name,
 )
 
 
@@ -60,8 +61,9 @@ _EXCLUDED_FROM_FILES = HOUSEKEEPING_FILES | GENERATION_INPUT_FILES
 def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
     """Yield (path, lstat) for each regular file that is artifact content.
 
-    Top-level `NON_CONTENT_NAMES` are pruned without descending and symlinks
-    are never followed. An entry or directory that errors is skipped on its
+    Top-level `NON_CONTENT_NAMES` and Python bytecode at any depth
+    (`is_bytecode_name`) are pruned without descending, and symlinks are
+    never followed. An entry or directory that errors is skipped on its
     own; a missing `folder` yields nothing. Order is unspecified.
 
     Directories are told apart by the scan's own entry type, so only files
@@ -77,6 +79,8 @@ def iter_content_files(folder: Path) -> Iterator[tuple[Path, os.stat_result]]:
             continue
         for entry in entries:
             if is_root and entry.name in NON_CONTENT_NAMES:
+                continue
+            if is_bytecode_name(entry.name):
                 continue
             try:
                 if entry.is_dir(follow_symlinks=False):
