@@ -193,6 +193,9 @@ async def test_end_of_turn_memory_calls_carry_the_turns_identity_but_not_its_ses
     )
     session._turn_count = 4  # identity extraction runs every fifth turn
     session._cortex.maybe_update_identity = record("identity")
+    session._cortex._turn_count = 9  # the memory vacuum checks every tenth turn
+    session._cortex.needs_compaction = lambda: True
+    session._cortex.compact_all = record("compaction")
     session._cerebellum = MagicMock(buffered_count=1, flush=record("post-mortem"))
 
     reply = LLMResponse(content="Hi.", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
@@ -210,7 +213,7 @@ async def test_end_of_turn_memory_calls_carry_the_turns_identity_but_not_its_ses
     finally:
         await provider.aclose()
 
-    assert set(sent) == {"identity", "post-mortem"}
+    assert set(sent) == {"identity", "post-mortem", "compaction"}
     for name, headers in sent.items():
         metadata = json.loads(headers["Langfuse-Metadata"])
         assert "Langfuse-Session-Id" not in headers, name

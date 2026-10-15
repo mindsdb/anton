@@ -4624,16 +4624,22 @@ class ChatSession:
 
         asyncio.create_task(_drain())
 
-    def _spawn_background(self, coro, trace: TraceContext | None) -> asyncio.Task:
-        """Start `coro` as background work of the turn `trace` identifies.
+    @staticmethod
+    def _background_context(trace: TraceContext | None) -> contextvars.Context:
+        """A context for background work of the turn `trace` identifies.
 
-        Its LLM calls are attributed to that turn, but kept out of the
-        conversation's session (see `detached_from_session`).
+        LLM calls made in it are attributed to that turn, but kept out of the
+        conversation's session (see `detached_from_session`). Tasks started in
+        it inherit it.
         """
         context = contextvars.copy_context()
         if trace is not None:
             context.run(set_trace_context, detached_from_session(trace))
-        return asyncio.create_task(coro, context=context)
+        return context
+
+    def _spawn_background(self, coro, trace: TraceContext | None) -> asyncio.Task:
+        """Start `coro` as background work of the turn `trace` identifies."""
+        return asyncio.create_task(coro, context=self._background_context(trace))
 
     def _schedule_cerebellum_flush(self, trace: TraceContext | None = None) -> None:
         """Fire the cerebellum's batched diff pass without blocking the turn.
@@ -4926,7 +4932,7 @@ class ChatSession:
         # router can attribute every LLM call (and any spans nested
         # inside this turn via tools / scratchpad) to the right session.
         # Tasks spawned during the turn inherit it. The end-of-turn memory
-        # tasks start after it is reset, so they get it from `_spawn_background`.
+        # tasks start after it is reset, so they get it from `_background_context`.
         _turn_trace = TraceContext(
             session_id=self._session_id,
             turn_id=turn_id if turn_id is not None else self._turn_count + 1,
@@ -5450,8 +5456,9 @@ class ChatSession:
                     messages_str = user_input
 
                 self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
-            # Periodic memory vacuum (Systems Consolidation)
-            self._cortex.maybe_vacuum()
+            # Periodic memory vacuum (Systems Consolidation). Its compaction
+            # task is started inside, so it runs in the background context.
+            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
