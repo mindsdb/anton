@@ -269,6 +269,8 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         ),
         # "exec failed" is the wording the cell-status classifier keys on for a
         # non-JSON result; without a recognised marker the cell reads as ok.
+        # cowork-server's figure sources key on the same "[error] exec failed"
+        # prefix to drop the call (cowork/harnesses/anton_harness/figure_sources.py).
         StreamToolResult(
             name="scratchpad",
             content=f"[error] exec failed — {reason}",
@@ -3239,6 +3241,8 @@ class ChatSession:
         with tool_use blocks and inserts a user message carrying
         synthetic `is_error: true` results for whichever ids didn't
         get acknowledged in the immediately following message.
+        cowork-server's figure sources skip results marked is_error, so
+        keep the flag on every result anton makes up itself.
 
         Returns the number of synthetic results inserted (0 if the
         history is already clean).
@@ -5991,6 +5995,8 @@ class ChatSession:
                                             exc_info=True,
                                         )
                                     if lint_messages:
+                                        # cowork-server's figure sources cut this
+                                        # block from a replayed cell's output.
                                         result_text += (
                                             "\n\n[artifact lint]\n"
                                             + "\n".join(lint_messages)

@@ -611,6 +611,8 @@ def damaged_tool_call_result(tc: ToolCall) -> dict | None:
             "body; if an argument was large, make it smaller or split the work "
             "across several calls."
         ),
+        # cowork-server's figure sources skip any history result marked
+        # is_error, since its text is anton's, not the tool's output.
         "is_error": True,
     }
 
