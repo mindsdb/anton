@@ -4554,8 +4554,7 @@ class ChatSession:
         first check, before any tool had been dispatched, and the turn still
         paid for two calls. Measured at a 100k ceiling with 190k contexts: zero
         tools run, 400k spent, 300% over the number the user asked for. The cap
-        binds only below ~2x the reserve; at the 1.25M default it changes
-        nothing.
+        binds only below ~2x the reserve; at the default it changes nothing.
 
         The bound this produces is close, not exact: the reserve is derived from
         `peak_context_tokens` (input + cache_read + cache_creation) but compared
