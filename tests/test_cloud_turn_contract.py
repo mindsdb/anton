@@ -92,7 +92,7 @@ def test_a_missing_or_non_object_connectors_block_parses_to_none(value):
 
 
 def _limits_request(value):
-    body = {"protocol_version": 1, "conversation_id": "c", "input": "q"}
+    body = {"protocol_version": 1, "conversation_id": "conv-7", "input": "q"}
     if value is not ...:
         body["limits"] = value
     return TurnRequestV1.from_json(json.dumps(body))
@@ -126,3 +126,38 @@ def test_a_limit_that_is_not_a_usable_integer_is_dropped(value):
 
 def test_zero_auto_continues_is_a_real_limit():
     assert _limits_request({"max_continuations": 0}).limits == {"max_continuations": 0}
+
+
+def test_each_dropped_limit_is_logged_by_name_and_reason_never_its_value(caplog):
+    """Dropping in silence would look exactly like a controller that sent no
+    block, and the only symptom would be a web turn stopping at the default."""
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        request = _limits_request({
+            "max_tool_rounds": 250,
+            "max_turn_tokens": 0,
+            "max_continuations": "7777",
+            "later_limit": 31337,
+        })
+
+    assert request.limits == {"max_tool_rounds": 250}
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) == 3
+    assert any("'max_turn_tokens'" in m and "below its minimum of 1" in m for m in lines)
+    assert any("'max_continuations'" in m and "not an integer (str)" in m for m in lines)
+    assert any("'later_limit'" in m and "unknown limit" in m for m in lines)
+    assert all("conversation=conv-7" in m for m in lines)
+    assert "7777" not in caplog.text and "31337" not in caplog.text
+
+
+def test_a_limits_block_that_is_not_an_object_is_logged(caplog):
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        assert _limits_request([250]).limits == {}
+    assert "not an object (list)" in caplog.text
+    assert "conversation=conv-7" in caplog.text
+
+
+def test_no_limits_block_logs_nothing(caplog):
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        assert _limits_request(...).limits == {}
+        assert _limits_request(None).limits == {}
+    assert caplog.records == []
