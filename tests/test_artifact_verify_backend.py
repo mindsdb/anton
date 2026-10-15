@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.tools.generate_artifact.verifiers import evaluate_backend, verify_backend, contract_operations, contract_paths
+from anton.core.tools.generate_artifact.verifiers import (
+    _check_backend_syntax,
+    contract_operations,
+    contract_paths,
+    evaluate_backend,
+    verify_backend,
+)
 
 GOOD_SOURCE = '''
 import os
@@ -485,3 +491,61 @@ async def test_introspection_stderr_carrying_a_token_is_redacted(tmp_path: Path)
     )
     assert any("produced no JSON" in e and "Bearer" in e for e in result.errors)
     assert not any(_LOGGED_TOKEN in e for e in result.errors)
+
+
+async def test_syntax_error_is_reported_and_writes_no_bytecode(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    (tmp_path / "backend.py").write_text("def broken(:\n    pass\n")
+
+    result, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+    )
+
+    assert not result.ok
+    [error] = result.errors
+    assert error.startswith("backend.py failed to compile:\n")
+    assert 'File "backend.py", line 1' in error
+    assert "SyntaxError" in error
+    assert list(tmp_path.rglob("*.pyc")) == []
+
+
+async def test_a_user_traceback_module_does_not_break_the_syntax_check(tmp_path: Path):
+    """The check script imports `traceback`; a user file of that name in the
+    artifact folder must not replace it."""
+    (tmp_path / "traceback.py").write_text("raise RuntimeError('user traceback.py imported')\n")
+    (tmp_path / "backend.py").write_text("x = 1\n")
+
+    assert await _check_backend_syntax(sys.executable, tmp_path) is None
+
+
+async def test_the_syntax_check_writes_no_bytecode(tmp_path: Path, monkeypatch):
+    """A valid file is where `py_compile` wrote its `.pyc`; introspection then
+    fails on the missing `app`, which is fine here."""
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    (tmp_path / "backend.py").write_text("x = 1\n")
+
+    await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+    )
+
+    assert list(tmp_path.rglob("__pycache__")) == []
+
+
+@_needs_asgi
+async def test_verify_backend_leaves_no_bytecode_for_local_modules(tmp_path: Path, monkeypatch):
+    """Introspection imports `backend.py` and its local modules; without the
+    bytecode switch in the backend env they leave `__pycache__` behind."""
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    (tmp_path / "helpers.py").write_text("ITEMS = []\n")
+    (tmp_path / "backend.py").write_text(
+        BACKEND_OK.replace("import os, argparse", "import os, argparse\nimport helpers")
+    )
+    (tmp_path / "requirements.txt").write_text("fastapi\nmangum\nuvicorn\n")
+
+    result, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+    )
+
+    assert result.ok, result.errors
+    assert list(tmp_path.rglob("__pycache__")) == []
+    assert list(tmp_path.rglob("*.pyc")) == []
