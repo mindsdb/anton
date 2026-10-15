@@ -374,6 +374,12 @@ class TestScrubOutput:
         r'body = "{\"access_token\": \"" + access_token_value + "\"}"',
         'x = "access_token=\'" if quoted_output else "access_token="',
         r'"{\"client_secret\": \"%s\"}" % secret_name',
+        'client_secret: "{{ .Values.oauth.clientSecret }}"',
+        'client_secret: "${{ secrets.GOOGLE_CLIENT_SECRET }}"',
+        '"access_token": "{{ access_token }}"',
+        '$url = "x?access_token=" . $accessTokenValue . "&scope=a";',
+        "local url = 'x?access_token=' .. access_token_value .. '&scope=a'",
+        "SELECT 'access_token=' || access_token_value || '&x' FROM tokens",
     ])
     def test_source_code_the_model_reads_is_left_alone(self, line):
         """Code the model reads and may write back is never rewritten."""
@@ -409,7 +415,8 @@ class TestScrubOutput:
     @pytest.mark.parametrize("text", [
         """client_secret='abc def\\'GhIjKlMnOpQr'""",
         'access_token="abc\\"defGhIjKlMnOpQrStu"',
-    ], ids=["single-quoted", "double-quoted"])
+        'access_token="abc defGhIjKlMnOpQrStu"',
+    ], ids=["single-quoted", "double-quoted", "space"])
     def test_a_quoted_value_in_key_value_form_is_redacted_whole(self, text):
         """The .env and shell form escapes its quote with a backslash."""
         result = scrub_output(text)
@@ -422,6 +429,22 @@ class TestScrubOutput:
         result = scrub_output(json.dumps({"client_secret": value})[:-2])
         assert "GhIjKlMn" not in result
         assert result.endswith("[REDACTED_TOKEN]")
+
+    @pytest.mark.parametrize("text", [
+        """{"client_secret":"abc'defGhIjKlMnOpQr"}""",
+        '{"access_token":"abc defGhIjKlMnOpQrStu"}',
+        '{"access_token":"abc\\"defGhIjKlMnOpQrStu"}',
+    ], ids=["apostrophe", "space", "quote"])
+    def test_the_reported_examples_are_redacted_as_written(self, text):
+        """Compact JSON, exactly as the report printed it."""
+        assert scrub_output(text) == text.split(":")[0] + ':"[REDACTED_TOKEN]"}'
+
+    @pytest.mark.parametrize("closing", ['"', ""], ids=["closed", "cut-off"])
+    def test_a_value_longer_than_the_scan_is_redacted_whole(self, closing):
+        """Past the scan limit, the rest of a long value is still redacted."""
+        result = scrub_output('"access_token": "' + "A" * 20_000 + closing)
+        assert "AAAAAAAA" not in result
+        assert result.startswith('"access_token": "[REDACTED_TOKEN]')
 
     def test_a_value_ending_in_a_backslash_leaves_nothing_of_it(self):
         """JSON's escaped trailing backslash reads like a bytes repr's escaped

@@ -221,9 +221,8 @@ _TOKEN_KEY = (
     r"(?<![A-Za-z0-9])"
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
-# A quoted value after a token key or `Bearer` is a string literal, so it is
-# redacted; only a placeholder or a marker is kept. No closing quote is
-# required: clipped output can end mid-value.
+# A quoted value with no quote, backslash or space, unless it is a whole marker; for
+# Bearer values and code-like token values. Clipped output may lack the closing quote.
 _NARROW_QUOTED_VALUE = (
     r"(?!(?:\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\])(?![^\"'\\\s]))"
     r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4}){16,}"
@@ -231,17 +230,22 @@ _NARROW_QUOTED_VALUE = (
 # A Bearer value cannot hold a space or a quote, so prose after `"Bearer ` stays.
 _QUOTED_BEARER_VALUE_PATTERN = re.compile(r"(\\?[\"'](?i:bearer)[ \t]+)" + _NARROW_QUOTED_VALUE)
 _NARROW_QUOTED_VALUE_PATTERN = re.compile(_NARROW_QUOTED_VALUE)
+_NARROW_VALUE_TAIL_PATTERN = re.compile(r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4})*")
 # Group 1 is the backslashes before the value's quote: how many times the
 # encoders above it escaped it, and so what its closing quote looks like. Seven
 # covers three levels of JSON in JSON.
 _QUOTED_TOKEN_OPENER_PATTERN = re.compile(_TOKEN_KEY + r"\\*[\"']?\s*[:=]\s*(\\{0,7})([\"'])")
 # Scanned length of one value; longer than any token or secret a cell prints.
 _QUOTED_VALUE_SCAN_MAX = 16_384
-_WHOLE_MARKER_PATTERN = re.compile(r"\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\]")
-_CODE_OPERATOR_AFTER = re.compile(r"\s*(?:[+,()%]|(?:if|else|or|and)\b)")
-_CODE_OPERATOR_BEFORE = re.compile(r"(?:[+,()%]|\b(?:if|else|or|and))\s*$")
+# A template expression (Helm, Jinja, GitHub Actions) is a whole marker too.
+_WHOLE_MARKER_PATTERN = re.compile(
+    r"\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\]|\$?\{\{[^{}\r\n]*\}\}"
+)
+# PHP, Lua and SQL join strings with ` . `, ` .. ` and ` || `.
+_CODE_OPERATOR_AFTER = re.compile(r"\s*(?:[+,()%]|(?:if|else|or|and)\b)|\s+(?:\.\.?|\|\|)\s")
+_CODE_OPERATOR_BEFORE = re.compile(r"(?:[+,()%]|\b(?:if|else|or|and))\s*$|\s(?:\.\.?|\|\|)\s*$")
 _CODE_OPERATOR_BEFORE_WINDOW = 64
-_CODE_LEADING_OPERATOR = re.compile(r"\s*[+,)](?:\s|$)")
+_CODE_LEADING_OPERATOR = re.compile(r"\s*(?:[+,)]|\.\.?|\|\|)(?:\s|$)")
 # Unquoted values can be source code the model reads and may write back: after a
 # key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
 # type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
@@ -471,12 +475,15 @@ def _quoted_value_end(text: str, start: int, quote: str, depth: int) -> int:
 
     It ends at the first `quote` preceded by exactly `depth` backslashes, the
     escaping its opening quote had; a quote with more backslashes is part of
-    the value. A line break, the end of `text` or `_QUOTED_VALUE_SCAN_MAX`
-    ends a value cut off early.
+    the value. A line break or the end of `text` ends a value cut off early.
+    Past `_QUOTED_VALUE_SCAN_MAX` the value runs on while it holds no quote,
+    backslash or space, so a long token is never shown in part.
     """
     limit = min(len(text), start + _QUOTED_VALUE_SCAN_MAX)
     found = _value_end_pattern(quote, depth).search(text, start, limit)
-    return found.start() if found else limit
+    if found:
+        return found.start()
+    return _NARROW_VALUE_TAIL_PATTERN.match(text, limit).end()
 
 
 def _looks_like_code(text: str, start: int, end: int, quote: str, depth: int) -> bool:
