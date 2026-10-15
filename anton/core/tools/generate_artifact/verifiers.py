@@ -750,13 +750,15 @@ def _validate_state_manifest(text: str) -> str | None:
 
 # Compiles backend.py without writing anything: `python -m py_compile` always
 # leaves `__pycache__/backend.*.pyc` in the artifact folder. The output matches
-# py_compile's for a SyntaxError.
+# py_compile's for a SyntaxError. Any exception is reported the same way, as
+# py_compile does: a MemoryError or RecursionError from the parser must not
+# show this script's own traceback.
 _SYNTAX_CHECK_SCRIPT = r'''
 import sys, traceback
 try:
     with open("backend.py", "rb") as f:
         compile(f.read(), "backend.py", "exec")
-except (SyntaxError, ValueError) as exc:
+except Exception as exc:
     sys.stderr.write("".join(traceback.format_exception_only(type(exc), exc)))
     sys.exit(1)
 '''
@@ -768,9 +770,11 @@ async def _check_backend_syntax(venv_python: str, artifact_path: Path) -> str | 
     Returns None when it compiles, else the error text. `-I` keeps the
     artifact folder off sys.path, so a user `traceback.py` cannot stand in
     for the stdlib module; `-B` disables bytecode writes regardless of env.
+    `-I` also drops an inherited `PYTHONUTF8`, so `-X utf8` keeps stderr in
+    UTF-8, which is how it is decoded here.
     """
     proc = await asyncio.create_subprocess_exec(
-        venv_python, "-I", "-B", "-c", _SYNTAX_CHECK_SCRIPT,
+        venv_python, "-I", "-B", "-X", "utf8", "-c", _SYNTAX_CHECK_SCRIPT,
         cwd=str(artifact_path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )

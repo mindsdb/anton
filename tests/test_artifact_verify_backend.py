@@ -518,6 +518,41 @@ async def test_a_user_traceback_module_does_not_break_the_syntax_check(tmp_path:
     assert await _check_backend_syntax(sys.executable, tmp_path) is None
 
 
+async def test_a_parser_failure_is_reported_without_the_check_scripts_traceback(tmp_path: Path):
+    """Source too complex to parse raises MemoryError, not SyntaxError; the
+    error must read like the backend's, not show the check script's frames."""
+    (tmp_path / "backend.py").write_text("x = " + "-" * 200_000 + "1\n")
+
+    error = await _check_backend_syntax(sys.executable, tmp_path)
+
+    assert error is not None
+    assert 'File "<string>"' not in error
+    assert error.strip().splitlines()[-1].split(":")[0].endswith("Error")
+
+
+async def test_the_syntax_check_reports_non_ascii_source_in_utf8(tmp_path: Path, monkeypatch):
+    """`-I` drops an inherited PYTHONUTF8, so on a non-UTF-8 Windows code page
+    the error would otherwise come back in that code page and be mis-decoded."""
+    import asyncio
+
+    seen_args: list[tuple] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def recording_exec(*args, **kwargs):
+        seen_args.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_exec)
+    (tmp_path / "backend.py").write_text('title = "Отчёт" +\n', encoding="utf-8")
+
+    error = await _check_backend_syntax(sys.executable, tmp_path)
+
+    [args] = seen_args
+    assert ("-X", "utf8") in zip(args, args[1:])
+    assert error is not None and "SyntaxError" in error
+    assert 'title = "Отчёт" +' in error
+
+
 async def test_the_syntax_check_writes_no_bytecode(tmp_path: Path, monkeypatch):
     """A valid file is where `py_compile` wrote its `.pyc`; introspection then
     fails on the missing `app`, which is fine here."""
