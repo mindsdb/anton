@@ -510,16 +510,18 @@ class ArtifactStore:
         folder = self.folder_for(artifact.slug)
         entries: list[FileEntry] = []
         for p in sorted(folder.rglob("*")):
+            parts = p.relative_to(folder).parts
+            # Before any stat: bytecode is dropped without touching the disk.
+            if any(is_bytecode_name(part) for part in parts):
+                continue
             if not p.is_file() or p.is_symlink():
                 continue
             # POSIX separators regardless of platform: FileEntry.path is
             # persisted to metadata.json and compared against the stored
             # fingerprint, so a Windows-written artifact must not disagree
             # with the same artifact written anywhere else.
-            rel = p.relative_to(folder).as_posix()
-            if rel in _EXCLUDED_FROM_FILES or rel.split("/", 1)[0] in HOUSEKEEPING_DIRS:
-                continue
-            if any(is_bytecode_name(part) for part in rel.split("/")):
+            rel = "/".join(parts)
+            if rel in _EXCLUDED_FROM_FILES or parts[0] in HOUSEKEEPING_DIRS:
                 continue
             try:
                 st = p.stat()

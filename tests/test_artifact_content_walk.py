@@ -124,14 +124,22 @@ def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
     assert _artifact_content_mtime(tmp_path) == 1000.0
 
 
-@pytest.mark.parametrize("name", ["__pycache__", "x.pyc", "X.PYC", "backend.cpython-313.pyc"])
-def test_bytecode_names_match(name):
-    assert is_bytecode_name(name)
-
-
-@pytest.mark.parametrize("name", ["pycache", "x.py", "static", "pyc", "x.pyc.bak"])
-def test_other_names_do_not_match(name):
-    assert not is_bytecode_name(name)
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("__pycache__", True),
+        ("x.pyc", True),
+        ("X.PYC", True),
+        ("backend.cpython-313.pyc", True),
+        ("pycache", False),
+        ("x.py", False),
+        ("static", False),
+        ("pyc", False),
+        ("x.pyc.bak", False),
+    ],
+)
+def test_is_bytecode_name(name, expected):
+    assert is_bytecode_name(name) is expected
 
 
 def test_skips_bytecode_at_any_depth(tmp_path):
