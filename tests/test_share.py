@@ -258,3 +258,46 @@ class TestShareRoundtrip:
         assert "revenue-region-yoy" in history_out, "Title must appear in history listing"
         assert "Analyzed revenue. APAC leads YoY." in history_out, "Summary must appear in history listing"
         assert "imported by" in history_out, "After roundtrip the file has imported metadata"
+
+    async def test_imported_cells_are_scrubbed(self, tmp_path, workspace):
+        """A cell from an older export that printed a token comes back with it redacted."""
+        token = "opq" + "Z9" * 15
+        session, episodic, _ = _build_session(tmp_path, workspace)
+        session._scratchpads._pads["main"].cells = [
+            Cell(code="fetch()", stdout=f'{{"access_token": "{token}"}}', stderr="", error=None),
+        ]
+        with patch("anton.commands.share._generate_meta",
+                   AsyncMock(return_value=("token-cell", "A cell printed a token."))):
+            await handle_share_export(RecordingConsole(), session, workspace, make_mock_llm(), episodic)
+        anton_file = next((tmp_path / ".anton" / "output").glob("*.anton"))
+        assert token in anton_file.read_text(), "the export must carry the raw token, as an older one would"
+
+        new_session, _ = await _do_import(tmp_path, RecordingConsole(), workspace, anton_file)
+
+        restored = new_session._scratchpads._pads["main"].cells
+        assert len(restored) == 1
+        assert token not in restored[0].stdout
+        assert '"access_token": "[REDACTED_TOKEN]"' in restored[0].stdout
+
+    async def test_imported_history_is_scrubbed(self, tmp_path, workspace):
+        """A tool result from an older export that held a token reaches neither the model nor the episodic log."""
+        token = "opq" + "Z9" * 15
+        session, episodic, _ = _build_session(tmp_path, workspace)
+        episodic.log_turn(3, "tool_call", '{"action": "exec", "code": "fetch()"}', tool="scratchpad")
+        episodic.log_turn(3, "tool_result", f'{{"access_token": "{token}"}}', tool="scratchpad")
+        with patch("anton.commands.share._generate_meta",
+                   AsyncMock(return_value=("token-history", "A tool result held a token."))):
+            await handle_share_export(RecordingConsole(), session, workspace, make_mock_llm(), episodic)
+        anton_file = next((tmp_path / ".anton" / "output").glob("*.anton"))
+        assert token in anton_file.read_text(), "the export must carry the raw token, as an older one would"
+
+        new_session, new_episodic = await _do_import(tmp_path, RecordingConsole(), workspace, anton_file)
+
+        results = [
+            block["content"]
+            for msg in new_session._history if isinstance(msg["content"], list)
+            for block in msg["content"] if block.get("type") == "tool_result"
+        ]
+        assert token not in json.dumps(new_session._history)
+        assert results == ['{"access_token": "[REDACTED_TOKEN]"}']
+        assert all(token not in (e.content or "") for e in new_episodic.get_items())

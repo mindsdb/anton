@@ -29,6 +29,7 @@ from anton.core.session import (
     ChatSession,
     ChatSessionConfig,
     _SPEND_CEILING_RESERVE,
+    _VerifierVerdict,
 )
 
 CEILING = 1_000_000
@@ -43,6 +44,12 @@ PER_CALL = 100_000
 # can avoid overshooting, so the floor is what keeps the setting honest — these
 # tests pin that the floor itself still does real work.
 PRODUCT_FLOOR = 750_000
+
+
+@pytest.fixture(autouse=True)
+def _verify_single_round_turns(monkeypatch):
+    # These tests drive the verifier through single-tool-round turns.
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
 
 
 @pytest.fixture()
@@ -205,6 +212,8 @@ async def test_handback_asks_the_user_and_is_persisted_as_streamed(workspace):
     text = _history_text(session)
     assert "Do NOT retry automatically" in text
     assert "ask if they'd like you to continue" in text
+    # A stop mid-search must not fill the gap with a guess.
+    assert "do not estimate, extrapolate or state a figure you did not retrieve" in text
     # The streamed diagnosis, not the pre-stop reply, is the tail of history.
     assert session._history[-1]["role"] == "assistant"
 
@@ -227,8 +236,13 @@ async def test_verification_is_skipped_after_a_ceiling_trip(workspace):
     session._llm.generate_object_code = verdict
     with patch("anton.analytics.send_event"):
         await _run(session)
-    assert verdict.call_count == 0, (
-        f"the completion verifier ran {verdict.call_count}x after the ceiling "
+    # The limit's own "did the user say keep going?" check uses the same
+    # structured call, so count only verifier verdicts.
+    verifier_calls = [
+        c for c in verdict.call_args_list if c.args and c.args[0] is _VerifierVerdict
+    ]
+    assert not verifier_calls, (
+        f"the completion verifier ran {len(verifier_calls)}x after the ceiling "
         "stopped the turn"
     )
 

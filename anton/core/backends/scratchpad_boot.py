@@ -9,6 +9,7 @@ import dill
 
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_TRACE_MARKER,
     MISSING_MODULE_HINT,
     RESULT_START,
     RESULT_END,
@@ -425,6 +426,10 @@ if _session_load_note:
     _session_notes.append(_session_load_note)
 namespace["_anton_explainability_queries"] = []
 
+# The running cell's trace context, read by every helper model call. The main
+# loop sets it from the cell's CELL_TRACE_MARKER line.
+_cell_trace = None
+
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
 if _scratchpad_model:
@@ -474,9 +479,24 @@ if _scratchpad_model:
             _llm_provider_kwargs["flavor"] = _ProviderClass.resolve_web_flavor(
                 _scratchpad_provider_name, _llm_base_url
             )
-            _llm_provider = _ProviderClass(**_llm_provider_kwargs)
         else:
-            _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
+            _llm_provider_kwargs = {}  # Anthropic doesn't need ssl_verify
+
+        from anton.core.llm.tracing import (
+            call_role,
+            reset_trace_context,
+            set_trace_context,
+        )
+
+        def _new_llm_provider():
+            """Build a provider from the pad's model settings. The only place one is built."""
+            return _ProviderClass(**_llm_provider_kwargs)
+
+        # Built at boot so a bad setting fails here, leaving the helpers
+        # undefined, and so web_search() can ask native_web_tools() without a
+        # loop. It never sends a request: every model call gets its own
+        # provider from _with_fresh_provider.
+        _llm_provider = _new_llm_provider()
         _llm_model = _scratchpad_model
 
         _LLM_HEARTBEAT_INTERVAL = 10  # seconds between heartbeats during LLM calls
@@ -515,6 +535,34 @@ if _scratchpad_model:
                 except _llm_asyncio.CancelledError:
                     pass
 
+        async def _with_fresh_provider(call):
+            """Await ``call(provider)`` on a provider built for this call, then close it.
+
+            A provider's HTTP pool keeps each connection bound to the event
+            loop that opened it, and every sync helper runs on its own
+            ``asyncio.run`` loop, closed on return. A provider kept across
+            calls hands the next call a connection on a closed loop: "Event
+            loop is closed", or a silent resend on SDKs that retry any error.
+            Closing in ``finally``, on the loop that used the client, also
+            keeps the SDK's finalizer from closing it later on another loop.
+            ``aclose()`` closes this provider only; ``close_live_providers()``
+            would also close the providers of calls still running beside this
+            one, under ``asyncio.gather`` or on other threads.
+            """
+            provider = _new_llm_provider()
+            # Set here, inside the call's own task, because the cell's context
+            # does not reach an asyncio.run loop on a worker thread.
+            trace_token = set_trace_context(_cell_trace)
+            try:
+                with call_role("coding"):
+                    return await _run_with_heartbeat(call(provider))
+            finally:
+                reset_trace_context(trace_token)
+                try:
+                    await provider.aclose()
+                except Exception:
+                    pass  # a cleanup-only failure must not replace the call's answer or error
+
         class _ScratchpadLLM:
             """Sync LLM wrapper for scratchpad use. Mirrors SkillLLM interface."""
 
@@ -532,8 +580,8 @@ if _scratchpad_model:
                 cell-level heartbeat thread).
                 """
                 return _llm_asyncio.run(
-                    _run_with_heartbeat(
-                        _llm_provider.complete(
+                    _with_fresh_provider(
+                        lambda provider: provider.complete(
                             model=_llm_model,
                             system=system,
                             messages=messages,
@@ -552,8 +600,8 @@ if _scratchpad_model:
                 Use this inside async code (e.g. asyncio.gather) for concurrent
                 LLM calls.  Emits heartbeats automatically like complete().
                 """
-                return await _run_with_heartbeat(
-                    _llm_provider.complete(
+                return await _with_fresh_provider(
+                    lambda provider: provider.complete(
                         model=_llm_model,
                         system=system,
                         messages=messages,
@@ -749,8 +797,8 @@ if _scratchpad_model:
                     "and Minds Cloud (mdb.ai)."
                 )
             response = _llm_asyncio.run(
-                _run_with_heartbeat(
-                    _llm_provider.complete(
+                _with_fresh_provider(
+                    lambda provider: provider.complete(
                         model=_llm_model,
                         system=_WEB_SEARCH_SYSTEM,
                         messages=[{"role": "user", "content": query}],
@@ -1035,8 +1083,10 @@ import threading
 
 from anton.core.backends.wire import (
     HEARTBEAT_MARKER,
+    MAX_OUTPUT,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
+    STDOUT_SCRUB_MARGIN,
 )
 
 # All _real_stdout writes go through this lock: the heartbeat thread writes
@@ -1084,9 +1134,6 @@ def _heartbeat_loop(stop: threading.Event) -> None:
             else:
                 _real_stdout.write(HEARTBEAT_MARKER + "\n")
             _real_stdout.flush()
-
-
-_MAX_OUTPUT = 10_000
 
 
 def progress(message=""):
@@ -1350,6 +1397,13 @@ while True:
     if eof:
         break
 
+    _cell_trace = None
+    # The JSON object's "{" keeps a cell line like `__ANTON_CELL_TRACE__ = 1` code.
+    if lines and lines[0].startswith(CELL_TRACE_MARKER + " {"):
+        from anton.core.llm.tracing import trace_context_from_json
+
+        _cell_trace = trace_context_from_json(lines.pop(0)[len(CELL_TRACE_MARKER):])
+
     code = "".join(lines)
     # Heal lone surrogates before compile() — a non-ASCII Windows path byte can
     # arrive surrogate-escaped over stdin and would crash compile() with
@@ -1408,10 +1462,11 @@ while True:
             sys.stderr = sys.__stderr__
             _cell_log_handler.buf = None
 
-        stdout_val = out_buf.getvalue()
-        if len(stdout_val) > _MAX_OUTPUT:
+        stdout_full = out_buf.getvalue()
+        stdout_val = stdout_full
+        if len(stdout_val) > MAX_OUTPUT:
             stdout_val = (
-                stdout_val[:_MAX_OUTPUT]
+                stdout_val[:MAX_OUTPUT]
                 + f"\n\n... (truncated, {len(stdout_val)} chars total)"
             )
 
@@ -1421,13 +1476,17 @@ while True:
         # working. Appended AFTER the truncation clamp so the note can never
         # be truncated away, and regardless of `error` so a cell that raised
         # after the chdir still reports it.
+        cwd_note = ""
         _cwd_after = os.getcwd()
         if _cwd_after != _cwd_before:
+            cwd_note = (
+                f"Note: this cell changed the working directory from {_cwd_before} "
+                f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
+            )
             stdout_val = (
                 stdout_val
                 + ("\n" if stdout_val and not stdout_val.endswith("\n") else "")
-                + f"Note: this cell changed the working directory from {_cwd_before} "
-                f"to {_cwd_after}; it persists for subsequent cells in this scratchpad.\n"
+                + cwd_note
             )
 
         # Persist session after each cell. Keep the return value: a swallowed failure here
@@ -1459,6 +1518,12 @@ while True:
         "error": error,
         "explainability_queries": list(namespace.get("_anton_explainability_queries", [])),
     }
+    if len(stdout_full) > MAX_OUTPUT:
+        # For LocalScratchpadRuntime, which scrubs before it cuts. Only for cut
+        # output: every reader of this result gets it, and "stdout" is unchanged.
+        result["stdout_head"] = stdout_full[: MAX_OUTPUT + STDOUT_SCRUB_MARGIN]
+        result["stdout_total"] = len(stdout_full)
+        result["cwd_note"] = cwd_note
     with _wire_lock:
         _real_stdout.write(RESULT_START + "\n")
         _real_stdout.write(json.dumps(result) + "\n")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -1409,3 +1410,44 @@ async def test_run_app_passes_when_the_served_page_is_clean(tmp_path: Path, monk
 
     assert await orchestrator._run_and_verify_app(st) is None
     assert [r.outcome for r in st.trace if r.node == "verify_fullstack"] == ["ok"]
+
+
+async def test_tail_log_redacts_a_logged_token(tmp_path: Path):
+    """The tail goes to the backend retry prompt and into the returned error,
+    so a token the backend logged must not reach either."""
+    token = "FAKE0tok3nZr1xK2mN4pL7vT9wY3sB6dF"
+    (tmp_path / "backend.log").write_text(f'INFO got {{"access_token": "{token}"}}\n')
+
+    tail = await orchestrator._tail_log(_state(tmp_path))
+
+    assert "access_token" in tail
+    assert token not in tail
+
+
+async def test_tail_log_cut_between_key_and_token_still_redacts_it(tmp_path: Path):
+    """A cut that lands just after the key must not leave the token bare."""
+    token = "FAKE0tok3nZr1xK2mN4pL7vT9wY3sB6dF"
+    filler = "x" * (2000 - len(token) - len('"}'))
+    (tmp_path / "backend.log").write_text(f'INFO got {{"access_token": "{token}"}}{filler}')
+
+    tail = await orchestrator._tail_log(_state(tmp_path))
+
+    assert len(tail) <= 2000
+    assert token not in tail
+
+
+async def test_tail_log_is_scrubbed_off_the_event_loop(tmp_path: Path, monkeypatch):
+    """The whole log is scrubbed, so the work must not block the event loop."""
+    loop_thread = threading.get_ident()
+    scrub_threads: list[int] = []
+
+    def recording_scrub(text):
+        scrub_threads.append(threading.get_ident())
+        return text
+
+    monkeypatch.setattr(orchestrator, "scrub_output", recording_scrub)
+    (tmp_path / "backend.log").write_text("INFO started\n")
+
+    await orchestrator._tail_log(_state(tmp_path))
+
+    assert scrub_threads and loop_thread not in scrub_threads

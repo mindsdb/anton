@@ -5,11 +5,19 @@ Neither side should redefine them — import from here.
 """
 
 CELL_DELIM = "__ANTON_CELL_END__"
+# Optional first line of a cell: the running turn's trace context as JSON, so
+# the cell's model calls carry the same session and question ids. Per cell,
+# not at spawn, because a pad outlives its turn on long-lived hosts.
+CELL_TRACE_MARKER = "__ANTON_CELL_TRACE__"
 RESULT_START = "__ANTON_RESULT__"
 RESULT_END = "__ANTON_RESULT_END__"
 PROGRESS_MARKER = "__ANTON_PROGRESS__"
 HEARTBEAT_MARKER = "__ANTON_HEARTBEAT__"
 STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
+# A cell's stdout limit, and how much more the worker sends for the parent to
+# scrub before it cuts, so a secret across the limit can still match whole.
+MAX_OUTPUT = 10_000
+STDOUT_SCRUB_MARGIN = 4_096
 # Dead: the worker no longer auto-installs on a missing import, so nothing
 # emits these anymore. local.py still parses for them defensively.
 INSTALL_START_MARKER = "__ANTON_INSTALL_START__"

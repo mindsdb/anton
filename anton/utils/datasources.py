@@ -9,7 +9,7 @@ import uuid
 import yaml
 from collections.abc import Collection, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -210,6 +210,39 @@ _SECRET_KEY_PATTERN = re.compile(
     r"|AQ\.[A-Za-z0-9._-]{50}"   # Google authorization key (AI Studio, 2026+)
 )
 
+# Output only: user input and published artifacts keep _SECRET_KEY_PATTERN,
+# since these shapes also match pasted connect credentials and token code.
+_TOKEN_SHAPE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"  # JWT
+    r"|ya29\.[A-Za-z0-9_-]{20,}"  # Google OAuth access token
+)
+_TOKEN_KEY = (
+    r"(?<![A-Za-z0-9])"
+    r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
+)
+# A quoted value after a token key or `Bearer` is a string literal, so it is
+# redacted whatever its characters; only a placeholder or a marker is kept.
+# No closing quote is required: clipped output can end mid-value.
+_QUOTED_TOKEN_VALUE_PATTERN = re.compile(
+    r"(" + _TOKEN_KEY + r"\\?[\"']?\s*[:=]\s*\\?[\"']"
+    r"|\\?[\"'](?i:bearer)[ \t]+)"
+    r"(?!(?:\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\])(?![^\"'\\\s]))"
+    r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4}){16,}"
+)
+# Unquoted values can be source code the model reads and may write back: after a
+# key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
+# type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
+# UPPER_SNAKE parts are letters with at most one trailing digit.
+_TOKEN_VALUE_PATTERN = re.compile(
+    r"((?i:\bbearer)(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
+    r"(?![a-z_/-]+(?![A-Za-z0-9._~+/=%!-]))"
+    r"|" + _TOKEN_KEY + r"\\?[\"']?(?:[ \t]*[:=][ \t]*|[ \t]+)"
+    r"(?!(?:[a-z_/-]+|[a-z_]\w*(?:\.[A-Za-z_]\w*)+|(?:[A-Z][a-z]{2,}){2,}|[A-Z]{2,}[0-9]?(?:_[A-Z]{2,}[0-9]?)+)"
+    r"(?![A-Za-z0-9._~+/=%!-])))"
+    r"(?!!)[A-Za-z0-9._~+/=%!-]{16,}"
+    r"(?![A-Za-z0-9._~+/=%!(-])"
+)
+
 
 def _reset_registered_ds_vars() -> None:
     """Drop all DS_* scope, so nothing survives into a turn with no vault."""
@@ -334,6 +367,81 @@ def scrub_credentials(text: str) -> str:
         text = re.sub(r'(?<!\w)' + re.escape(value) + r'(?!\w)', f'[{key}]', text)
     text = _SECRET_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     return text
+
+
+def _exact_secret_values() -> list[str]:
+    """Return the values `scrub_credentials` matches exactly this turn.
+
+    Mirrors the value rules in `scrub_credentials`: every registered secret,
+    unknown DS_* values over 8 characters, and provider keys over 8 characters.
+    """
+    values = [_ds_env_values.get(key) or "" for key in _DS_SECRET_VARS]
+    values += [
+        value for key, value in _ds_env_values.items()
+        if key not in _DS_KNOWN_VARS and value and len(value) > 8
+    ]
+    values += [
+        value for value in (os.environ.get(key, "") for key in _PROVIDER_SECRET_VARS)
+        if len(value) > 8
+    ]
+    return [value for value in values if value]
+
+
+def longest_exact_secret() -> int:
+    """Return the length of the longest value `scrub_credentials` matches exactly this turn.
+
+    A caller that cuts output before scrubbing it needs this much text past the
+    cut for such a value to match whole. Counts only what the scrub matches, so
+    a long non-secret field does not hold output back. Returns 0 when there is none.
+    """
+    return max((len(value) for value in _exact_secret_values()), default=0)
+
+
+def exact_secret_prefix_at_end(text: str) -> int:
+    """Return the length of the longest end of `text` that starts, but does not complete, an exact-match secret.
+
+    Output cut mid-write can end partway through a secret, which the exact-value
+    scrub cannot see. Call it on scrubbed text, so a whole secret at the end is
+    already a placeholder. Returns 0 when the end starts no such value.
+    """
+    longest = 0
+    for value in _exact_secret_values():
+        for length in range(min(len(value) - 1, len(text)), longest, -1):
+            if text.endswith(value[:length]):
+                longest = length
+                break
+    return longest
+
+
+def exact_secret_suffix_at_start(text: str) -> int:
+    """Return the length of the longest start of `text` that ends, but does not complete, an exact-match secret.
+
+    The start-of-text counterpart of `exact_secret_prefix_at_end`, for output
+    whose beginning was dropped. Call it on scrubbed text. Returns 0 when the
+    start ends no such value.
+    """
+    longest = 0
+    for value in _exact_secret_values():
+        for length in range(min(len(value) - 1, len(text)), longest, -1):
+            if text.startswith(value[-length:]):
+                longest = length
+                break
+    return longest
+
+
+def scrub_output(text: str) -> str:
+    """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
+
+    Runs `scrub_credentials`, then redacts OAuth tokens that no configured
+    value names: JWTs, Google `ya29.` tokens, `Bearer` values, and the values
+    of access/refresh/id token and client secret keys. Use it on output only;
+    inbound user text keeps `scrub_credentials` so pasted connect
+    credentials still reach the vault.
+    """
+    text = scrub_credentials(text)
+    text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
+    text = _QUOTED_TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    return _TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
 
 
 def unscrub_marker(vault: "DataVault", marker: str) -> str | None:
@@ -532,6 +640,9 @@ def collect_datasource_catalog(
 
     `slugs`, when given, leaves every other connection out before its record
     is read: a remote vault fetches each record over the network.
+
+    An unnamed connection's block shows its engine as the label, suffixed to
+    stay unique within the returned catalog; its `label` field stays "".
     """
     _reject_bare_string(slugs)
     try:
@@ -561,12 +672,14 @@ def collect_datasource_catalog(
     # for a Picker-only connection exactly as it always has.
     #
     # One registry per call, and one lookup per engine: DatasourceRegistry()
-    # parses the full built-in + user datasources.md on every construction
-    # (no caching), and this runs on every chat turn.
+    # re-reads the built-in and user datasources.md and builds every engine on
+    # each construction (only the YAML parse is cached), and this runs on
+    # every chat turn.
     registry = DatasourceRegistry()
     engine_names: dict[str, str] = {}
     notes: dict[str, str] = {}
     connections: list[CatalogConnection] = []
+    created_at: list[str] = []
     for c in conns:
         engine = c["engine"]
         slug = f"{engine}-{c['name']}"
@@ -601,8 +714,8 @@ def collect_datasource_catalog(
             fields.get("_label", "")
         ).strip()
 
-        lines = [f"\n### Slug: `{slug}` — Label: {user_label or '(none)'}"]
-        lines.append(f"Engine: {engine_name}")
+        # The slug/label header is prepended below, once every stored label is known.
+        lines = [f"Engine: {engine_name}"]
         # Same non-secret allowlist `_connection_identity()` encodes
         # (host/database/email, secure_keys-gated) — inlined here as
         # independent lines instead of one collapsed string.
@@ -626,6 +739,7 @@ def collect_datasource_catalog(
             fields.get("auth_type") == "oauth"
             or bool(_parse_picked_files(fields.get("_picked_files")))
         )
+        created_at.append(str(c.get("created_at") or ""))
         connections.append(
             CatalogConnection(
                 slug=slug,
@@ -636,6 +750,25 @@ def collect_datasource_catalog(
                 footer=_GOOGLE_DRIVE_PARAGRAPH if google_drive_access else "",
             )
         )
+    # An unnamed connection shows its engine, not "(none)", since "(none)" made
+    # the model estimate figures it lacked. The suffix rule matches
+    # ensure_unique_user_label, against rendered connections only, because
+    # `slugs` must not trigger reads of records it leaves out. Oldest first,
+    # so adding a connection never renames one the model already knows.
+    labels = [conn.label for conn in connections]
+    taken = {label for label in labels if label}
+    unnamed = [i for i, label in enumerate(labels) if not label]
+    for i in sorted(unnamed, key=lambda i: (created_at[i], connections[i].slug)):
+        base = connections[i].engine or connections[i].slug
+        label, n = base, 2
+        while label in taken:
+            label, n = f"{base} {n}", n + 1
+        taken.add(label)
+        labels[i] = label
+    connections = [
+        replace(conn, block=f"\n### Slug: `{conn.slug}` — Label: {label}\n{conn.block}")
+        for conn, label in zip(connections, labels)
+    ]
     return DatasourceCatalog(connections=tuple(connections), notes=notes)
 
 

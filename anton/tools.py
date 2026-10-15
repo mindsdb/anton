@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
-import urllib.error
 import uuid
 from typing import TYPE_CHECKING
 
@@ -28,20 +27,6 @@ SECRET_NAME_TOKENS = (
 # User messages are scrubbed too, so the model may see these and echo them
 # back as known_variables — they must never be saved as real credentials.
 SCRUBBED_VALUE_RE = re.compile(r"^\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]$")
-
-
-def _report_missing_error(exc: Exception) -> bool:
-    """True when POST /upload itself answered 404 for the report_id we tried
-    to update.
-
-    Only this case justifies re-publishing without report_id. Anything else —
-    a 5xx, a failed or timed-out async job, and a 404 from the job status poll
-    (the record expired or publish_url is wrong while the job may still be
-    finishing) — must not: a second POST would create a duplicate artifact
-    and double the wait. PublishJobFailed is therefore never a
-    retry trigger, whatever its status_code.
-    """
-    return isinstance(exc, urllib.error.HTTPError) and exc.code == 404
 
 
 def looks_secret(field_name: str) -> bool:
@@ -614,7 +599,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         return f"{title} is at {file_path} but no previewable HTML was found."
 
     # Publish flow
-    from anton.publisher import publish
+    import urllib.error
+
+    from anton.publisher import ArtifactOwnedByOtherUserError, publish
 
     if not settings.minds_api_key:
         console.print()
@@ -704,13 +691,24 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
                 access=eff_access,
                 pwd_version=pwd_version,
                 access_version=access_version,
+                previous_access=prev,
+            )
+        except ArtifactOwnedByOtherUserError as e:
+            console.print(f"  [anton.error]{e}[/]")
+            console.print()
+            return (
+                f"PUBLISH FAILED: {e} Do NOT call this tool again for this artifact "
+                "and do not publish it under a new report on your own. Tell the user "
+                "that the existing link belongs to another account, and that they can "
+                "publish their own copy by running /publish and choosing 'new'."
             )
         except Exception as e:
-            if report_id and _report_missing_error(e):
-                # The report may have been deleted server-side (404) — retry
-                # without report_id to create a fresh one. Note: the current
-                # upload lambda treats an unknown report_id as "new with this id"
-                # and never answers 404, so this branch is compatibility-only.
+            # Only a 404 from the upload itself says the report is gone, so
+            # publishing it afresh without report_id is safe. After a timeout,
+            # a 5xx, a 409 or a failed or timed-out async job the report may
+            # still exist, and a retry would publish a copy under a new URL.
+            gone = isinstance(e, urllib.error.HTTPError) and e.code == 404
+            if report_id and gone:
                 try:
                     result = publish(
                         publish_target,
@@ -748,6 +746,9 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # instead of creating a new report (owner-side; unified location + key).
     if returned_report_id:
         entry = dict(owner_side)
+        if result.get("password_hash"):
+            # Sent again by the next publish while the password is unchanged.
+            entry["password_hash"] = result["password_hash"]
         entry.update({
             "report_id": returned_report_id,
             "url": view_url,
@@ -785,7 +786,8 @@ PUBLISH_TOOL = ToolDef(
             "file_path": {
                 "type": "string",
                 "description": (
-                    "Path to the artifact FOLDER (e.g. artifacts/<slug>). The tool reads "
+                    "The artifact's folder: the absolute path that create_artifact or "
+                    "generate_artifact returned, or the artifact's slug. The tool reads "
                     "the folder's metadata.json to decide how to publish: fullstack apps "
                     "publish the whole folder, static reports publish their primary file. "
                     "A path to a file inside the artifact also works."

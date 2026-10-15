@@ -35,6 +35,12 @@ from anton.core.llm.provider import (
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 
 
+@pytest.fixture(autouse=True)
+def _verify_single_round_turns(monkeypatch):
+    # These tests drive the verifier through single-tool-round turns.
+    monkeypatch.setenv("ANTON_VERIFY_MIN_TOOL_ROUNDS", "1")
+
+
 @pytest.fixture()
 def workspace():
     base = Path(__file__).resolve().parents[1] / ".pytest-workspace"
@@ -235,17 +241,18 @@ async def test_late_finalizer_cannot_close_a_newer_turns_books(workspace):
 
 
 async def test_exhausted_retries_is_not_reported_as_completed(workspace):
-    """Every LLM call failing → the retry loop yields an apology and breaks.
-    Nothing is in flight in the finally, so the default ``completed`` used to
-    hold — filing the most common failure mode as a clean turn.
+    """Every LLM call failing → the retry loop asks the model to explain, that
+    call fails too, and the turn raises. The default ``completed``
+    used to hold here — filing the most common failure mode as a clean turn.
     """
     mock_llm = make_mock_llm()
     mock_llm.plan_stream = MagicMock(side_effect=RuntimeError("provider down"))
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
 
     with patch("anton.analytics.send_event") as send:
-        async for _ in session.turn_stream("do something"):
-            pass
+        with pytest.raises(RuntimeError):
+            async for _ in session.turn_stream("do something"):
+                pass
 
     assert _ended_by(send) == "retry_exhausted"
 
@@ -307,6 +314,10 @@ async def test_round_cap_reports_the_cap_not_cap_plus_one(workspace):
 
     kwargs = send.call_args.kwargs
     assert kwargs["ended_by"] == "round_cap"
+    # The cap pause forbids guessing, like the spend-ceiling pause.
+    notes = [m["content"] for m in session.history
+             if m.get("role") == "user" and "tool-call rounds on this turn" in str(m.get("content"))]
+    assert notes and "you could not find it" in notes[-1]
     expected = 2 + _ROUND_CAP_GRACE_ROUNDS
     assert kwargs["rounds"] == str(expected), (
         f"effective cap is {expected}, reported {kwargs['rounds']}"
@@ -791,8 +802,9 @@ async def test_retry_exhausted_names_the_exception_class(workspace):
     )
 
     with patch("anton.analytics.send_event") as send:
-        async for _ in session.turn_stream("do something"):
-            pass
+        with pytest.raises(RuntimeError):
+            async for _ in session.turn_stream("do something"):
+                pass
 
     assert _ended_by(send) == "retry_exhausted"
     assert _error_type(send) == "RuntimeError"
@@ -811,8 +823,9 @@ async def test_retry_exhausted_reports_the_specific_provider_exception(workspace
     )
 
     with patch("anton.analytics.send_event") as send:
-        async for _ in session.turn_stream("do something"):
-            pass
+        with pytest.raises(TimeoutError):
+            async for _ in session.turn_stream("do something"):
+                pass
 
     assert _ended_by(send) == "retry_exhausted"
     assert _error_type(send) == "TimeoutError"

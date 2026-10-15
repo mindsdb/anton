@@ -934,7 +934,7 @@ The memory + skills + cerebellum + ACC systems are wired into `ChatSession` (def
 | `scratchpad_result` | After `pad.execute()` returns a non-killed cell | `core/tools/tool_handlers.py` |
 | `scratchpad_empty_code` | When `prepare_scratchpad_exec` rejects the call | `core/tools/tool_handlers.py` |
 | `scratchpad_reset` | After `pad.reset()` in the reset action | `core/tools/tool_handlers.py` |
-| `scratchpad_killed` | After `pad.execute()` returns a cell whose `error` starts with `Cancelled`/`Cell timed out`/`Cell killed` | `core/tools/tool_handlers.py` |
+| `scratchpad_killed` | After `pad.execute()` returns a cell whose `error` starts with `Cancelled`/`Cell timed out`/`Cell killed`. Host task cancellation ends the turn after recording the cell, without firing this event. The CLI returns the killed cell and continues, so the event still fires | `core/tools/tool_handlers.py` |
 | `tool_call` | At top of per-tc loop in `_stream_and_handle_tools` | `core/session.py` |
 | `tool_result` | After result_text is finalized, before `tool_results.append` | `core/session.py` |
 | `history_repair` | After `_seal_dangling_tool_uses` actually inserts synthetic blocks | `core/session.py` |

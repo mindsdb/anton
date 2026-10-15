@@ -6,8 +6,6 @@ from typing import NoReturn
 
 import anthropic
 
-from anton.utils.datasources import scrub_credentials
-
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -29,7 +27,9 @@ from .provider import (
     Usage,
     classify_404,
     classify_content_rejection,
+    classify_markup_bad_request,
     classify_transient,
+    log_transient_provider_error,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
@@ -51,6 +51,12 @@ def _raise_for_bad_request(exc: anthropic.BadRequestError) -> None:
     matches a 400 first and its bare ``raise`` re-raises out of the whole
     ``try`` — ``_raise_for_status_error`` never sees a 400, on either provider.
     """
+    # First, because the checks below read the body as an API error and a
+    # markup body is not one.
+    misrouted = classify_markup_bad_request(exc.body)
+    if misrouted is not None:
+        raise misrouted from exc
+
     msg = str(exc).lower()
     if "prompt is too long" in msg or "context limit" in msg:
         raise ContextOverflowError(str(exc)) from exc
@@ -193,11 +199,7 @@ def _raise_for_status_error(
         velocity_confirmed=_velocity,
     )
     if transient is not None:
-        logger.warning(
-            "transient provider error (%s): status=%s retry_after=%s body=%s",
-            transient.code, exc.status_code, transient.retry_after,
-            scrub_credentials(str(exc.body))[:500],
-        )
+        log_transient_provider_error(logger=logger, error=transient)
         raise transient from exc
 
     raise ConnectionError(

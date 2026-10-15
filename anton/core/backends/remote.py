@@ -15,6 +15,7 @@ from typing import AsyncIterator
 import httpx2 as httpx
 
 from anton.core.backends.base import Cell, ScratchpadRuntime
+from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 
 
 class RemoteScratchpadRuntime(ScratchpadRuntime):
@@ -128,12 +129,16 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
         estimated_seconds: int = 0,
     ):
         """Execute code via SSE — yields progress strings then a final Cell."""
+        trace = get_trace_context()
         body = {
             "name": self.name,
             "code": code,
             "description": description,
             "estimated_time": estimated_time,
             "estimated_seconds": estimated_seconds,
+            # The service restores this context around execution. Keep it out
+            # of code so the cell's source and notebook remain unchanged.
+            "trace_context": json.loads(trace_context_to_json(trace)) if trace is not None else None,
         }
 
         async for event in self._sse("/scratchpad/execute-stream", body):
@@ -153,7 +158,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     estimated_time=cell_data.get("estimated_time", estimated_time),
                     logs=cell_data.get("logs", ""),
                 )
-                self.cells.append(cell)
+                cell = self._record_cell(cell)
                 yield cell
 
             elif event_type == "error":
@@ -165,7 +170,7 @@ class RemoteScratchpadRuntime(ScratchpadRuntime):
                     error=error_msg,
                     description=description,
                 )
-                self.cells.append(cell)
+                cell = self._record_cell(cell)
                 yield cell
 
     async def cleanup(self) -> None:

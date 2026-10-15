@@ -40,6 +40,7 @@ from anton.core.llm.provider import (
     ModelUnavailableError,
     ProviderAuthError,
     ProviderErrorBody,
+    RequestRefusedError,
     TokenLimitExceeded,
     TransientProviderError,
     WalletEmptyError,
@@ -541,6 +542,14 @@ def test_content_too_large_is_a_content_validation_error():
     parent, so neither had to learn the subtype exists."""
     assert issubclass(ContentTooLargeError, ContentValidationError)
     assert issubclass(ContentTooLargeError, ConnectionError)
+
+
+def test_request_refused_error_is_not_a_connection_error():
+    """The opposite of its siblings, on purpose. A ConnectionError reads as a
+    failure a retry may fix: the completion verifier books one as transient,
+    so a refused verdict call would never latch and would be re-sent on every
+    turn. A refused request fails the same way on every retry."""
+    assert not issubclass(RequestRefusedError, ConnectionError)
 
 
 def test_an_oversized_non_image_payload_is_not_a_content_rejection():
@@ -1410,8 +1419,8 @@ def test_a_request_less_response_does_not_shadow_a_foreign_host():
     "api-pr123.dev.mindshub.ai",    # ephemeral per-PR env
     "llm.mdb.ai",                   # legacy vanity gateway
     "llm.staging.mdb.ai",
-    "writer.mdb.ai",                # white-label surfaces
-    "terabase.dev.mdb.ai",
+    "example.mdb.ai",               # vanity host shapes
+    "example.dev.mdb.ai",
     "view.mindshub.ai",
 ])
 def test_every_real_gateway_host_is_trusted(host):

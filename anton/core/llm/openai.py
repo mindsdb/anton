@@ -12,8 +12,6 @@ from contextlib import aclosing
 
 from openai import AsyncAzureOpenAI
 
-from anton.utils.datasources import scrub_credentials
-
 from .provider import register_provider, safe_parse_tool_input, unregister_provider
 from .provider import (
     ContextOverflowError,
@@ -37,7 +35,11 @@ from .provider import (
     Usage,
     classify_404,
     classify_content_rejection,
+    classify_markup_bad_request,
+    classify_request_refusal,
+    classify_responses_failure,
     classify_transient,
+    log_transient_provider_error,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
@@ -72,6 +74,65 @@ def _error_body(exc: "openai.APIStatusError") -> object:
     return raw
 
 
+def _rejects_reasoning_summary(exc: "openai.BadRequestError") -> bool:
+    """True when a 400 refuses ``reasoning.summary`` itself (e.g. an account
+    that must verify its organisation before it may request summaries)."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    param = err.get("param")
+    if param:
+        return param == "reasoning.summary"
+    message = str(err.get("message") or "").strip().lower()
+    return message.startswith(
+        "your organization must be verified to generate reasoning summaries."
+    )
+
+
+def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
+    """True when a 400 refuses the explicit ``prompt_cache_breakpoint`` field,
+    e.g. a model or endpoint that does not support explicit breakpoints."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    text = f"{err.get('param') or ''} {err.get('message') or ''}"
+    return "prompt_cache_breakpoint" in text
+
+
+# (base_url, model) pairs that refused an explicit cache breakpoint. Process-wide
+# because Cowork builds a provider per turn: one refusal is enough.
+_CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
+
+
+def _shared_prompt_input(static: str, session: str) -> list[dict]:
+    """The system prompt as two developer messages, the shared part cacheable."""
+    return [
+        {"role": "developer", "type": "message", "content": [
+            {"type": "input_text", "text": static,
+             "prompt_cache_breakpoint": {"mode": "explicit"}},
+        ]},
+        {"role": "developer", "type": "message", "content": session},
+    ]
+
+
+def _has_cache_breakpoint(kwargs: dict) -> bool:
+    first = (kwargs.get("input") or [None])[0]
+    content = first.get("content") if isinstance(first, dict) else None
+    return (
+        isinstance(content, list) and bool(content)
+        and isinstance(content[0], dict) and "prompt_cache_breakpoint" in content[0]
+    )
+
+
+def _without_cache_breakpoint(kwargs: dict) -> dict:
+    """``kwargs`` with the shared-prompt split undone: back to ``instructions``."""
+    static = kwargs["input"][0]["content"][0]["text"]
+    session = kwargs["input"][1]["content"]
+    return dict(kwargs, instructions=static + session, input=kwargs["input"][2:])
+
+
 def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     """Classify the 400s we can name. Returns when we cannot, so the caller
     re-raises the SDK error exactly as it does today.
@@ -91,18 +152,38 @@ def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     terminal today. Naming only what we can name leaves every other 400
     byte-identical; the generic-fallback question is ENG-1283's.
     """
+    # First, because the checks below read the body as an API error and a
+    # markup body is not one.
+    misrouted = classify_markup_bad_request(_error_body(exc))
+    if misrouted is not None:
+        raise misrouted from exc
+
     msg = str(exc).lower()
     if "context_length_exceeded" in msg or "maximum context length" in msg:
         raise ContextOverflowError(str(exc)) from exc
 
     parsed = ProviderErrorBody.parse(_error_body(exc))
+    message = parsed.envelope.message or parsed.top.message
+    param = parsed.envelope.param or parsed.top.param
     content = classify_content_rejection(
         error_type=parsed.envelope.type or parsed.top.type,
-        message=parsed.envelope.message or parsed.top.message,
-        param=parsed.envelope.param or parsed.top.param,
+        message=message,
+        param=param,
     )
     if content is not None:
         raise content from exc
+
+    # A request the provider refuses outright: a refused reasoning effort, such
+    # as function tools on chat.completions for a model that reasons by
+    # default, or a prompt its policy blocks. Re-sending the identical request
+    # cannot pass, so it fails the turn instead of being re-sent and then
+    # ending as prose with no error shown. Last, so the rungs above keep their
+    # recoveries.
+    refusal = classify_request_refusal(
+        status_code=exc.status_code, code=parsed.code, message=message, param=param,
+    )
+    if refusal is not None:
+        raise refusal from exc
 
 
 def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoReturn:
@@ -306,11 +387,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         velocity_confirmed=_velocity,
     )
     if transient is not None:
-        logger.warning(
-            "transient provider error (%s): status=%s retry_after=%s body=%s",
-            transient.code, exc.status_code, transient.retry_after,
-            scrub_credentials(str(exc.body))[:500],
-        )
+        log_transient_provider_error(logger=logger, error=transient)
         raise transient from exc
 
     raise ConnectionError(
@@ -587,6 +664,11 @@ def _translate_tools_to_responses(tools: list[dict]) -> list[dict]:
     The Responses API uses a flat shape (``{"type": "function", "name": ...,
     "description": ..., "parameters": ...}``) rather than the chat.completions
     nested shape under a ``function`` key.
+
+    ``strict`` is sent as False on every tool. chat.completions reads an
+    omitted ``strict`` as non-strict, while the Responses API normalizes an
+    omitted one into strict mode, which can change what the model sends for
+    optional fields. False keeps both transports on the same schema rules.
     """
     result: list[dict] = []
     for tool in tools:
@@ -596,6 +678,7 @@ def _translate_tools_to_responses(tools: list[dict]) -> list[dict]:
                 "name": tool["name"],
                 "description": tool.get("description", ""),
                 "parameters": tool.get("input_schema", {}),
+                "strict": False,
             }
         )
     return result
@@ -697,9 +780,16 @@ def _translate_assistant_blocks_to_responses(blocks: list[dict]) -> list[dict]:
 def _translate_user_blocks_to_responses(
     blocks: list[dict], supports_vision: bool = True
 ) -> list[dict]:
-    """Convert user content blocks (text, tool_result, image) to Responses API items."""
+    """Convert user content blocks (text, tool_result, image) to Responses API items.
+
+    Images a tool returned are not dropped: like the chat.completions path,
+    they are deferred to one user message after ALL ``function_call_output``
+    items, so the outputs for a multi-call round stay contiguous and each
+    output stays a plain string.
+    """
     result: list[dict] = []
     content_parts: list[dict] = []
+    deferred_img_parts: list[dict] = []
 
     for block in blocks:
         if block.get("type") == "tool_result":
@@ -709,9 +799,21 @@ def _translate_user_blocks_to_responses(
                 content_parts = []
             tool_content = block.get("content", "")
             if isinstance(tool_content, list):
-                tool_content = "\n".join(
-                    b.get("text", "") for b in tool_content if b.get("type") == "text"
-                )
+                texts = [b.get("text", "") for b in tool_content if b.get("type") == "text"]
+                images = [
+                    part for part in map(_responses_image_part, tool_content) if part
+                ] if supports_vision else []
+                if images and not deferred_img_parts:
+                    deferred_img_parts.append(
+                        {"type": "input_text", "text": "Image(s) returned by previous tool call:"}
+                    )
+                deferred_img_parts.extend(images)
+                if texts:
+                    tool_content = "\n".join(texts)
+                elif images:
+                    tool_content = "Image attached in next user message."
+                else:
+                    tool_content = ""
             result.append(
                 {
                     "type": "function_call_output",
@@ -721,22 +823,40 @@ def _translate_user_blocks_to_responses(
             )
         elif block.get("type") == "text":
             content_parts.append({"type": "input_text", "text": block.get("text", "")})
-        elif block.get("type") == "image" and supports_vision:
-            source = block.get("source", {})
-            if source.get("type") == "base64":
-                media_type = source.get("media_type", "image/png")
-                data = source.get("data", "")
-                content_parts.append(
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{media_type};base64,{data}",
-                    }
-                )
+        elif supports_vision and (part := _responses_image_part(block)):
+            content_parts.append(part)
+
+    # Flush deferred images after all function_call_output items.
+    if deferred_img_parts:
+        result.append(_user_message_from_parts(deferred_img_parts))
 
     if content_parts:
         result.append(_user_message_from_parts(content_parts))
 
     return result
+
+
+def _responses_image_part(block: dict) -> dict | None:
+    """An Anthropic ``image`` or OpenAI ``image_url`` block as an ``input_image`` part.
+
+    ``image_url`` blocks come from scratchpad code that built the message in
+    OpenAI shape; the chat.completions path passes them through, so they must
+    reach the model here too.
+    """
+    if block.get("type") == "image":
+        source = block.get("source", {})
+        if source.get("type") != "base64":
+            return None
+        media_type = source.get("media_type", "image/png")
+        url = f"data:{media_type};base64,{source.get('data', '')}"
+    elif block.get("type") == "image_url":
+        image_url = block.get("image_url")
+        url = image_url.get("url", "") if isinstance(image_url, dict) else (image_url or "")
+        if not url:
+            return None
+    else:
+        return None
+    return {"type": "input_image", "image_url": url, "detail": "auto"}
 
 
 def _user_message_from_parts(parts: list[dict]) -> dict:
@@ -880,6 +1000,11 @@ class OpenAIProvider(LLMProvider):
     FLAVOR_OPENAI = "openai"  # Direct OpenAI BYOK — uses Responses API.
     FLAVOR_MINDS_PASSTHROUGH = "minds-passthrough"  # mdb.ai — chat.completions w/ native tools.
     FLAVOR_OPENAI_COMPATIBLE_GENERIC = "openai-compatible-generic"  # third-party.
+    # The Responses transport (FLAVOR_OPENAI) reports truncation and failures,
+    # forwards tool_result images and attaches trace headers. Hosts that pin
+    # anton to a branch check this before moving direct OpenAI onto it; older
+    # builds lacked those and should stay on chat.completions.
+    RESPONSES_TRANSPORT_READY = True
 
     async def aclose(self) -> None:
         client = getattr(self, "_client", None)
@@ -915,6 +1040,9 @@ class OpenAIProvider(LLMProvider):
         # chat.completions path and as ``reasoning={"effort": ...}`` on the
         # Responses API path. None = the model's default.
         self._reasoning_effort = reasoning_effort
+        # Responses only: ask for a reasoning summary until the account refuses
+        # one (see _create_response), then stop asking for this provider's life.
+        self._reasoning_summary = True
         # Whether to attach langfuse-style headers (Langfuse-Session-Id,
         # Langfuse-Tags, Langfuse-Metadata) to outbound requests. Default-on
         # only for the MindsHub-backed deployment, which is the curated
@@ -1042,7 +1170,7 @@ class OpenAIProvider(LLMProvider):
         """
         if not self._emit_trace_headers:
             return None
-        from .tracing import get_trace_context, surface_tag
+        from .tracing import get_call_role, get_trace_context, surface_tag
 
         ctx = get_trace_context()
         if ctx is None:
@@ -1080,6 +1208,10 @@ class OpenAIProvider(LLMProvider):
         # tag convention. The tag is what a cheap population count uses.
         if ctx.surface:
             extra["surface"] = ctx.surface
+        # So usage can be summed per role even when roles share a model.
+        role = get_call_role() or self.trace_role
+        if role:
+            extra["role"] = role
         # Our own build (ENG-1279). The router lifts this onto the trace's
         # native `version` field, the only form the Langfuse metrics API can
         # group by — so "did this fix change behaviour in production?" becomes
@@ -1304,10 +1436,17 @@ class OpenAIProvider(LLMProvider):
                 # `reasoning_content` is the de facto convention several
                 # OpenAI-compatible reasoning gateways use (DeepSeek, vLLM's
                 # reasoning parser, and possibly the mdb.ai passthrough for
-                # non-Anthropic reasoning models). Read defensively via
-                # getattr since the SDK's Delta model doesn't declare it.
-                reasoning_delta = getattr(delta, "reasoning_content", None)
-                if reasoning_delta:
+                # non-Anthropic reasoning models). OpenRouter and Ollama name
+                # the same field `reasoning`. Read both: thinking under either
+                # name shows in the thinking block, and it restarts the
+                # model-call deadline, which only an event resets. Read
+                # defensively via getattr since the SDK's Delta model doesn't
+                # declare either.
+                reasoning_delta = (
+                    getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                )
+                if isinstance(reasoning_delta, str) and reasoning_delta:
                     yield StreamReasoningDelta(text=reasoning_delta)
 
                 # Tool call deltas
@@ -1406,10 +1545,7 @@ class OpenAIProvider(LLMProvider):
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                logger.warning(
-                    "transient mid-stream provider error (%s): %s",
-                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
-                )
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
@@ -1514,7 +1650,18 @@ class OpenAIProvider(LLMProvider):
             "input": responses_input,
             "max_output_tokens": max_tokens,
         }
-        if system:
+        from .prompt_builder import SESSION_CONTEXT_MARKER
+
+        if (
+            self._flavor == self.FLAVOR_OPENAI
+            and system.count(SESSION_CONTEXT_MARKER) == 1
+            and (self._base_url or "", model) not in _CACHE_BREAKPOINT_REFUSED
+        ):
+            # The shared part ends in an explicit cache breakpoint, so it is read
+            # from cache by every session, not only by later turns of this one.
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            kwargs["input"] = _shared_prompt_input(static, SESSION_CONTEXT_MARKER + session) + responses_input
+        elif system:
             kwargs["instructions"] = system
         if self._reasoning_effort:
             # "summary": "auto" asks the Responses API to also stream a
@@ -1524,7 +1671,9 @@ class OpenAIProvider(LLMProvider):
             # all. Safe to always pair with effort: only sent when effort
             # is already set, which is itself gated to reasoning-capable
             # models by the caller (see AntonSettings.planning_reasoning_effort).
-            kwargs["reasoning"] = {"effort": self._reasoning_effort, "summary": "auto"}
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+            if self._reasoning_summary:
+                kwargs["reasoning"]["summary"] = "auto"
 
         merged_tools: list[dict] = []
         if tools:
@@ -1534,7 +1683,41 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice_to_responses(tool_choice)
+        # Same trace headers as the chat.completions path.
+        trace_headers = self._build_trace_headers()
+        if trace_headers:
+            kwargs["extra_headers"] = trace_headers
+        # `store` is left at the provider default on purpose. store=False was
+        # measured to slow every later prompt-cache hit on the prefix it
+        # wrote (gpt-6.1-sol, 2026-10-02: time to first text 2.5-2.8 s vs
+        # 1.75-1.9 s on identical prefixes), and this path depends on cross-
+        # call cache hits. Retention then follows the key owner's OpenAI
+        # organisation settings.
         return kwargs
+
+    async def _create_response(self, kwargs: dict):
+        """``responses.create``, retried once without the reasoning summary when
+        the account may not request one.
+
+        chat.completions never asks for a summary, so on that transport such an
+        account works; here the same account would get a 400 on every call. The
+        refusal happens before any output, so the retry is a clean re-issue.
+        """
+        try:
+            return await self._client.responses.create(**kwargs)
+        except openai.BadRequestError as exc:
+            if _has_cache_breakpoint(kwargs) and _rejects_cache_breakpoint(exc):
+                logger.warning("explicit prompt cache breakpoints refused for %s; continuing without them",
+                               kwargs.get("model"))
+                _CACHE_BREAKPOINT_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
+                return await self._create_response(_without_cache_breakpoint(kwargs))
+            reasoning = kwargs.get("reasoning") or {}
+            if "summary" not in reasoning or not _rejects_reasoning_summary(exc):
+                raise
+            logger.warning("reasoning summaries refused for this account; continuing without them")
+            self._reasoning_summary = False
+            retry = dict(kwargs, reasoning={k: v for k, v in reasoning.items() if k != "summary"})
+            return await self._client.responses.create(**retry)
 
     async def _complete_via_responses(
         self,
@@ -1558,7 +1741,7 @@ class OpenAIProvider(LLMProvider):
         )
 
         try:
-            response = await self._client.responses.create(**kwargs)
+            response = await self._create_response(kwargs)
         except openai.BadRequestError as exc:
             _raise_for_bad_request(exc)
             raise
@@ -1616,7 +1799,7 @@ class OpenAIProvider(LLMProvider):
 
         stream = None
         try:
-            stream = await self._client.responses.create(**kwargs)
+            stream = await self._create_response(kwargs)
             stream_started = True
             async for event in stream:
                 etype = getattr(event, "type", "")
@@ -1701,11 +1884,11 @@ class OpenAIProvider(LLMProvider):
                     if info["started"]:
                         yield StreamToolUseEnd(id=info["call_id"])
 
-                # Final completion event carries the resolved Response object
-                # with usage/stop_reason. We trust the structured parse here in
-                # case the streamed deltas missed something (e.g. server-tool
-                # calls produce text we already streamed but no function call).
-                elif etype == "response.completed":
+                # Terminal event carries the resolved Response object with
+                # usage/stop_reason. `incomplete` is the token-budget cut: it
+                # must report usage and "length" like `completed` reports
+                # its stop, or truncation recovery never sees it.
+                elif etype in ("response.completed", "response.incomplete"):
                     final_response = getattr(event, "response", None)
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
@@ -1716,8 +1899,21 @@ class OpenAIProvider(LLMProvider):
                                 cache_creation_tokens,
                             ) = _split_cached_input(usage)
                             output_tokens = getattr(usage, "output_tokens", 0) or 0
-                        stop_reason = getattr(final_response, "status", None)
+                        stop_reason = _responses_stop_reason(final_response)
                         served_model = getattr(final_response, "model", None) or served_model
+
+                # A failed response and a stream `error` event both arrive as
+                # ordinary events (the SDK only raises on a top-level `error`
+                # key). Unhandled, the stream just ended and the failure looked
+                # like an empty answer. Raised as the bare APIError the SDK
+                # raises for a mid-stream SSE error, so the handler below
+                # classifies it the same way (billing stop, a code that names
+                # its cause, transient, or stream_error with backoff).
+                elif etype in ("response.failed", "error"):
+                    error = (getattr(getattr(event, "response", None), "error", None)
+                             if etype == "response.failed" else event)
+                    body = _responses_error_body(error)
+                    raise openai.APIError(body["message"], _stream_request(stream), body=body)
         except openai.BadRequestError as exc:
             _raise_for_bad_request(exc)
             raise
@@ -1760,15 +1956,21 @@ class OpenAIProvider(LLMProvider):
             )
             if billing_stop is not None:
                 raise billing_stop from exc
+            # A code that names its cause gets that cause's handling instead of
+            # the incident backoff: compaction, the count-based retry for a rate
+            # limit, the image repair, or a visible refusal. Covers both the
+            # event raised above and an `error` event the SDK raised itself.
+            named = classify_responses_failure(
+                getattr(exc, "body", None), provider="The model provider", model=model,
+            )
+            if named is not None:
+                raise named from exc
             transient = classify_transient(
                 getattr(exc, "status_code", None), getattr(exc, "body", None),
                 provider="The model provider", model=model,
             )
             if transient is not None:
-                logger.warning(
-                    "transient mid-stream provider error (%s): %s",
-                    transient.code, scrub_credentials(str(getattr(exc, "body", "")))[:500],
-                )
+                log_transient_provider_error(logger=logger, error=transient)
                 raise transient from exc
             raise TransientProviderError(
                 "The model provider failed mid-response — try again in a moment.",
@@ -1778,6 +1980,22 @@ class OpenAIProvider(LLMProvider):
 
         finally:
             await _aclose_stream(stream)
+
+        # Same rule as the chat.completions reader (ENG-673): a stream that
+        # ended with no terminal event and produced nothing was cut, and must
+        # fail fast rather than hand back an empty answer.
+        if stop_reason is None:
+            if content_text or tool_calls:
+                logger.warning("responses stream ended with no terminal event but produced "
+                               "output — passing through")
+            else:
+                logger.warning("responses stream ended empty with no terminal event — "
+                               "treating as truncated")
+                raise TransientProviderError(
+                    "The model provider ended the response early — try again in a moment.",
+                    provider="The model provider", code="truncated_stream",
+                    session_backoff=False, model=model,
+                )
 
         yield StreamComplete(
             response=LLMResponse(
@@ -1796,6 +2014,42 @@ class OpenAIProvider(LLMProvider):
                 model=served_model,
             )
         )
+
+
+def _stream_request(stream):
+    """The httpx request behind an SDK stream, or None (fakes, odd transports)."""
+    try:
+        return stream.response.request
+    except Exception:
+        return None
+
+
+def _responses_stop_reason(response) -> str | None:
+    """The Responses API ``status`` as the stop reason the session reads.
+
+    A response cut at ``max_output_tokens`` comes back ``incomplete``; it is
+    reported as ``"length"`` (the chat.completions word) so ``looks_truncated``
+    and the session's truncation recovery fire on this transport too. Other
+    incomplete reasons (``content_filter``, ...) pass through by name.
+    """
+    status = getattr(response, "status", None)
+    if status != "incomplete":
+        return status
+    reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+    return "length" if reason in (None, "max_output_tokens") else reason
+
+
+def _responses_error_body(error) -> dict:
+    """``{"code", "message"}`` from a Responses ``error`` (object, dict or None).
+
+    No ``type`` key: the classifier reads ``type`` before ``code``, and the
+    Responses error event's ``type`` is the literal ``"error"``.
+    """
+    if isinstance(error, dict):
+        code, message = error.get("code"), error.get("message")
+    else:
+        code, message = getattr(error, "code", None), getattr(error, "message", None)
+    return {"code": code, "message": message or "The model provider failed the response."}
 
 
 def _parse_response_object(response, model: str) -> LLMResponse:
@@ -1839,7 +2093,19 @@ def _parse_response_object(response, model: str) -> LLMResponse:
     input_tokens, cache_read_tokens, cache_creation_tokens = _split_cached_input(usage)
     output_tokens = (getattr(usage, "output_tokens", 0) or 0) if usage else 0
 
-    status = getattr(response, "status", None)
+    if getattr(response, "status", None) == "failed":
+        body = _responses_error_body(getattr(response, "error", None))
+        named = classify_responses_failure(body, provider="The model provider", model=model)
+        if named is not None:
+            raise named
+        raise classify_transient(
+            None, body, provider="The model provider", model=model,
+        ) or TransientProviderError(
+            "The model provider failed the response — try again in a moment.",
+            provider="The model provider", code=body["code"] or "response_failed",
+            session_backoff=False, model=model,
+        )
+    status = _responses_stop_reason(response)
     raise_on_empty_response(
         content=content_text, tool_calls=tool_calls, stop_reason=status, model=model,
     )

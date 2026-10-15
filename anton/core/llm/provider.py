@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
+import re
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -279,6 +281,17 @@ class StreamReasoningDelta:
     text: str
 
 
+@dataclass
+class StreamTurnEnded:
+    """Last event of a turn that handed back before finishing.
+
+    `ended_by` is the turn's `TurnCost.ended_by` (e.g. `spend_ceiling`,
+    `round_cap`). Not sent for a completed, cancelled or failed turn.
+    """
+
+    ended_by: str
+
+
 StreamEvent = (
     StreamTextDelta
     | StreamToolUseStart
@@ -291,6 +304,7 @@ StreamEvent = (
     | StreamAskUser
     | StreamAskUserAnswered
     | StreamReasoningDelta
+    | StreamTurnEnded
 )
 
 
@@ -431,20 +445,26 @@ def safe_parse_tool_input(raw_json: str) -> tuple[dict, str | None, bool]:
     try:
         parsed = _json.loads(raw_json)
     except _json.JSONDecodeError as exc:
-        # Try the repair pass before giving up entirely.
+        # Try the repair pass before giving up entirely. Either way the log
+        # names the decoder's message and position, never the arguments: they
+        # are model-authored and can hold SQL values or credentials. The
+        # exception stays out of the args too, because its `doc` is the whole
+        # raw body. Streamed deltas can split a surrogate pair, and
+        # "surrogatepass" counts a lone half instead of raising.
+        raw_bytes = len(raw_json.encode("utf-8", "surrogatepass"))
         repair = _try_repair_tool_json(raw_json)
         if repair is not None:
             repaired, truncated = repair
             _logging.getLogger(__name__).info(
-                "Tool-use input JSON was malformed (%s) but repaired "
-                "successfully. Raw bytes: %d, truncated: %s.",
-                exc, len(raw_json), truncated,
+                "Tool-use input JSON was malformed (%s: line %d column %d (char %d)) "
+                "but repaired successfully. Raw bytes: %d, truncated: %s.",
+                exc.msg, exc.lineno, exc.colno, exc.pos, raw_bytes, truncated,
             )
             return repaired, None, truncated
         _logging.getLogger(__name__).warning(
-            "Tool-use input JSON was malformed and unrecoverable (%s). "
-            "Raw bytes: %d, head: %r",
-            exc, len(raw_json), raw_json[:160],
+            "Tool-use input JSON was malformed and unrecoverable "
+            "(%s: line %d column %d (char %d)). Raw bytes: %d",
+            exc.msg, exc.lineno, exc.colno, exc.pos, raw_bytes,
         )
         return {}, str(exc), False
     # Anthropic occasionally emits a top-level scalar (e.g. a string
@@ -850,6 +870,41 @@ class TransientProviderError(ConnectionError):
         self.session_backoff = session_backoff
 
 
+def log_transient_provider_error(*, logger: logging.Logger, error: TransientProviderError) -> None:
+    """Log classified retry metadata without provider bodies or exception text.
+
+    Provider error bodies can echo credentials, prompts and tool arguments, and
+    a Responses failure builds its TransientProviderError from the body's own
+    `code`. So the line names a code only from the closed transient vocabulary
+    and logs `unrecognized` for anything else.
+    """
+    logger.warning(
+        "transient provider error error_code=%s status=%s retry_after=%s session_backoff=%s",
+        _loggable_transient_code(code=error.code), _log_status(status=error.status_code),
+        error.retry_after, error.session_backoff,
+    )
+
+
+# `http_<status>` exactly as classify_transient mints it: a 5xx status in ASCII
+# digits. provider_failure_kind matches codes against it, so analytics and the
+# log line accept the same shapes.
+_MINTED_HTTP_CODE = re.compile(r"http_5[0-9]{2}")
+
+
+def _loggable_transient_code(*, code: object) -> str:
+    """Return `code` when it is a transient code anton mints, else `unrecognized`.
+
+    Only an exact str counts: a subclass could override `__eq__` to match the
+    vocabulary or `__str__` to render other text in the log line.
+    """
+    return code if type(code) is str and provider_failure_kind(code) else "unrecognized"
+
+
+def _log_status(*, status: object) -> int | str:
+    """An HTTP status for a log line: a real status code, else `unknown`."""
+    return status if type(status) is int and 100 <= status <= 599 else "unknown"
+
+
 class ProviderOverloadedError(ConnectionError):
     """Terminal form of a transient failure: the retry budget was exhausted.
 
@@ -929,7 +984,7 @@ _MINDSHUB_BILLING_CTA = (
 # every environment and vanity host is a subdomain of one of them:
 # prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
 # per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
-# `llm.mdb.ai`, `llm.staging.mdb.ai`, `writer.mdb.ai`, `terabase.dev.mdb.ai`,
+# `llm.mdb.ai`, `llm.staging.mdb.ai`, vanity hosts under `*.mdb.ai` and `*.dev.mdb.ai`,
 # `view.mindshub.ai`. Terraform declares no other apex zone, and the wildcards
 # `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
 # positive cases are pinned in tests/test_status_error_mapper.py so this
@@ -1280,6 +1335,24 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     return secs
 
 
+def _rate_limited(
+    *, provider: str, model: str, velocity_confirmed: bool,
+    retry_after: float | None, status_code: int | None,
+) -> TransientProviderError:
+    """The rate-limit error, shared by the 429 classifier and the Responses one.
+
+    Only a confirmed velocity limit earns the session wait and keeps the
+    server's interval hint; see :func:`classify_transient`.
+    """
+    return TransientProviderError(
+        f"{provider or 'The model provider'} is rate-limiting requests.",
+        provider=provider, code="rate_limited",
+        session_backoff=velocity_confirmed,
+        retry_after=retry_after if velocity_confirmed else None,
+        model=model, status_code=status_code,
+    )
+
+
 def classify_transient(
     status_code: int | None,
     body: Any,
@@ -1370,12 +1443,9 @@ def classify_transient(
         # minute", we immediately sent more. This is the one failure class
         # where waiting is both necessary and sufficient, so it waits — for the
         # interval the server named, when it named one.
-        return TransientProviderError(
-            f"{provider or 'The model provider'} is rate-limiting requests.",
-            provider=provider, code="rate_limited",
-            session_backoff=velocity_confirmed,
-            retry_after=retry_after if velocity_confirmed else None,
-            model=model, status_code=status_code,
+        return _rate_limited(
+            provider=provider, model=model, velocity_confirmed=velocity_confirmed,
+            retry_after=retry_after, status_code=status_code,
         )
     return None
 
@@ -1515,6 +1585,88 @@ class ContentTooLargeError(ContentValidationError):
         super().__init__(message, code=code)
 
 
+class RequestRefusedError(Exception):
+    """The provider refused the request itself, so the identical request fails
+    identically every time: a setting the model does not accept (function tools
+    with a reasoning effort on chat.completions, or an effort value it does not
+    know), or a prompt its policy blocks (``content_filter`` or
+    ``invalid_prompt``, as a 400 or as an in-band Responses failure).
+
+    A re-send is rebuilt from the same settings and history, so it fails the
+    same way. The session's explain-the-failure call after the re-sends sends
+    no tools. For a refused effort it can pass, and its prose then ends the
+    turn as the answer. For a blocked prompt it is refused too, and the raw
+    provider error ends the turn as prose. Either way the host shows no error.
+    So the session ends the turn on the first refusal, and the host shows this
+    one.
+
+    ``code`` names the refusal: ``parameter_refused`` for a refused setting, or
+    the provider's own code for a refused prompt. ``status_code`` is the HTTP
+    status it was classified from, and ``None`` for a failure inside a 200
+    stream.
+
+    Not a ``ConnectionError``, unlike most types here: callers read that base
+    as a failure a retry may fix (the verifier counts it as transient), and a
+    retry cannot fix this one. The class NAME is what survives a hosted turn
+    (``cloud_turn.__main__._scrub``).
+    """
+
+    def __init__(self, message: str, *, code: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
+def _describe_seconds(*, seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+    if seconds == int(seconds):
+        whole = int(seconds)
+        return f"{whole} second" if whole == 1 else f"{whole} seconds"
+    return f"{seconds:g} seconds"
+
+
+class ModelCallTimeoutError(Exception):
+    """A model call sent no output for its whole idle deadline, so
+    ``LLMClient`` stopped it.
+
+    The deadline restarts with every event the provider sends and runs across
+    the SDK's own retries, so a model that is slow but writing is never cut.
+    The turn ends on the first one with no auto-retry: a provider that stayed
+    silent for the whole deadline would make a re-send wait it out again.
+
+    A plain ``Exception``, not a ``ConnectionError``: callers read that base as
+    a network blip a retry may fix (the verifier's transient catch, the
+    generate_artifact stream-drop retry), and this one is not.
+
+    ``code`` is the wire code the host maps to its card. The class NAME is what
+    survives a hosted turn (``cloud_turn.__main__._scrub``).
+    """
+
+    code = "model_timeout"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        role: str = "",
+        model: str = "",
+        idle_timeout_s: float | None = None,
+    ) -> None:
+        if message is None:
+            waited = (
+                _describe_seconds(seconds=idle_timeout_s)
+                if idle_timeout_s is not None
+                else "too long"
+            )
+            message = f"The model sent no output for {waited}, so the call was stopped."
+        super().__init__(message)
+        self.role = role
+        self.model = model
+        self.idle_timeout_s = idle_timeout_s
+
+
 # Phrases that identify a permanent, content-SHAPED rejection (ENG-1992) in the
 # two dialects we have actually observed. Matched on the provider's prose
 # because no provider gives this a structured code.
@@ -1573,6 +1725,48 @@ def _quote_provider(message: str) -> str:
     return detail
 
 
+def _provider_said(message: object) -> str:
+    """`` The provider said: <quote>`` to append to curated copy, or ``""``
+    when the provider sent no message to quote."""
+    if not isinstance(message, str) or not message.strip():
+        return ""
+    return f" The provider said: {_quote_provider(message)}"
+
+
+def _image_too_large(message: object) -> ContentTooLargeError:
+    """The size refusal, shared by the 400 classifier and the Responses one."""
+    return ContentTooLargeError(
+        "An image in this conversation is too large for the model to "
+        f"accept.{_provider_said(message)} "
+        "That image will be removed automatically so the conversation can "
+        "continue \u2014 re-attach a smaller or lower-resolution copy if you "
+        "still need it."
+    )
+
+
+def _content_rejected() -> ContentValidationError:
+    """The shape refusal, shared by the 400 classifier and the Responses one."""
+    return ContentValidationError(
+        "The model provider rejected part of this conversation's content "
+        "(an attachment or image in an unsupported format). That content "
+        "will be removed automatically so the conversation can continue."
+    )
+
+
+def _prompt_refused(
+    message: object, *, code: str, status_code: int | None,
+) -> RequestRefusedError:
+    """The prompt refusal, shared by the 400 classifier and the Responses one."""
+    return RequestRefusedError(
+        "The model provider refused this conversation's prompt, so sending it "
+        f"again would fail the same way.{_provider_said(message)} Change the "
+        "request. If the refused content is earlier in the conversation, "
+        "start a new one.",
+        code=code,
+        status_code=status_code,
+    )
+
+
 def classify_content_rejection(
     *, error_type: str | None, message: str | None, param: str | None = None,
 ) -> "ContentValidationError | None":
@@ -1619,13 +1813,7 @@ def classify_content_rejection(
     par = (param or "").lower()
 
     if "image" in low and any(phrase in low for phrase in _CONTENT_SIZE_PHRASES):
-        return ContentTooLargeError(
-            "An image in this conversation is too large for the model to "
-            f"accept. The provider said: {_quote_provider(raw)} "
-            "That image will be removed automatically so the conversation can "
-            "continue \u2014 re-attach a smaller or lower-resolution copy if you "
-            "still need it."
-        )
+        return _image_too_large(raw)
 
     # A param pointing into a content array is evidence on its own.
     _content_param = ".content[" in par or par.endswith(".content")
@@ -1643,12 +1831,111 @@ def classify_content_rejection(
         and _names_a_content_block(low)
     )
     if _content_param or _corroborated_phrase:
-        return ContentValidationError(
-            "The model provider rejected part of this conversation's content "
-            "(an attachment or image in an unsupported format). That content "
-            "will be removed automatically so the conversation can continue."
-        )
+        return _content_rejected()
 
+    return None
+
+
+# The sentence OpenAI and Azure send when chat.completions refuses function
+# tools for a model that reasons by default, whether or not the request set an
+# effort. Azure documents only this sentence, not the body's `param`.
+_TOOLS_WITH_EFFORT_REFUSAL = "function tools with reasoning_effort are not supported"
+
+# Codes that name a prompt the provider's policy blocks: Azure's prompt filter
+# (`content_filter`) and OpenAI's flagged prompt (`invalid_prompt`), sent as a
+# request-time 400 or as an in-band Responses failure. A filtered OUTPUT is
+# documented to end `incomplete` instead, so it stays a stop reason: an answer
+# that stops early, with no error. That is not yet observed on Azure. If Azure
+# ever fails a filtered output in-band with `content_filter`, the turn shows
+# this error instead.
+_PROMPT_REFUSAL_CODES = ("content_filter", "invalid_prompt")
+
+
+def classify_request_refusal(
+    *, status_code: int, code: object, message: object, param: object,
+) -> RequestRefusedError | None:
+    """Classify a 400 that refuses the request outright, else None.
+
+    Two refusals qualify. A refused reasoning effort: ``param`` naming
+    ``reasoning_effort`` (which also covers an effort value the model does not
+    accept), or the tools-with-effort sentence, for a body that names no param.
+    A blocked prompt: ``code`` in ``_PROMPT_REFUSAL_CODES``. Azure's prompt
+    filter sends no ``type``, so no rule keyed on ``invalid_request_error``
+    sees it.
+
+    Narrow on purpose. Every other 400 keeps the session's retry-then-explain
+    path, and a history-shape 400 needs it: an orphan tool call can heal on the
+    re-send once the session seals it. The caller runs this after the
+    context-overflow and content classifiers, so a body that also matches one of
+    those keeps its recovery.
+    """
+    if status_code != 400:
+        return None
+    names_the_refusal = (
+        isinstance(message, str) and _TOOLS_WITH_EFFORT_REFUSAL in message.lower()
+    )
+    if param == "reasoning_effort" or names_the_refusal:
+        return RequestRefusedError(
+            "The model provider refused this request's reasoning effort, so sending "
+            f"it again would fail the same way.{_provider_said(message)} Change the "
+            "model or its reasoning effort in the model settings.",
+            code="parameter_refused",
+            status_code=status_code,
+        )
+    if isinstance(code, str) and code in _PROMPT_REFUSAL_CODES:
+        return _prompt_refused(message, code=code, status_code=status_code)
+    return None
+
+
+# In-band Responses API image codes, by the recovery each one gets. Every
+# image code is about an image already in the history, so each gets the history
+# repair; the size codes also ask the user for a smaller copy.
+_RESPONSES_IMAGE_TOO_LARGE_CODES = ("image_too_large", "image_file_too_large")
+_RESPONSES_IMAGE_REJECTED_CODES = (
+    "invalid_image", "invalid_image_format", "invalid_base64_image",
+    "invalid_image_url", "invalid_image_mode", "image_too_small",
+    "image_parse_error", "image_content_policy_violation",
+    "unsupported_image_media_type", "empty_image_file",
+    "failed_to_download_image", "image_file_not_found",
+)
+
+
+def classify_responses_failure(
+    body: object, *, provider: str, model: str,
+) -> ContextOverflowError | TransientProviderError | RequestRefusedError | ContentValidationError | None:
+    """The typed error for an in-band Responses API failure that names its
+    cause, else None.
+
+    In-band means a ``response.failed`` event, a stream ``error`` event, or a
+    non-streamed response with status ``failed``: all arrive inside a 200. Each
+    named code gets the typed error for its cause, so the session runs that
+    cause's handling: compaction for an overflow, the count-based retry for a
+    rate limit, the history repair for an image, and a visible error for a
+    refused prompt. ``None`` leaves any other code to the caller's transient
+    handling.
+
+    A rate limit gets what an unconfirmed 429 gets, not the session wait. The
+    code does not say whether a per-minute or a per-day limit was hit, and only
+    a confirmed velocity limit earns the wait (see :func:`classify_transient`).
+    """
+    parsed = ProviderErrorBody.parse(body)
+    code = parsed.code
+    if not isinstance(code, str):
+        return None
+    message = parsed.top.message or parsed.envelope.message
+    if code == "context_length_exceeded":
+        return ContextOverflowError(message if isinstance(message, str) else code)
+    if code == "rate_limit_exceeded":
+        return _rate_limited(
+            provider=provider, model=model, velocity_confirmed=False,
+            retry_after=None, status_code=None,
+        )
+    if code in _PROMPT_REFUSAL_CODES:
+        return _prompt_refused(message, code=code, status_code=None)
+    if code in _RESPONSES_IMAGE_TOO_LARGE_CODES:
+        return _image_too_large(message)
+    if code in _RESPONSES_IMAGE_REJECTED_CODES:
+        return _content_rejected()
     return None
 
 
@@ -1713,6 +2000,34 @@ def classify_404(
     return EndpointConfigurationError(
         f"The model endpoint returned 404 — check the endpoint URL and model "
         f"configuration.{suffix}"
+    )
+
+
+def classify_markup_bad_request(body: object) -> "EndpointConfigurationError | None":
+    """Classify a 400 whose body is HTML or XML as a misrouted request.
+
+    Shared by the OpenAI-compatible and Anthropic 400 paths. Both SDKs keep a
+    body that is not JSON as the raw string, and use that string as the
+    exception's message too. A model API answers in JSON, so markup means the
+    request reached some other service, such as a web server, a proxy, a CDN
+    or a storage bucket.
+
+    The 400 path is the one that needs this. Its unclassified errors re-raise
+    the SDK error, raw body included. Other statuses go through
+    ``_raise_for_status_error``, which always ends in anton's own copy.
+
+    The identical request fails identically on a retry, and the raw body is
+    neither safe nor useful to show. So this returns curated copy that leaves
+    the body out, and the session fails the turn at once instead of spending
+    its retries. Returns None for any other body, so JSON 400s keep their
+    existing handling.
+    """
+    if not (isinstance(body, str) and body.lstrip().startswith("<")):
+        return None
+    return EndpointConfigurationError(
+        "The model endpoint returned 400 with a web page or other non-API "
+        "response, so the request likely reached the wrong service — check "
+        "the endpoint URL configuration."
     )
 
 
@@ -1782,7 +2097,80 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     # what makes a new type fail at authoring time rather than in prod.
     ContentTooLargeError,
     EndpointConfigurationError,
+    RequestRefusedError,
+    ModelCallTimeoutError,
 )
+
+
+def _exception_chain(*, exc: BaseException) -> Iterator[BaseException]:
+    """Yield `exc`, then its cause, its context and its group members, depth first.
+
+    Each exception is yielded once, so a cycle ends the walk. `__context__` is
+    followed even when `__suppress_context__` is set: a wrapper raised
+    `from None` can still repeat the provider error's text in its own message.
+    """
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        # Pushed in reverse so the walk pops the cause first and the members last.
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(reversed(current.exceptions))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+
+
+def _provider_error(*, exc: BaseException) -> BaseException | None:
+    """The first provider error in `exc`'s chain, found by type alone."""
+    from anthropic import AnthropicError
+    from openai import OpenAIError
+
+    provider_types = (OpenAIError, AnthropicError, *CURATED_PROVIDER_ERRORS)
+    return next((error for error in _exception_chain(exc=exc) if isinstance(error, provider_types)), None)
+
+
+class ProviderErrorFilter(logging.Filter):
+    """Keep provider diagnostics while omitting exception bodies and cause traces.
+
+    SDK errors can echo prompts, tool arguments and credentials. Typed errors
+    retain those SDK errors as causes, so logging their traceback would undo
+    the adapters' safe warnings. Filter only records holding a provider error;
+    callers' propagated exceptions and unrelated tracebacks stay unchanged.
+
+    The replacement names the record's own exception class, the provider
+    error's class and the provider error's own HTTP status. Class names come
+    from code, and a status is logged only when it is a real HTTP status code.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        candidates: list[BaseException] = []
+        if record.exc_info and record.exc_info[1] is not None:
+            candidates.append(record.exc_info[1])
+        if isinstance(record.msg, BaseException):
+            candidates.append(record.msg)
+        args = record.args.values() if isinstance(record.args, dict) else (record.args or ())
+        candidates.extend(arg for arg in args if isinstance(arg, BaseException))
+        for exc in candidates:
+            provider_error = _provider_error(exc=exc)
+            if provider_error is None:
+                continue
+            record.msg = "Provider operation failed: error_type=%s provider_error=%s status=%s"
+            record.args = (
+                type(exc).__name__, type(provider_error).__name__,
+                _log_status(status=getattr(provider_error, "status_code", None)),
+            )
+            record.message = record.getMessage()
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+            break
+        return True
 
 
 # The analytics vocabulary for WHY the provider failed, kept deliberately small
@@ -1798,13 +2186,16 @@ PROVIDER_FAILURE_KINDS: frozenset[str] = frozenset({
     "http_5xx",            # request-time 5xx status
     "connection_failure",  # never reached it, or the connection dropped
     "bad_response",        # a 200 whose body was unusable
+    "no_output",           # the call sent nothing for its whole idle deadline
 })
 
 # Codes that mean "we got a 200 and the body was unusable": an unclassifiable
 # mid-stream error event, a stream that stopped early, or one that never
 # started. Distinct from `overload_signal` because the provider told us
 # nothing about why — claiming overload here would over-report incidents.
-_BAD_RESPONSE_CODES = frozenset({"stream_error", "truncated_stream", "empty_response"})
+_BAD_RESPONSE_CODES = frozenset({
+    "stream_error", "truncated_stream", "empty_response", "response_failed",
+})
 
 
 def provider_failure_kind(code: str | None) -> str:
@@ -1825,15 +2216,14 @@ def provider_failure_kind(code: str | None) -> str:
         return "rate_limit"
     if code == "connection_error":
         return "connection_failure"
+    if code == ModelCallTimeoutError.code:
+        return "no_output"
     if code.startswith("http_"):
-        # Only 5xx is minted with this prefix (`classify_transient`), but parse
-        # rather than trust it: a future 4xx would otherwise be mislabelled as a
-        # server fault, which is the one direction that misleads an operator.
-        try:
-            status = int(code[len("http_"):])
-        except ValueError:
-            return ""
-        return "http_5xx" if 500 <= status < 600 else ""
+        # Only 5xx is minted with this prefix (`classify_transient`), and the
+        # pattern accepts only that exact shape: a future 4xx maps to "" rather
+        # than to a server fault, which is the one direction that misleads an
+        # operator.
+        return "http_5xx" if _MINTED_HTTP_CODE.fullmatch(code) else ""
     return ""
 
 
@@ -1858,6 +2248,9 @@ class LLMProvider(ABC):
         return None
     # Human-readable provider id (e.g. "anthropic", "openai-compatible").
     name: str = ""
+    # Role reported for a call made on this provider outside LLMClient, such
+    # as cowork-server's route gate. LLMClient sets it.
+    trace_role: str | None = None
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
