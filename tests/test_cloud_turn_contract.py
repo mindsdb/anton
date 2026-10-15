@@ -89,3 +89,40 @@ def test_a_missing_or_non_object_connectors_block_parses_to_none(value):
     if value is not None:
         body["connectors"] = value
     assert TurnRequestV1.from_json(json.dumps(body)).connectors is None
+
+
+def _limits_request(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "q"}
+    if value is not ...:
+        body["limits"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+def test_the_limits_block_is_read():
+    limits = {"max_tool_rounds": 250, "max_continuations": 10, "max_turn_tokens": 25_000_000}
+    assert _limits_request(limits).limits == limits
+
+
+@pytest.mark.parametrize("value", [..., None, "x", [250], 25_000_000])
+def test_a_missing_or_non_object_limits_block_reads_as_no_limits(value):
+    assert _limits_request(value).limits == {}
+
+
+def test_a_bad_limit_is_dropped_and_the_rest_are_kept():
+    request = _limits_request({
+        "max_tool_rounds": 250,
+        # 0 means no ceiling to anton; a producer bug must not turn it off.
+        "max_turn_tokens": 0,
+        "max_continuations": True,
+        "later_limit": 5,
+    })
+    assert request.limits == {"max_tool_rounds": 250}
+
+
+@pytest.mark.parametrize("value", ["250", 2.5, -1, None])
+def test_a_limit_that_is_not_a_usable_integer_is_dropped(value):
+    assert _limits_request({"max_tool_rounds": value}).limits == {}
+
+
+def test_zero_auto_continues_is_a_real_limit():
+    assert _limits_request({"max_continuations": 0}).limits == {"max_continuations": 0}
