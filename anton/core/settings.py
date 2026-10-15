@@ -29,9 +29,14 @@ class CoreSettings(BaseSettings):
     # instead. Must be a finite number.
     model_call_idle_timeout_s: float = Field(600.0, allow_inf_nan=False)
 
-    # Session orchestration tuning
-    max_tool_rounds: int = 25
-    max_continuations: int = 3
+    # Session orchestration tuning. These and `max_turn_tokens` are safety limits
+    # for a turn that never finishes, not budgets for normal work: 30 days of
+    # production (2026-10-14) had no runaway turn, and the largest legitimate one
+    # used 34.4M tokens, 171 tool rounds and 6 continuations. Hosts that want a
+    # tighter limit set their own. `max_tool_rounds` counts per attempt and
+    # restarts on each continuation.
+    max_tool_rounds: int = 250
+    max_continuations: int = 10
     # Skip the completion verifier when a turn used fewer than this many tool
     # rounds. At 2, pure Q&A and single-tool-round turns skip it: prod data showed
     # it sent back fewer than 2.5% of single-round turns, so the call rarely pays.
@@ -54,11 +59,9 @@ class CoreSettings(BaseSettings):
     # weighting IS a defect (ENG-1132) because it guards money — same arithmetic,
     # opposite verdict, because they protect different things.
     #
-    # 1.25M measured against 30 days of production (2026-08-12): trips ~15% of
-    # external turns at a median of 16 LLM calls in. Set above the worst turn
-    # of the runaway session this exists for (1,480,766) and you stop catching
-    # it — 1.5M misses it by 20k tokens.
-    max_turn_tokens: int = 1_250_000
+    # 25M stopped 6 of 9,145 production turns in 30 days (2026-10-14), all
+    # legitimate long work that a user can continue past.
+    max_turn_tokens: int = 25_000_000
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
