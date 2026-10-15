@@ -365,7 +365,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
     # session loop rather than surfacing an instant, misleading failure (ENG-673).
     # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
-    # our gateway names it on the reason header and in the body code. Anything
+    # our gateway names it on the reason header and in the body code, and Azure
+    # by sending retry-after-ms. Anything
     # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
     # old fail-fast path rather than burning the budget on a limit that may not
     # clear.
@@ -1953,7 +1954,7 @@ class OpenAIProvider(LLMProvider):
             if billing_stop is not None:
                 raise billing_stop from exc
             # A code that names its cause gets that cause's handling instead of
-            # the incident backoff: compaction, the count-based retry for a rate
+            # the incident backoff: compaction, the rate-limit wait for a rate
             # limit, the image repair, or a visible refusal. Covers both the
             # event raised above and an `error` event the SDK raised itself.
             named = classify_responses_failure(

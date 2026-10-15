@@ -1293,7 +1293,8 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     """Seconds from a response's ``Retry-After`` header, or ``None`` (ENG-1537).
 
     The MindsHub gateway sends this on the velocity 429 (``rate_limited``,
-    `minds/inference/errors.py`) as integer seconds — the only form we act on.
+    `minds/inference/errors.py`) as integer seconds. Azure's ``retry-after-ms``
+    is read first when present, since it is the precise interval.
     The HTTP-date form is legal but nothing in use emits it, and mis-reading a
     date as a number would produce an absurd delay, so an unparseable value is
     treated as absent: the caller then falls back to its own backoff curve.
@@ -1366,7 +1367,8 @@ def classify_transient(
     the session waits the interval the server actually named (ENG-1537).
 
     ``velocity_confirmed`` says the caller POSITIVELY identified a velocity
-    limit — our gateway's ``rate_limited`` reason header or body code. Only then
+    limit — our gateway's ``rate_limited`` reason header or body code, or
+    Azure's ``retry-after-ms`` header. Only then
     does the 429 earn a session wait. The absence of billing carriers is not
     evidence of transience: both fail-fast guards below are string-exact, so a
     provider whose quota denial uses a different dialect (Gemini sends an
@@ -1900,14 +1902,14 @@ def classify_responses_failure(
     In-band means a ``response.failed`` event, a stream ``error`` event, or a
     non-streamed response with status ``failed``: all arrive inside a 200. Each
     named code gets the typed error for its cause, so the session runs that
-    cause's handling: compaction for an overflow, the count-based retry for a
+    cause's handling: compaction for an overflow, the session wait for a
     rate limit, the history repair for an image, and a visible error for a
     refused prompt. ``None`` leaves any other code to the caller's transient
     handling.
 
-    A rate limit gets what an unconfirmed 429 gets, not the session wait. The
-    code does not say whether a per-minute or a per-day limit was hit, and only
-    a confirmed velocity limit earns the wait (see :func:`classify_transient`).
+    A rate limit gets the session wait. Its code names a rate limit, quotas and
+    spend caps have their own codes, and with no hint the wait runs the backoff
+    curve inside the rate-limit budget.
     """
     parsed = ProviderErrorBody.parse(body)
     code = parsed.code
@@ -1918,7 +1920,7 @@ def classify_responses_failure(
         return ContextOverflowError(message if isinstance(message, str) else code)
     if code == "rate_limit_exceeded":
         return _rate_limited(
-            provider=provider, model=model, velocity_confirmed=False,
+            provider=provider, model=model, velocity_confirmed=True,
             retry_after=None, status_code=None,
         )
     if code in _PROMPT_REFUSAL_CODES:
