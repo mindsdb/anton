@@ -141,21 +141,18 @@ async def test_endpoint_configuration_error_on_the_final_wrapup_call_still_rerai
     assert script.calls == 4
 
 
-async def test_generic_connection_error_still_falls_back_to_chat_text(workspace):
-    """Only the typed auth refusal re-raises — an unrelated ConnectionError
-    (e.g. the generic 'temporarily unavailable' case) keeps the existing
-    fallback-text behavior instead of failing the turn."""
+async def test_generic_connection_error_is_retried_before_it_fails_the_turn(workspace):
+    """Only the typed auth refusal fails fast. An unrelated ConnectionError
+    (e.g. the generic 'temporarily unavailable' case) still gets the retries
+    and the explain call. When those fail too the turn raises it rather than
+    streaming it as chat text."""
     mock_llm = make_mock_llm()
     script = _AlwaysRaisingPlanStream(ConnectionError("temporarily unavailable"))
     mock_llm.plan_stream = script
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
 
-    events = await _run_turn(session)
+    with pytest.raises(ConnectionError, match="temporarily unavailable") as err:
+        await _run_turn(session)
 
-    from anton.core.llm.provider import StreamTextDelta
-
-    fallback_text = "".join(
-        e.text for e in events if isinstance(e, StreamTextDelta)
-    )
-    assert "temporarily unavailable" in fallback_text
-    assert "unexpected error occurred" in fallback_text
+    assert not isinstance(err.value, ProviderAuthError)
+    assert script.calls > 1, "an unrelated failure must not fail fast like auth"

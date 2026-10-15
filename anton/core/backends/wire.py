@@ -19,6 +19,10 @@ STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
 # when the host sets USAGE_MARKER_ENV in the pad's environment.
 USAGE_MARKER = "__ANTON_USAGE__"
 USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
+# A cell's stdout limit, and how much more the worker sends for the parent to
+# scrub before it cuts, so a secret across the limit can still match whole.
+MAX_OUTPUT = 10_000
+STDOUT_SCRUB_MARGIN = 4_096
 # Dead: the worker no longer auto-installs on a missing import, so nothing
 # emits these anymore. local.py still parses for them defensively.
 INSTALL_START_MARKER = "__ANTON_INSTALL_START__"

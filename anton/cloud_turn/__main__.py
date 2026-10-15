@@ -252,6 +252,7 @@ async def stream_turn(
         StreamToolUseDelta,
         StreamToolUseEnd,
         StreamToolUseStart,
+        StreamTurnEnded,
     )
 
     builder = session_builder or build_cloud_chat_session
@@ -401,6 +402,9 @@ async def stream_turn(
                 wire({"kind": "round_end",
                       "stop_reason": event.response.stop_reason,
                       "had_tool_calls": bool(event.response.tool_calls)})
+            elif isinstance(event, StreamTurnEnded):
+                logger.info("turn handed back: %s", event.ended_by)
+                wire({"kind": "turn_ended", "ended_by": event.ended_by})
         await _settle_memory(session)
         entries = drain_pending_memory(session)
         if entries:

@@ -689,9 +689,10 @@ async def test_a_refused_request_ends_the_turn_in_one_request(flavor, refusal):
 @pytest.mark.parametrize("flavor", _REFUSAL_FLAVORS)
 async def test_a_history_shape_400_still_retries_then_explains(flavor):
     """The narrow rule leaves this 400 on today's path: three attempts with
-    tools, then one tool-less call asking the model to explain, which fails
-    too here and ends as prose. An orphan tool call can heal on the re-send
-    once the session seals it, so it must not end the turn on the first one."""
+    tools, then one tool-less call asking the model to explain. That call
+    fails too here, so the turn fails with the SDK error rather than streaming
+    it as prose. An orphan tool call can heal on the re-send once
+    the session seals it, so it must not end the turn on the first one."""
     from anton.chat import ChatSession
     from anton.core.llm.client import LLMClient
     from anton.core.llm.provider import StreamTextDelta
@@ -703,13 +704,15 @@ async def test_a_history_shape_400_still_retries_then_explains(flavor):
                        coding_provider=provider, coding_model="gpt-6-luna")
     session = ChatSession(ChatSessionConfig(llm_client=client, session_id="conv-orphan"))
 
+    events: list = []
     try:
-        events = [e async for e in session.turn_stream("hello")]
+        with pytest.raises(openai.BadRequestError):
+            async for event in session.turn_stream("hello"):
+                events.append(event)
     finally:
         await provider.aclose()
 
     assert len(requests) == 4, f"expected three attempts and one explain call, got {len(requests)}"
     assert all(r.get("tools") for r in requests[:3])
     assert "tools" not in requests[3]
-    text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
-    assert "An unexpected error occurred" in text
+    assert not [e for e in events if isinstance(e, StreamTextDelta)]

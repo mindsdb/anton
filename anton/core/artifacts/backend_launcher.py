@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+from anton.utils.datasources import scrub_output
 
 
 _log = logging.getLogger(__name__)
@@ -174,6 +175,15 @@ class ScratchpadPoolLike(Protocol):
     async def get_or_create(self, name: str) -> Any: ...
     # The returned object must expose:
     #     async install_packages(packages: list[str]) -> str
+
+
+def _scrubbed_log_tail(log_path: Path) -> str:
+    """Return the last 2000 characters of the backend log, scrubbed first.
+
+    Scrubbed before the cut, so a cut between a key and its token cannot strip
+    the key. Blocking, and the log grows across relaunches: run it in a thread.
+    """
+    return scrub_output(log_path.read_text(errors="replace"))[-2000:]
 
 
 async def launch_artifact_backend(
@@ -330,7 +340,7 @@ async def launch_artifact_backend(
         if proc.returncode is not None:
             tail = ""
             try:
-                tail = log_path.read_text(errors="replace")[-2000:]
+                tail = await asyncio.to_thread(_scrubbed_log_tail, log_path)
             except OSError:
                 pass
             return (
@@ -376,7 +386,7 @@ async def launch_artifact_backend(
             pass
         tail = ""
         try:
-            tail = log_path.read_text(errors="replace")[-2000:]
+            tail = await asyncio.to_thread(_scrubbed_log_tail, log_path)
         except OSError:
             pass
         return (

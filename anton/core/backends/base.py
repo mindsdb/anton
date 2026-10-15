@@ -7,9 +7,11 @@ our cloud ScratchpadRuntime (Enterprise).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
+
+from anton.utils.datasources import scrub_output
 
 
 @dataclass
@@ -23,6 +25,21 @@ class Cell:
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
+
+
+def scrub_cell(cell: Cell) -> Cell:
+    """Return a copy of ``cell`` with credentials scrubbed from its output.
+
+    Scrubs ``stdout``, ``stderr``, ``error`` and ``logs``. ``code`` is the
+    model's own text and stays as written.
+    """
+    return replace(
+        cell,
+        stdout=scrub_output(cell.stdout),
+        stderr=scrub_output(cell.stderr),
+        error=scrub_output(cell.error) if cell.error else cell.error,
+        logs=scrub_output(cell.logs),
+    )
 
 
 class ScratchpadRuntime(ABC):
@@ -49,6 +66,10 @@ class ScratchpadRuntime(ABC):
         self._coding_model = coding_model
         self._coding_api_key = coding_api_key
         self._coding_base_url = coding_base_url
+        # Replayed cells can come from storage written before the scrub. Scrubbed
+        # in place: the manager hands the same list to every pad it creates.
+        if cells is not None:
+            cells[:] = [scrub_cell(c) for c in cells]
         self.cells: list[Cell] = cells if cells is not None else []
         self._workspace_path = workspace_path or Path("~/.anton").expanduser()
         self._installed_packages: set[str] = set()
@@ -107,6 +128,17 @@ class ScratchpadRuntime(ABC):
         host process (e.g. remote / Lightsail backends).
         """
         return None
+
+    def _record_cell(self, cell: Cell) -> Cell:
+        """Scrub a finished cell, append it to ``cells``, and return the scrubbed copy.
+
+        Backends record every cell through here, so the streamed result, the
+        model's tool result, the episodic log and ``dump`` all read scrubbed
+        output.
+        """
+        scrubbed = scrub_cell(cell)
+        self.cells.append(scrubbed)
+        return scrubbed
 
     def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
         """Override this pad's DS_* env for its next start()/reset(); no-op unless a backend supports it."""

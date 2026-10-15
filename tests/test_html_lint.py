@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.artifacts.html_lint import lint_html, lint_url
+from anton.core.artifacts.html_lint import _findings_from_result, lint_html, lint_url
 
 requires_browser = pytest.mark.skipif(
     not os.environ.get("ANTON_HTML_LINT_BROWSER"),
@@ -170,3 +170,20 @@ def test_lint_url_flags_console_error_and_http_404(served_broken_page: str):
     messages = " ".join(f.message() for f in findings)
     assert "intentional error for test" in messages
     assert "missing.js" in messages and "HTTP 404" in messages
+
+
+def test_browser_findings_redact_tokens_in_messages_and_urls():
+    """Console messages and failed request URLs reach the regeneration prompt,
+    so a token in either is redacted and the rest stays readable."""
+    token = "FAKE0tok3nZr1xK2mN4pL7vT9wY3sB6dF"
+    findings = _findings_from_result({
+        "consoleErrors": [{"message": f"auth failed: Bearer {token}", "line": 3}],
+        "failedRequests": [
+            {"url": f"https://api.example.com/v1/items?access_token={token}", "error": "net::ERR_FAILED"},
+        ],
+    })
+
+    details = [f.detail for f in findings]
+    assert details[0].startswith("auth failed: Bearer ") and details[0].endswith("(line 3)")
+    assert "https://api.example.com/v1/items?access_token=" in details[1]
+    assert not any(token in d for d in details)
