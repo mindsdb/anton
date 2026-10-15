@@ -143,10 +143,12 @@ def trace_context_from_json(text: str) -> TraceContext | None:
         return None
 
 
-# The LLMClient role (planning, coding, router) of the model call in flight.
+# The LLMClient role (planning, coding, router) of the model call in flight, or
+# JEV_CALL_ROLE for a Jev check, which runs on none of the client's models.
 # A ContextVar rather than a provider attribute: one provider object can serve
 # two roles (the router falls back to the coding provider).
 _call_role: ContextVar[str | None] = ContextVar("anton_call_role", default=None)
+JEV_CALL_ROLE = "decision"
 
 
 def get_call_role() -> str | None:
