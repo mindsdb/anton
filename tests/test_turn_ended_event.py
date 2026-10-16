@@ -24,7 +24,13 @@ from tests.test_turn_cost_terminals import (
     _verdict_llm,
 )
 
-from anton.core.llm.provider import LLMResponse, StreamComplete, StreamTextDelta, StreamTurnEnded
+from anton.core.llm.provider import (
+    LLMResponse,
+    StreamComplete,
+    StreamTaskProgress,
+    StreamTextDelta,
+    StreamTurnEnded,
+)
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 
 
@@ -250,8 +256,36 @@ async def test_escape_while_a_handback_is_held_stops_the_call(workspace):
 
     session = _verifier_failure_with_handback(workspace, None, handback_stream=_handback())
     session.escape_watcher = MagicMock(cancelled=asyncio.Event())
-    events, _ = await _drain(session)
+    events, booked = await _drain(session)
     shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert "complete" not in reached, "the held call ran on to its end after Escape"
     assert "first" not in shown and "second" not in shown
-    assert isinstance(events[-1], StreamTurnEnded), "the CLI needs a last event to see Escape on"
+    assert booked == "cancelled"
+    assert isinstance(events[-1], StreamTaskProgress), "the CLI needs a last event to see Escape on"
+
+
+async def test_escape_while_a_handback_is_held_cancels_the_turn_as_the_cli_sees_it(workspace):
+    session = None
+
+    async def _handback():
+        yield StreamTextDelta(text="first")
+        session.escape_watcher.cancelled.set()
+        yield StreamTextDelta(text="second")
+        yield StreamComplete(response=_text("first second"))
+
+    session = _verifier_failure_with_handback(workspace, None, handback_stream=_handback())
+    session.escape_watcher = MagicMock(cancelled=asyncio.Event())
+    # As anton/chat.py reads the stream: on the first event after Escape, set the flag and stop.
+    with patch("anton.analytics.send_event") as send:
+        stream = session.turn_stream("do the thing")
+        stopped = False
+        try:
+            async for _event in stream:
+                if session.escape_watcher.cancelled.is_set():
+                    session._cancel_event.set()
+                    stopped = True
+                    break
+        finally:
+            await stream.aclose()
+    assert stopped
+    assert send.call_args.kwargs["ended_by"] == "cancelled"

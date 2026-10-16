@@ -4388,6 +4388,9 @@ class ChatSession:
                     watcher = self.escape_watcher
                     if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
                         log.info("%s diagnosis cancelled while held — dropped", label)
+                        # Set here so the books say cancelled, then one event for the CLI to stop on.
+                        self._cancel_event.set()
+                        yield StreamTaskProgress(phase="analyzing", message="Cancelled")
                         return
                     held_text.append(event)
                     continue
