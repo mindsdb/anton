@@ -461,7 +461,9 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   with the `_v` it was read with. If another request wrote in between, the
   put raises `ConditionalCheckFailed` and writes nothing, instead of
   silently overwriting that write; answer 409. Handle a missing document
-  first:
+  first, and make sure some endpoint creates it, e.g. a "new game" route
+  calling `await games.put("current", new_game(), if_not_exists=True)`;
+  until then this route answers 404:
   ```python
   from fastapi import HTTPException
   from anton_state import ConditionalCheckFailed

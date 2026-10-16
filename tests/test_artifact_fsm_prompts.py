@@ -313,6 +313,7 @@ def test_stateful_rules_show_versioned_read_modify_write():
     assert "todos.get(" in stateful
     assert 'if_version=game["_v"]' in stateful
     assert "ConditionalCheckFailed" in stateful
+    assert 'games.put("current", new_game(), if_not_exists=True)' in stateful
 
 
 def test_stateful_rules_say_which_items_come_back_without_keys():

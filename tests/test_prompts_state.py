@@ -68,3 +68,4 @@ def test_store_api_shows_versioned_read_modify_write(T):
     assert "todos.get(" in T
     assert 'if_version=game["_v"]' in T
     assert "ConditionalCheckFailed" in T
+    assert 'games.put("current", new_game(), if_not_exists=True)' in T

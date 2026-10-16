@@ -192,7 +192,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     items = await todos.list()                          # all items in the collection
     n = await Collection(get_store(), "counters").increment("visits", field="n")
     ```
-    CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back with the `_v` it was read with. If another request wrote in between, the put raises `ConditionalCheckFailed` and writes nothing, instead of silently overwriting that write; answer 409. Handle a missing document first:
+    CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back with the `_v` it was read with. If another request wrote in between, the put raises `ConditionalCheckFailed` and writes nothing, instead of silently overwriting that write; answer 409. Handle a missing document first, and make sure some endpoint creates it, e.g. a "new game" route calling `await games.put("current", new_game(), if_not_exists=True)`; until then this route answers 404:
     ```python
     from fastapi import HTTPException
     from anton_state import ConditionalCheckFailed
