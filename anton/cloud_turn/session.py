@@ -775,6 +775,11 @@ def build_cloud_chat_session(
     settings.resolve_workspace(str(base))
     if request.model:
         settings.planning_model = request.model
+    # The tenant's limits replace anton's own defaults, as the desktop harness
+    # overlays them for an in-process turn. Without them a web turn stopped at
+    # the defaults whatever the tenant set.
+    for name, limit in request.limits.items():
+        setattr(settings, name, limit)
     # Mounted (_SKILLS_ROOT_ENV set): the organization's own live skills tree,
     # owned by cowork-server, read directly. Unmounted (desktop, CI): the
     # request's skills are staged outside the workspace instead, since that PVC

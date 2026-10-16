@@ -94,11 +94,14 @@ at most 64 KB:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+
+logger = logging.getLogger(__name__)
 
 
 def _is_version(value: object, expected: int) -> bool:
@@ -155,6 +158,46 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
         seen.add(connection_id)
         refs.append(DatasourceConnectionRefV1(connection_id, credential_version))
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
+
+#: The per-task limits a request may set, with the lowest value each accepts.
+#: A turn-token limit of 0 means no limit to anton, so it is refused here: a
+#: producer bug must not turn the ceiling off.
+TURN_LIMIT_MINIMUMS = {"max_tool_rounds": 1, "max_continuations": 0, "max_turn_tokens": 1}
+
+
+def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
+    """The usable limits in a request's ``limits`` block.
+
+    Keeps known names with integer values at or above their minimum and drops
+    the rest, so one bad value leaves that limit at the pod's default instead of
+    failing the turn. Each drop is logged by name and reason, never by value:
+    dropping in silence would look exactly like a controller that sent nothing.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning(
+            "cloud turn ignoring a limits block that is not an object (%s) conversation=%s",
+            type(value).__name__, conversation_id,
+        )
+        return {}
+    limits: dict[str, int] = {}
+    for name, limit in value.items():
+        if name not in TURN_LIMIT_MINIMUMS:
+            reason = "unknown limit"
+        elif not isinstance(limit, int) or isinstance(limit, bool):
+            reason = f"not an integer ({type(limit).__name__})"
+        elif limit < TURN_LIMIT_MINIMUMS[name]:
+            reason = f"below its minimum of {TURN_LIMIT_MINIMUMS[name]}"
+        else:
+            limits[name] = limit
+            continue
+        logger.warning(
+            "cloud turn ignoring limit %r: %s conversation=%s",
+            str(name)[:64], reason, conversation_id,
+        )
+    return limits
 
 
 @dataclass
@@ -227,6 +270,11 @@ class TurnRequestV1:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: The tenant's per-task limits cowork-server resolved: any of
+    #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``. Each one
+    #: present replaces the pod's own default for this turn; an absent one (or
+    #: an older controller that sends no block) leaves the default.
+    limits: dict[str, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -262,4 +310,5 @@ class TurnRequestV1:
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
         )
