@@ -89,3 +89,25 @@ def test_a_missing_or_non_object_connectors_block_parses_to_none(value):
     if value is not None:
         body["connectors"] = value
     assert TurnRequestV1.from_json(json.dumps(body)).connectors is None
+
+
+def _with_effort(**extra):
+    """The parsed request for a minimal body carrying ``extra``."""
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
+    body.update(extra)
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("effort", ["low", "none", "high", "some-future-level"])
+def test_reasoning_effort_is_passed_through_uninterpreted(effort):
+    assert _with_effort(reasoning_effort=effort).reasoning_effort == effort
+
+
+@pytest.mark.parametrize("extra", [{}, {"reasoning_effort": None}, {"reasoning_effort": ""}, {"reasoning_effort": "  "}])
+def test_absent_null_or_blank_reasoning_effort_is_unset(extra):
+    assert _with_effort(**extra).reasoning_effort is None
+
+
+@pytest.mark.parametrize("effort", [1, True, ["high"], {"level": "high"}, 0.5])
+def test_a_non_string_reasoning_effort_falls_back_to_the_default(effort):
+    assert _with_effort(reasoning_effort=effort).reasoning_effort is None

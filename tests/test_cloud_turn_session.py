@@ -20,6 +20,8 @@ from pathlib import Path
 # `_pin_today` later replaces on the module.
 from datetime import datetime as _stdlib_datetime
 
+import httpx2 as httpx
+import openai
 import pytest
 
 import anton.core.llm.client as llm_client_mod
@@ -1259,6 +1261,124 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
 
     assert cfg.data_vault.load("gmail", "primary") is None
     assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ
+
+
+_MINDS_LLM = {"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"}
+
+
+def _build_real_client(tmp_path, monkeypatch, **req_overrides):
+    """The real LLMClient a cloud turn builds for this request, with ChatSession faked."""
+    captured: dict = {}
+    real_from_settings = llm_client_mod.LLMClient.from_settings.__func__
+
+    def capture(cls, settings):
+        captured["client"] = real_from_settings(cls, settings)
+        return captured["client"]
+
+    monkeypatch.setattr(session_mod, "ChatSession", lambda config: _FakeSession())
+    monkeypatch.setattr(llm_client_mod.LLMClient, "from_settings", classmethod(capture))
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    body = dict(protocol_version=1, conversation_id="conv_1", input="hello", llm=_MINDS_LLM)
+    body.update(req_overrides)
+    build_cloud_chat_session(TurnRequestV1(**body))
+    return captured["client"]
+
+
+def _chat_stream(text: str) -> bytes:
+    """``text`` as a streamed chat.completions answer, the format the minds passthrough reads."""
+    chunk = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 0, "model": "m"}
+    chunks = [
+        {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
+                               "finish_reason": None}]},
+        {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
+
+
+def _record_requests(monkeypatch) -> list[tuple[str, dict]]:
+    """Point every OpenAI SDK client built from now on at a transport that
+    records each request as (path, body) and answers it with a short completion."""
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        requests.append((request.url.path, sent))
+        if sent.get("stream"):
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"},
+                content=_chat_stream("answered"),
+            )
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "answered"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    real_async_openai = openai.AsyncOpenAI
+
+    def mock_async_openai(**kwargs):
+        kwargs["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return real_async_openai(**{**kwargs, "max_retries": 0})
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", mock_async_openai)
+    return requests
+
+
+async def _efforts_on_the_wire(client, requests) -> dict[str, str | None]:
+    """One call per role; the ``reasoning_effort`` each chat.completions request carried."""
+    messages = [{"role": "user", "content": "hi"}]
+    async for _ in client.plan_stream(system="s", messages=messages):
+        pass
+    async for _ in client.code_stream(system="s", messages=messages):
+        pass
+    await client.summarize(system="s", messages=messages)
+    assert [path for path, _ in requests] == ["/v1/chat/completions"] * 3
+    efforts = (sent.get("reasoning_effort") for _, sent in requests)
+    return dict(zip(("planning", "coding", "router"), efforts))
+
+
+@pytest.mark.parametrize("coding_model", [None, "claude-opus-4-6"])
+@pytest.mark.parametrize("router", [False, True])
+async def test_selected_effort_reaches_only_the_planning_request(tmp_path, monkeypatch, coding_model, router):
+    """The router shares the coding provider unless one is configured, so
+    coding effort must stay put or history summarization would change too."""
+    if router:
+        monkeypatch.setenv("ANTON_ROUTER_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("ANTON_CODING_REASONING_EFFORT", "medium")
+    requests = _record_requests(monkeypatch)
+    llm = dict(_MINDS_LLM, coding_model=coding_model) if coding_model else _MINDS_LLM
+    client = _build_real_client(
+        tmp_path, monkeypatch, model="claude-opus-4-6", llm=llm, reasoning_effort="low",
+    )
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "low", "coding": "medium", "router": None if router else "medium"}
+
+
+async def test_no_selected_effort_keeps_the_configured_planning_effort(tmp_path, monkeypatch):
+    """With nothing selected, planning carries the configured effort and the other roles none."""
+    monkeypatch.setenv("ANTON_PLANNING_REASONING_EFFORT", "high")
+    requests = _record_requests(monkeypatch)
+    client = _build_real_client(tmp_path, monkeypatch, reasoning_effort=None)
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "high", "coding": None, "router": None}
+
+
+async def test_no_selected_or_configured_effort_sends_none(tmp_path, monkeypatch):
+    """With nothing selected or configured, no request carries an effort."""
+    requests = _record_requests(monkeypatch)
+    client = _build_real_client(tmp_path, monkeypatch)
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": None, "coding": None, "router": None}
 
 
 # ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────
