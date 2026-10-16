@@ -6,144 +6,36 @@ tool_use/tool_result messages out of it. `ChatSession.turn_messages()` still
 returns every message the turn appended, in order, so the cloud pod and
 cowork-server's in-process harness can build the turn's tool rows.
 
-The scripted turns run a tool round AFTER the swap: a turn that compacts on its
-final round appends only text afterwards, and `split_turn_into_rows` drops
-text, so such a fixture cannot tell a fix from a session that only reads the
-final list.
+The scripted turns (tests/_turn_rows_helpers.py) run a tool round AFTER the
+swap: a turn that compacts on its final round appends only text afterwards,
+and `split_turn_into_rows` drops text, so such a fixture cannot tell a fix
+from a session that only reads the final list.
 """
 
 from __future__ import annotations
 
 import asyncio
-import copy
-import json
-from dataclasses import dataclass, field
 from unittest.mock import AsyncMock
 
 import pytest
 
 from anton.cloud_turn.__main__ import stream_turn
 from anton.cloud_turn.history_rows import split_turn_into_rows
-from anton.core.llm.provider import (
-    ContextOverflowError,
-    LLMResponse,
-    StreamComplete,
-    StreamContextCompacted,
-    StreamTextDelta,
-    StreamToolUseDelta,
-    StreamToolUseEnd,
-    StreamToolUseStart,
-    ToolCall,
-    Usage,
-)
+from anton.core.llm.provider import LLMResponse, StreamContextCompacted
 from anton.core.session import ChatSession, ChatSessionConfig
-from anton.core.tools.tool_defs import ToolDef
+from tests._turn_rows_helpers import (
+    PAGES,
+    SEED,
+    TOOL_IDS,
+    run_turn,
+    scripted_session,
+    tool_result,
+    tool_use,
+)
 from tests.conftest import make_mock_llm
 
-ANSWER = "Overtime costs $42 an hour, and the plant runs 9 lines."
-PAGES = {
-    "toolu_1": "Wage table: overtime rate is $42 per hour.",
-    "toolu_2": "Shift calendar: three shifts.",
-    "toolu_3": "Holiday list: none.",
-    "toolu_4": "Line roster: the plant runs 9 lines.",
-}
-TOOL_IDS = list(PAGES)
-SEED = [
-    {"role": "user", "content": "seed question one"},
-    {"role": "assistant", "content": "seed answer one"},
-]
-# The plan_stream call that returns toolu_4. Compaction or overflow lands on
-# it, so toolu_4's tool_use and tool_result are appended after the swap.
-SWAP_ROUND = 3
 # StreamContextCompacted events each mode yields.
 COMPACTIONS = {"none": 0, "proactive": 1, "overflow": 1, "hard-truncate": 2}
-
-
-@dataclass
-class PlanCalls:
-    """What the scripted planner received.
-
-    `requests` holds the messages of each planning call, copied when the call
-    was made. `overflowed` holds the indexes in `requests` of the calls that
-    raised ContextOverflowError.
-    """
-
-    requests: list[list[dict]] = field(default_factory=list)
-    overflowed: list[int] = field(default_factory=list)
-
-
-def _scripted_llm(*, mode: str, calls: PlanCalls | None = None):
-    """A planner that calls `lookup` four times, then answers.
-
-    `mode` picks what happens on SWAP_ROUND: "proactive" reports a context
-    pressure over the threshold, so the tool loop compacts; "overflow" raises
-    ContextOverflowError once (summarize and retry); "hard-truncate" raises it
-    twice (summarize, then hard-truncate and retry); "none" does neither.
-    Pass `calls` to read back what each planning call received.
-    """
-    llm = make_mock_llm()
-    calls = calls if calls is not None else PlanCalls()
-    state = {"round": 0}
-    overflow_budget = {"overflow": 1, "hard-truncate": 2}.get(mode, 0)
-
-    def plan_stream(messages, **kwargs):
-        calls.requests.append(copy.deepcopy(messages))
-
-        async def gen():
-            r = state["round"]
-            if r == SWAP_ROUND and len(calls.overflowed) < overflow_budget:
-                calls.overflowed.append(len(calls.requests) - 1)
-                raise ContextOverflowError("too long")
-            state["round"] += 1
-            pressure = 0.99 if mode == "proactive" and r == SWAP_ROUND else 0.0
-            if r < len(TOOL_IDS):
-                tid = TOOL_IDS[r]
-                yield StreamToolUseStart(id=tid, name="lookup")
-                yield StreamToolUseDelta(id=tid, json_delta=json.dumps({"id": tid}))
-                yield StreamToolUseEnd(id=tid)
-                yield StreamComplete(response=LLMResponse(
-                    content="",
-                    tool_calls=[ToolCall(id=tid, name="lookup", input={"id": tid})],
-                    usage=Usage(input_tokens=100, context_pressure=pressure),
-                    stop_reason="tool_use",
-                ))
-            else:
-                yield StreamTextDelta(text=ANSWER)
-                yield StreamComplete(response=LLMResponse(
-                    content=ANSWER,
-                    usage=Usage(input_tokens=100, context_pressure=pressure),
-                    stop_reason="end_turn",
-                ))
-
-        return gen()
-
-    llm.plan_stream = plan_stream
-    llm.summarize = AsyncMock(return_value=LLMResponse(content="SUMMARY of earlier turns"))
-    return llm
-
-
-async def _lookup(session, tc_input):
-    return PAGES[tc_input["id"]]
-
-
-def _session(
-    *, mode: str, handler=_lookup, seed: list[dict] = SEED, calls: PlanCalls | None = None,
-) -> ChatSession:
-    lookup = ToolDef(
-        name="lookup",
-        description="Look up a page by id.",
-        input_schema={"type": "object", "properties": {"id": {"type": "string"}}},
-        handler=handler,
-    )
-    session = ChatSession(ChatSessionConfig(
-        llm_client=_scripted_llm(mode=mode, calls=calls), initial_history=list(seed), tools=[lookup],
-    ))
-    session._verify_min_tool_rounds = 99  # no verifier LLM call
-    return session
-
-
-async def _run(session: ChatSession) -> list:
-    return [event async for event in session.turn_stream("What does overtime cost?")]
 
 
 def _trim(messages: list) -> list:
@@ -180,8 +72,8 @@ _EXPECTED_IDS = [
 
 @pytest.mark.parametrize("mode", ["proactive", "overflow", "hard-truncate"])
 async def test_a_turn_that_swaps_history_returns_every_tool_row(mode):
-    session = _session(mode=mode)
-    events = await _run(session)
+    session = scripted_session(mode=mode)
+    events = await run_turn(session)
 
     assert sum(isinstance(e, StreamContextCompacted) for e in events) == COMPACTIONS[mode]
     # Precondition: the swap folded the turn's first round out of the live list.
@@ -202,9 +94,9 @@ async def test_a_turn_that_swaps_history_returns_every_tool_row(mode):
 
 async def test_a_turn_that_does_not_swap_history_returns_the_seed_slice():
     """Without a swap the method is exactly the slice consumers used to take."""
-    session = _session(mode="none")
+    session = scripted_session(mode="none")
     seed_len = len(session.history)
-    events = await _run(session)
+    events = await run_turn(session)
 
     assert not any(isinstance(e, StreamContextCompacted) for e in events)
     assert session.turn_messages() == session.history[seed_len:]
@@ -214,9 +106,9 @@ async def test_a_turn_that_does_not_swap_history_returns_the_seed_slice():
 async def test_a_turn_after_a_seed_ending_in_a_user_message_returns_the_seed_slice():
     """The turn's user input merges into the seed's last message. That message
     is not this turn's, so it stays out, as it did from the slice."""
-    session = _session(mode="none", seed=[*SEED, {"role": "user", "content": "pending"}])
+    session = scripted_session(mode="none", seed=[*SEED, {"role": "user", "content": "pending"}])
     seed_len = len(session.history)
-    events = await _run(session)
+    events = await run_turn(session)
 
     assert not any(isinstance(e, StreamContextCompacted) for e in events)
     assert session.history[seed_len - 1]["role"] == "user"
@@ -227,11 +119,11 @@ async def test_a_turn_after_a_seed_ending_in_a_user_message_returns_the_seed_sli
 
 
 async def test_turn_messages_starts_at_the_latest_turn():
-    session = _session(mode="none")
-    await _run(session)
+    session = scripted_session(mode="none")
+    await run_turn(session)
     first_turn_end = len(session.history)
     session._llm.plan_stream = make_mock_llm().plan_stream
-    await _run(session)
+    await run_turn(session)
 
     assert session.turn_messages() == session.history[first_turn_end:]
 
@@ -251,8 +143,8 @@ async def test_a_swap_no_event_announces_keeps_the_rows_appended_after_it():
             truncated.append(len(session.history))
         return PAGES[tc_input["id"]]
 
-    session = _session(mode="none", handler=truncating_lookup)
-    events = await _run(session)
+    session = scripted_session(mode="none", handler=truncating_lookup)
+    events = await run_turn(session)
 
     assert truncated == [4]  # the placeholder, toolu_2's round, toolu_3's tool_use
     assert not any(isinstance(e, StreamContextCompacted) for e in events)
@@ -274,31 +166,19 @@ def _seeded_session() -> ChatSession:
     return ChatSession(ChatSessionConfig(llm_client=llm, initial_history=seed))
 
 
-def _tool_use(*ids: str) -> dict:
-    return {"role": "assistant", "content": [
-        {"type": "tool_use", "id": tid, "name": "lookup", "input": {}} for tid in ids
-    ]}
-
-
-def _tool_result(*ids: str) -> dict:
-    return {"role": "user", "content": [
-        {"type": "tool_result", "tool_use_id": tid, "content": tid} for tid in ids
-    ]}
-
-
 async def test_rows_appended_right_after_a_swap_are_kept_without_a_read_between():
     """Nothing reads the session between the swap and the appends. A host that
     noted the new list only when it next looked would start it past t2."""
     session = _seeded_session()
     session._start_turn_segments()
     session._append_history({"role": "user", "content": "q"})
-    session._append_history(_tool_use("t1"))
-    session._append_history(_tool_result("t1"))
+    session._append_history(tool_use("t1"))
+    session._append_history(tool_result("t1"))
     outgoing = session.history
     assert await session._summarize_history() is True
     assert session.history is not outgoing
-    session._append_history(_tool_use("t2"))
-    session._append_history(_tool_result("t2"))
+    session._append_history(tool_use("t2"))
+    session._append_history(tool_result("t2"))
 
     rows = split_turn_into_rows(_trim(session.turn_messages()))
     assert _row_ids(rows) == [
@@ -315,11 +195,11 @@ async def test_a_merge_into_the_message_a_compaction_carried_over_is_kept():
     session = _seeded_session()
     session._start_turn_segments()
     session._append_history({"role": "user", "content": "q"})
-    session._append_history(_tool_use("t1", "t2"))
-    session._append_history(_tool_result("t1"))
+    session._append_history(tool_use("t1", "t2"))
+    session._append_history(tool_result("t1"))
     assert await session._summarize_history() is True
     # The new list ends with the same tool_result message; this merges into it.
-    session._append_history(_tool_result("t2"))
+    session._append_history(tool_result("t2"))
 
     rows = split_turn_into_rows(_trim(session.turn_messages()))
     assert _row_ids(rows) == [
@@ -335,10 +215,10 @@ async def test_a_second_merge_into_the_claimed_message_keeps_each_row_once():
     session = _seeded_session()
     session._start_turn_segments()
     session._append_history({"role": "user", "content": "q"})
-    session._append_history(_tool_use("t1", "t2"))
-    session._append_history(_tool_result("t1"))
+    session._append_history(tool_use("t1", "t2"))
+    session._append_history(tool_result("t1"))
     assert await session._summarize_history() is True
-    session._append_history(_tool_result("t2"))
+    session._append_history(tool_result("t2"))
     session._append_history({"role": "user", "content": "a note after the results"})
 
     messages = _trim(session.turn_messages())
@@ -354,15 +234,15 @@ async def test_a_merge_into_the_hard_truncation_separator_is_kept():
     session = _seeded_session()
     session._start_turn_segments()
     session._append_history({"role": "user", "content": "q"})
-    session._append_history(_tool_use("t1"))
-    session._append_history(_tool_result("t1"))
+    session._append_history(tool_use("t1"))
+    session._append_history(tool_result("t1"))
     session.hard_truncate_history(keep=1)
     # The one kept message is t1's tool_result, whose tool_use was cut off, so
     # it goes too. The new list is the placeholder and the "Understood."
     # separator; the next assistant message merges into it.
     assert [m["role"] for m in session.history] == ["user", "assistant"]
-    session._append_history(_tool_use("t2"))
-    session._append_history(_tool_result("t2"))
+    session._append_history(tool_use("t2"))
+    session._append_history(tool_result("t2"))
 
     rows = split_turn_into_rows(_trim(session.turn_messages()))
     assert _row_ids(rows) == [
@@ -379,8 +259,8 @@ async def test_a_swap_before_the_first_turn_is_not_recorded():
 
 
 async def test_a_swap_after_the_turn_ended_leaves_its_messages_alone():
-    session = _session(mode="none")
-    await _run(session)
+    session = scripted_session(mode="none")
+    await run_turn(session)
     finished = session.turn_messages()
     assert await session._summarize_history() is True
     session._append_history({"role": "user", "content": "between turns"})
@@ -390,8 +270,8 @@ async def test_a_swap_after_the_turn_ended_leaves_its_messages_alone():
 async def test_edits_between_turns_leave_the_finished_turn_alone():
     """CLI commands append to history between turns, and the memory command
     rewrites it in place. Neither belongs to the turn that already ended."""
-    session = _session(mode="none")
-    await _run(session)
+    session = scripted_session(mode="none")
+    await run_turn(session)
     finished = session.turn_messages()
     session.history.append({"role": "assistant", "content": "connected a datasource"})
     session.history[:] = [{"role": "user", "content": "rewritten"}, *session.history]
@@ -427,7 +307,7 @@ async def test_the_turn_closes_even_when_closing_the_inner_turn_raises():
 
 @pytest.mark.parametrize("mode", ["proactive", "overflow", "hard-truncate"])
 def test_the_pod_sends_its_history_frame_after_a_compaction(mode):
-    session = _session(mode=mode)
+    session = scripted_session(mode=mode)
     frames: list[dict] = []
     asyncio.run(stream_turn(
         '{"protocol_version":1,"conversation_id":"c","input":"What does overtime cost?"}',

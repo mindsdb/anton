@@ -371,9 +371,10 @@ class TestRepairOfAnAlreadyPoisonedConversation:
         """The repair is re-applied on EVERY load and never written back —
         cowork-server leaves `history_store` unset and persists only this
         turn's messages (`ChatSession.turn_messages()`), so the repaired seed
-        never reaches the messages table. A random minted id would therefore change the replayed
-        prefix every turn and miss the prompt cache on the whole conversation,
-        forever, for exactly the conversations being healed.
+        never reaches the messages table. A random minted id would therefore
+        change the replayed prefix every turn and miss the prompt cache on the
+        whole conversation, forever, for exactly the conversations being
+        healed.
 
         Note this is a strictly stronger property than `test_repair_is_idempotent`
         below, which re-repairs an ALREADY-repaired list and so cannot catch a

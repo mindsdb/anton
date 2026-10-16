@@ -29,15 +29,15 @@ from anton.core.llm.provider import (
     Usage,
 )
 from anton.core.session import ChatSession, ChatSessionConfig
-from tests.conftest import make_mock_llm
-from tests.test_turn_rows_through_compaction import (
+from tests._turn_rows_helpers import (
     ANSWER,
     PlanCalls,
-    _run,
-    _tool_result,
-    _tool_use,
+    run_turn,
+    scripted_session,
+    tool_result,
+    tool_use,
 )
-from tests.test_turn_rows_through_compaction import _session as _scripted_session
+from tests.conftest import make_mock_llm
 
 PLACEHOLDER_PREFIX = "[Earlier conversation was truncated"
 
@@ -159,7 +159,7 @@ def _tool_loop(*tids: str) -> list[dict]:
     """A question, then one tool round per id, ending with the last tool_result."""
     history: list[dict] = [{"role": "user", "content": "How many lines does the plant run?"}]
     for tid in tids:
-        history += [_tool_use(tid), _tool_result(tid)]
+        history += [tool_use(tid), tool_result(tid)]
     return history
 
 
@@ -168,8 +168,8 @@ def _tool_loop(*tids: str) -> list[dict]:
 
 async def test_the_retry_after_a_hard_truncation_in_a_tool_loop_is_a_valid_request():
     calls = PlanCalls()
-    session = _scripted_session(mode="hard-truncate", calls=calls)
-    events = await _run(session)
+    session = scripted_session(mode="hard-truncate", calls=calls)
+    events = await run_turn(session)
 
     # Precondition: the planning call that returns toolu_4 overflowed twice,
     # so the summary and then the hard truncation both ran.
@@ -226,8 +226,8 @@ def test_a_tail_of_tool_rounds_is_kept_whole():
     # No "Understood." separator: the placeholder is a user message, so the
     # kept tool_use can answer it directly.
     assert session.history[1:] == [
-        _tool_use("toolu_2"), _tool_result("toolu_2"),
-        _tool_use("toolu_3"), _tool_result("toolu_3"),
+        tool_use("toolu_2"), tool_result("toolu_2"),
+        tool_use("toolu_3"), tool_result("toolu_3"),
     ]
     assert _provider_violations(session.history) == _VALID
 
@@ -238,19 +238,19 @@ def test_a_tool_result_cut_from_its_tool_use_is_still_dropped():
     session = _session(history=_tool_loop("toolu_1", "toolu_2", "toolu_3"))
     session.hard_truncate_history(keep=3)
 
-    assert session.history[1:] == [_tool_use("toolu_3"), _tool_result("toolu_3")]
+    assert session.history[1:] == [tool_use("toolu_3"), tool_result("toolu_3")]
     assert _provider_violations(session.history) == _VALID
 
 
 def test_a_truncation_during_a_tool_call_keeps_the_call_being_run():
     """A truncation from inside a tool handler runs while the assistant message
     with the running call is last; its tool_result is appended after."""
-    history = [*_tool_loop("toolu_1", "toolu_2"), _tool_use("toolu_3")]
+    history = [*_tool_loop("toolu_1", "toolu_2"), tool_use("toolu_3")]
     session = _session(history=history)
     session.hard_truncate_history(keep=4)
 
-    assert session.history[1:] == [_tool_use("toolu_2"), _tool_result("toolu_2"), _tool_use("toolu_3")]
-    session._append_history(_tool_result("toolu_3"))
+    assert session.history[1:] == [tool_use("toolu_2"), tool_result("toolu_2"), tool_use("toolu_3")]
+    session._append_history(tool_result("toolu_3"))
     assert _provider_violations(session.history) == _VALID
 
 
@@ -261,4 +261,4 @@ def test_the_truncated_tool_loop_ends_with_its_latest_tool_result(rounds):
     session.hard_truncate_history()
 
     assert _provider_violations(session.history) == _VALID
-    assert session.history[-2:] == [_tool_use(tids[-1]), _tool_result(tids[-1])]
+    assert session.history[-2:] == [tool_use(tids[-1]), tool_result(tids[-1])]
