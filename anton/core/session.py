@@ -5406,8 +5406,9 @@ class ChatSession:
         self._turn_count += 1
         self._persist_history()
         if usage_log_enabled():
-            # Evals only: the turn's trace is already reset here, so without
-            # it this work's model calls could not be attributed or priced.
+            # Evals only, so the eval can attribute and price this work's calls.
+            # Production runs it outside the turn on purpose, as it always has:
+            # neither the turn's cost books nor its Langfuse trace include it.
             background = contextvars.copy_context()
             background.run(set_trace_context, _turn_trace)
             background.run(self._start_background_work, user_input)
