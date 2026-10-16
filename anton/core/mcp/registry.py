@@ -13,6 +13,9 @@ Two things happen here, in order, before the LLM ever sees a tool name:
    threads that connection's own `name` in too, so the two connections'
    tools don't collide under `ToolRegistry.register_tool`'s
    skip-duplicate-by-name behavior and silently shadow one another.
+   `parse_namespaced_tool_name` splits a registered name back into engine,
+   connection and tool for callers that only see the name (for example a
+   stored tool row).
 2. **Access filtering** — `access.allowed_for_mode` decides which tools
    survive at all for this connection's mode. This *is* the governance
    mechanism for MCP tool access (see access.py's module docstring); nothing
@@ -25,6 +28,8 @@ nothing new to design.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
@@ -42,6 +47,34 @@ def namespaced_tool_name(engine: str, tool_name: str, *, connection_name: str | 
     if connection_name is None:
         return f"{engine}__{tool_name}"
     return f"{engine}__{connection_name}__{tool_name}"
+
+
+@dataclass(frozen=True)
+class ToolNameParts:
+    """A registered MCP tool name split back into what built it."""
+
+    engine: str
+    connection_name: str | None
+    tool_name: str
+
+
+def parse_namespaced_tool_name(*, name: str) -> ToolNameParts | None:
+    """The inverse of `namespaced_tool_name`, or None when `name` is not a
+    namespaced MCP tool name (a built-in tool such as `web_fetch`), or when
+    its engine, tool or connection is empty.
+
+    The engine is the text before the first `__` and the tool is the text
+    after the last `__`. Anything between is the connection name. A
+    connection's name is free text from the vault and may start or end with
+    `_` or hold `__`, while tool names come from the MCP server's fixed list,
+    so the split trusts the tool side: a tool name that starts with `_` or
+    holds `__` would not parse back when a connection name is present.
+    """
+    engine, _, rest = name.partition("__")
+    connection_name, separator, tool_name = rest.rpartition("__")
+    if not engine or not tool_name or (separator and not connection_name):
+        return None
+    return ToolNameParts(engine=engine, connection_name=connection_name or None, tool_name=tool_name)
 
 
 async def discover_tool_defs(
