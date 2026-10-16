@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from anton.core.memory.cortex import Cortex, _CompactionResult
+import anton.core.memory.cortex as cortex_mod
+from anton.core.llm.provider import LLMResponse, Usage
+from anton.core.memory.cortex import Cortex, _CompactionResult, _parse_rule_selection
 from anton.core.memory.hippocampus import Engram, Hippocampus
 
 
@@ -381,22 +383,20 @@ class TestRuleRetrievalObservability:
 
     async def test_filtered_outcome_is_reported(self, cortex, captured_events):
         rules = _when_engrams(12)
-        # Echo back exactly two rules, verbatim, as the prompt demands.
-        echo = "\n".join(f"- {rules[i].text}" for i in (0, 1))
-        llm = _FakeLLM(content=echo)
+        llm = _FakeLLM(content='{"keep": [1, 2]}')
         out = await self._run(cortex, llm, rules)
 
         assert llm.calls == 1
-        assert len(out) == 2, "behaviour must be unchanged: only the echoed rules survive"
+        assert out == rules[:2], "only the selected rules survive, as the original engrams"
         ev = _one_event(captured_events)
         assert ev["outcome"] == "filtered"
         assert ev["when_rules"] == 12 and ev["kept_rules"] == 2
 
     async def test_dropped_all_is_its_own_outcome(self, cortex, captured_events):
-        """`NONE` discards every conditional rule — measured at 30% and absent
-        from the ticket's original three-outcome taxonomy."""
+        """An empty selection discards every conditional rule, an outcome
+        separate from the original three."""
         rules = _when_engrams(12)
-        out = await self._run(cortex, _FakeLLM(content="NONE"), rules)
+        out = await self._run(cortex, _FakeLLM(content='{"keep": []}'), rules)
         assert out == [], "no mandatory rules present, so nothing should remain"
         ev = _one_event(captured_events)
         assert ev["outcome"] == "dropped_all"
@@ -432,18 +432,125 @@ class TestRuleRetrievalObservability:
         assert len(out) == 12, "the permissive fallback must still apply"
         assert _one_event(captured_events)["outcome"] == "error"
 
-    async def test_truncation_is_reported_via_stop_reason(self, cortex, captured_events):
-        """A verbatim echo cut at the ceiling is accepted as 'the relevant rules',
-        so truncation masquerades as a successful filter — 8 of 9 truncated calls
-        in production were classified that way. `stop_reason` is what separates
-        them; output_tokens == max_tokens is a heuristic with false positives."""
+    async def test_a_selection_at_the_output_cap_keeps_every_rule_even_on_stop(self, cortex, captured_events):
+        """A gateway may report "stop" at the cap, so the token count alone rejects it."""
+
+        class _AtTheCap:
+            async def code(self, **kwargs):
+                return LLMResponse(
+                    content='{"keep": [1, 2]}',
+                    usage=Usage(output_tokens=cortex_mod._RULE_RETRIEVAL_MAX_TOKENS),
+                    stop_reason="stop",
+                )
+
         rules = _when_engrams(12)
-        echo = "\n".join(f"- {rules[i].text}" for i in (0, 1))
-        llm = _FakeLLM(content=echo, stop_reason="max_tokens")
-        await self._run(cortex, llm, rules)
+        out = await self._run(cortex, _AtTheCap(), rules)
+        assert out == rules
+        assert _one_event(captured_events)["outcome"] == "kept_all_no_match"
+
+    async def test_truncated_selection_keeps_every_rule(self, cortex, captured_events):
+        """A selection cut at the ceiling may be missing rules even when what
+        arrived parses, so it is rejected whole rather than trusted."""
+        rules = _when_engrams(12)
+        llm = _FakeLLM(content='{"keep": [1, 2]}', stop_reason="max_tokens")
+        out = await self._run(cortex, llm, rules)
+        assert out == rules
         ev = _one_event(captured_events)
-        assert ev["outcome"] == "filtered"
+        assert ev["outcome"] == "kept_all_no_match"
         assert ev["stop_reason"] == "max_tokens", "a truncated filter must be separable"
+
+    async def test_the_model_is_shown_numbered_rules_and_asked_for_numbers(self, cortex):
+        rules = _when_engrams(12)
+        seen: dict = {}
+
+        class _Capturing:
+            async def code(self, **kwargs):
+                seen.update(kwargs)
+                return LLMResponse(content='{"keep": [3]}', usage=Usage())
+
+        cortex._llm = _Capturing()
+        out = await cortex._retrieve_relevant_rules(rules, "do the august campaign")
+        content = seen["messages"][0]["content"]
+        assert f"1. {rules[0].text}" in content
+        assert f"12. {rules[11].text}" in content
+        assert '{"keep"' in seen["system"]
+        assert out == [rules[2]]
+
+    async def test_selection_keeps_file_order_and_collapses_duplicates(self, cortex, captured_events):
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _FakeLLM(content='{"keep": [5, 2, 5]}'), rules)
+        assert out == [rules[1], rules[4]]
+        assert _one_event(captured_events)["kept_rules"] == 2
+
+    async def test_a_fenced_selection_still_filters(self, cortex, captured_events):
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _FakeLLM(content='```json\n{"keep": [2]}\n```'), rules)
+        assert out == [rules[1]]
+        assert _one_event(captured_events)["outcome"] == "filtered"
+
+    async def test_one_invalid_index_keeps_every_rule(self, cortex, captured_events):
+        rules = _when_engrams(12)
+        out = await self._run(cortex, _FakeLLM(content='{"keep": [1, 13]}'), rules)
+        assert out == rules
+        assert _one_event(captured_events)["outcome"] == "kept_all_no_match"
+
+    async def test_mandatory_rules_survive_every_selection(self, cortex):
+        mandatory = [
+            Engram(text="Always cite sources", kind="always", scope="global", confidence="high"),
+            Engram(text="Never delete data", kind="never", scope="global", confidence="high"),
+        ]
+        when = _when_engrams(12)
+        for content in ('{"keep": [1]}', '{"keep": []}', "garbage", ""):
+            cortex._llm = _FakeLLM(content=content)
+            out = await cortex._retrieve_relevant_rules(mandatory + when, "do the august campaign")
+            assert out[:2] == mandatory, content
+
+    async def test_a_slow_filter_times_out_and_keeps_every_rule(self, cortex, captured_events, monkeypatch):
+        monkeypatch.setattr(cortex_mod, "_RULE_RETRIEVAL_TIMEOUT_SECONDS", 0.05)
+
+        class _Hanging:
+            async def code(self, **kwargs):
+                await asyncio.sleep(30)
+
+        rules = _when_engrams(12)
+        cortex._llm = _Hanging()
+        started = asyncio.get_running_loop().time()
+        out = await cortex._retrieve_relevant_rules(rules, "do the august campaign")
+        assert asyncio.get_running_loop().time() - started < 5, "must not wait for the 30 s hang"
+        assert out == rules
+        assert _one_event(captured_events)["outcome"] == "timeout"
+
+    async def test_a_provider_timeout_before_the_deadline_is_an_error(self, cortex, captured_events):
+        class _ProviderTimeout:
+            async def code(self, **kwargs):
+                raise TimeoutError("read timed out")
+
+        rules = _when_engrams(12)
+        cortex._llm = _ProviderTimeout()
+        out = await cortex._retrieve_relevant_rules(rules, "do the august campaign")
+        assert out == rules
+        assert _one_event(captured_events)["outcome"] == "error"
+
+    async def test_both_scopes_time_out_together(self, dirs, captured_events, monkeypatch):
+        """Prompt assembly waits for one deadline, not one per memory scope."""
+        monkeypatch.setattr(cortex_mod, "_RULE_RETRIEVAL_TIMEOUT_SECONDS", 0.2)
+        for d in dirs:
+            lines = "\n".join(f"- {e.text}" for e in _when_engrams(12))
+            (d / "rules.md").write_text(f"## When\n{lines}\n")
+
+        class _Hanging:
+            async def code(self, **kwargs):
+                await asyncio.sleep(30)
+
+        g, p = dirs
+        cortex = Cortex(
+            global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot", llm_client=_Hanging()
+        )
+        started = asyncio.get_running_loop().time()
+        result = await cortex.build_memory_context("do the august campaign")
+        assert asyncio.get_running_loop().time() - started < 5, "must not wait for the 30 s hang"
+        assert [ev["outcome"] for ev in captured_events] == ["timeout", "timeout"]
+        assert result.count("When condition 011 applies") == 2
 
     async def test_the_call_is_tagged_so_it_is_isolatable_in_a_trace(self, cortex):
         """Done-when #1: distinguishable from every other `llm.code` call."""
@@ -798,3 +905,48 @@ class TestCompactRulesFile:
         await self._compact(dirs, hc, keep=list(range(1, 12)))
         assert "Hand-added note" in hc._rules_path.read_text()
         assert len(hc.get_rules()) == 11
+
+
+class TestParseRuleSelection:
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ('{"keep": [1, 3]}', [0, 2]),
+            ('{"keep": []}', []),
+            ('{"keep": [3, 1, 3]}', [0, 2]),
+            ('  {"keep": [2]}  ', [1]),
+            ('```json\n{"keep": [1, 3]}\n```', [0, 2]),
+            ('```\n{"keep": []}\n```', []),
+            ('  ```JSON\n{"keep": [2]}\n```  ', [1]),
+        ],
+    )
+    def test_accepts_exact_index_selections(self, text, expected):
+        assert _parse_rule_selection(text, 3) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "NONE",
+            "not json",
+            '{"keep": [1, 2]',
+            "[1, 2]",
+            '{"keep": "1"}',
+            '{"keep": [1], "why": "x"}',
+            '{"rules": [1]}',
+            '{"keep": [0]}',
+            '{"keep": [4]}',
+            '{"keep": [1, 4]}',
+            '{"keep": [true]}',
+            '{"keep": [1.0]}',
+            '{"keep": ["1"]}',
+            '{"keep": [null]}',
+            '```json\n{"keep": [4]}\n```',
+            '```json\n```json\n{"keep": [1]}\n```\n```',
+            '```json\n{"keep": [1]}',
+            'Here you go: ```json\n{"keep": [1]}\n```',
+            '```python\n{"keep": [1]}\n```',
+        ],
+    )
+    def test_rejects_anything_else(self, text):
+        assert _parse_rule_selection(text, 3) is None
