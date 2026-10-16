@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import hashlib
 import httpx2 as httpx
@@ -67,6 +68,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StreamTurnEnded,
     StructuredOutputError,
     TokenLimitExceeded,
     ToolCall,
@@ -77,8 +79,11 @@ from anton.core.llm.provider import (
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
+    JEV_CALL_ROLE,
     VALID_SURFACES,
     TraceContext,
+    call_role,
+    detached_from_session,
     reset_trace_context,
     set_trace_context,
 )
@@ -92,8 +97,8 @@ from anton.core.tools.tool_defs import (
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
-    OPEN_ARTIFACT_TOOL,
     READ_IMAGE_TOOL,
+    READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
     SELECT_PATH_TOOL,
@@ -127,6 +132,7 @@ from anton.utils.datasources import (
     build_datasource_context,
     restore_namespaced_env,
     scrub_credentials,
+    scrub_output,
 )
 from anton.core.settings import CoreSettings
 
@@ -226,6 +232,18 @@ def _discarded_call_reason(tc: ToolCall) -> str:
     return "Discarded: the round it belonged to was cut off"
 
 
+def _known_scratchpad_action(tc: ToolCall) -> str | None:
+    """The call's `action` if it is one the scratchpad schema allows, else None.
+
+    A cut-off call carries whatever the model wrote, and a consumer reads
+    `StreamToolResult.action` as ours: `"message"`, for one, means a tool's
+    message to the user.
+    """
+    action = tc.input.get("action") if isinstance(tc.input, dict) else None
+    allowed = SCRATCHPAD_TOOL.input_schema["properties"]["action"]["enum"]
+    return action if action in allowed else None
+
+
 def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
     """Everything a consumer needs to retire the step of a call we refuse to run.
 
@@ -259,10 +277,12 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         ),
         # "exec failed" is the wording the cell-status classifier keys on for a
         # non-JSON result; without a recognised marker the cell reads as ok.
+        # cowork-server's figure sources key on the same "[error] exec failed"
+        # prefix to drop the call (cowork/harnesses/anton_harness/figure_sources.py).
         StreamToolResult(
             name="scratchpad",
             content=f"[error] exec failed — {reason}",
-            action=tc.input.get("action") if isinstance(tc.input, dict) else None,
+            action=_known_scratchpad_action(tc),
             id=tc.id,
         ),
     ]
@@ -474,6 +494,94 @@ class _VerifierVerdict(BaseModel):
         return False if v is None else v
 
 
+class _FinishAuthorization(BaseModel):
+    """Whether the user's own message already answers a turn limit's
+    "keep going?" question (see `_user_authorized_finishing`)."""
+
+    # Before `authorized`, so the model finds its evidence first. Asking for the
+    # words, not just a yes/no, is what stopped a whole-job request ("convert
+    # the whole RFP") from reading as "keep going": there is nothing to quote.
+    quote: str = Field(
+        description=(
+            "The words, copied from the user's message, that tell the agent to "
+            "keep working without stopping or checking in until the task is "
+            "finished. Empty if the message has no such words."
+        )
+    )
+    authorized: bool = Field(
+        description="True only if `quote` is non-empty and says that."
+    )
+
+
+def _finish_authorized(verdict, message: str) -> bool:
+    """Read a `_FinishAuthorization` verdict: yes needs a quote that is in the
+    message. Copied exactly (ignoring case, spacing and punctuation), or mostly:
+    models fix typos ("hae" → "have") when they copy, but an invented quote
+    shares few words. Unicode-aware, so an exact Chinese or Russian quote
+    counts; scripts without spaces rely on the exact match."""
+    if getattr(verdict, "authorized", None) is not True:
+        return False
+    quote = str(getattr(verdict, "quote", ""))
+    letters = lambda text: "".join(ch for ch in text.lower() if ch.isalnum())  # noqa: E731
+    if not letters(quote):
+        return False
+    if letters(quote) in letters(message):
+        return True
+    words = re.findall(r"[\w']+", quote.lower())
+    present = set(re.findall(r"[\w']+", message.lower()))
+    return sum(w in present for w in words) >= 0.8 * len(words)
+
+
+# Longest message the finish-authorization check reads. Longer ones are never
+# truncated into it (a cut-off restriction would read as unrestricted); the
+# turn asks instead, which only costs a question.
+_FINISH_AUTHORIZATION_MAX_CHARS = 4000
+
+
+def _build_finish_authorization_request(message: str) -> tuple[str, list[dict]]:
+    """The exact (system, messages) pair the finish-authorization check sends.
+
+    Module-level so the live eval (`tests/test_finish_authorization_live.py`)
+    exercises the production prompt, as `_build_verify_request` does for the
+    verifier. The exclusions are the measured failure: read without them,
+    "one step at a time... before moving on" counted as "keep going".
+    """
+    system = (
+        "An AI agent is working on a user's task and has reached an automatic "
+        "usage limit: a cap on the steps or tokens one request may use. It "
+        "would normally stop and ask the user whether to keep going. Decide "
+        "whether the user's message already answers yes, with an explicit "
+        "instruction to keep working without stopping or checking in until "
+        "the task is finished.\n\n"
+        "Answer true for instructions such as: \"keep going\", \"don't stop "
+        "until you're finished\", \"finish the whole thing without checking "
+        "in\", \"go and don't stop until you have something for me to "
+        "review\", \"just finish it\", \"yes, continue\". The instruction may "
+        "come at the end of a longer task request.\n\n"
+        "Answer false for:\n"
+        "- instructions about how to pace or order the work, such as \"one "
+        "step at a time\", \"step by step\", \"check each one before moving "
+        "on\", \"never combine steps\";\n"
+        "- a task request, however long or detailed, that says nothing about "
+        "stopping or checking in. Asking for the whole job (\"convert the whole "
+        "document\", \"deliver all three files\") sets its scope; it does not "
+        "say to skip check-ins;\n"
+        "- continuing with a change of direction, such as \"keep going but "
+        "try a different approach\";\n"
+        "- a question, or an instruction to stop, pause or wait;\n"
+        "- any message that also asks to be checked with before going past a "
+        "limit, spending more, or exceeding a budget, even if it also says "
+        "\"keep going\" (\"keep going, but ask me before you go over my token "
+        "limit\"). The restriction wins. Permission with a condition about "
+        "cost, budget or limits (\"as long as...\", \"unless...\", \"otherwise "
+        "ask\") is such a restriction.\n\n"
+        "If unsure, answer false: the agent will then simply ask.\n\n"
+        "First copy the words in the message that give that instruction. If "
+        "there are none, leave the quote empty and answer false."
+    )
+    return system, [{"role": "user", "content": f"USER MESSAGE:\n{message}"}]
+
+
 # Output budgets for the verdict call: first attempt, then the retry used when
 # it comes back truncated (ENG-1081).
 #
@@ -681,6 +789,31 @@ _SPEND_CEILING_GRACE_FLOOR = 100_000
 # repeatedly: see the grant sites for the one-shot guard.
 _ROUND_CAP_GRACE_ROUNDS = 3
 
+# What one "Keep going" at a turn limit buys: the limit rises by this many times
+# its configured size. Replayed against 30 days of limit stops, 4x let 116 of
+# 120 interrupted-then-finished runs complete after one question; one more
+# equal window removed none of the repeat stops.
+_LIMIT_CONTINUE_MULTIPLIER = 4
+
+# Closes every hand-back notice. The notices reach the model as user-role
+# messages, so without this it reads the pause as the user's request and tells
+# them it "stopped, as requested" right after they asked it to keep going.
+_HANDBACK_NOT_USER_CLAUSE = (
+    "This pause comes from an automatic limit, not from the user: do not say "
+    "or imply that they asked you to stop."
+)
+
+
+def _limit_handback_clause(reached: str) -> str:
+    """Has the hand-back state the limit word for word, and what a reply does.
+    Without it the model explained the stop as "a lot of work", and a user who
+    then wrote "don't stop" could not tell why it stopped again."""
+    return (
+        f'Begin your reply with this sentence, word for word: "{reached}." '
+        "End it by telling the user that replying \"keep going\" continues "
+        "from where you stopped. "
+    )
+
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
 # budgets above. Tool name comes off the schema class so it can't go stale.
@@ -722,6 +855,13 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+
+# Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
+_NO_GUESS_AT_LIMIT = (
+    "Report only what your tool results actually showed. If you have not found the "
+    "answer, say plainly that you could not find it; do not estimate, extrapolate or "
+    "state a figure you did not retrieve."
+)
 
 
 def _safe_error_detail(exc: BaseException) -> str:
@@ -1396,6 +1536,12 @@ class ChatSessionConfig:
     # capability the host declares, like `elicitor`, never inferred from
     # `surface` or `console`: those answer different questions.
     live_tool_peek: bool = False
+    # Whether this host renders a tool's message to the user — a
+    # `StreamToolResult(action="message")`, e.g. generate_artifact's brief when
+    # the agent acts first — as an agent message. Declared by the host like
+    # `live_tool_peek`; without it the relay drops the message and the tool
+    # hands the content to the agent instead.
+    tool_messages: bool = False
     # WHO the user is, for analytics attribution only (ENG-2121): the Keycloak
     # ``sub`` and the active organisation id, both UUIDs. ``turn_completed``
     # is keyed on ``user_id`` when it is set, which is the same distinct_id the
@@ -1512,6 +1658,15 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
+        # Headroom the user granted this turn by answering "Keep going" at a
+        # limit. Reset per turn in turn_stream.
+        self._spend_ceiling_continued_tokens = 0
+        self._round_cap_continued_rounds = 0
+        # Whether this turn's own message told the agent to keep going (None
+        # until a limit first asks), and the limits that message has already
+        # carried past once.
+        self._finish_authorized: bool | None = None
+        self._limits_passed_by_message: set[str] = set()
         # Memory section by user message, reused within one turn. None outside a turn.
         self._turn_memory: dict[str, str] | None = None
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
@@ -1627,6 +1782,7 @@ class ChatSession:
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
         self.live_tool_peek = config.live_tool_peek
+        self.tool_messages = config.tool_messages
         self._user_id = _validated_account_id(config.user_id)
         self._organization_id = _validated_account_id(config.organization_id)
         # Per-turn token cost books (ENG-1288). Created and armed at each
@@ -1688,12 +1844,13 @@ class ChatSession:
         # Where `create_skill_draft` stages skills the agent builds. None means
         # the host stages none, and the tool is not registered at all.
         self._skill_drafts_root = getattr(s, "skill_drafts_root", None)
-        # Slugs of artifacts this turn created or opened for editing, recorded
-        # by the artifact tool handlers as they run. A host builds the turn's
-        # artifact cards from this rather than diffing the artifacts directory:
-        # the set names what THIS turn actually touched, so a concurrent turn
-        # writing into the same (shared, project-wide) directory can never be
-        # mistaken for this turn's work. Reset at the top of every turn.
+        # Slugs of artifacts this turn created, generated, updated or edited
+        # through the scratchpad, recorded by the artifact tool handlers as
+        # they run. A host builds the turn's artifact cards from this rather
+        # than diffing the artifacts directory: the set names what THIS turn
+        # actually touched, so a concurrent turn writing into the same (shared,
+        # project-wide) directory can never be mistaken for this turn's work.
+        # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
@@ -1792,8 +1949,13 @@ class ChatSession:
         return self._history
 
     @property
+    def act_first(self) -> bool:
+        """The "act first, ask later" setting this session was built with."""
+        return self._act_first
+
+    @property
     def artifacts_touched(self) -> set[str]:
-        """Slugs this turn created or opened for editing.
+        """Slugs this turn created, generated, updated or edited through the scratchpad.
 
         A copy: a host reads this after the turn to decide which artifacts to
         surface, and must not be able to mutate the session's own record.
@@ -2517,6 +2679,7 @@ class ChatSession:
 
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
+        self.tool_registry.register_tool(READ_TEXT_FILE_TOOL)
         # Interactive file/folder disambiguation. Registered on every host, but
         # in one of two shapes — because "degrades to picker_unavailable" is
         # not a neutral degradation when the definition also injects a
@@ -2601,7 +2764,6 @@ class ChatSession:
         if self._workspace is not None:
             self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
             self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             self.tool_registry.register_tool(GENERATE_ARTIFACT_TOOL)
@@ -3087,6 +3249,8 @@ class ChatSession:
         with tool_use blocks and inserts a user message carrying
         synthetic `is_error: true` results for whichever ids didn't
         get acknowledged in the immediately following message.
+        cowork-server's figure sources skip results marked is_error, so
+        keep the flag on every result anton makes up itself.
 
         Returns the number of synthetic results inserted (0 if the
         history is already clean).
@@ -3547,6 +3711,10 @@ class ChatSession:
                 # consistent with how other unset string properties go out.
                 grace_granted=tc.grace_granted,
                 grace_tokens=str(tc.grace_tokens),
+                # "Keep going" answers at a turn limit — see
+                # `TurnCost.limit_continues`.
+                limit_continues=str(tc.limit_continues),
+                limit_message_continues=str(tc.limit_message_continues),
                 # WHY the verifier produced no verdict (ENG-1858): the loop's
                 # own truncated/transient/hard/denied class plus the content-
                 # free exception type. Empty on verified turns. See
@@ -3903,7 +4071,11 @@ class ChatSession:
             max(self._max_turn_tokens // 2, 1),
         )
         return max(
-            self._max_turn_tokens + self._spend_ceiling_grace_tokens - reserve, 1
+            self._max_turn_tokens
+            + self._spend_ceiling_grace_tokens
+            + self._spend_ceiling_continued_tokens
+            - reserve,
+            1,
         )
 
     def _grant_spend_ceiling_grace(self) -> None:
@@ -3932,6 +4104,138 @@ class ChatSession:
             self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
         _record_grace(self._turn_cost, "ceiling")
 
+    def _limit_reached(self, limit: str) -> str:
+        """Names the limit that stopped the turn, and where it is set.
+
+        The user cannot act on "this took a lot of work": they need to know a
+        per-request limit fired, so that a reply carries on and a setting can
+        raise it. Reports the limit in force now, which a "Keep going" may
+        already have raised."""
+        if limit == "spend_ceiling":
+            ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
+            return (
+                f"This task reached its limit of {ceiling:,} tokens per request "
+                "(Max tokens per task, in your settings)"
+            )
+        cap = self._max_tool_rounds + self._round_cap_continued_rounds
+        return (
+            f"This task reached its limit of {cap} steps per request "
+            "(Max steps per task, in your settings)"
+        )
+
+    def _grant_limit(self, limit: str) -> None:
+        """Raise `limit` by `_LIMIT_CONTINUE_MULTIPLIER` times its configured
+        size for the rest of the turn."""
+        if limit == "spend_ceiling":
+            self._spend_ceiling_continued_tokens += (
+                _LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens
+            )
+        else:
+            self._round_cap_continued_rounds += (
+                _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
+            )
+
+    async def _ask_to_continue_past_limit(self, limit: str, user_message: str = ""):
+        """Decide whether the turn keeps going past a limit.
+
+        `limit` is "spend_ceiling" or "round_cap". Yields ``("event", ev)``,
+        then ``("result", granted)``. Granted raises that limit by
+        `_LIMIT_CONTINUE_MULTIPLIER` times its configured size for the rest of
+        the turn. Two ways to grant, in order:
+
+        1. The message that started this turn already says to keep going or
+           finish. Honored once per limit per turn, with a progress line
+           naming the limit, so the user is not asked what they just said.
+        2. A "Keep going / Stop here" question naming the limit. "Stop
+           here", Skip, a timeout, or a host that cannot ask returns False
+           and the caller hands back as before.
+        """
+        if limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
+            user_message
+        ):
+            # Named before the grant, which would report the raised limit.
+            note = f"{self._limit_reached(limit)}. Continuing, as you asked."
+            self._limits_passed_by_message.add(limit)
+            self._grant_limit(limit)
+            if self._turn_cost is not None:
+                self._turn_cost.limit_message_continues += 1
+            yield "event", StreamTaskProgress(phase="analyzing", message=note)
+            yield "result", True
+            return
+        if self.emitter is None:
+            # `turn()` runs without an emitter, so there is no one to ask and
+            # nothing to drain; the caller hands back as it always did.
+            yield "result", False
+            return
+        inner = self._run_draining(self._continue_question(limit))
+        try:
+            async for kind, item in inner:
+                if kind == "result" and item:
+                    self._grant_limit(limit)
+                    if self._turn_cost is not None:
+                        self._turn_cost.limit_continues += 1
+                yield kind, item
+        finally:
+            await inner.aclose()
+
+    async def _user_authorized_finishing(self, user_message: str) -> bool:
+        """Whether this turn's own message tells the agent to keep going.
+
+        Any message counts, including the first: "don't stop until you're
+        finished" in the original request is honored. A yes/no call on the
+        cheap coding model (`_build_finish_authorization_request`), made only
+        when a limit is reached and at most once per turn. Matching phrases
+        would misread "keep going with a different approach". Any failure
+        reads as no, which falls back to asking.
+        """
+        if self._finish_authorized is None:
+            self._finish_authorized = False
+            text = (user_message or "").strip()
+            # Too long to send whole: ask instead. A truncated message could
+            # drop a trailing restriction ("...but ask before going over my
+            # token limit") while its opening "keep going" still verifies.
+            if text and len(text) <= _FINISH_AUTHORIZATION_MAX_CHARS:
+                try:
+                    system, messages = _build_finish_authorization_request(text)
+                    verdict = await self._llm.generate_object_code(
+                        _FinishAuthorization,
+                        system=system,
+                        messages=messages,
+                        max_tokens=_VERIFIER_TOKEN_BUDGETS[0],
+                    )
+                    self._finish_authorized = _finish_authorized(verdict, text)
+                except Exception:
+                    logger.warning(
+                        "finish-authorization check failed; asking instead",
+                        exc_info=True,
+                    )
+        return self._finish_authorized
+
+    async def _continue_question(self, limit: str) -> bool:
+        """The "Keep going / Stop here" question itself; True on Keep going."""
+        from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+        if limit == "spend_ceiling":
+            more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens:,} more tokens"
+            cost = " Continuing uses more tokens."
+        else:
+            more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds} more steps"
+            cost = ""
+        request = AskRequest(
+            prompt=f"{self._limit_reached(limit)}.{cost} Keep going?",
+            options=(
+                AskOption(value="continue", label="Keep going", detail=more, style="primary"),
+                AskOption(
+                    value="stop", label="Stop here",
+                    detail="Summarize what is done and what remains",
+                ),
+            ),
+            allow_custom=False,
+            timeout_s=getattr(self.elicitor, "timeout_s", None),
+        )
+        answer = await elicit(self, f"limit:{uuid.uuid4().hex}", request)
+        return answer.status == "answered" and answer.values == ("continue",)
+
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
 
@@ -3956,7 +4260,10 @@ class ChatSession:
             "work, so the user can decide whether it is worth continuing. "
             "If you are on a good track and can finish, say so and ask if they'd "
             "like you to continue. "
-            "Do NOT retry automatically — wait for the user's response."
+            f"{_NO_GUESS_AT_LIMIT} "
+            "Do NOT retry automatically — wait for the user's response. "
+            + _limit_handback_clause(self._limit_reached("spend_ceiling"))
+            + _HANDBACK_NOT_USER_CLAUSE
         )
 
     async def _jev_verdict(self, user_message: str | None) -> "_jev.JevVerdict | None":
@@ -3975,12 +4282,27 @@ class ChatSession:
             return _jev.JevVerdict(error="credentials")
         if not api_key:
             return None
+        # Traced like the LLM verifier it stands in for (same turn and harness);
+        # without these headers the gateway files the check as direct-API use. Its
+        # own role: it runs on Jev, not on any of the session's model slots.
+        with call_role(JEV_CALL_ROLE):
+            headers = provider.trace_headers()
+        # Kept out of the conversation's session: the console marks a conversation
+        # failed when any call in it fails, and a refused check is one the turn
+        # recovers from. The conversation rides in the metadata instead, so the
+        # check can still be joined to it.
+        conversation_id = headers.pop("Langfuse-Session-Id", None)
+        if conversation_id and "Langfuse-Metadata" in headers:
+            metadata = json.loads(headers["Langfuse-Metadata"])
+            metadata["conversation_id"] = conversation_id
+            headers["Langfuse-Metadata"] = json.dumps(metadata)
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
         return await _jev.classify(
             base_url=base_url,
             api_key=api_key,
+            headers=headers,
             model=self._jev_model,
             state={
                 "request": (user_message or "").strip(),
@@ -4308,7 +4630,24 @@ class ChatSession:
 
         asyncio.create_task(_drain())
 
-    def _schedule_cerebellum_flush(self) -> None:
+    @staticmethod
+    def _background_context(trace: TraceContext | None) -> contextvars.Context:
+        """A context for background work of the turn `trace` identifies.
+
+        LLM calls made in it are attributed to that turn, but kept out of the
+        conversation's session (see `detached_from_session`). Tasks started in
+        it inherit it.
+        """
+        context = contextvars.copy_context()
+        if trace is not None:
+            context.run(set_trace_context, detached_from_session(trace))
+        return context
+
+    def _spawn_background(self, coro, trace: TraceContext | None) -> asyncio.Task:
+        """Start `coro` as background work of the turn `trace` identifies."""
+        return asyncio.create_task(coro, context=self._background_context(trace))
+
+    def _schedule_cerebellum_flush(self, trace: TraceContext | None = None) -> None:
         """Fire the cerebellum's batched diff pass without blocking the turn.
 
         The cerebellum buffered any errored / warning cells across the
@@ -4330,7 +4669,7 @@ class ChatSession:
         if cb.buffered_count == 0:
             return
         try:
-            asyncio.create_task(cb.flush())
+            self._spawn_background(cb.flush(), trace)
         except RuntimeError:
             # No running loop (e.g. called from a sync context in tests).
             # Cerebellum learning is best-effort, so just drop the buffer.
@@ -4378,13 +4717,30 @@ class ChatSession:
         return ""
 
     async def _dispatch_draining(self, tc):
-        """Run one tool while forwarding whatever it emits out of band.
+        """Run one tool through `_run_draining`. The final item is
+        ``("result", outcome)``, the ``ToolOutcome`` ``dispatch_tool`` returns,
+        so the caller reads ``.content`` and ``.ok`` off it rather than
+        receiving bare text. Callers must ``aclose()`` this generator."""
+        inner = self._run_draining(
+            self.tool_registry.dispatch_tool(
+                self, tc.name, tc.input, tool_call_id=tc.id,
+            )
+        )
+        try:
+            async for item in inner:
+                yield item
+        finally:
+            # Same-task close, so the inner `finally` cancels the dispatch on
+            # a Stop rather than waiting for GC (hazard 4 below).
+            await inner.aclose()
+
+    async def _run_draining(self, coro):
+        """Run *coro* while forwarding whatever it emits out of band.
 
         Yields ``("event", ev)`` for each out-of-band event, then
-        ``("result", outcome)`` — the ``ToolOutcome`` ``dispatch_tool``
-        returns, so the caller reads ``.content`` and ``.ok`` off it rather
-        than receiving bare text. "Out of band" covers both an ``ask_user``
-        question (ENG-1276, #292) and a streaming tool's ``ToolProgress``
+        ``("result", value)`` with what *coro* returned. "Out of band" covers
+        both an ``ask_user`` question (ENG-1276, #292), a turn-limit question
+        (`_ask_to_continue_past_limit`) and a streaming tool's ``ToolProgress``
         markers (ENG-763) — ``dispatch_tool`` relays the latter through
         ``session.emitter`` too, since it has no other way to reach the
         caller while running inside this method's background task; both
@@ -4416,11 +4772,7 @@ class ChatSession:
            cancelled while we are suspended at a ``yield``, our ``finally``
            only runs on finalization, which GC would otherwise defer.
         """
-        task = asyncio.create_task(
-            self.tool_registry.dispatch_tool(
-                self, tc.name, tc.input, tool_call_id=tc.id,
-            )
-        )
+        task = asyncio.create_task(coro)
         # Bound before the try: the `finally` cancels it, and if the first
         # `ensure_future` below raised, an unbound name there would turn the
         # real cause into a NameError.
@@ -4549,6 +4901,10 @@ class ChatSession:
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
         self._round_cap_grace_used = False
+        self._spend_ceiling_continued_tokens = 0
+        self._round_cap_continued_rounds = 0
+        self._finish_authorized = None
+        self._limits_passed_by_message = set()
         self._turn_memory = {}
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
@@ -4581,19 +4937,17 @@ class ChatSession:
         # talking to MindsHub and attaches langfuse-style headers so the
         # router can attribute every LLM call (and any spans nested
         # inside this turn via tools / scratchpad) to the right session.
-        # ContextVar propagation also covers `asyncio.create_task` spawns
-        # — the cerebellum flush + identity extraction tasks scheduled
-        # below inherit a copy of this context.
-        _trace_token = set_trace_context(
-            TraceContext(
-                session_id=self._session_id,
-                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
-                harness=self._harness,
-                surface=self._surface,
-                tags=tuple(trace_tags or ()),
-                metadata=trace_metadata or None,
-            )
+        # Tasks spawned during the turn inherit it. The end-of-turn memory
+        # tasks start after it is reset, so they get it from `_background_context`.
+        _turn_trace = TraceContext(
+            session_id=self._session_id,
+            turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+            harness=self._harness,
+            surface=self._surface,
+            tags=tuple(trace_tags or ()),
+            metadata=trace_metadata or None,
         )
+        _trace_token = set_trace_context(_turn_trace)
 
         # Open the turn's cost books and listen at the LLM-client narrow
         # waist — planning, coding (incl. verifier verdicts), and router
@@ -4617,6 +4971,9 @@ class ChatSession:
         _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
+        # A wrap-up failure the retry-exhausted site has already booked, so
+        # the finally keeps that terminal instead of filing it as "error".
+        _booked_exc: BaseException | None = None
         try:
             while True:
                 try:
@@ -5017,62 +5374,37 @@ class ChatSession:
                                     assistant_text_parts.append(event.text)
                                 yield event
                         except Exception as e:
-                            if isinstance(e, CURATED_PROVIDER_ERRORS):
-                                # Curated provider failures must FAIL the turn, not
-                                # get wrapped into assistant prose: the server maps
-                                # them to actionable cards, which can only fire when
-                                # the exception propagates. Wrapping them as text is
-                                # how "Server returned 403" ended up mid-chat with
-                                # "please rephrase your request" advice.
-                                #
-                                # ENG-1361 moved the membership list from HERE to
-                                # `provider.py`, beside the classes themselves, so
-                                # a new type is triaged where it is born.
-                                #
-                                # Be precise about what that does and does NOT buy
-                                # (review of #433): this is STILL an allowlist at
-                                # runtime — an unlisted type still becomes prose.
-                                # The default-safe property comes only from
-                                # `test_every_exception_defined_in_a_provider_module_is_triaged`,
-                                # which is why that test's module list must cover
-                                # every module that defines one of these.
-                                #
-                                # And propagating is not automatically better.
-                                # Five members currently have NO card on either
-                                # transport (ContextOverflowError,
-                                # StructuredOutputError, TransientProviderError,
-                                # EndpointConfigurationError,
-                                # RequestRefusedError): cowork-server
-                                # replaces the message with a flat "An unexpected
-                                # error occurred." and the client renders a
-                                # BUTTONLESS alert, so for those the turn trades
-                                # anton's own diagnosis for less text. It is still
-                                # the right trade — the prose asserted a remedy
-                                # that could not work — but it is a trade, not a
-                                # free win, and the cards are the follow-up.
-                                raise
-                            if _is_provider_auth_error(e):
-                                # Preserve a refusal after failed confirmation,
-                                # or the first refusal after stream output, for
-                                # the host's auth-error mapping.
-                                raise
-                            # No "rephrase your request": everything reaching
-                            # this line is an UNEXPECTED failure, and we have no
-                            # basis to claim the user's wording caused it. The
-                            # curated failures — where we DO know the cause, and
-                            # where rephrasing provably cannot help — are re-
-                            # raised above (ENG-1361). Say what happened and stop
-                            # inventing a remedy.
-                            fallback = f"An unexpected error occurred: {e}"
-                            assistant_text_parts.append(fallback)
-                            yield StreamTextDelta(text=fallback)
+                            # The explain call failed too, so the turn fails with
+                            # its error and the host maps it: curated types to
+                            # their cards where one exists, auth refusals to
+                            # the reconnect card, and anything else to the
+                            # host's own redacted copy — cowork-server's "An
+                            # unexpected error occurred.", the CLI's
+                            # setup/retry prompt.
+                            #
+                            # Never stream the exception as prose. Its message
+                            # can be anything: a provider's raw response body,
+                            # a file path, an internal detail. As prose it
+                            # skips the host's redaction, is saved as the
+                            # turn's reply, and is replayed to the model on
+                            # every later turn. Raising is default-safe: a type
+                            # outside the curated allowlist gets generic copy
+                            # rather than leaking.
+                            #
+                            # Telemetry keeps the retry_exhausted terminal
+                            # stamped above, with the error that exhausted the
+                            # retries. A curated or auth failure is booked as
+                            # "error", since it names its own cause.
+                            if not isinstance(e, CURATED_PROVIDER_ERRORS) and not _is_provider_auth_error(e):
+                                _booked_exc = e
+                            raise
                         break
         except BaseException as _e:
             # Capture, don't classify — the finally needs to know whether THIS
             # turn failed, rather than asking the interpreter what the thread
             # happens to be handling (#309 review). Covers GeneratorExit and
             # CancelledError too, both BaseException, both real turn endings.
-            _turn_exc = _e
+            _turn_exc = None if _e is _booked_exc else _e
             raise
         finally:
             self._turn_memory = None
@@ -5129,15 +5461,21 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                asyncio.create_task(self._cortex.maybe_update_identity(messages_str))
-            # Periodic memory vacuum (Systems Consolidation)
-            self._cortex.maybe_vacuum()
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
+            # Periodic memory vacuum (Systems Consolidation). Its compaction
+            # task is started inside, so it runs in the background context.
+            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush()
+        self._schedule_cerebellum_flush(_turn_trace)
         self._schedule_acc_flush()
+
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
 
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.
@@ -5384,9 +5722,23 @@ class ChatSession:
                     self._round_cap_grace_used = True
                     _round_cap_grace_active = True
                     _record_grace(self._turn_cost, "round")
-                effective_round_cap = self._max_tool_rounds + (
-                    _ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0
+                effective_round_cap = (
+                    self._max_tool_rounds
+                    + (_ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0)
+                    + self._round_cap_continued_rounds
                 )
+                if tool_round > effective_round_cap and self._max_tool_rounds > 0:
+                    agen = self._ask_to_continue_past_limit("round_cap", user_message)
+                    try:
+                        async for _kind, _payload in agen:
+                            if _kind == "event":
+                                yield _payload
+                            elif _payload:
+                                effective_round_cap += (
+                                    _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
+                                )
+                    finally:
+                        await agen.aclose()
                 # Accumulate, don't assign: `tool_round` is loop-local and
                 # resets to 0 on every verifier-forced continuation, so
                 # assigning reported only the last continuation's rounds —
@@ -5417,7 +5769,10 @@ class ChatSession:
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
-                                "Do NOT retry automatically — wait for the user's response."
+                                f"{_NO_GUESS_AT_LIMIT} "
+                                "Do NOT retry automatically — wait for the user's response. "
+                                + _limit_handback_clause(self._limit_reached("round_cap"))
+                                + _HANDBACK_NOT_USER_CLAUSE
                             ),
                         }
                     )
@@ -5452,6 +5807,14 @@ class ChatSession:
                     # hasn't, the second trip below asks same as always.
                     if not self._spend_ceiling_grace_used:
                         self._grant_spend_ceiling_grace()
+                    if self._spend_ceiling_stops_the_tool_loop():
+                        agen = self._ask_to_continue_past_limit("spend_ceiling", user_message)
+                        try:
+                            async for _kind, _payload in agen:
+                                if _kind == "event":
+                                    yield _payload
+                        finally:
+                            await agen.aclose()
                     if self._spend_ceiling_stops_the_tool_loop():
                         _spend_ceiling_hit = True
                         if self._turn_cost is not None:
@@ -5621,7 +5984,7 @@ class ChatSession:
                                         break
                                     if isinstance(item, str):
                                         yield StreamTaskProgress(
-                                            phase="scratchpad", message=item, id=tc.id,
+                                            phase="scratchpad", message=scrub_output(item), id=tc.id,
                                         )
                                     elif isinstance(item, Cell):
                                         cell = item
@@ -5657,6 +6020,8 @@ class ChatSession:
                                             exc_info=True,
                                         )
                                     if lint_messages:
+                                        # cowork-server's figure sources cut this
+                                        # block from a replayed cell's output.
                                         result_text += (
                                             "\n\n[artifact lint]\n"
                                             + "\n".join(lint_messages)
@@ -5949,6 +6314,9 @@ class ChatSession:
                         )
                         continue
 
+                    # Process output gets scrub_output where it is read, such as scratchpad cells
+                    # and backend logs. Other tools return source the model may write back.
+                    result_text = scrub_credentials(result_text)
                     if self._episodic is not None:
                         self._episodic.log_turn(
                             self._turn_count + 1,
@@ -5956,7 +6324,6 @@ class ChatSession:
                             result_text,
                             tool=tc.name,
                         )
-                    result_text = scrub_credentials(result_text)
                     self._record_root_cause(tool_ok, tool_reason, result_text)
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,
@@ -6111,7 +6478,8 @@ class ChatSession:
                             "2. Identify the specific blocker or failure preventing completion.\n"
                             "3. Suggest concrete next steps the user can take to unblock this.\n"
                             f"4. {_SOLVABILITY_CLAUSE}\n"
-                            "Be honest and specific — do not be vague about what went wrong."
+                            "Be honest and specific — do not be vague about what went wrong. "
+                            + _HANDBACK_NOT_USER_CLAUSE
                         ),
                     }
                 )
@@ -6561,6 +6929,14 @@ class ChatSession:
                 # the ask below, unchanged from before this existed.
                 if verdict.close_to_done and not self._spend_ceiling_grace_used:
                     self._grant_spend_ceiling_grace()
+                if self._spend_ceiling_reached():
+                    agen = self._ask_to_continue_past_limit("spend_ceiling", user_message)
+                    try:
+                        async for _kind, _payload in agen:
+                            if _kind == "event":
+                                yield _payload
+                    finally:
+                        await agen.aclose()
                 if self._spend_ceiling_reached():
                     _spend_ceiling_hit = True
                     if self._turn_cost is not None:

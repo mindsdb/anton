@@ -167,6 +167,16 @@ _SENTINEL_REASONS = {
     # resolves to a DIFFERENT class is the kind of collision a future editor
     # reads straight past.
     "path_not_found": (TIER_SELF, "unknown_resource"),
+    # `read_text_file`: each refusal is about the agent's own argument — a
+    # path, a range, a file it chose — and the message says what to do instead.
+    "missing_path": (TIER_SELF, "missing_argument"),
+    "invalid_path": (TIER_SELF, "invalid_argument"),
+    "not_a_file": (TIER_SELF, "invalid_argument"),
+    "access_denied": (TIER_SELF, "invalid_argument"),
+    "file_too_large": (TIER_SELF, "invalid_argument"),
+    "not_text": (TIER_SELF, "invalid_argument"),
+    "invalid_range": (TIER_SELF, "invalid_argument"),
+    "invalid_fields": (TIER_SELF, "invalid_argument"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
     "store_unavailable": (TIER_WALL, "service_unavailable"),

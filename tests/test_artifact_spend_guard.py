@@ -224,7 +224,7 @@ async def test_the_write_loop_ends_when_its_closing_rounds_run_out(tmp_path):
 
     def _client(**kw):
         session.calls += 1
-        return _stream_of(_llm_response(tool="read_file"))()  # never finishes
+        return _stream_of(_llm_response(tool="read_text_file"))()  # never finishes
 
     session._llm.plan_stream = _client
     session._llm.code_stream = _client
@@ -258,7 +258,7 @@ async def test_each_parallel_loop_gets_its_own_closing_rounds(tmp_path):
     async def _loop(label: str):
         def _client(**kw):
             rounds[label] += 1
-            return _stream_of(_llm_response(tool="read_file"))()
+            return _stream_of(_llm_response(tool="read_text_file"))()
 
         local = SimpleNamespace(
             _llm=SimpleNamespace(

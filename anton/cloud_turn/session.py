@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Trusted mount path — pod-side config, never from the wire request.
+#: cowork-server maps a pod's file reads from this path back to the project
+#: (cowork/harnesses/anton_harness/agent_files.py).
 DEFAULT_CLOUD_WORKSPACE_PATH = "/workspace"
 #: Operator/CI override for the mount path (pod-side env var, not request data).
 _WORKSPACE_PATH_ENV = "ANTON_CLOUD_WORKSPACE_PATH"
@@ -65,8 +67,8 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         "scratchpad",
         "create_artifact",
         "list_artifacts",
-        "open_artifact",
         "update_artifact",
+        "read_text_file",
         # Safe to list only because a cortex is always built — core registers
         # `memorize` with one, and an allowlist name matching no tool is fatal.
         "memorize",
@@ -893,6 +895,9 @@ def build_cloud_chat_session(
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
         elicitor=elicitor,                  # interactive turns only; None = no ask_user
+        # Whether cowork renders a tool's message to the user (UI turns do,
+        # channel turns do not); only the request can say.
+        tool_messages=request.tool_messages,
         cortex=cortex,                      # org memory; writes are reported, not stored
         episodic=None,
         self_awareness=None,

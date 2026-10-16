@@ -264,15 +264,13 @@ async def test_failed_context_length_exceeded_raises_context_overflow(endpoint):
 
 
 async def test_rate_limit_error_event_takes_the_rate_limit_path(endpoint):
-    """`rate_limited` on the count path, as an unconfirmed 429 gets, not the
-    incident backoff: the code does not say whether a per-minute or a per-day
-    limit was hit, so it earns no session wait. No HTTP status, because the
-    stream itself was a 200."""
+    """`rate_limited` with the session wait, not the incident backoff or an
+    immediate re-send. No HTTP status, because the stream itself was a 200."""
     endpoint.replies.append((200, "sse", _sse(*_text_events(""), {
         "type": "error", "code": "rate_limit_exceeded", "message": "Slow down", "param": None})))
     with pytest.raises(TransientProviderError) as info:
         await _stream(endpoint.provider())
-    assert (info.value.code, info.value.session_backoff, info.value.status_code) == ("rate_limited", False, None)
+    assert (info.value.code, info.value.session_backoff, info.value.status_code) == ("rate_limited", True, None)
     assert info.value.retry_after is None
 
 
@@ -363,7 +361,7 @@ async def test_a_failed_non_streamed_response_maps_the_same_codes(endpoint, code
         await endpoint.provider().complete(
             model="gpt-test", system="s", messages=[{"role": "user", "content": "hi"}], max_tokens=16)
     if expected is TransientProviderError:
-        assert (info.value.code, info.value.session_backoff) == ("rate_limited", False)
+        assert (info.value.code, info.value.session_backoff) == ("rate_limited", True)
 
 
 async def test_function_tools_are_sent_non_strict(endpoint):

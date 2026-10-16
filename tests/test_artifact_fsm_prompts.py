@@ -308,6 +308,25 @@ def test_stateful_rules_carry_the_state_sdk_contract():
     assert "EXTERNAL database" in stateful
 
 
+def test_stateful_rules_say_which_items_come_back_without_keys():
+    """An app counted with `increment` and listed with `query`, read the option
+    from `sk`, got None and showed every count as 0: the items those calls
+    create carry no key attributes, locally and in the cloud broker."""
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    assert "`increment`/`update` CREATES carries NO `pk`/`sk`" in stateful
+    assert 'set_fields={"option": option}' in stateful
+    # a put before each increment would reset the count every time
+    assert "Never `put` a counter item before each" in stateful
+
+
+def test_stateful_rules_keep_collection_data_behind_collection():
+    """An app wrote through `Collection` (pk `_`, sk `<name>#<key>`) and read
+    with raw `store.get`/`query` on its own keys, so it never found the vote."""
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    assert 'sk="<name>#<key>"' in stateful
+    assert "read back ONLY through the same `Collection`" in stateful
+
+
 def test_stateful_block_says_when_local_state_survives():
     """The STATE store must be described as working both locally and deployed."""
     stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
@@ -410,12 +429,28 @@ def test_verifier_contract_reaches_both_frontend_prompts():
       for marker in (
         "explicit `<body>`",
         "absolute URL",
+        "No root-relative path",
         "__antonCommentsLayer",
         "!important",
         "z-index",
         "stable `id`",
       ):
         assert marker in rules, marker
+
+
+def test_frame_notes_follow_the_browser_gate_in_both_frontend_prompts():
+    """BROWSER STORAGE and LINKS are not verifier checks. They sit after the
+    browser-gate bullet under their own lead sentence, so neither they nor
+    the browser gate read as the other kind."""
+    assert "BROWSER STORAGE" not in prompts._VERIFIER_CONTRACT
+    assert 'target="_blank"' not in prompts._VERIFIER_CONTRACT
+    for text in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        gate = text.index("Where a headless browser is available")
+        notes = text.index("Not checked by the verifier, but the page breaks inside the frame")
+        assert gate < notes < text.index("BROWSER STORAGE") < text.index('target="_blank"')
 
 
 def test_verifier_contract_promises_the_browser_load_for_both_page_kinds():
@@ -467,6 +502,24 @@ def test_design_rules_require_units_and_formatters():
     assert "never a raw float" in rules
     assert "One date format per page" in rules
     assert "estimated, sampled or converted" in rules
+
+
+def test_design_rules_forbid_content_nobody_asked_for():
+    """Pages gained invented brand names, status pills, marketing copy and
+    footers that neither the request nor the PRD mentioned. Both page
+    prompts carry the scope rule."""
+    rules = prompts._DESIGN_RULES
+    assert "render ONLY what the request, the PRD, `spec.md` and the API" in rules
+    assert "invented brand" in rules
+    assert "they never add other content" in rules
+    # error states and the notes other design rules demand are not extras
+    assert "functional states (loading, empty, error and API error messages)" in rules
+    assert "chart subtitles, units, estimated or converted" in rules
+    for text in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        assert "render ONLY what the request, the PRD, `spec.md` and the API" in text
 
 
 def test_design_rules_recommend_tailwind_but_keep_hand_written_css():
@@ -693,7 +746,7 @@ def test_fetch_prompt_has_no_write_file_instructions():
     system = prompts.build_fetch_data_system_prompt(Path("/tmp/a"))
     assert "Do NOT write any artifact files" in system
     assert "write_file" not in system
-    assert "read_file" not in system
+    assert "read_text_file" not in system
     assert "mode=\"a\"" not in system
 
 
@@ -863,15 +916,14 @@ def test_the_markers_are_quoted_identically_on_every_surface():
         assert begin in kickoff and end in kickoff
 
 
-# ── `read_file`'s surfaces must agree about `full` ──────────────────────────
+# ── The read surfaces must agree ────────────────────────────────────────────
 #
-# A live run found them disagreeing in the way that costs the most:
-# the only place stating that `full=true` is expensive and must not be used to
-# check finished work was the tool schema's `description`, while the system
-# prompt showed `read_file(path)` as a one-argument call and separately
-# promised the tail was "all you need". The model read all of them, believed
-# the promise, discovered the tail says nothing about the middle of a file,
-# and escalated to `full=true` anyway.
+# A live run found them disagreeing in the way that costs the most: the only
+# place saying a whole-file read is expensive and must not be used to check
+# finished work was the tool schema, while the system prompt promised the
+# default read was "all you need". The model believed the promise and then
+# escalated to a whole-file read anyway. The system prompt, the read tool's
+# description and the size rules must say the same things.
 
 def _write_loop_prompts() -> dict[str, str]:
     """Every system prompt a `_run_loop` write round can be sent.
@@ -889,17 +941,20 @@ def _write_loop_prompts() -> dict[str, str]:
     }
 
 
-def test_the_system_prompt_names_the_full_parameter_at_all():
-    """It did not, which is why the only warning about it lived in the tool
-    schema — which the model reads as a listing, not as rules."""
-    for name, text in _write_loop_prompts().items():
-        assert "full=true" in text, name
+def test_every_surface_names_the_tail_read_and_the_whole_file_read():
+    from anton.core.tools.generate_artifact.sub_tools import GEN_READ_TEXT_FILE_DESCRIPTION
+
+    surfaces = {**_write_loop_prompts(), "tool": GEN_READ_TEXT_FILE_DESCRIPTION}
+    for name, text in surfaces.items():
+        assert "start_line=-20" in text, name
+        assert "end_line=-1" in text, name
+        assert "never to check finished work" in text, name
 
 
-def test_the_system_prompt_says_what_full_costs_and_when_not_to_use_it():
+def test_no_surface_still_names_the_old_read_tool():
     for name, text in _write_loop_prompts().items():
-        assert "ENTIRE file" in text, name
-        assert "finish" in text, name
+        assert "read_file" not in text, name
+        assert "full=true" not in text, name
 
 
 def test_no_surface_still_claims_the_tail_is_all_you_need():
@@ -910,12 +965,14 @@ def test_no_surface_still_claims_the_tail_is_all_you_need():
         assert "which is all you need" not in text, name
 
 
-def test_the_write_result_is_advertised_as_the_cheaper_answer():
-    """`write_file` reports lines now; the prompt has to say so, or the model
-    spends a round re-learning what it was already told."""
+def test_every_surface_says_write_file_reports_the_lines_of_each_part():
+    from anton.core.tools.generate_artifact.sub_tools import GEN_READ_TEXT_FILE_DESCRIPTION
+
     for name, text in _write_loop_prompts().items():
-        assert "LINES" in text, name
+        assert "the lines this part occupies" in text, name
         assert "without reading" in text, name
+        assert "reports the lines each part occupies" in text, name
+    assert "reports the lines each part occupies" in GEN_READ_TEXT_FILE_DESCRIPTION
 
 
 # ── html-app generator prompt: structure ────────────────────────────────────
