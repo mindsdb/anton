@@ -912,19 +912,17 @@ def _log_status(*, status: object) -> int | str:
 # Transport errors a stream raises while its body is read. The SDKs wrap
 # transport failures only while they open the request; once the 200 is in,
 # a dying connection surfaces as the raw httpx2 error and the SDK never
-# retried it. Providers catch these next to the SDK's own connection error.
-STREAM_DROP_ERRORS: tuple[type[BaseException], ...] = (httpx2.TransportError,)
+# retried it. Providers catch it next to the SDK's own connection error.
+STREAM_DROP_ERROR = httpx2.TransportError
 
 
 def is_stream_drop(exc: BaseException) -> bool:
     """True for a connection that died after the response started.
 
-    That is a raw transport error, or the ``connection_error`` the providers
-    raise for one: they set ``session_backoff`` on it only once the stream has
-    started, so a failure to connect never matches.
+    Providers raise ``connection_error`` for every lost connection and set
+    ``session_backoff`` only once the stream has started, so a failure to
+    connect never matches.
     """
-    if isinstance(exc, STREAM_DROP_ERRORS):
-        return True
     return (
         isinstance(exc, TransientProviderError)
         and exc.code == "connection_error"

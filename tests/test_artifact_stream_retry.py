@@ -1,7 +1,6 @@
 """A dropped stream in the artifact pipeline is retried once at half the budget."""
 from __future__ import annotations
 
-import httpx2
 import pytest
 
 from anton.core.llm.provider import LLMResponse, StreamComplete, TransientProviderError, Usage
@@ -29,14 +28,8 @@ def _scripted(*outcomes):
 OK = LLMResponse(content="ok", usage=Usage(output_tokens=3))
 
 
-@pytest.mark.parametrize(
-    "drop",
-    [
-        httpx2.RemoteProtocolError("peer closed connection"),
-        TransientProviderError("lost", code="connection_error", session_backoff=True),
-    ],
-)
-async def test_drop_is_retried_at_half_budget(drop):
+async def test_drop_is_retried_at_half_budget():
+    drop = TransientProviderError("lost", code="connection_error", session_backoff=True)
     llm_call, calls = _scripted(drop, OK)
     response, used = await _call_with_stream_retry(
         llm_call, system="s", messages=[], tools=None, max_tokens=16384, default_cap=16384,
