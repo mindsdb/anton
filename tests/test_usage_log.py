@@ -11,6 +11,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anthropic
+import httpx2 as httpx
 import pytest
 
 from anton.core.llm.anthropic import AnthropicProvider
@@ -69,14 +71,17 @@ def _openai(create):
     return patcher, OpenAIProvider(api_key="k")
 
 
-async def _aiter(items):
+async def _aiter(items, then_raise=None):
     for item in items:
         yield item
+    if then_raise is not None:
+        raise then_raise
 
 
 class _AnthropicStream:
-    def __init__(self, events):
+    def __init__(self, events, then_raise=None):
         self._events = events
+        self._then_raise = then_raise
 
     async def __aenter__(self):
         return self
@@ -85,7 +90,7 @@ class _AnthropicStream:
         return False
 
     def __aiter__(self):
-        return _aiter(self._events)
+        return _aiter(self._events, self._then_raise)
 
 
 def _anthropic(**client_attrs):
@@ -191,6 +196,53 @@ async def test_a_streamed_anthropic_call_is_logged_even_when_it_ends_empty(usage
 
     (line,) = usage_log()
     assert (line["model"], line["input"]) == ("claude-alias", 30)
+
+
+_MESSAGE_START = SimpleNamespace(type="message_start", message=SimpleNamespace(
+    model="claude-served", usage=SimpleNamespace(input_tokens=50000, output_tokens=1)))
+_TEXT_DELTA = SimpleNamespace(type="content_block_delta", index=0,
+                              delta=SimpleNamespace(type="text_delta", text="Hel"))
+
+
+def _streaming_anthropic(monkeypatch, stream):
+    """A real provider, so its `except` clauses match the SDK's own error types."""
+    provider = AnthropicProvider(api_key="k")
+    monkeypatch.setattr(provider._client.messages, "stream", MagicMock(return_value=stream))
+    return provider
+
+
+def _connection_lost():
+    return anthropic.APIConnectionError(request=httpx.Request("POST", "http://mock/v1/messages"))
+
+
+async def test_a_streamed_anthropic_call_that_fails_midway_is_still_logged(usage_log, monkeypatch):
+    stream = _AnthropicStream([_MESSAGE_START, _TEXT_DELTA], then_raise=_connection_lost())
+    provider = _streaming_anthropic(monkeypatch, stream)
+    with pytest.raises(TransientProviderError):
+        async for _ in provider.stream(model="claude-alias", system="s", messages=MESSAGES):
+            pass
+
+    (line,) = usage_log()
+    assert (line["served_model"], line["input"]) == ("claude-served", 50000)
+
+
+async def test_a_streamed_anthropic_call_its_consumer_closes_is_still_logged(usage_log, monkeypatch):
+    provider = _streaming_anthropic(monkeypatch, _AnthropicStream([_MESSAGE_START, _TEXT_DELTA, _TEXT_DELTA]))
+    events = provider.stream(model="claude-alias", system="s", messages=MESSAGES)
+    await anext(events)
+    await events.aclose()
+
+    (line,) = usage_log()
+    assert line["input"] == 50000
+
+
+async def test_a_streamed_anthropic_call_that_fails_before_message_start_logs_nothing(usage_log, monkeypatch):
+    provider = _streaming_anthropic(monkeypatch, _AnthropicStream([], then_raise=_connection_lost()))
+    with pytest.raises(TransientProviderError):
+        async for _ in provider.stream(model="claude-alias", system="s", messages=MESSAGES):
+            pass
+
+    assert usage_log() == []
 
 
 async def _trace_seen_by_end_of_turn_work(monkeypatch):

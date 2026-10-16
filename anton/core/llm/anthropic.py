@@ -411,12 +411,14 @@ class AnthropicProvider(LLMProvider):
         # returned, so it never retried — the session must (ENG-673). A failure
         # BEFORE this (request establishment) was already SDK-retried → fail fast.
         stream_started = False
+        usage_seen = False
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 stream_started = True
                 async for event in stream:
                     if event.type == "message_start":
+                        usage_seen = True
                         served_model = getattr(event.message, "model", None) or served_model
                         usage = event.message.usage
                         input_tokens = usage.input_tokens
@@ -516,15 +518,18 @@ class AnthropicProvider(LLMProvider):
                 provider="Anthropic", code="connection_error",
                 session_backoff=stream_started, model=model,
             ) from exc
-
-        usage = Usage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            context_pressure=compute_context_pressure(model, input_tokens),
-            cache_read_tokens=cache_read_tokens,
-            cache_creation_tokens=cache_creation_tokens,
-        )
-        self.log_usage(model=model, usage=usage, served_model=served_model)
+        finally:
+            usage = Usage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                context_pressure=compute_context_pressure(model, input_tokens),
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+            )
+            # Billed from message_start on, so a stream that then fails or that its
+            # consumer closes still writes its line.
+            if usage_seen:
+                self.log_usage(model=model, usage=usage, served_model=served_model)
 
         # Missing stop_reason is a genuine truncation only when the stream
         # produced NOTHING. A content/tool-bearing stream that lacks it is almost
