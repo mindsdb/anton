@@ -116,3 +116,10 @@ async def test_put_rejects_key_attrs_of_another_target(store, value):
     c = Collection(store, "task")
     with pytest.raises(StateValidationError, match="do not match"):
         await c.put("a", value)
+
+
+async def test_put_rejects_item_copied_under_another_key(store):
+    c = Collection(store, "task")
+    await c.put("a", {"n": 1})
+    with pytest.raises(StateValidationError, match="do not match"):
+        await c.put("b", await c.get("a"))
