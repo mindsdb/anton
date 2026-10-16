@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+from anton.core.mcp.access import TOOL_ACCESS
 from anton.core.mcp.client import McpSession
-from anton.core.mcp.registry import discover_tool_defs, namespaced_tool_name
+from anton.core.mcp.registry import discover_tool_defs, namespaced_tool_name, without_empty_optionals
 from anton.core.tools.registry import ToolOutcome
 
 
@@ -101,3 +102,76 @@ async def test_discover_tool_defs_threads_connection_name_into_namespacing(stub_
             session, engine="hubspot", access_mode="write", connection_name="acme"
         )
     assert {d.name for d in defs} == {"hubspot__acme__add", "hubspot__acme__boom"}
+
+
+async def test_handler_leaves_out_empty_optional_arguments_of_a_read_tool(monkeypatch):
+    """Some models send cursor="" instead of omitting it; Notion rejects that."""
+    monkeypatch.setitem(TOOL_ACCESS, "hubspot", {"list_pages": "read"})
+    server = MCPServer(name="list-stub")
+
+    @server.tool()
+    def list_pages(query: str, cursor: str | None = None) -> str:
+        return f"query={query!r} cursor={cursor!r}"
+
+    async with McpSession(server=server) as session:
+        defs = await discover_tool_defs(session, engine="hubspot", access_mode="write")
+        handler = next(d for d in defs if d.name == "hubspot__list_pages").handler
+
+        outcome = await handler(None, {"query": "", "cursor": ""})
+        assert outcome.content == "query='' cursor=None"
+
+        outcome = await handler(None, {"query": "x", "cursor": "abc"})
+        assert outcome.content == "query='x' cursor='abc'"
+
+
+async def test_handler_passes_empty_arguments_of_a_write_tool_through(monkeypatch):
+    """On a write tool "" can mean "clear this field", so it must reach the server."""
+    monkeypatch.setitem(TOOL_ACCESS, "hubspot", {})
+    server = MCPServer(name="update-stub")
+
+    @server.tool()
+    def update_contact(contact_id: str, phone: str | None = None) -> str:
+        return f"contact_id={contact_id!r} phone={phone!r}"
+
+    async with McpSession(server=server) as session:
+        defs = await discover_tool_defs(session, engine="hubspot", access_mode="write")
+        handler = next(d for d in defs if d.name == "hubspot__update_contact").handler
+
+        outcome = await handler(None, {"contact_id": "42", "phone": ""})
+        assert outcome.content == "contact_id='42' phone=''"
+
+
+def test_empty_optionals_are_dropped_inside_nested_objects():
+    """HubSpot's discover_hubspot_schema takes its cursor inside `query`."""
+    schema = {
+        "type": "object",
+        "required": ["query"],
+        "properties": {"query": {
+            "type": "object",
+            "required": ["_queryType"],
+            "properties": {"_queryType": {"type": "string"}, "cursor": {"type": "string"}, "limit": {"type": "integer"}},
+        }},
+    }
+    args = {"query": {"_queryType": "GET_OBJECT_TYPES", "cursor": "", "limit": 100, "typeNameFilter": []}}
+    assert without_empty_optionals(args, schema, schema) == {
+        "query": {"_queryType": "GET_OBJECT_TYPES", "limit": 100, "typeNameFilter": []},
+    }
+
+
+def test_a_required_field_is_kept_even_when_empty_at_any_depth():
+    schema = {
+        "type": "object",
+        "$defs": {"Filter": {"type": "object", "required": ["value"], "properties": {"value": {"type": "string"}}}},
+        "properties": {"filters": {"type": "array", "items": {"$ref": "#/$defs/Filter"}}},
+        "required": [],
+    }
+    args = {"filters": [{"value": "", "note": None}], "cursor": None}
+    assert without_empty_optionals(args, schema, schema) == {"filters": [{"value": ""}]}
+
+
+def test_a_field_required_by_any_branch_is_kept():
+    schema = {"anyOf": [
+        {"type": "object", "required": ["q"], "properties": {"q": {"type": "string"}}},
+        {"type": "object", "properties": {"id": {"type": "string"}}},
+    ]}
+    assert without_empty_optionals({"q": "", "id": ""}, schema, schema) == {"q": ""}

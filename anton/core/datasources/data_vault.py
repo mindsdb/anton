@@ -389,6 +389,10 @@ _TURNKEY_RESPONSE_FIELDS = ("access_token", "account_email", "token_type", "scop
 #: connector that declares them (Google Ads: its API rejects every call
 #: without the developer token).
 _TURNKEY_EXTRA_FIELDS = ("developer_token", "login_customer_id")
+
+#: `_`-prefixed bookkeeping auth returns for some connectors. Never injected
+#: as env vars; `_method` marks an MCP connection for anton/core/mcp/wiring.py.
+_TURNKEY_BOOKKEEPING_FIELDS = ("_method",)
 _TURNKEY_SECURE_KEYS = ("access_token", "developer_token")
 
 
@@ -472,10 +476,14 @@ class TurnKeyDataVault:
         env: dict[str, str] = {}
         if flat:
             for key, value in fields.items():
+                if key.startswith("_"):
+                    continue
                 env[f"DS_{key.upper()}"] = value
         else:
             prefix = _slug_env_prefix(engine, name)
             for key, value in fields.items():
+                if key.startswith("_"):
+                    continue
                 env[f"{prefix}__{key.upper()}"] = value
         return env
 
@@ -543,7 +551,7 @@ class TurnKeyDataVault:
             return None
         fields = {
             k: str(data[k])
-            for k in _TURNKEY_RESPONSE_FIELDS + _TURNKEY_EXTRA_FIELDS
+            for k in _TURNKEY_RESPONSE_FIELDS + _TURNKEY_EXTRA_FIELDS + _TURNKEY_BOOKKEEPING_FIELDS
             if data.get(k) is not None
         }
         # Every credential this vault serves is OAuth-backed by construction
