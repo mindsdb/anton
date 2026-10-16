@@ -1206,7 +1206,7 @@ def _render_verify_transcript(
     taken from the message role (list-based *user* content — images/files — is
     labelled USER, not ASSISTANT); multimodal blocks are rendered block-by-block
     (text kept, images as a placeholder, never raw base64); anton's internal notes (``_NOTE_PREFIXES``)
-    injections are dropped before budgeting so they don't consume slots. Keeps
+    are dropped before budgeting so they don't consume slots. Keeps
     the call cheap and free of tool_use/tool_result pairing constraints
     (ENG-716).
 
