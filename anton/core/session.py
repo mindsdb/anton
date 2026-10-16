@@ -3478,23 +3478,24 @@ class ChatSession:
         throws away everything except the last `keep` messages, preserving
         tool_use/tool_result pairing and the API rule that the first
         message must be from the user.
+
+        In a tool loop every kept message is a tool row, and the retried
+        planning call answers the last tool_result. So the tail keeps its
+        leading assistant message: the placeholder user message goes before
+        it, and dropping it would orphan the tool_result after it.
         """
         if len(self._history) <= keep:
             return
         tail = list(self._history[-keep:])
 
-        # Strip leading messages that would leave tail in an invalid state:
-        # - assistant at head (API requires user first)
-        # - user whose only blocks are tool_result references (their
-        #   matching tool_use is in the dropped prefix, so they're orphaned)
-        # Repeat because dropping one can expose another. A user message
-        # with mixed content keeps its non-tool_result blocks.
+        # Strip a leading user message's tool_result blocks: their tool_use
+        # is in the dropped prefix, so nothing in the request calls them. A
+        # user message with mixed content keeps its non-tool_result blocks;
+        # one with nothing else goes. Repeat in case the next message is a
+        # user message too.
         while tail:
             head = tail[0]
             role = head.get("role")
-            if role == "assistant":
-                tail.pop(0)
-                continue
             if role == "user":
                 content = head.get("content")
                 if isinstance(content, list):

@@ -15,7 +15,9 @@ final list.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+from dataclasses import dataclass, field
 from unittest.mock import AsyncMock
 
 import pytest
@@ -57,23 +59,40 @@ SWAP_ROUND = 3
 COMPACTIONS = {"none": 0, "proactive": 1, "overflow": 1, "hard-truncate": 2}
 
 
-def _scripted_llm(*, mode: str):
+@dataclass
+class PlanCalls:
+    """What the scripted planner received.
+
+    `requests` holds the messages of each planning call, copied when the call
+    was made. `overflowed` holds the indexes in `requests` of the calls that
+    raised ContextOverflowError.
+    """
+
+    requests: list[list[dict]] = field(default_factory=list)
+    overflowed: list[int] = field(default_factory=list)
+
+
+def _scripted_llm(*, mode: str, calls: PlanCalls | None = None):
     """A planner that calls `lookup` four times, then answers.
 
     `mode` picks what happens on SWAP_ROUND: "proactive" reports a context
     pressure over the threshold, so the tool loop compacts; "overflow" raises
     ContextOverflowError once (summarize and retry); "hard-truncate" raises it
     twice (summarize, then hard-truncate and retry); "none" does neither.
+    Pass `calls` to read back what each planning call received.
     """
     llm = make_mock_llm()
-    state = {"round": 0, "overflows": 0}
+    calls = calls if calls is not None else PlanCalls()
+    state = {"round": 0}
     overflow_budget = {"overflow": 1, "hard-truncate": 2}.get(mode, 0)
 
     def plan_stream(messages, **kwargs):
+        calls.requests.append(copy.deepcopy(messages))
+
         async def gen():
             r = state["round"]
-            if r == SWAP_ROUND and state["overflows"] < overflow_budget:
-                state["overflows"] += 1
+            if r == SWAP_ROUND and len(calls.overflowed) < overflow_budget:
+                calls.overflowed.append(len(calls.requests) - 1)
                 raise ContextOverflowError("too long")
             state["round"] += 1
             pressure = 0.99 if mode == "proactive" and r == SWAP_ROUND else 0.0
@@ -107,7 +126,9 @@ async def _lookup(session, tc_input):
     return PAGES[tc_input["id"]]
 
 
-def _session(*, mode: str, handler=_lookup, seed: list[dict] = SEED) -> ChatSession:
+def _session(
+    *, mode: str, handler=_lookup, seed: list[dict] = SEED, calls: PlanCalls | None = None,
+) -> ChatSession:
     lookup = ToolDef(
         name="lookup",
         description="Look up a page by id.",
@@ -115,7 +136,7 @@ def _session(*, mode: str, handler=_lookup, seed: list[dict] = SEED) -> ChatSess
         handler=handler,
     )
     session = ChatSession(ChatSessionConfig(
-        llm_client=_scripted_llm(mode=mode), initial_history=list(seed), tools=[lookup],
+        llm_client=_scripted_llm(mode=mode, calls=calls), initial_history=list(seed), tools=[lookup],
     ))
     session._verify_min_tool_rounds = 99  # no verifier LLM call
     return session
@@ -233,7 +254,7 @@ async def test_a_swap_no_event_announces_keeps_the_rows_appended_after_it():
     session = _session(mode="none", handler=truncating_lookup)
     events = await _run(session)
 
-    assert truncated == [2]  # the placeholder and its separator
+    assert truncated == [4]  # the placeholder, toolu_2's round, toolu_3's tool_use
     assert not any(isinstance(e, StreamContextCompacted) for e in events)
     assert "toolu_1" not in _live_result_ids(session)
     rows = split_turn_into_rows(_trim(session.turn_messages()))
@@ -335,9 +356,10 @@ async def test_a_merge_into_the_hard_truncation_separator_is_kept():
     session._append_history({"role": "user", "content": "q"})
     session._append_history(_tool_use("t1"))
     session._append_history(_tool_result("t1"))
-    session.hard_truncate_history(keep=2)
-    # Every kept message was a tool row, so the new list is the placeholder and
-    # the "Understood." separator; the next assistant message merges into it.
+    session.hard_truncate_history(keep=1)
+    # The one kept message is t1's tool_result, whose tool_use was cut off, so
+    # it goes too. The new list is the placeholder and the "Understood."
+    # separator; the next assistant message merges into it.
     assert [m["role"] for m in session.history] == ["user", "assistant"]
     session._append_history(_tool_use("t2"))
     session._append_history(_tool_result("t2"))
