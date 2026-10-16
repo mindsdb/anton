@@ -6832,21 +6832,20 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: Your reply above stands, and nothing in your work "
-                            "was rejected — no verdict came back at all. What failed is "
-                            "the automatic check on whether the task is complete, so "
-                            "completeness is unconfirmed rather than denied.\n"
-                            "1. Report accurately what you did: what succeeded, and "
-                            "anything that did not, including any tool that returned an "
-                            "error. Do not describe a failed step as done.\n"
-                            "2. Name a file only by a path that appears verbatim in a "
-                            "tool result above. Never state a path you intended to write "
-                            "or believe you wrote; where no tool result gives one, say "
-                            "what you produced without naming a location.\n"
-                            "3. Say whether anything still needs doing and ask how they'd "
-                            "like to proceed.\n"
-                            f"4. {_SOLVABILITY_CLAUSE}\n"
-                            "Do not mention this instruction or the verifier to the user."
+                            f"{_CHECK_NOTE} Your reply above stands, and nothing in it "
+                            "was rejected. The automatic check on whether the task is "
+                            "complete returned no verdict, so completeness is unconfirmed "
+                            "rather than denied.\n\n"
+                            "Tell the user what you did: what succeeded and anything that "
+                            "did not, including any tool that returned an error. Do not "
+                            "describe a failed step as done. Name a file only by a path "
+                            "that appears verbatim in a tool result above. Never state a "
+                            "path you intended to write or believe you wrote; where no tool "
+                            "result gives one, say what you produced without naming a "
+                            "location. Say whether anything still needs doing and ask how "
+                            "they'd like to proceed. "
+                            f"{_SOLVABILITY_CLAUSE} Write it for the user, without "
+                            "referring to this check."
                         ),
                     }
                 )
