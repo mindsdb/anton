@@ -5412,33 +5412,38 @@ class ChatSession:
                 # task anyway, so there is nothing to restore.
                 pass
 
-        # Log assistant response to episodic memory
-        if self._episodic is not None and assistant_text_parts:
-            self._episodic.log_turn(
-                self._turn_count + 1,
-                "assistant",
-                "".join(assistant_text_parts)[:2000],
-            )
+        usage_log = usage_log_enabled()
+        # The passes keep no handle on the tasks they start, and nothing else can
+        # start one before the `finally` below: no await in between.
+        before = asyncio.all_tasks() if usage_log else set()
+        try:
+            # Log assistant response to episodic memory
+            if self._episodic is not None and assistant_text_parts:
+                self._episodic.log_turn(
+                    self._turn_count + 1,
+                    "assistant",
+                    "".join(assistant_text_parts)[:2000],
+                )
 
-        self._turn_count += 1
-        self._persist_history()
-        if usage_log_enabled():
-            # Evals only, so the eval can attribute and price this work's calls.
-            # Production runs it outside the turn on purpose, as it always has:
-            # neither the turn's cost books nor its Langfuse trace include it.
-            background = contextvars.copy_context()
-            background.run(set_trace_context, _turn_trace)
-            # The passes keep no handle on the tasks they start, and nothing
-            # else can start one during this synchronous call.
-            before = asyncio.all_tasks()
-            background.run(self._start_background_work, user_input)
-            marker = asyncio.create_task(
-                _log_background_done_after(asyncio.all_tasks() - before, _turn_trace)
-            )
-            _BACKGROUND_MARKERS.add(marker)
-            marker.add_done_callback(_BACKGROUND_MARKERS.discard)
-        else:
-            self._start_background_work(user_input)
+            self._turn_count += 1
+            self._persist_history()
+            if usage_log:
+                # Evals only, so the eval can attribute and price this work's calls.
+                # Production runs it outside the turn on purpose, as it always has:
+                # neither the turn's cost books nor its Langfuse trace include it.
+                background = contextvars.copy_context()
+                background.run(set_trace_context, _turn_trace)
+                background.run(self._start_background_work, user_input)
+            else:
+                self._start_background_work(user_input)
+        finally:
+            if usage_log:
+                # Also when a step above failed: the turn already wrote its turn_cost line.
+                marker = asyncio.create_task(
+                    _log_background_done_after(asyncio.all_tasks() - before, _turn_trace)
+                )
+                _BACKGROUND_MARKERS.add(marker)
+                marker.add_done_callback(_BACKGROUND_MARKERS.discard)
 
         # The books are closed, so ended_by is final. A clean exit can still book
         # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.

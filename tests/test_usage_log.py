@@ -332,3 +332,22 @@ async def test_no_end_of_turn_marker_when_the_usage_log_is_off(monkeypatch, back
     await asyncio.sleep(0.05)
 
     assert background_done() == []
+
+
+async def test_a_turn_whose_history_save_fails_still_marks_its_work_done(monkeypatch, background_done):
+    """It already wrote its turn_cost line; without the marker the eval waits out its cap."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    llm = make_mock_llm()
+    llm.plan.return_value = LLMResponse(content="hi", usage=Usage(input_tokens=1))
+    session = ChatSession(ChatSessionConfig(llm_client=llm))
+
+    def disk_full():
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(session, "_persist_history", disk_full)
+    with pytest.raises(OSError):
+        async for _ in session.turn_stream("one", trace_metadata={"turn": "0"}):
+            pass
+    await asyncio.sleep(0.05)
+
+    assert background_done() == [{"conversation": session._session_id, "turn": "0"}]
