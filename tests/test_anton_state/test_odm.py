@@ -123,3 +123,10 @@ async def test_put_rejects_item_copied_under_another_key(store):
     await c.put("a", {"n": 1})
     with pytest.raises(StateValidationError, match="do not match"):
         await c.put("b", await c.get("a"))
+
+
+async def test_put_rejects_item_copied_to_another_partition(store):
+    c = Collection(store, "task")
+    await c.put("a", {"n": 1}, pk="room1")
+    with pytest.raises(StateValidationError, match="do not match"):
+        await c.put("a", await c.get("a", pk="room1"), pk="room2")
