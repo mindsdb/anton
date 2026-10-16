@@ -188,7 +188,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     from anton_state import Collection
     todos = Collection(get_store(), "todos")
     await todos.put("id1", {"text": "buy milk"})     # pk defaults to one partition
-    item = await todos.get("id1")                       # None if missing; also carries pk, sk, _key, _v
+    item = await todos.get("id1")                       # None if missing; an item written by put also carries pk, sk, _key, _v
     items = await todos.list()                          # all items in the collection
     n = await Collection(get_store(), "counters").increment("visits", field="n")
     ```

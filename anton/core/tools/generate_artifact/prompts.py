@@ -448,7 +448,7 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   ```python
   todos = Collection(get_store(), "todos")   # built inside the route
   await todos.put("id1", {"text": "buy milk"})
-  item = await todos.get("id1")    # None if missing; also carries pk, sk, _key, _v
+  item = await todos.get("id1")    # None if missing; an item written by put also carries pk, sk, _key, _v
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
   ```
