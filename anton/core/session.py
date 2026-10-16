@@ -282,32 +282,6 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
     ]
 
 
-def _tool_result_block(
-    *, tool_use_id: str, tool_name: str, content: str | list[dict], ok: bool | None,
-) -> dict:
-    """The history `tool_result` block for one dispatched call.
-
-    A call whose handler reported a failure (`ok=False`, or a raise) gets
-    `is_error: true`, the Anthropic Messages API's marker for a failed tool
-    call. The model then reads the result as a failure, and cowork-server's
-    figure sources leave the call out of the steps a figure can come from
-    (cowork/harnesses/anton_harness/stream_formatter.py), so an MCP tool's
-    error body never sources a figure.
-
-    The flag means the call produced no usable output, so two failures stay
-    unflagged. An unclassified result (`ok=None`) has only a text guess for
-    its verdict. A scratchpad cell that raised may have printed real data
-    before the error, and that output must stay readable.
-
-    The block is a raw dict because the whole history pipeline passes
-    dicts; there is no typed tool_result model yet.
-    """
-    block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
-    if ok is False and tool_name != "scratchpad":
-        block["is_error"] = True
-    return block
-
-
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
@@ -2251,8 +2225,7 @@ class ChatSession:
         tool_result.  If we cancelled mid-turn, the last assistant message
         may contain tool_use blocks with no corresponding tool_result in
         the next message.  Append synthetic tool_results so the
-        conversation can continue. The results carry `is_error: true`,
-        since the calls never ran and nothing in them is tool output.
+        conversation can continue.
         """
         if not self._history:
             return
@@ -2277,7 +2250,6 @@ class ChatSession:
                         "type": "tool_result",
                         "tool_use_id": tid,
                         "content": "Cancelled by user.",
-                        "is_error": True,
                     }
                     for tid in tool_ids
                 ],
@@ -3075,11 +3047,8 @@ class ChatSession:
                             )
                             lines.append(f"[{role}/tool_use]: {block.get('name', '')}({args})")
                         elif block.get("type") == "tool_result":
-                            # The summary replaces the folded result, so a
-                            # failed call keeps its failure marker in the text.
-                            label = "tool_result error" if block.get("is_error") else "tool_result"
                             lines.append(
-                                f"[{label}]: "
+                                f"[tool_result]: "
                                 f"{_clip_keep_cause(str(block.get('content', '')), 500)}"
                             )
 
@@ -6450,10 +6419,13 @@ class ChatSession:
                             severity=5 if tool_ok is False else 1,
                             round_idx=tool_round,
                         )
-                        tool_results.append(_tool_result_block(
-                            tool_use_id=tc.id, tool_name=tc.name,
-                            content=scrubbed_blocks, ok=tool_ok,
-                        ))
+                        tool_results.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tc.id,
+                                "content": scrubbed_blocks,
+                            }
+                        )
                         continue
 
                     # Process output gets scrub_output where it is read, such as scratchpad cells
@@ -6493,14 +6465,13 @@ class ChatSession:
                         severity=5 if _failed else 1,
                         round_idx=tool_round,
                     )
-                    # The nudge and circuit-breaker text appended above ride
-                    # inside this block, so a failed text result carries them
-                    # under its is_error flag. A failed scratchpad result
-                    # carries them unflagged; the list path above appends none.
-                    tool_results.append(_tool_result_block(
-                        tool_use_id=tc.id, tool_name=tc.name,
-                        content=result_text, ok=tool_ok,
-                    ))
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": result_text,
+                        }
+                    )
 
                 # ACC Layer 2 — mid-turn nudge. No-op when mode != "active"
                 # or when no new patterns fired this round. When it does

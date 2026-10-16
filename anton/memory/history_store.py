@@ -242,13 +242,11 @@ def repair_replayed_tool_ids(history: list[dict]) -> tuple[list[dict], int]:
                 b["tool_use_id"] = queue.pop(0)
                 repaired += 1
         for orphan in queue:
-            # A block, not a message: still count-preserving. Flagged
-            # is_error, since anton wrote it and it holds no tool output.
+            # A block, not a message: still count-preserving.
             new_reply.append({
                 "type": "tool_result",
                 "tool_use_id": orphan,
                 "content": "[no result was recorded for this call]",
-                "is_error": True,
             })
             repaired += 1
         out[i + 1] = {**nxt, "content": new_reply}

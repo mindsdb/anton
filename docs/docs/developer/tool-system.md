@@ -119,23 +119,6 @@ Details that matter:
   when streamed arguments couldn't be parsed, and the dispatcher short-circuits
   with a synthetic tool_result asking the LLM to re-emit the call — instead of
   running the handler with empty input.
-- **Failed calls**: when a handler reports a failure (`ToolOutcome.ok=False`,
-  or it raises), the stored `tool_result` carries `is_error: true`, the
-  Anthropic Messages API's marker for a failed tool call. This covers an MCP
-  tool's own error body. On a failed text result, the resilience nudge and
-  circuit-breaker text ride inside the flagged result. A list (multimodal)
-  result gets no nudge text. Anthropic receives the flag as is. OpenAI Chat
-  Completions and the Responses API have no such field, so the OpenAI adapter
-  drops it and starts the output text with `Error:` instead, unless the text's
-  first word is already "Error". Two kinds of result stay unflagged: an
-  unclassified one (`ok=None`), and any scratchpad result, since a cell that
-  raised may have printed real data first. A failed scratchpad result still
-  carries the nudge text, unflagged. The results anton writes for a call that
-  never ran also carry the flag: the `Cancelled by user.` result after a
-  cancelled turn, the seal for a call a crash left unanswered, and the fill for
-  a replayed call with no recorded result. When compaction folds a flagged
-  result into the summary, the summarizer's input labels it
-  `[tool_result error]`, so the failure survives the fold.
 - **Episodic logging**: each `tool_call` and `tool_result` is logged to episodic
   memory (truncated to 500/2000 chars).
 - **ACC observation points**: `tool_call` is emitted at the top of the per-call
