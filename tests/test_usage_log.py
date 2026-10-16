@@ -7,7 +7,7 @@ when the reply then fails a check.
 from __future__ import annotations
 
 import asyncio
-import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,15 +32,9 @@ MESSAGES = [{"role": "user", "content": "hi"}]
 
 
 @pytest.fixture
-def usage_log(monkeypatch, caplog):
+def usage_log(monkeypatch, usage_lines):
     monkeypatch.setenv("ANTON_USAGE_LOG", "1")
-    caplog.set_level("INFO", logger="anton.usage")
-
-    def lines():
-        return [json.loads(r.getMessage().removeprefix("llm_usage "))
-                for r in caplog.records if r.name == "anton.usage"]
-
-    return lines
+    return usage_lines
 
 
 @pytest.fixture
@@ -62,13 +56,13 @@ def _chat_response(*, content, finish_reason="stop", prompt_tokens=120, cached=1
     )
 
 
+@contextmanager
 def _openai(create):
-    patcher = patch("anton.core.llm.openai.openai")
-    mock_openai = patcher.start()
-    client = AsyncMock()
-    client.chat.completions.create = create
-    mock_openai.AsyncOpenAI.return_value = client
-    return patcher, OpenAIProvider(api_key="k")
+    with patch("anton.core.llm.openai.openai") as mock_openai:
+        client = AsyncMock()
+        client.chat.completions.create = create
+        mock_openai.AsyncOpenAI.return_value = client
+        yield OpenAIProvider(api_key="k")
 
 
 async def _aiter(items, then_raise=None):
@@ -93,35 +87,30 @@ class _AnthropicStream:
         return _aiter(self._events, self._then_raise)
 
 
+@contextmanager
 def _anthropic(**client_attrs):
-    patcher = patch("anton.core.llm.anthropic.anthropic")
-    mock_anthropic = patcher.start()
-    client = AsyncMock()
-    for name, value in client_attrs.items():
-        setattr(client.messages, name, value)
-    mock_anthropic.AsyncAnthropic.return_value = client
-    return patcher, AnthropicProvider(api_key="k")
+    with patch("anton.core.llm.anthropic.anthropic") as mock_anthropic:
+        client = AsyncMock()
+        for name, value in client_attrs.items():
+            setattr(client.messages, name, value)
+        mock_anthropic.AsyncAnthropic.return_value = client
+        yield AnthropicProvider(api_key="k")
 
 
-def test_nothing_is_logged_when_the_switch_is_off(monkeypatch, caplog):
+def test_nothing_is_logged_when_the_switch_is_off(monkeypatch, usage_lines):
     monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
-    caplog.set_level("INFO", logger="anton.usage")
 
     class _Provider(LLMProvider):
         async def complete(self, **kwargs):
             raise NotImplementedError
 
     _Provider().log_usage(model="m", usage=Usage(input_tokens=1), served_model=None)
-    assert not [r for r in caplog.records if r.name == "anton.usage"]
+    assert usage_lines() == []
 
 
 async def test_a_completed_chat_call_logs_its_conversation_turn_role_and_tokens(usage_log, eval_turn):
-    patcher, provider = _openai(AsyncMock(return_value=_chat_response(content="Hello")))
-    try:
-        with call_role("coding"):
-            await provider.complete(model="alias-model", system="s", messages=MESSAGES)
-    finally:
-        patcher.stop()
+    with _openai(AsyncMock(return_value=_chat_response(content="Hello"))) as provider, call_role("coding"):
+        await provider.complete(model="alias-model", system="s", messages=MESSAGES)
 
     assert usage_log() == [{
         "conversation": "conv-1", "turn": "2", "tags": ["eval_turn:2", "cowork-gate"], "role": "coding",
@@ -131,12 +120,9 @@ async def test_a_completed_chat_call_logs_its_conversation_turn_role_and_tokens(
 
 
 async def test_a_billed_chat_call_is_logged_even_when_its_empty_reply_raises(usage_log):
-    patcher, provider = _openai(AsyncMock(return_value=_chat_response(content="", finish_reason=None)))
-    try:
+    with _openai(AsyncMock(return_value=_chat_response(content="", finish_reason=None))) as provider:
         with pytest.raises(TransientProviderError):
             await provider.complete(model="m", system="s", messages=MESSAGES)
-    finally:
-        patcher.stop()
 
     (line,) = usage_log()
     assert (line["input"], line["output"], line["conversation"]) == (20, 16, None)
@@ -152,13 +138,10 @@ async def test_a_streamed_chat_call_logs_the_usage_of_its_last_chunk(usage_log, 
     chunks = [_chunk("Hel"), _chunk("lo", finish="stop"),
               _chunk(usage=SimpleNamespace(prompt_tokens=50, completion_tokens=3,
                                            prompt_tokens_details=SimpleNamespace(cached_tokens=0)))]
-    patcher, provider = _openai(AsyncMock(return_value=_aiter(chunks)))
-    provider.trace_role = "router"
-    try:
+    with _openai(AsyncMock(return_value=_aiter(chunks))) as provider:
+        provider.trace_role = "router"
         async for _ in provider.stream(model="gate-model", system="s", messages=MESSAGES):
             pass
-    finally:
-        patcher.stop()
 
     (line,) = usage_log()
     assert (line["role"], line["model"], line["input"], line["output"]) == ("router", "gate-model", 50, 3)
@@ -166,12 +149,9 @@ async def test_a_streamed_chat_call_logs_the_usage_of_its_last_chunk(usage_log, 
 
 async def test_a_streamed_chat_call_that_reports_no_usage_logs_nothing(usage_log):
     """A line of zeros would read as a call that cost nothing."""
-    patcher, provider = _openai(AsyncMock(return_value=_aiter([_chunk("Hel"), _chunk("lo", finish="stop")])))
-    try:
+    with _openai(AsyncMock(return_value=_aiter([_chunk("Hel"), _chunk("lo", finish="stop")]))) as provider:
         async for _ in provider.stream(model="m", system="s", messages=MESSAGES):
             pass
-    finally:
-        patcher.stop()
 
     assert usage_log() == []
 
@@ -179,11 +159,8 @@ async def test_a_streamed_chat_call_that_reports_no_usage_logs_nothing(usage_log
 async def test_a_chat_call_that_reports_no_usage_logs_nothing(usage_log):
     response = _chat_response(content="Hello")
     response.usage = None
-    patcher, provider = _openai(AsyncMock(return_value=response))
-    try:
+    with _openai(AsyncMock(return_value=response)) as provider:
         await provider.complete(model="m", system="s", messages=MESSAGES)
-    finally:
-        patcher.stop()
 
     assert usage_log() == []
 
@@ -195,11 +172,8 @@ async def test_a_completed_anthropic_call_logs_its_cache_tokens(usage_log):
                                      cache_creation_input_tokens=40)
     response.stop_reason = "end_turn"
     response.model = "claude-served"
-    patcher, provider = _anthropic(create=AsyncMock(return_value=response))
-    try:
+    with _anthropic(create=AsyncMock(return_value=response)) as provider:
         await provider.complete(model="claude-alias", system="s", messages=MESSAGES)
-    finally:
-        patcher.stop()
 
     (line,) = usage_log()
     assert (line["served_model"], line["input"], line["output"], line["cache_read"], line["cache_creation"]) == (
@@ -211,13 +185,10 @@ async def test_a_streamed_anthropic_call_is_logged_even_when_it_ends_empty(usage
         SimpleNamespace(type="message_start", message=SimpleNamespace(
             model="claude-served", usage=SimpleNamespace(input_tokens=30, output_tokens=0))),
     ]
-    patcher, provider = _anthropic(stream=MagicMock(return_value=_AnthropicStream(events)))
-    try:
+    with _anthropic(stream=MagicMock(return_value=_AnthropicStream(events))) as provider:
         with pytest.raises(TransientProviderError):
             async for _ in provider.stream(model="claude-alias", system="s", messages=MESSAGES):
                 pass
-    finally:
-        patcher.stop()
 
     (line,) = usage_log()
     assert (line["model"], line["input"]) == ("claude-alias", 30)
