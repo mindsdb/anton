@@ -348,8 +348,8 @@ class AnthropicProvider(LLMProvider):
             output_tokens=response.usage.output_tokens,
             context_pressure=compute_context_pressure(model, input_tokens),
             # Anthropic reports cache activity as separate fields and its
-            # input_tokens already excludes them — pass through as-is
-            # (ENG-1288). getattr-guarded: absent on older SDK responses.
+            # input_tokens already excludes them — pass through as-is.
+            # getattr-guarded: absent on older SDK responses.
             cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
             cache_creation_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
         )
