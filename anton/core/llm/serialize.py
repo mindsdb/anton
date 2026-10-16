@@ -35,11 +35,14 @@ def serialize_content(content: Any) -> Any:
                 "input": block.get("input"),
             })
         elif t == "tool_result":
-            blocks.append({
+            result = {
                 "type": "tool_result",
                 "tool_use_id": block.get("tool_use_id"),
                 "content": block.get("content"),
-            })
+            }
+            if block.get("is_error"):
+                result["is_error"] = True
+            blocks.append(result)
         else:
             blocks.append(block)
     return blocks

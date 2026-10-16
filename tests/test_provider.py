@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anthropic
+import httpx2 as httpx
 import pytest
+from anthropic.types import ToolResultBlockParam
 
 from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import _parse_response_object
@@ -557,3 +561,45 @@ class TestAnthropicNativeWebTools:
             # No tools array at all — backward-compatible with the no-tools case
             assert "tools" not in kwargs
             assert "extra_headers" not in kwargs
+
+
+class TestAnthropicFailedToolResultWire:
+    """A failed call's `is_error: true` reaches the Messages API as is. It is
+    the API's own field, so the model reads the result as a failure."""
+
+    async def test_is_error_is_sent_on_the_tool_result(self):
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "The search failed."}],
+                "stop_reason": "end_turn", "stop_sequence": None,
+                "usage": {"input_tokens": 5, "output_tokens": 5},
+            })
+
+        provider = AnthropicProvider(api_key="test-key")
+        provider._client = anthropic.AsyncAnthropic(
+            api_key="test-key", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        failed = {
+            "type": "tool_result", "tool_use_id": "toolu_1",
+            "content": "limit must be less than or equal to 200; received 500", "is_error": True,
+        }
+        await provider.complete(
+            model="claude-sonnet-4-6",
+            system="s",
+            messages=[
+                {"role": "user", "content": "deals?"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "hubspot__search_crm_objects", "input": {"limit": 500}},
+                ]},
+                {"role": "user", "content": [failed]},
+            ],
+        )
+        await provider.aclose()
+
+        sent = bodies[0]["messages"][2]["content"][0]
+        assert sent == failed
+        assert set(sent) <= set(ToolResultBlockParam.__annotations__)

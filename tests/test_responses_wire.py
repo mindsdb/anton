@@ -248,6 +248,21 @@ async def test_wire_body_defers_tool_images_and_carries_trace_headers(endpoint, 
     assert req["headers"].get("langfuse-session-id") == "sess-1"
 
 
+async def test_a_failed_tool_result_is_sent_as_a_plain_output_that_says_so(endpoint):
+    """A function_call_output has no error field, so the is_error flag is
+    dropped and the output text says the call failed."""
+    endpoint.replies.append((200, "sse", _sse(*_text_events("Sorry"), {"type": "response.completed", "response": _response("completed")})))
+    messages = [{"role": "user", "content": "Stock?"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call_a", "name": "get_stock", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_a",
+                                              "content": "limit must be less than or equal to 200; received 500",
+                                              "is_error": True}]}]
+    await _stream(endpoint.provider(), messages=messages, tools=TOOLS)
+    output = endpoint.requests[0]["body"]["input"][-1]
+    assert output == {"type": "function_call_output", "call_id": "call_a",
+                      "output": "Error: limit must be less than or equal to 200; received 500"}
+
+
 def _failed(code, message):
     """A stream that fails in-band with a `response.failed` naming its cause."""
     return _sse(*_text_events(""), {

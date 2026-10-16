@@ -221,6 +221,43 @@ class TestTranslateMessages:
         assert tool_msg["tool_call_id"] == "tool_1"
         assert tool_msg["content"] == "file contents here"
 
+    def test_a_failed_tool_result_says_so_in_the_tool_message(self):
+        # Chat Completions has no error field on a tool message, so the flag
+        # is dropped and the text itself says the call failed.
+        msgs = [{"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "tool_1",
+            "content": "limit must be less than or equal to 200; received 500", "is_error": True,
+        }]}]
+        tool_msg = _translate_messages("sys", msgs)[1]
+        assert tool_msg == {
+            "role": "tool", "tool_call_id": "tool_1",
+            "content": "Error: limit must be less than or equal to 200; received 500",
+        }
+
+    def test_a_failed_multimodal_tool_result_says_so_in_the_tool_message(self):
+        msgs = [{"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "tool_1", "is_error": True,
+            "content": [{"type": "text", "text": "rate limited"}],
+        }]}]
+        tool_msg = _translate_messages("sys", msgs)[1]
+        assert tool_msg == {"role": "tool", "tool_call_id": "tool_1", "content": "Error: rate limited"}
+
+    def test_a_failed_result_already_worded_as_an_error_is_not_prefixed_again(self):
+        msgs = [{"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "tool_1",
+            "content": "Error: file not found: notes.md", "is_error": True,
+        }]}]
+        assert _translate_messages("sys", msgs)[1]["content"] == "Error: file not found: notes.md"
+
+    def test_a_failed_result_whose_first_word_only_begins_with_error_is_prefixed(self):
+        # "error_rate" and "errors" are data, not a failure notice, so the
+        # text still needs the marker.
+        for body in ("error_rate: 0.3", "errors: []", "Errored rows: 4"):
+            msgs = [{"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "tool_1", "content": body, "is_error": True,
+            }]}]
+            assert _translate_messages("sys", msgs)[1]["content"] == f"Error: {body}"
+
     def test_multi_tool_with_image_result_keeps_tools_contiguous(self):
         """Regression: when a non-final tool_result carries image content, the
         extracted role:user image message must NOT be inserted between role:tool

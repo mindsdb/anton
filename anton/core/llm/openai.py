@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import NoReturn
 
@@ -495,6 +496,24 @@ def _translate_assistant_blocks(blocks: list[dict]) -> list[dict]:
     return [msg]
 
 
+# "Error" as a whole first word ("Error: ...", "Error executing tool ..."),
+# not a data key that only begins with it ("error_rate", "errors").
+_LEADING_ERROR_WORD = re.compile(r"\s*error(?:[:\s]|$)", re.IGNORECASE)
+
+
+def _tool_output_text(*, text: str, is_error: bool) -> str:
+    """A tool result's text as an OpenAI tool output.
+
+    Chat Completions `tool` messages and Responses `function_call_output` items
+    have no error field, so the `is_error` flag of a failed call cannot travel
+    as a field. The text says so instead, unless its first word is already
+    "Error".
+    """
+    if is_error and not _LEADING_ERROR_WORD.match(text):
+        return f"Error: {text}"
+    return text
+
+
 def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vision_format: str = "openai") -> list[dict]:
     """Convert user content blocks (including tool_result and image) to OpenAI messages.
 
@@ -548,7 +567,9 @@ def _translate_user_blocks(blocks: list[dict], supports_vision: bool = True, vis
                 {
                     "role": "tool",
                     "tool_call_id": block["tool_use_id"],
-                    "content": tool_text,
+                    "content": _tool_output_text(
+                        text=tool_text, is_error=bool(block.get("is_error")),
+                    ),
                 }
             )
 
@@ -818,7 +839,9 @@ def _translate_user_blocks_to_responses(
                 {
                     "type": "function_call_output",
                     "call_id": block["tool_use_id"],
-                    "output": str(tool_content),
+                    "output": _tool_output_text(
+                        text=str(tool_content), is_error=bool(block.get("is_error")),
+                    ),
                 }
             )
         elif block.get("type") == "text":
