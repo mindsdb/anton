@@ -308,6 +308,13 @@ def test_stateful_rules_carry_the_state_sdk_contract():
     assert "EXTERNAL database" in stateful
 
 
+def test_stateful_rules_show_versioned_read_modify_write():
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    assert "todos.get(" in stateful
+    assert 'if_version=game["_v"]' in stateful
+    assert "ConditionalCheckFailed" in stateful
+
+
 def test_stateful_block_says_when_local_state_survives():
     """The STATE store must be described as working both locally and deployed."""
     stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)

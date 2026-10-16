@@ -441,8 +441,28 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   ```python
   todos = Collection(get_store(), "todos")   # built inside the route
   await todos.put("id1", {"text": "buy milk"})
+  item = await todos.get("id1")    # None if missing; also carries pk, sk, _key, _v
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
+  ```
+- CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back
+  with the `_v` it was read with. If another request wrote in between, the
+  put raises `ConditionalCheckFailed` and writes nothing, instead of
+  silently overwriting that write; answer 409. Handle a missing document
+  first:
+  ```python
+  from fastapi import HTTPException
+  from anton_state import ConditionalCheckFailed
+
+  games = Collection(get_store(), "games")
+  game = await games.get("current")
+  if game is None:
+      raise HTTPException(status_code=404, detail="no game")
+  game["moves"].append(cell)
+  try:
+      await games.put("current", game, if_version=game["_v"])
+  except ConditionalCheckFailed:
+      raise HTTPException(status_code=409, detail="state changed, reload")
   ```
   Low-level `store` methods (all async; there is NO `scan()` and NO secondary
   indexes — `query` has no `index=` argument):
@@ -452,7 +472,7 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   * `await store.delete(pk, sk=None)`
   * `await store.query(pk, *, sk_prefix=None, filters=None, limit=None)`
   * `await store.increment(pk, sk=None, *, field, by=1)` — atomic counter;
-    do NOT hand-roll read-modify-write
+    never read-modify-write a counter by hand
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
 - DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
