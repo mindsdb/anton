@@ -9,7 +9,7 @@ already covered by `TestContextCompaction` in test_chat.py.
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from anton.core import session as session_mod
 from anton.core.session import (
@@ -60,6 +60,21 @@ class TestLastCompaction:
         assert session.history[0]["content"] == compaction["summary"]
         # The last 4 (uncompacted) turns survive verbatim, in order.
         assert session.history[-4:] == original[6:]
+
+    async def test_budget_ignores_the_larger_stream_budget(self):
+        """Compaction is a non-streamed call: it stays under the client's own
+        max_tokens even when streamed calls get more room."""
+        mock_llm = make_mock_llm()
+        mock_llm.max_tokens = 4096
+        mock_llm.stream_budget = MagicMock(return_value=16384)
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nx"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+        assert await session._summarize_history() is True
+
+        assert mock_llm.summarize.await_args.kwargs["max_tokens"] == 4096
 
     async def test_failed_summarize_reports_no_compaction(self):
         """A transient summarize error must NOT be reported as a compaction —

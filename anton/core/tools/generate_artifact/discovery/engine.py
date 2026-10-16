@@ -103,14 +103,21 @@ async def run_gathering_loop(state: "PrdState") -> None:
             state.record("gathering", "stopped_over_budget", f"after round {round_idx}")
             state.gathering_complete = False
             return
-        method = "plan" if round_idx == 0 else "code"
-        llm_call = state.session._llm.plan if round_idx == 0 else state.session._llm.code
+        role = "planning" if round_idx == 0 else "coding"
         await sub_tools.signal_thinking(state.session)
-        response = await llm_call(system=system, messages=state.messages, tools=tools)
-        state.trace_log.llm_call(
-            node="gathering", method=method, system=system,
-            messages=state.messages, response=response, round=round_idx,
+        room = await sub_tools.call_with_room(
+            state, step, role=role, system=system, messages=state.messages,
+            tools=tools, round_idx=round_idx,
         )
+        response = room.response
+        if room.truncated:
+            # Cut off without a retry or after one: half a summary must not
+            # become the notes, and a damaged call must not run.
+            # `gathering_complete` stays False, so the emergency data loop
+            # re-checks the data.
+            state.record("gathering", "truncated", f"round {round_idx}")
+            state.gathering_complete = False
+            return
 
         if not response.tool_calls:
             state.gathering_notes = (response.content or "").strip()

@@ -12,6 +12,7 @@ import pytest
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import engine
 from anton.core.tools.generate_artifact.discovery.state import PrdState
+from tests.streaming_llm import StreamingLLM
 
 
 def _response(content="", tool_calls=None) -> LLMResponse:
@@ -52,7 +53,7 @@ def _session_with_plan_sequence(*responses) -> SimpleNamespace:
     async def _next(**kwargs):
         return next(it)
 
-    llm = SimpleNamespace(plan=AsyncMock(side_effect=_next), code=AsyncMock(side_effect=_next))
+    llm = StreamingLLM(plan=AsyncMock(side_effect=_next), code=AsyncMock(side_effect=_next))
     return SimpleNamespace(_llm=llm, question_count=0, elicitor=None, emit=AsyncMock())
 
 
