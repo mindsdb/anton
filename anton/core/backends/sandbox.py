@@ -64,10 +64,13 @@ _SHARED_RIGHTS = _READ + _WRITE
 
 _SYSTEM_EXEC_DIRS = ("/usr", "/lib", "/lib64", "/bin", "/sbin")
 _SYSTEM_READ_DIRS = ("/proc", "/sys", "/etc/ssl", "/etc/ca-certificates")
+# pip's vendored distro opens /etc/debian_version and /etc/os-release to build
+# its user agent, and lets anything but a missing file escape as a crash.
 _SYSTEM_READ_FILES = (
     "/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf",
     "/etc/host.conf", "/etc/gai.conf", "/etc/services", "/etc/protocols", "/etc/mime.types",
-    "/etc/localtime", "/etc/ld.so.cache",
+    "/etc/localtime", "/etc/ld.so.cache", "/etc/debian_version", "/etc/os-release",
+    "/etc/lsb-release",
 )
 _CA_BUNDLE_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "PIP_CERT")
 _DEVICE_RULES = (

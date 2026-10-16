@@ -213,6 +213,24 @@ def test_devices_names_and_the_shm_folder_work_under_the_lock(tmp_path, dirs):
 
 
 @needs_landlock
+def test_the_os_release_files_pip_reads_are_readable_under_the_lock(tmp_path, dirs):
+    # pip's vendored distro opens these to build its user agent and crashes on
+    # anything but a missing file, so a denied read fails every install.
+    present = [p for p in ("/etc/debian_version", "/etc/os-release") if os.path.exists(p)]
+    if not present:
+        pytest.skip("this host has neither /etc/debian_version nor /etc/os-release")
+    result = _python(
+        _policy(tmp_path),
+        f"""
+        for path in {present!r}:
+            with open(path) as f:
+                print(path, bool(f.read()))
+        """,
+    )
+    assert result.stdout.split("\n")[: len(present)] == [f"{p} True" for p in present]
+
+
+@needs_landlock
 def test_multiprocessing_pool_and_manager_run_under_the_lock(tmp_path, dirs):
     result = _python(
         _policy(tmp_path),
