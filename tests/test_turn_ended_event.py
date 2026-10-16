@@ -213,9 +213,9 @@ async def test_filtered_handback_is_dropped(workspace):
     shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert refusal not in shown
     assert "the answer" in shown
-    assert session.history[-1]["role"] == "assistant"
-    assert refusal not in str(session.history[-1]["content"])
-    assert "the answer" in str(session.history[-1]["content"])
+    assert refusal not in str(session.history)
+    # Like an empty hand-back, history keeps its tail: the answer, then the note.
+    assert session.history[-2] == {"role": "assistant", "content": "the answer"}
     assert booked == "handback_verifier_failure"
     assert events[-1] == StreamTurnEnded(ended_by="handback_verifier_failure")
 
