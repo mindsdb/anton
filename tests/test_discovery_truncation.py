@@ -46,6 +46,15 @@ def _state(*plan_outcomes, progress=True, winding_down=False, artifact_path=Path
     return state, llm
 
 
+def _retry_lines(state):
+    """Live status lines sent to the host before a retry."""
+    return [
+        call.args[0].message
+        for call in state.session.emit.await_args_list
+        if getattr(call.args[0], "phase", None) == "model_wait"
+    ]
+
+
 def _lines(state):
     out = []
     while not state.progress.empty():
@@ -64,6 +73,7 @@ async def test_cut_off_brief_is_retried_with_more_room_and_a_note():
     assert retry["wait_note"] == TRUNCATION_RETRY_NOTE
     assert retry["messages"][-1] == {"role": "user", "content": prompts.DISCOVERY_TRUNCATED_NUDGE}
     assert "Preparing a short brief for you (attempt 2)" in _lines(state)
+    assert _retry_lines(state) == [TRUNCATION_RETRY_NOTE]
 
 
 async def test_history_keeps_the_retry_answer_and_not_the_nudge():
@@ -116,6 +126,7 @@ async def test_discovery_streams_instead_of_one_shot_calls():
     state, llm = _state(_ok())
     await brief.draft_brief(state)
     assert [c["role"] for c in llm.stream_calls] == ["planning"]
+    assert _retry_lines(state) == []
 
 
 async def test_cut_off_redraw_is_retried():
@@ -240,5 +251,7 @@ async def test_second_cut_round_does_not_repeat_the_attempt_line(monkeypatch):
     await engine.run_gathering_loop(state)
     lines = _lines(state)
     assert lines.count("Gathering what the artifact needs (attempt 2)") == 1
+    # The step row is added once, but every retry shows on the live status line.
+    assert _retry_lines(state) == [TRUNCATION_RETRY_NOTE, TRUNCATION_RETRY_NOTE]
     assert [c["role"] for c in llm.stream_calls] == ["planning", "planning", "coding", "coding"]
     assert llm.stream_calls[3]["wait_note"] == TRUNCATION_RETRY_NOTE

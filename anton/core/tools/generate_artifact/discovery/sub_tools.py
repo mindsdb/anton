@@ -213,6 +213,8 @@ async def call_with_room(
     may truncate again and is reported as such.
     """
     from anton.core.llm.effort import TRUNCATION_RETRY_NOTE, client_stream_budget, retry_budget
+    from anton.core.llm.liveness import MODEL_WAIT_PHASE
+    from anton.core.llm.provider import StreamTaskProgress
     from anton.core.llm.structured import looks_truncated, usable_tool_call
 
     from ..streaming import _call_with_stream_retry
@@ -250,6 +252,10 @@ async def call_with_room(
     if step not in state.retry_announced:
         state.retry_announced.add(step)
         state.step_started(step, attempt=1)
+    # The step row above is added once per step; this live line goes out
+    # before every retry, so a second cut-off round is not silent until the
+    # host's own still-working tick.
+    await state.session.emit(StreamTaskProgress(phase=MODEL_WAIT_PHASE, message=TRUNCATION_RETRY_NOTE))
     bigger = retry_budget(used)
     state.trace_log.node(
         step, "retry_truncated",

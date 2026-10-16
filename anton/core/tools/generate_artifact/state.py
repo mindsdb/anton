@@ -212,8 +212,9 @@ class GenState:
     # `QueueFull` there would abort a generation over a progress line.
     progress: "asyncio.Queue[str | None] | None" = None
     # Steps that already showed an "attempt 2" line for a truncation retry.
-    # Later retries of the same step show only on the live status line, so a
-    # gathering run with several cut rounds does not repeat the same row.
+    # Later retries of the same step show only on the live status line, which
+    # every retry sets, so a gathering run with several cut rounds does not
+    # repeat the same row.
     retry_announced: set[str] = field(default_factory=set)
     # Where this run entered the pipeline (`discovery.checkpoint.ENTRY_*`,
     # set by `orchestrator.run`): a resumed run has fewer steps ahead of it,
