@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import site
 import sys
 import traceback
 
@@ -34,6 +35,12 @@ SESSION_PATH = os.environ.get("ANTON_SCRATCHPAD_SESSION_PATH", "")
 # (ENG-1366). Used to resolve agent-authored modules while the snapshot is loaded —
 # see `_workspace_on_syspath`. Empty means "no workspace", and every use is inert.
 WORKSPACE_PATH = os.environ.get("ANTON_SCRATCHPAD_WORKSPACE_PATH", "")
+
+# The packages folder `local.py` sets when this pad runs on the app's own Python.
+# Appended after the stdlib and site-packages, so an install never shadows either.
+_PACKAGES_PATH = os.environ.get("ANTON_SCRATCHPAD_PACKAGES_PATH", "")
+if _PACKAGES_PATH:
+    site.addsitedir(_PACKAGES_PATH)
 
 # Snapshot size ceiling. Persisting after every cell costs nothing while it always
 # fails; once it works, a namespace holding large frames would be rewritten on each

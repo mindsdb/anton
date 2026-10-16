@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import hashlib
+import importlib.util
 import re
 import shutil
 import sys
@@ -115,6 +116,23 @@ _QUIET_NOTICE_EVERY = 60.0
 # error, so the parent's windows must outlast the worker's timer for that
 # error to win the race against a generic kill (ENG-1275).
 _INSTALL_GRACE = 30.0
+
+# Windows refusing to launch a file by policy: 4551 is Application Control
+# (WDAC, Smart App Control), 1260 is AppLocker / Software Restriction Policies.
+# A rebuilt venv produces the same kind of file, so retrying cannot succeed.
+_POLICY_BLOCK_WINERRORS = frozenset({4551, 1260})
+
+
+def _policy_block_code(exc: BaseException) -> int | None:
+    """Return the Windows error code when ``exc`` is a launch refused by policy.
+
+    Takes any exception; returns the ``winerror`` of an ``OSError`` carrying
+    one of ``_POLICY_BLOCK_WINERRORS``, otherwise None. No side effects.
+    """
+    if not isinstance(exc, OSError):
+        return None
+    code = getattr(exc, "winerror", None)
+    return code if code in _POLICY_BLOCK_WINERRORS else None
 
 
 def _read_boot_script() -> str:
@@ -320,6 +338,13 @@ def _venv_lock(*, venv_path: Path) -> threading.RLock:
         return _VENV_LOCKS.setdefault(key, threading.RLock())
 
 
+# Venvs bases where Windows refused a venv's Python by policy, with the refusal.
+# Kept per base, not per process: one server serves every workspace, and a
+# policy path rule can block one workspace folder and not another.
+_POLICY_BLOCKED_BASES: dict[str, OSError] = {}
+_POLICY_BLOCKED_GUARD = threading.Lock()
+
+
 class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
@@ -386,6 +411,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._pending_recovery_note: str | None = None
         self._last_resume_error: str | None = None
         self._last_verify_error: str | None = None
+        # The launch Windows refused by policy, kept with its code so the
+        # venv build can stop retrying.
+        self._policy_block: OSError | None = None
+        # Set once the pad runs on the app's own interpreter; the venvs base
+        # stays blocked for the process, so the pad never leaves this mode.
+        self._in_fallback = False
+        # A uv that Windows refused at install time, skipped by later installs.
+        self._refused_uv: str | None = None
         self._venvs_base = (
             _venvs_base if _venvs_base is not None else default_venvs_base(workspace_path)
         )
@@ -460,34 +493,48 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return
 
         venv_path = self._venvs_base / self.name
-        if venv_path.is_dir() and self._try_recycle_venv(venv_path):
+        last_error: Exception | None = None
+        blocked = self._base_policy_block()
+        if blocked is None and venv_path.is_dir() and self._try_recycle_venv(venv_path):
             return
+        blocked = self._base_policy_block()
 
-        # Only one thread at a time deletes and rebuilds this directory. A
-        # thread that waited here recycles the venv the first one built, so
-        # concurrent first starts create it once.
-        with _venv_lock(venv_path=venv_path):
-            if venv_path.is_dir() and self._try_recycle_venv(venv_path):
-                return
+        if blocked is None:
+            # Only one thread at a time deletes and rebuilds this directory. A
+            # thread that waited here recycles the venv the first one built, so
+            # concurrent first starts create it once.
+            with _venv_lock(venv_path=venv_path):
+                if venv_path.is_dir() and self._try_recycle_venv(venv_path):
+                    return
 
-            if venv_path.is_dir():
-                self._nuke_venv()
-
-            last_error: Exception | None = None
-            for attempt in range(1, self._MAX_VENV_RETRIES + 1):
-                try:
-                    self._create_venv()
-                    if self._verify_venv_python():
-                        self._setup_parent_site_packages()
-                        self._save_python_version()
-                        return
-                    detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
-                    raise RuntimeError(
-                        f"venv Python binary at {self._venv_python} is not functional{detail}"
-                    )
-                except Exception as exc:
-                    last_error = exc
+                # A thread that held this lock may have recorded a block meanwhile.
+                attempts = 0 if self._base_policy_block() is not None else self._MAX_VENV_RETRIES
+                if attempts and venv_path.is_dir():
                     self._nuke_venv()
+
+                for attempt in range(1, attempts + 1):
+                    try:
+                        self._create_venv()
+                        if self._verify_venv_python():
+                            self._setup_parent_site_packages()
+                            self._save_python_version()
+                            return
+                        detail = f" ({self._last_verify_error})" if self._last_verify_error else ""
+                        raise RuntimeError(
+                            f"venv Python binary at {self._venv_python} is not functional{detail}"
+                        )
+                    except Exception as exc:
+                        last_error = exc
+                        if _policy_block_code(exc) is not None:
+                            self._record_policy_block(exc, program=None)
+                        self._nuke_venv()
+                    if self._policy_block is not None:
+                        break
+            blocked = self._base_policy_block()
+
+        if blocked is not None:
+            self._enter_fallback(blocked)
+            return
 
         # The model reads this message and relays it to the user, so it states
         # facts only: a generic fix hint here gets repeated as a diagnosis.
@@ -497,6 +544,119 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             f"Scratchpad failed to start: could not create a working Python venv at "
             f"{venv_path} from {sys.executable} using {method} after "
             f"{self._MAX_VENV_RETRIES} attempts. Last error: {last_error}"
+        )
+
+    def _policy_blocked_key(self) -> str:
+        """The key of this pad's venvs base in ``_POLICY_BLOCKED_BASES``."""
+        key = os.path.realpath(self._venvs_base)
+        if sys.platform in ("darwin", "win32"):
+            key = key.casefold()
+        return key
+
+    def _record_policy_block(self, exc: OSError, program: str | None) -> None:
+        """Keep a launch Windows refused by policy, and mark this venvs base blocked.
+
+        Windows leaves ``filename`` empty on a refused launch, so ``program``
+        is stamped on it for the message. Side effect: writes the process-wide
+        map, so every pad under this base skips the venv build until restart.
+        """
+        if exc.filename is None:
+            exc.filename = program
+        self._policy_block = exc
+        with _POLICY_BLOCKED_GUARD:
+            _POLICY_BLOCKED_BASES.setdefault(self._policy_blocked_key(), exc)
+
+    def _base_policy_block(self) -> OSError | None:
+        """Return the policy refusal recorded for this pad's venvs base, if any."""
+        with _POLICY_BLOCKED_GUARD:
+            return _POLICY_BLOCKED_BASES.get(self._policy_blocked_key())
+
+    def _enter_fallback(self, blocked: OSError) -> None:
+        """Run this pad on the app's own interpreter, which the policy already allows.
+
+        A per-pad packages folder takes the venv's place, so installs land there
+        and every delete path removes only it, never the app's environment.
+        Raises the policy message when the app's interpreter is refused too.
+        """
+        # Named like the venv folder, so the venv lock that guards its deletion
+        # covers exactly the pads that share it.
+        packages_root = self._venvs_base.parent / "scratchpad-packages"
+        packages = packages_root / self.name
+        # A direct child only: "." or "" would make the root itself the folder
+        # that cleanup() deletes, taking every pad's packages with it.
+        if packages.resolve().parent != packages_root.resolve():
+            raise RuntimeError(
+                f"Scratchpad failed to start: the scratchpad name {self.name!r} "
+                f"points outside {packages_root}."
+            ) from blocked
+        if packages.resolve().is_relative_to(Path(sys.prefix).resolve()):
+            raise RuntimeError(
+                f"Scratchpad failed to start: refusing a packages folder inside the "
+                f"app's own Python environment ({packages})."
+            ) from blocked
+
+        self._venv_python = sys.executable
+        if not self._verify_venv_python():
+            fallback_error = self._last_verify_error or "it did not run"
+            self._venv_dir = None
+            self._venv_python = None
+            raise RuntimeError(
+                self._policy_blocked_message(blocked, fallback_error=fallback_error)
+            ) from blocked
+
+        self._venv_dir = str(packages)
+        if packages.is_dir() and not self._check_python_version():
+            # Built for another Python: its compiled installs would not import, and
+            # requirements.txt would make install_packages skip reinstalling them.
+            with _venv_lock(venv_path=self._venvs_base / self.name):
+                shutil.rmtree(packages)
+        packages.mkdir(parents=True, exist_ok=True)
+        self._save_python_version()
+        self._load_requirements()
+        if not self._in_fallback:
+            self._pending_recovery_note = (
+                f"Note: this scratchpad runs on the app's own Python ({sys.executable}) "
+                f"because Windows blocked {blocked.filename or 'the scratchpad venv'} "
+                f"(WinError {_policy_block_code(blocked)}: {blocked.strerror}) by an "
+                f"Application Control policy. Installed packages go to {packages}. A "
+                "package the app already ships keeps the app's version, so installing "
+                "another version of it has no effect. A package with compiled parts "
+                "may be blocked by the same policy."
+            )
+        self._in_fallback = True
+
+    def _policy_blocked_message(
+        self, blocked: OSError, *, fallback_error: str | None = None
+    ) -> str:
+        """The start failure the model relays when Windows policy refused a launch.
+
+        ``blocked`` is the first refusal; ``fallback_error`` says why running on
+        the app's own Python failed too, when it was tried. Unlike the
+        facts-only venv failure, this carries a recovery path: the cause is
+        identified by its error code, so the advice cannot be a misdiagnosis.
+        Re-uploading is named as useless because it was offered.
+        """
+        program = blocked.filename or "a program the scratchpad needs"
+        fallback = (
+            f"Running on the app's own Python ({sys.executable}) failed as well: "
+            f"{fallback_error}. "
+            if fallback_error is not None
+            else ""
+        )
+        # A blocked uv lives outside the venvs folder, so allowing that folder alone
+        # would not unblock it.
+        allow = f"programs in {self._venvs_base}"
+        if blocked.filename and not Path(blocked.filename).is_relative_to(self._venvs_base):
+            allow = f"{blocked.filename} and {allow}"
+        return (
+            f"Scratchpad failed to start: Windows blocked {program} "
+            f"(WinError {_policy_block_code(blocked)}: {blocked.strerror}). "
+            f"{fallback}"
+            "A Windows Application Control policy on this computer blocks it. "
+            "Renaming the scratchpad, retrying, or re-uploading files will not help. "
+            f"To recover, an IT administrator can allow {allow}, "
+            "and then the app must be restarted. Otherwise, use a computer "
+            "without this restriction."
         )
 
     @staticmethod
@@ -557,6 +717,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 # never seen — only "returned non-zero exit status N".
                 stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"uv venv failed: {stderr}" if stderr else str(exc)) from exc
+            except OSError as exc:
+                # Windows names no file on a launch it refuses; the message needs it.
+                if _policy_block_code(exc) is not None and exc.filename is None:
+                    exc.filename = uv
+                raise
         else:
             # symlinks=False is venv.create()'s own default on every platform
             # (only the `python -m venv` CLI defaults it per-OS); a copied
@@ -583,13 +748,19 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         Returns None when the venv has not been provisioned yet (i.e.
         no exec has run). Auxiliary tools that want to share installed
         packages call this to discover the interpreter.
+
+        Also None in fallback mode: those tools launch the interpreter without
+        the pad's packages folder, so its installs would not import there.
         """
+        if self._in_fallback:
+            return None
         if self._venv_python and os.path.isfile(self._venv_python):
             return self._venv_python
         return None
 
     def _verify_venv_python(self) -> bool:
         self._last_verify_error = None
+        self._policy_block = None
         if self._venv_python is None:
             return False
         if not os.path.exists(self._venv_python):
@@ -609,6 +780,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return ok
         except Exception as exc:
             self._last_verify_error = str(exc)
+            if _policy_block_code(exc) is not None:
+                self._record_policy_block(exc, program=self._venv_python)
             return False
 
     def _nuke_venv(self) -> None:
@@ -898,6 +1071,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["PYTHONPATH"] = _anton_root + (
                 os.pathsep + python_path if python_path else ""
             )
+        if self._in_fallback and self._venv_dir is not None:
+            # Not on PYTHONPATH, which precedes the stdlib: the boot script appends
+            # it last. PIP_TARGET keeps a cell's pip off the app's own environment.
+            env["ANTON_SCRATCHPAD_PACKAGES_PATH"] = self._venv_dir
+            env["PIP_TARGET"] = self._venv_dir
+        else:
+            env.pop("ANTON_SCRATCHPAD_PACKAGES_PATH", None)
 
         # Pin the subprocess cwd to the workspace root so bare-relative
         # paths in scratchpad code (`open("data.csv")`, `os.listdir(".")`,
@@ -940,6 +1120,21 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 await self._run_venv_work(self._ensure_venv)
                 self._proc = await spawn()
         except (FileNotFoundError, PermissionError, OSError) as exc:
+            if _policy_block_code(exc) is not None:
+                # Rebuilding cannot help, so keep the venv and stop other pads trying.
+                self._record_policy_block(exc, program=self._venv_python)
+                if self._in_fallback:
+                    first = self._base_policy_block() or exc
+                    fallback_error = str(exc) if first is not exc else None
+                    raise RuntimeError(
+                        self._policy_blocked_message(first, fallback_error=fallback_error)
+                    ) from exc
+                # Start on the app's own Python now, rather than report a block
+                # that the next start would get past.
+                await self._run_venv_work(lambda: self._enter_fallback(exc))
+                await self._stop_process()
+                await self.start()
+                return
             await self._run_venv_work(self._nuke_venv)
             raise RuntimeError(
                 f"Failed to start scratchpad: {exc}. "
@@ -1091,7 +1286,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         estimated_seconds: int = 0,
     ):
         """Async generator: yields progress strings then a final Cell."""
-        recovery_note: str | None = None
         if self._proc is None or self._proc.returncode is not None:
             # ENG-1273: a dead process (watchdog kill, crash, or anything
             # else) recovers automatically here rather than making the agent
@@ -1112,12 +1306,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     estimated_time=estimated_time,
                 ))
                 return
-            # Grabbed once and cleared immediately: whatever happens to THIS
-            # cell (succeeds, errors, or is killed again), the note must
-            # reach the agent exactly once, attached to this cell's result —
-            # never left dangling on a later, unrelated one.
-            recovery_note = self._pending_recovery_note
-            self._pending_recovery_note = None
+        # Grabbed once and cleared immediately: whatever happens to THIS
+        # cell (succeeds, errors, or is killed again), the note must
+        # reach the agent exactly once, attached to this cell's result —
+        # never left dangling on a later, unrelated one. Read on every
+        # cell, because a fallback start leaves one without any recovery.
+        recovery_note = self._pending_recovery_note
+        self._pending_recovery_note = None
 
         # Fresh salvage state per cell: _read_result accumulates the worker's
         # stdout chunks here so a kill/crash can still report partial output.
@@ -1498,20 +1693,27 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         await self._run_venv_work(self._ensure_venv)
 
         uv = self._find_uv()
-        if uv:
+        if self._in_fallback:
+            command = self._fallback_install_command(uv, needed)
+            if isinstance(command, str):
+                return command
+            cmd = command
+        elif uv:
             cmd = [uv, "pip", "install", "--python", self._venv_python, *needed]
         else:
             cmd = [self._venv_python, "-m", "pip", "install", "--no-input", *needed]
 
         _install_timeout = CoreSettings().cell_install_timeout
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            # Same UTF-8 mode as the scratchpad process, so pip/uv output on a
-            # non-UTF-8 host locale doesn't come back as mojibake (ENG-824).
-            env=_utf8_env(os.environ),
-        )
+        launched = await self._launch_installer(cmd)
+        if isinstance(launched, str) and self._in_fallback and uv is not None and cmd[0] == uv:
+            # Remember the refused uv and retry once through pip on the allowed Python.
+            self._refused_uv = uv
+            retry = self._fallback_install_command(None, needed)
+            if not isinstance(retry, str):
+                launched = await self._launch_installer(retry)
+        if isinstance(launched, str):
+            return launched
+        proc = launched
         try:
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=_install_timeout
@@ -1526,6 +1728,50 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         for p in needed:
             self._installed_packages.add(p.lower())
         return output
+
+    def _fallback_install_command(self, uv: str | None, needed: list[str]) -> list[str] | str:
+        """The install command for fallback mode, or the reason no installer can run.
+
+        --target keeps every install in the packages folder; without it this
+        would install into the app's own environment. A uv that Windows refused,
+        for this pad or for its venvs base, is skipped in favour of pip.
+        """
+        blocked = self._base_policy_block()
+        refused = {self._refused_uv, blocked.filename if blocked is not None else None}
+        if uv in refused:
+            uv = None
+        target = ["--target", self._venv_dir]
+        if uv:
+            return [uv, "pip", "install", "--python", self._venv_python, *target, *needed]
+        if importlib.util.find_spec("pip") is None:
+            return (
+                "Install failed: no installer is available for the app's Python "
+                "(uv was not found or was blocked, and pip is not installed)."
+            )
+        return [self._venv_python, "-m", "pip", "install", "--no-input", *target, *needed]
+
+    async def _launch_installer(self, cmd: list[str]) -> asyncio.subprocess.Process | str:
+        """Start an install command, or return the failure when Windows refuses it by policy.
+
+        Other launch errors propagate unchanged.
+        """
+        try:
+            return await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                # Same UTF-8 mode as the scratchpad process, so pip/uv output on a
+                # non-UTF-8 host locale doesn't come back as mojibake (ENG-824).
+                env=_utf8_env(os.environ),
+            )
+        except OSError as exc:
+            code = _policy_block_code(exc)
+            if code is None:
+                raise
+            return (
+                f"Install failed: Windows blocked {cmd[0]} (WinError {code}: "
+                f"{exc.strerror}) by an Application Control policy on this computer."
+            )
 
     async def _stop_process(self) -> None:
         if self._proc is not None and self._proc.returncode is None:

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,6 +32,14 @@ _DEFAULTS = dict(
 
 def make_pad(tmp_path, name="probe"):
     return LocalScratchpadRuntime(name=name, _venvs_base=tmp_path, **_DEFAULTS)
+
+
+@pytest.fixture(autouse=True)
+def _forget_policy_blocks():
+    """A recorded policy block lasts for the process, so isolate each test."""
+    local._POLICY_BLOCKED_BASES.clear()
+    yield
+    local._POLICY_BLOCKED_BASES.clear()
 
 
 @pytest.mark.parametrize(
@@ -194,6 +203,703 @@ def test_verify_captures_an_exception_reason(tmp_path):
 
     assert pad._verify_venv_python() is False
     assert pad._last_verify_error
+
+
+def _policy_error(code: int) -> OSError:
+    """An ``OSError`` shaped like Windows refusing a launch with ``code``."""
+    exc = OSError(13, "An Application Control policy has blocked this file")
+    exc.winerror = code
+    return exc
+
+
+def _raise_on_run(exc: OSError):
+    def run(*args, **kwargs):
+        raise exc
+
+    return run
+
+
+def _refuse_every_run(code: int):
+    """A subprocess.run that Windows refuses, with a new error per launch as CPython raises."""
+
+    def run(*args, **kwargs):
+        raise _policy_error(code)
+
+    return run
+
+
+@pytest.mark.parametrize("code", [4551, 1260])
+def test_verify_records_a_launch_refused_by_policy(tmp_path, monkeypatch, code):
+    pad = make_pad(tmp_path)
+    pad._venv_python = sys.executable
+    blocked = _policy_error(code)
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(blocked))
+
+    assert pad._verify_venv_python() is False
+    assert pad._policy_block is blocked
+    assert "Application Control policy" in pad._last_verify_error
+
+
+def test_verify_does_not_record_other_windows_errors_as_policy(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    pad._venv_python = sys.executable
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(_policy_error(5)))
+
+    assert pad._verify_venv_python() is False
+    assert pad._policy_block is None
+
+
+def test_verify_clears_a_recorded_policy_block_on_success(tmp_path):
+    pad = make_pad(tmp_path)
+    pad._policy_block = _policy_error(4551)
+    pad._venv_python = sys.executable
+
+    assert pad._verify_venv_python() is True
+    assert pad._policy_block is None
+
+
+def test_a_venv_build_refused_by_policy_is_recorded(tmp_path, monkeypatch):
+    # uv.exe can sit in a folder the same policy covers, so the build itself
+    # may be the launch Windows refuses.
+    pad = make_pad(tmp_path / "venvs")
+    blocked = _policy_error(4551)
+
+    def blocked_build():
+        raise blocked
+
+    monkeypatch.setattr(pad, "_create_venv", blocked_build)
+
+    pad._ensure_venv()
+    assert pad._base_policy_block() is blocked
+
+
+def test_recycling_an_existing_venv_records_a_policy_block(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    existing = tmp_path / "probe"
+    existing.mkdir()
+    monkeypatch.setattr(local.os.path, "exists", lambda p: True)
+    blocked = _policy_error(4551)
+    monkeypatch.setattr(subprocess, "run", _raise_on_run(blocked))
+
+    assert pad._try_recycle_venv(existing) is False
+    assert pad._policy_block is blocked
+
+
+def _count_builds(pad, monkeypatch, *, verify):
+    """Replace the venv build with a counter and verification with ``verify``."""
+    builds: list[str] = []
+    monkeypatch.setattr(pad, "_create_venv", lambda: builds.append(pad.name))
+    monkeypatch.setattr(pad, "_verify_venv_python", verify)
+    return builds
+
+
+def _blocked_verify(pad):
+    def verify():
+        pad._last_verify_error = "[WinError 4551] An Application Control policy has blocked this file"
+        pad._record_policy_block(_policy_error(4551), program=pad._venv_python)
+        return False
+
+    return verify
+
+
+def test_a_policy_block_stops_the_build_after_one_attempt(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    builds = _count_builds(pad, monkeypatch, verify=_blocked_verify(pad))
+
+    with pytest.raises(RuntimeError, match="4551"):
+        pad._ensure_venv()
+    assert builds == ["probe"]
+
+
+def test_a_renamed_pad_under_a_blocked_base_skips_the_build(tmp_path, monkeypatch):
+    first = make_pad(tmp_path / "venvs", name="probe")
+    _count_builds(first, monkeypatch, verify=_blocked_verify(first))
+    with pytest.raises(RuntimeError):
+        first._ensure_venv()
+
+    renamed = make_pad(tmp_path / "venvs", name="probe_retry")
+    builds = _count_builds(renamed, monkeypatch, verify=lambda: True)
+
+    renamed._ensure_venv()
+    assert builds == []
+    assert renamed._in_fallback
+
+
+def test_a_block_recorded_while_waiting_for_the_lock_skips_the_build(tmp_path, monkeypatch):
+    # Another thread holding the lock builds, is refused, and records the
+    # block; the thread that waited must not delete and build once more.
+    pad = make_pad(tmp_path / "venvs")
+    builds = _count_builds(pad, monkeypatch, verify=pad._verify_venv_python)
+    (tmp_path / "venvs" / "probe").mkdir(parents=True)
+    real_lock = local._venv_lock
+
+    def lock_taken_by_a_refused_build(*, venv_path):
+        make_pad(tmp_path / "venvs", name="other")._record_policy_block(
+            _policy_error(4551), program=None
+        )
+        return real_lock(venv_path=venv_path)
+
+    monkeypatch.setattr(local, "_venv_lock", lock_taken_by_a_refused_build)
+
+    pad._ensure_venv()
+
+    assert builds == []
+    assert (tmp_path / "venvs" / "probe").is_dir()
+    assert pad._in_fallback
+
+
+def test_a_policy_block_leaves_other_venvs_bases_building(tmp_path, monkeypatch):
+    blocked_pad = make_pad(tmp_path / "blocked")
+    _count_builds(blocked_pad, monkeypatch, verify=_blocked_verify(blocked_pad))
+    with pytest.raises(RuntimeError):
+        blocked_pad._ensure_venv()
+
+    other = make_pad(tmp_path / "other")
+    builds = _count_builds(other, monkeypatch, verify=lambda: True)
+    monkeypatch.setattr(other, "_setup_parent_site_packages", lambda: None)
+    monkeypatch.setattr(other, "_save_python_version", lambda: None)
+
+    other._ensure_venv()
+    assert builds == ["probe"]
+
+
+def test_a_failure_that_is_not_a_policy_block_still_retries(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path)
+    builds = _count_builds(pad, monkeypatch, verify=lambda: False)
+
+    with pytest.raises(RuntimeError):
+        pad._ensure_venv()
+    assert len(builds) == LocalScratchpadRuntime._MAX_VENV_RETRIES
+
+
+def test_a_policy_block_names_the_blocker_and_a_recovery_path(tmp_path, monkeypatch):
+    # The model relays this message; the ticket's failure ended with the user
+    # told to re-upload files, which cannot start a blocked interpreter.
+    pad = make_pad(tmp_path)
+    blocked_python = str(tmp_path / "probe" / "Scripts" / "python.exe")
+
+    def build():
+        pad._venv_dir = str(tmp_path / "probe")
+        pad._venv_python = blocked_python
+
+    monkeypatch.setattr(pad, "_create_venv", build)
+    monkeypatch.setattr(local.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(subprocess, "run", _refuse_every_run(4551))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pad._ensure_venv()
+
+    message = str(exc_info.value)
+    assert f"Windows blocked {blocked_python}" in message
+    assert "WinError 4551" in message
+    assert "Application Control policy" in message
+    assert "re-uploading files will not help" in message
+    assert f"allow programs in {tmp_path}" in message
+    assert "restarted" in message
+    assert "after 3 attempts" not in message
+
+
+async def test_a_spawn_refused_by_policy_reports_it_and_keeps_the_venv(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    pad = make_pad(tmp_path / "venvs")
+
+    async def refuse_spawn(*_args, **_kwargs):
+        raise _policy_error(4551)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_spawn)
+
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            await pad.start()
+    finally:
+        await pad.close()
+
+    message = str(exc_info.value)
+    venv_python = tmp_path / "venvs" / "probe" / "bin" / "python"
+    assert f"Windows blocked {venv_python}" in message
+    assert f"Running on the app's own Python ({sys.executable}) failed as well" in message
+    assert "will be recreated" not in message
+    assert (tmp_path / "venvs" / "probe").is_dir(), "a rebuild cannot help, so the venv stays"
+    renamed = make_pad(tmp_path / "venvs", name="probe_retry")
+    builds = _count_builds(renamed, monkeypatch, verify=lambda: True)
+    renamed._ensure_venv()
+    assert builds == []
+    assert renamed._in_fallback
+
+
+def _fallback_pad(tmp_path):
+    """A pad whose venvs base Windows has refused, so it runs on sys.executable."""
+    pad = make_pad(tmp_path / "venvs")
+    pad._record_policy_block(_policy_error(4551), program=None)
+    pad._ensure_venv()
+    return pad
+
+
+def _record_rmtree_paths(monkeypatch) -> list[Path]:
+    """Record the resolved target of every rmtree call the runtime makes."""
+    paths: list[Path] = []
+    real_rmtree = local.shutil.rmtree
+
+    def recording(path, *args, **kwargs):
+        paths.append(Path(path).resolve())
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(local.shutil, "rmtree", recording)
+    return paths
+
+
+def _under_app_environment(paths: list[Path]) -> list[Path]:
+    prefix = Path(sys.prefix).resolve()
+    return [p for p in paths if p.is_relative_to(prefix)]
+
+
+def test_fallback_runs_on_the_app_interpreter_with_a_packages_folder(tmp_path):
+    pad = _fallback_pad(tmp_path)
+
+    assert pad._venv_python == sys.executable
+    assert pad._venv_dir == str(tmp_path / "scratchpad-packages" / "probe")
+    assert (tmp_path / "scratchpad-packages" / "probe").is_dir()
+    assert pad.venv_python() is None
+
+
+def test_fallback_packages_folders_follow_the_venv_names(tmp_path):
+    # Sanitized names would put "a b" and "a_b" in one folder under two
+    # different venv locks, so one pad's cleanup could delete the other's installs.
+    spaced = make_pad(tmp_path / "venvs", name="a b")
+    spaced._record_policy_block(_policy_error(4551), program=None)
+    spaced._ensure_venv()
+    underscored = make_pad(tmp_path / "venvs", name="a_b")
+    underscored._ensure_venv()
+
+    assert spaced._venv_dir == str(tmp_path / "scratchpad-packages" / "a b")
+    assert underscored._venv_dir == str(tmp_path / "scratchpad-packages" / "a_b")
+
+
+@pytest.mark.parametrize("name", ["../escape", ".", ""])
+def test_fallback_refuses_a_pad_name_that_is_not_a_folder_of_its_own(tmp_path, name):
+    pad = make_pad(tmp_path / "venvs", name=name)
+    pad._record_policy_block(_policy_error(4551), program=None)
+
+    with pytest.raises(RuntimeError, match="points outside"):
+        pad._ensure_venv()
+    assert pad._venv_dir is None
+    assert not (tmp_path / "escape").exists()
+
+
+def test_fallback_is_refused_when_the_app_interpreter_is_blocked_too(tmp_path, monkeypatch):
+    pad = make_pad(tmp_path / "venvs")
+    venv_python = str(tmp_path / "venvs" / "probe" / "Scripts" / "python.exe")
+    pad._record_policy_block(_policy_error(4551), program=venv_python)
+    monkeypatch.setattr(subprocess, "run", _refuse_every_run(4551))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pad._ensure_venv()
+
+    message = str(exc_info.value)
+    assert f"Windows blocked {venv_python}" in message
+    assert f"Running on the app's own Python ({sys.executable}) failed as well" in message
+    assert not pad._in_fallback
+    assert not (tmp_path / "scratchpad-packages").exists()
+
+
+def _refuse_uv_only(uv: str):
+    """A subprocess.run where Windows refuses uv and runs everything else."""
+    real_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd[0] == uv:
+            raise _policy_error(4551)
+        return real_run(cmd, *args, **kwargs)
+
+    return run
+
+
+def test_a_blocked_uv_is_named_in_the_fallback_note(tmp_path, monkeypatch):
+    uv = str(tmp_path / "bin" / "uv.exe")
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: uv))
+    monkeypatch.setattr(subprocess, "run", _refuse_uv_only(uv))
+    pad = make_pad(tmp_path / "venvs")
+
+    pad._ensure_venv()
+
+    assert pad._in_fallback
+    assert f"Windows blocked {uv}" in pad._pending_recovery_note
+
+
+def test_a_blocked_uv_is_named_in_the_recovery_path(tmp_path, monkeypatch):
+    # Allowing the venvs folder alone would leave uv blocked.
+    uv = str(tmp_path / "bin" / "uv.exe")
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: uv))
+    monkeypatch.setattr(subprocess, "run", _refuse_every_run(4551))
+    pad = make_pad(tmp_path / "venvs")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        pad._ensure_venv()
+
+    message = str(exc_info.value)
+    assert f"Windows blocked {uv}" in message
+    assert f"allow {uv} and programs in {tmp_path / 'venvs'}" in message
+
+
+async def test_fallback_installs_skip_a_uv_that_windows_refused(tmp_path, monkeypatch):
+    uv = str(tmp_path / "bin" / "uv.exe")
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: uv))
+    monkeypatch.setattr(subprocess, "run", _refuse_uv_only(uv))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: object() if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = make_pad(tmp_path / "venvs")
+    pad._ensure_venv()
+    commands = _record_install_commands(monkeypatch)
+
+    await pad.install_packages(["requests"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    assert commands == [
+        (sys.executable, "-m", "pip", "install", "--no-input", "--target", packages, "requests")
+    ]
+
+
+async def test_a_uv_refused_at_install_time_falls_back_to_pip_and_is_remembered(
+    tmp_path, monkeypatch
+):
+    # Fallback entered on a blocked venv Python never ran uv, so the first
+    # install is where Windows refuses it; pip on the allowed Python still works.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: object() if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+    recorded_exec = local.asyncio.create_subprocess_exec
+
+    async def refuse_uv(*cmd, **kwargs):
+        if cmd[0] == "/usr/bin/uv":
+            commands.append(cmd)
+            raise _policy_error(4551)
+        return await recorded_exec(*cmd, **kwargs)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_uv)
+
+    first = await pad.install_packages(["requests"])
+    second = await pad.install_packages(["rich"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    pip = (sys.executable, "-m", "pip", "install", "--no-input", "--target", packages)
+    assert first == second == "installed"
+    assert commands == [
+        ("/usr/bin/uv", "pip", "install", "--python", sys.executable, "--target", packages, "requests"),
+        (*pip, "requests"),
+        (*pip, "rich"),
+    ]
+
+
+async def test_a_packages_folder_for_another_python_is_rebuilt(tmp_path, monkeypatch):
+    # After an app update to a new Python minor, compiled installs in the old
+    # folder would not import, so the remembered requirements must not count.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    packages = tmp_path / "scratchpad-packages" / "probe"
+    packages.mkdir(parents=True)
+    (packages / ".python_version").write_text("2.7\n")
+    (packages / "requirements.txt").write_text("requests\n")
+    (packages / "stale_cp27_module.py").write_text("")
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    result = await pad.install_packages(["requests"])
+
+    expected = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert (packages / ".python_version").read_text().strip() == expected
+    assert not (packages / "stale_cp27_module.py").exists()
+    assert result == "installed"
+    assert len(commands) == 1
+
+
+def test_a_packages_folder_for_this_python_is_kept(tmp_path):
+    packages = tmp_path / "scratchpad-packages" / "probe"
+    packages.mkdir(parents=True)
+    (packages / ".python_version").write_text(
+        f"{sys.version_info.major}.{sys.version_info.minor}\n"
+    )
+    (packages / "requirements.txt").write_text("requests\n")
+
+    pad = _fallback_pad(tmp_path)
+
+    assert "requests" in pad._installed_packages
+    assert (packages / "requirements.txt").exists()
+
+
+async def test_an_install_refused_by_policy_names_the_installer(tmp_path, monkeypatch):
+    # No pip to retry with, so the uv refusal is what the model sees.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: None if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = _fallback_pad(tmp_path)
+
+    async def refuse(*_args, **_kwargs):
+        raise _policy_error(4551)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse)
+
+    result = await pad.install_packages(["requests"])
+
+    assert result.startswith("Install failed: Windows blocked /usr/bin/uv")
+    assert "WinError 4551" in result
+
+
+async def test_a_spawn_refused_by_policy_starts_on_the_app_interpreter(tmp_path, monkeypatch):
+    # The venv's Python passed its check but Windows refused the spawn; the
+    # same start moves to the app's own Python instead of reporting a block.
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    real_exec = local.asyncio.create_subprocess_exec
+
+    async def refuse_the_venv(program, *args, **kwargs):
+        if program != sys.executable:
+            raise _policy_error(4551)
+        return await real_exec(program, *args, **kwargs)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_the_venv)
+    pad = make_pad(tmp_path / "venvs")
+    try:
+        await pad.start()
+        cell = await pad.execute("import sys; print(sys.executable)")
+    finally:
+        await pad.close()
+
+    assert pad._in_fallback
+    assert cell.stdout.strip() == sys.executable
+    assert "WinError 4551" in cell.logs
+
+
+async def test_fallback_cleanup_deletes_only_the_packages_folder(tmp_path, monkeypatch):
+    pad = _fallback_pad(tmp_path)
+    await pad.start()
+    deleted = _record_rmtree_paths(monkeypatch)
+
+    await pad.cleanup()
+
+    assert deleted == [(tmp_path / "scratchpad-packages" / "probe").resolve()]
+    assert not (tmp_path / "scratchpad-packages" / "probe").exists()
+
+
+async def test_fallback_reset_restarts_on_the_app_interpreter(tmp_path, monkeypatch):
+    # The check fails once, so reset() takes its delete path for a broken
+    # interpreter; in fallback mode that may only remove the packages folder.
+    pad = _fallback_pad(tmp_path)
+    await pad.start()
+    deleted = _record_rmtree_paths(monkeypatch)
+    real_verify = pad._verify_venv_python
+    checks: list[bool] = []
+
+    def fails_once() -> bool:
+        checks.append(True)
+        return len(checks) > 1 and real_verify()
+
+    monkeypatch.setattr(pad, "_verify_venv_python", fails_once)
+    try:
+        await pad.reset()
+        cell = await pad.execute("import sys; print(sys.executable)")
+    finally:
+        await pad.close()
+
+    assert cell.stdout.strip() == sys.executable
+    assert deleted == [(tmp_path / "scratchpad-packages" / "probe").resolve()]
+    assert _under_app_environment(deleted) == []
+
+
+async def test_a_failed_fallback_spawn_never_deletes_the_app_environment(
+    tmp_path, monkeypatch
+):
+    pad = _fallback_pad(tmp_path)
+    deleted = _record_rmtree_paths(monkeypatch)
+
+    async def refuse_spawn(*_args, **_kwargs):
+        raise OSError("spawn refused")
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", refuse_spawn)
+    try:
+        with pytest.raises(RuntimeError, match="spawn refused"):
+            await pad.start()
+    finally:
+        await pad.close()
+
+    assert deleted
+    assert _under_app_environment(deleted) == []
+    assert Path(sys.executable).exists()
+
+
+async def test_a_fallback_pad_reads_a_zip_of_workbooks(tmp_path):
+    # The ticket's upload: a ZIP of Excel reports. zipfile and openpyxl ship
+    # with the app's own Python, so no install is needed to read it.
+    pad = _fallback_pad(tmp_path)
+    archive = tmp_path / "reports.zip"
+    code = (
+        "import io, zipfile, openpyxl\n"
+        "book = openpyxl.Workbook(); book.active['A1'] = 'March'\n"
+        "data = io.BytesIO(); book.save(data)\n"
+        f"with zipfile.ZipFile({str(archive)!r}, 'w') as z: z.writestr('march.xlsx', data.getvalue())\n"
+        f"with zipfile.ZipFile({str(archive)!r}) as z:\n"
+        "    sheet = openpyxl.load_workbook(io.BytesIO(z.read('march.xlsx'))).active\n"
+        "print(sheet['A1'].value)\n"
+    )
+    await pad.start()
+    try:
+        cell = await pad.execute(code)
+    finally:
+        await pad.close()
+
+    assert cell.error is None, cell.error
+    assert cell.stdout.strip() == "March"
+
+
+async def test_fallback_installs_never_shadow_the_stdlib_or_app_packages(tmp_path):
+    # A --target install of a backport or of a package the app ships must not
+    # replace the stdlib or the app's copy: the boot script imports both.
+    pad = _fallback_pad(tmp_path)
+    packages = tmp_path / "scratchpad-packages" / "probe"
+    for name in ("json", "dill", "only_in_packages"):
+        (packages / name).mkdir()
+        (packages / name / "__init__.py").write_text("FROM_PACKAGES = True\n")
+
+    await pad.start()
+    try:
+        cell = await pad.execute(
+            "import json, dill, only_in_packages\n"
+            "print(hasattr(json, 'FROM_PACKAGES'), hasattr(dill, 'FROM_PACKAGES'),"
+            " only_in_packages.FROM_PACKAGES)\n"
+        )
+    finally:
+        await pad.close()
+
+    assert cell.error is None, cell.error
+    assert cell.stdout.strip() == "False False True"
+
+
+async def test_fallback_child_env_points_installs_at_the_packages_folder(tmp_path, monkeypatch):
+    pad = _fallback_pad(tmp_path)
+    envs: list[dict[str, str]] = []
+    real_exec = local.asyncio.create_subprocess_exec
+
+    async def recording_exec(*args, **kwargs):
+        envs.append(kwargs["env"])
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", recording_exec)
+    await pad.start()
+    await pad.close()
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    assert packages not in envs[0]["PYTHONPATH"].split(os.pathsep)
+    assert envs[0]["ANTON_SCRATCHPAD_PACKAGES_PATH"] == packages
+    assert envs[0]["PIP_TARGET"] == packages
+
+
+async def test_the_fallback_note_reaches_the_model_once(tmp_path):
+    pad = _fallback_pad(tmp_path)
+    await pad.start()
+    try:
+        first = await pad.execute("print(1)")
+        await pad.resume()
+        after_resume = await pad.execute("print(2)")
+        await pad.reset()
+        after_reset = await pad.execute("print(3)")
+        await pad.cancel()
+        after_cancel = await pad.execute("print(4)")
+    finally:
+        await pad.close()
+
+    assert "runs on the app's own Python" in first.logs
+    assert "WinError 4551" in first.logs
+    assert "keeps the app's version" in first.logs
+    assert "runs on the app's own Python" not in after_resume.logs
+    assert "runs on the app's own Python" not in after_reset.logs
+    assert after_cancel.stdout.strip() == "4"
+    assert "runs on the app's own Python" not in after_cancel.logs
+
+
+def _record_install_commands(monkeypatch) -> list[tuple[str, ...]]:
+    """Capture install commands and answer each with a successful fake process."""
+    commands: list[tuple[str, ...]] = []
+
+    class _Done:
+        returncode = 0
+
+        async def communicate(self):
+            return b"installed", None
+
+    async def fake_exec(*cmd, **_kwargs):
+        commands.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", fake_exec)
+    return commands
+
+
+async def test_fallback_installs_go_to_the_packages_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    await pad.install_packages(["requests"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    assert commands == [
+        ("/usr/bin/uv", "pip", "install", "--python", sys.executable, "--target", packages, "requests")
+    ]
+
+
+async def test_fallback_installs_without_uv_use_pip_with_a_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: object() if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    await pad.install_packages(["requests"])
+
+    packages = str(tmp_path / "scratchpad-packages" / "probe")
+    assert commands == [
+        (sys.executable, "-m", "pip", "install", "--no-input", "--target", packages, "requests")
+    ]
+
+
+async def test_fallback_without_any_installer_names_the_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    real_find_spec = local.importlib.util.find_spec
+    monkeypatch.setattr(
+        local.importlib.util, "find_spec",
+        lambda name, *a: None if name == "pip" else real_find_spec(name, *a),
+    )
+    pad = _fallback_pad(tmp_path)
+    commands = _record_install_commands(monkeypatch)
+
+    result = await pad.install_packages(["requests"])
+
+    assert commands == []
+    assert result.startswith("Install failed")
+    assert "no installer is available" in result
+
+
+async def test_fallback_installs_are_remembered_in_the_packages_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: "/usr/bin/uv"))
+    pad = _fallback_pad(tmp_path)
+    _record_install_commands(monkeypatch)
+    await pad.install_packages(["requests"])
+    await pad.close()
+
+    assert (tmp_path / "scratchpad-packages" / "probe" / "requirements.txt").read_text() == "requests\n"
+    again = _fallback_pad(tmp_path)
+    assert await again.install_packages(["requests"]) == "All packages already installed."
 
 
 def _in_daemon_thread(*, fn, timeout: float = 30.0):
