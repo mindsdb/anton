@@ -1326,7 +1326,8 @@ class OpenAIProvider(LLMProvider):
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
         )
-        self.log_usage(model=model, usage=usage, served_model=getattr(response, "model", None))
+        if usage_obj is not None:
+            self.log_usage(model=model, usage=usage, served_model=getattr(response, "model", None))
 
         raise_on_empty_response(
             content=content_text, tool_calls=tool_calls,
@@ -1405,6 +1406,7 @@ class OpenAIProvider(LLMProvider):
         # returned, so it never retried — the session must (ENG-673). A failure
         # BEFORE this (request establishment) was already SDK-retried → fail fast.
         stream_started = False
+        usage_seen = False
 
         stream = None
         try:
@@ -1413,6 +1415,7 @@ class OpenAIProvider(LLMProvider):
             async for chunk in stream:
                 served_model = getattr(chunk, "model", None) or served_model
                 if chunk.usage:
+                    usage_seen = True
                     (
                         input_tokens,
                         cache_read_tokens,
@@ -1568,7 +1571,8 @@ class OpenAIProvider(LLMProvider):
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
         )
-        self.log_usage(model=model, usage=usage, served_model=served_model)
+        if usage_seen:
+            self.log_usage(model=model, usage=usage, served_model=served_model)
 
         # Finalize tool calls. Same safe-parse protection as the
         # non-streaming path — a model cut off mid-JSON-arguments
@@ -1762,10 +1766,11 @@ class OpenAIProvider(LLMProvider):
                 model=model,
             ) from exc
 
-        self.log_usage(
-            model=model, usage=_responses_usage(response, model),
-            served_model=getattr(response, "model", None),
-        )
+        if getattr(response, "usage", None) is not None:
+            self.log_usage(
+                model=model, usage=_responses_usage(response, model),
+                served_model=getattr(response, "model", None),
+            )
         return _parse_response_object(response, model)
 
     async def _stream_via_responses(
@@ -1797,6 +1802,7 @@ class OpenAIProvider(LLMProvider):
         cache_creation_tokens = 0
         stop_reason: str | None = None
         served_model: str | None = None  # from the final Response object (ENG-1638)
+        usage_seen = False
 
         # Map output_index → in-flight function-call state. Responses API uses
         # a per-output_index stable handle for streaming arguments.
@@ -1902,6 +1908,7 @@ class OpenAIProvider(LLMProvider):
                     if final_response is not None:
                         usage = getattr(final_response, "usage", None)
                         if usage is not None:
+                            usage_seen = True
                             (
                                 input_tokens,
                                 cache_read_tokens,
@@ -1920,7 +1927,7 @@ class OpenAIProvider(LLMProvider):
                 # its cause, transient, or stream_error with backoff).
                 elif etype in ("response.failed", "error"):
                     failed = getattr(event, "response", None) if etype == "response.failed" else None
-                    if failed is not None:
+                    if getattr(failed, "usage", None) is not None:
                         # Billed though it failed, and this raise skips the usage line below.
                         self.log_usage(model=model, usage=_responses_usage(failed, model),
                                        served_model=getattr(failed, "model", None))
@@ -2004,7 +2011,8 @@ class OpenAIProvider(LLMProvider):
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
         )
-        self.log_usage(model=model, usage=usage, served_model=served_model)
+        if usage_seen:
+            self.log_usage(model=model, usage=usage, served_model=served_model)
 
         # Same rule as the chat.completions reader (ENG-673): a stream that
         # ended with no terminal event and produced nothing was cut, and must

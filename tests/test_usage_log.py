@@ -142,15 +142,16 @@ async def test_a_billed_chat_call_is_logged_even_when_its_empty_reply_raises(usa
     assert (line["input"], line["output"], line["conversation"]) == (20, 16, None)
 
 
-async def test_a_streamed_chat_call_logs_the_usage_of_its_last_chunk(usage_log, eval_turn):
-    def chunk(content=None, finish=None, usage=None):
-        choices = [] if usage else [SimpleNamespace(
-            delta=SimpleNamespace(content=content, tool_calls=None), finish_reason=finish)]
-        return SimpleNamespace(model="served-model", choices=choices, usage=usage)
+def _chunk(content=None, finish=None, usage=None):
+    choices = [] if usage else [SimpleNamespace(
+        delta=SimpleNamespace(content=content, tool_calls=None), finish_reason=finish)]
+    return SimpleNamespace(model="served-model", choices=choices, usage=usage)
 
-    chunks = [chunk("Hel"), chunk("lo", finish="stop"),
-              chunk(usage=SimpleNamespace(prompt_tokens=50, completion_tokens=3,
-                                          prompt_tokens_details=SimpleNamespace(cached_tokens=0)))]
+
+async def test_a_streamed_chat_call_logs_the_usage_of_its_last_chunk(usage_log, eval_turn):
+    chunks = [_chunk("Hel"), _chunk("lo", finish="stop"),
+              _chunk(usage=SimpleNamespace(prompt_tokens=50, completion_tokens=3,
+                                           prompt_tokens_details=SimpleNamespace(cached_tokens=0)))]
     patcher, provider = _openai(AsyncMock(return_value=_aiter(chunks)))
     provider.trace_role = "router"
     try:
@@ -161,6 +162,30 @@ async def test_a_streamed_chat_call_logs_the_usage_of_its_last_chunk(usage_log, 
 
     (line,) = usage_log()
     assert (line["role"], line["model"], line["input"], line["output"]) == ("router", "gate-model", 50, 3)
+
+
+async def test_a_streamed_chat_call_that_reports_no_usage_logs_nothing(usage_log):
+    """A line of zeros would read as a call that cost nothing."""
+    patcher, provider = _openai(AsyncMock(return_value=_aiter([_chunk("Hel"), _chunk("lo", finish="stop")])))
+    try:
+        async for _ in provider.stream(model="m", system="s", messages=MESSAGES):
+            pass
+    finally:
+        patcher.stop()
+
+    assert usage_log() == []
+
+
+async def test_a_chat_call_that_reports_no_usage_logs_nothing(usage_log):
+    response = _chat_response(content="Hello")
+    response.usage = None
+    patcher, provider = _openai(AsyncMock(return_value=response))
+    try:
+        await provider.complete(model="m", system="s", messages=MESSAGES)
+    finally:
+        patcher.stop()
+
+    assert usage_log() == []
 
 
 async def test_a_completed_anthropic_call_logs_its_cache_tokens(usage_log):
