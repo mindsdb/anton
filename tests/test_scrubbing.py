@@ -449,10 +449,46 @@ class TestScrubOutput:
             """It's here: {"client_secret":"abc',defGhIjKlMnOpQrStu"}""",
             """It's here: {"client_secret":"[REDACTED_TOKEN]"}""",
         ),
-    ], ids=["quote-and-comma", "leading-plus", "key-value-leading-plus", "after-prose-apostrophe"])
+        (
+            """users' tokens: {"client_secret":"abc', defGhIjKlMnOpQrStu"}""",
+            """users' tokens: {"client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            """{"msg":"rock 'n roll","client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """{"msg":"rock 'n roll","client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            """{"msg":"90's","client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """{"msg":"90's","client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            repr({"note": "users' data", "client_secret": "abc', defGhIjKlMnOpQrStu"}),
+            """{'note': "users' data", 'client_secret': "[REDACTED_TOKEN]"}""",
+        ),
+    ], ids=[
+        "quote-and-comma", "leading-plus", "key-value-leading-plus", "after-prose-apostrophe",
+        "after-plural-possessive", "apostrophe-in-earlier-value", "digit-apostrophe-in-earlier-value",
+        "apostrophe-in-earlier-repr-value",
+    ])
     def test_a_value_holding_code_operators_is_redacted_whole(self, text, expected):
         """Quotes and operators inside a literal the key opened are part of the value, not code."""
         assert scrub_output(text) == expected
+
+    def test_a_value_after_one_that_ran_past_its_end_is_still_redacted(self):
+        """A value ending in a backslash runs into the next key; what follows on the line is data."""
+        text = json.dumps({"client_secret": "AbCdEfGhIjKlMnOp\\", "access_token": "+ defGhIjKlMnOpQrStu"})
+        result = scrub_output(text)
+        assert "AbCdEfGh" not in result
+        assert "GhIjKlMn" not in result
+
+    def test_a_value_nested_five_json_levels_deep_is_redacted(self):
+        """Thirty-one backslashes before the quote is five levels of JSON in JSON."""
+        text = {"access_token": "abc defGhIjKlMnOpQrStuVw"}
+        for _ in range(5):
+            text = json.dumps(text)
+        result = scrub_output(text)
+        assert "GhIjKlMn" not in result
+        assert "[REDACTED_TOKEN]" in result
 
     @pytest.mark.parametrize("closing", ['"', ""], ids=["closed", "cut-off"])
     @pytest.mark.parametrize("tail", ["", " tailGhIjKlMnOpQrStu", '\\"tailGhIjKlMnOpQrStu'], ids=["none", "space", "escaped-quote"])

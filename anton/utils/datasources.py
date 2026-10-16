@@ -230,10 +230,9 @@ _NARROW_QUOTED_VALUE = (
 # A Bearer value cannot hold a space or a quote, so prose after `"Bearer ` stays.
 _QUOTED_BEARER_VALUE_PATTERN = re.compile(r"(\\?[\"'](?i:bearer)[ \t]+)" + _NARROW_QUOTED_VALUE)
 _NARROW_QUOTED_VALUE_PATTERN = re.compile(_NARROW_QUOTED_VALUE)
-# Group 1 is the backslashes before the value's quote: how many times the
-# encoders above it escaped it, and so what its closing quote looks like. Seven
-# covers three levels of JSON in JSON.
-_QUOTED_TOKEN_OPENER_PATTERN = re.compile(_TOKEN_KEY + r"\\*[\"']?\s*[:=]\s*(\\{0,7})([\"'])")
+# Group 1 is the backslashes before the value's quote, which its closing quote
+# repeats; 31 covers five levels of JSON in JSON.
+_QUOTED_TOKEN_OPENER_PATTERN = re.compile(_TOKEN_KEY + r"\\*[\"']?\s*[:=]\s*(\\{0,31})([\"'])")
 # Scanned length of one value; longer than any token or secret a cell prints.
 _QUOTED_VALUE_SCAN_MAX = 16_384
 # A template expression (Helm, Jinja, GitHub Actions) is a whole marker too.
@@ -247,6 +246,7 @@ _CODE_OPERATOR_BEFORE_WINDOW = 64
 _CODE_LEADING_OPERATOR = re.compile(r"\s*(?:[+,)]|\.\.?|\|\||[=!]=|(?:not\s+)?in|is)(?:\s|$)")
 _QUOTE_OR_LINE_BREAK_PATTERN = re.compile(r"(?<!\\)(\\*)([\"'])|[\r\n]")
 _LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
+_WORD_BEFORE_PATTERN = re.compile(r"[A-Za-z0-9]+$")
 # Unquoted values can be source code the model reads and may write back: after a
 # key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
 # type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
@@ -458,43 +458,57 @@ def _value_end_pattern(quote: str, depth: int) -> re.Pattern[str]:
 
 
 class _OpenLiterals:
-    """Track which string literals are open at a point on the current line.
+    """Track which string literal is open at each escape depth on the current line.
 
-    A literal is a quote kind at an escape depth; each quote toggles its own,
-    and a line break closes them all. Positions only move forward, so one
-    pass over the text serves every opener on it.
+    A quote opens a literal at its depth, and only the same kind of quote
+    closes it; the other kind inside is content. After a redacted value the
+    rest of its line reads as data, since a value that ran past its real
+    end leaves the state wrong. A line break resets both.
     """
 
     def __init__(self, text: str) -> None:
         """Start at the beginning of `text` with no literal open."""
         self.text = text
         self.position = 0
-        self.open: set[tuple[str, int]] = set()
+        self.open: dict[int, str] = {}
+        self.trusted = True
 
     def advance(self, end: int) -> None:
         """Count every quote and line break from the current position up to `end`."""
         for found in _QUOTE_OR_LINE_BREAK_PATTERN.finditer(self.text, self.position, end):
-            if found.group(2) is None:
+            quote, depth = found.group(2), len(found.group(1) or "")
+            if quote is None:
                 self.open.clear()
+                self.trusted = True
+            elif depth in self.open:
+                if self.open[depth] == quote:
+                    del self.open[depth]
             elif not _is_apostrophe(self.text, found):
-                self.open ^= {(found.group(2), len(found.group(1)))}
+                self.open[depth] = quote
         self.position = max(self.position, end)
 
-    def skip_value(self, quote: str, depth: int, end: int) -> None:
-        """Pass over a redacted value: its opening quote counts, what it holds does not."""
-        self.open ^= {(quote, depth)}
+    def is_open(self, quote: str, depth: int) -> bool:
+        """Return whether a `quote` literal at `depth` is open and the line can still be read as code."""
+        return self.trusted and self.open.get(depth) == quote
+
+    def skip_redacted(self, end: int) -> None:
+        """Pass over a redacted value; the rest of its line is data."""
+        self.trusted = False
         self.position = end
 
 
 def _is_apostrophe(text: str, found: re.Match[str]) -> bool:
-    """Return whether a matched `'` sits between two letters, as in prose, and so opens no literal."""
-    return (
-        found.group(2) == "'"
-        and found.start() > 0
-        and text[found.start() - 1].isalpha()
-        and found.end() < len(text)
-        and text[found.end()].isalpha()
-    )
+    """Return whether a matched `'` is prose, as in `it's`, `90's` or `users'`, and so opens no literal.
+
+    A word right before it of three or more characters, or a letter right
+    after it, marks prose; one or two letters before is a string prefix.
+    """
+    if found.group(2) != "'" or found.group(1):
+        return False
+    word = _WORD_BEFORE_PATTERN.search(text, max(0, found.start() - 3), found.start())
+    if word is None:
+        return False
+    return len(word.group()) >= 3 or (found.end() < len(text) and text[found.end()].isalpha())
 
 
 def _quoted_value_end(text: str, start: int, quote: str, depth: int) -> int:
@@ -524,7 +538,7 @@ def _looks_like_code(
     quote inside the value next to an operator. Inside a literal the key
     opened, every quote and operator is part of the value.
     """
-    if (quote, depth) in literals.open and _CODE_LEADING_OPERATOR.match(text, start, end):
+    if literals.is_open(quote, depth) and _CODE_LEADING_OPERATOR.match(text, start, end):
         return True
     other = "'" if quote == '"' else '"'
     for boundary in _QUOTE_OR_LINE_BREAK_PATTERN.finditer(text, start, end):
@@ -534,7 +548,7 @@ def _looks_like_code(
             or (boundary_quote == quote and boundary_depth < depth)
         ):
             continue
-        if (boundary_quote, boundary_depth) not in literals.open:
+        if not literals.is_open(boundary_quote, boundary_depth):
             continue
         if _CODE_OPERATOR_AFTER.match(text, boundary.end(), end):
             return True
@@ -571,7 +585,7 @@ def _redact_quoted_token_values(text: str) -> str:
             continue
         parts.append(text[position:start])
         parts.append("[REDACTED_TOKEN]")
-        literals.skip_value(quote, depth, end)
+        literals.skip_redacted(end)
         position = end
     parts.append(text[position:])
     return "".join(parts)
