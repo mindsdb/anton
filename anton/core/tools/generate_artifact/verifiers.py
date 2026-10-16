@@ -748,6 +748,42 @@ def _validate_state_manifest(text: str) -> str | None:
 # Backend verification — async scratchpad-venv glue
 # ---------------------------------------------------------------------------
 
+# Compiles backend.py without writing anything: `python -m py_compile` always
+# leaves `__pycache__/backend.*.pyc` in the artifact folder. The output matches
+# py_compile's for a SyntaxError. Any exception is reported the same way, as
+# py_compile does: a MemoryError or RecursionError from the parser must not
+# show this script's own traceback.
+_SYNTAX_CHECK_SCRIPT = r'''
+import sys, traceback
+try:
+    with open("backend.py", "rb") as f:
+        compile(f.read(), "backend.py", "exec")
+except Exception as exc:
+    sys.stderr.write("".join(traceback.format_exception_only(type(exc), exc)))
+    sys.exit(1)
+'''
+
+
+async def _check_backend_syntax(venv_python: str, artifact_path: Path) -> str | None:
+    """Compile `backend.py` with the backend's own interpreter.
+
+    Returns None when it compiles, else the error text. `-I` keeps the
+    artifact folder off sys.path, so a user `traceback.py` cannot stand in
+    for the stdlib module; `-B` disables bytecode writes regardless of env.
+    `-I` also drops an inherited `PYTHONUTF8`, so `-X utf8` keeps stderr in
+    UTF-8, which is how it is decoded here.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        venv_python, "-I", "-B", "-X", "utf8", "-c", _SYNTAX_CHECK_SCRIPT,
+        cwd=str(artifact_path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode == 0:
+        return None
+    return err.decode(errors="replace")
+
+
 # Runs inside the scratchpad venv. Imports the artifact backend, introspects
 # `app`, and prints one JSON line. Docs routes and the StaticFiles Mount are
 # excluded so only real API routes remain.
@@ -828,15 +864,9 @@ async def verify_backend(
     if not venv_python:
         return VerifyResult(errors=["Scratchpad venv Python is unavailable (remote runtime?)."]), []
 
-    # py_compile first (fast syntax gate).
-    proc = await asyncio.create_subprocess_exec(
-        venv_python, "-m", "py_compile", "backend.py",
-        cwd=str(artifact_path),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    _, cerr = await proc.communicate()
-    if proc.returncode != 0:
-        return VerifyResult(errors=[f"backend.py failed to compile:\n{cerr.decode(errors='replace')}"]), \
+    compile_error = await _check_backend_syntax(venv_python, artifact_path)
+    if compile_error is not None:
+        return VerifyResult(errors=[f"backend.py failed to compile:\n{compile_error}"]), \
             _ds_keys(source)
 
     # Import + introspect in a subprocess with a timeout. The env matters:

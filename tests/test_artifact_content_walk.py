@@ -5,6 +5,9 @@ import errno
 import os
 from pathlib import Path
 
+import pytest
+
+from anton.core.artifacts.internal_files import is_bytecode_name
 from anton.core.artifacts.store import iter_content_files
 from anton.core.tools.tool_handlers import _artifact_content_mtime
 from anton.publish_access import _user_files
@@ -117,5 +120,45 @@ def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
     good = _touch(tmp_path / "index.html")
     os.utime(good, (1000, 1000))
     _fail_stat_for(monkeypatch, _touch(tmp_path / "gone.html"))
+
+    assert _artifact_content_mtime(tmp_path) == 1000.0
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("__pycache__", True),
+        ("x.pyc", True),
+        ("X.PYC", True),
+        ("backend.cpython-313.pyc", True),
+        ("pycache", False),
+        ("x.py", False),
+        ("static", False),
+        ("pyc", False),
+        ("x.pyc.bak", False),
+    ],
+)
+def test_is_bytecode_name(name, expected):
+    assert is_bytecode_name(name) is expected
+
+
+def test_skips_bytecode_at_any_depth(tmp_path):
+    _touch(tmp_path / "backend.py")
+    _touch(tmp_path / "__pycache__" / "backend.cpython-313.pyc")
+    _touch(tmp_path / "routes" / "x.py")
+    _touch(tmp_path / "routes" / "__pycache__" / "x.cpython-313.pyc")
+    _touch(tmp_path / "stray.pyc")
+    _touch(tmp_path / "static" / "prd.md")
+
+    assert _names(tmp_path) == {"backend.py", "routes/x.py", "static/prd.md"}
+
+
+def test_bytecode_does_not_move_the_content_mtime(tmp_path):
+    index = _touch(tmp_path / "index.html")
+    os.utime(index, (1000, 1000))
+    cache = _touch(tmp_path / "routes" / "__pycache__" / "x.cpython-313.pyc")
+    os.utime(cache, (5000, 5000))
+    stray = _touch(tmp_path / "stray.pyc")
+    os.utime(stray, (6000, 6000))
 
     assert _artifact_content_mtime(tmp_path) == 1000.0
