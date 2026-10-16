@@ -41,7 +41,6 @@ from .provider import (
     classify_responses_failure,
     classify_transient,
     log_transient_provider_error,
-    stream_drop_error,
     retry_after_seconds,
     compute_context_pressure,
     origin_is_known_third_party,
@@ -1508,7 +1507,7 @@ class OpenAIProvider(LLMProvider):
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
-        except openai.APIConnectionError as exc:
+        except (openai.APIConnectionError, *STREAM_DROP_ERRORS) as exc:
             # A connection error here is retryable. If it dropped mid-stream
             # (after the 200), the SDK never retried it → the session must back
             # off and retry. If it failed during request establishment, the SDK
@@ -1519,10 +1518,6 @@ class OpenAIProvider(LLMProvider):
                 else "Could not reach the model provider — check your connection or try again in a moment.",
                 provider="The model provider", code="connection_error",
                 session_backoff=stream_started, model=model,
-            ) from exc
-        except STREAM_DROP_ERRORS as exc:
-            raise stream_drop_error(
-                provider="The model provider", target="the model provider", model=model,
             ) from exc
         except openai.APIError as exc:
             # A mid-stream SSE `error` event (server_error / overloaded) arrives
@@ -1933,7 +1928,7 @@ class OpenAIProvider(LLMProvider):
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
-        except openai.APIConnectionError as exc:
+        except (openai.APIConnectionError, *STREAM_DROP_ERRORS) as exc:
             # A connection error here is retryable. Mid-stream (after the 200) was
             # never SDK-retried → session backs off; request-establishment was
             # already SDK-retried → fail fast (ENG-673).
@@ -1943,10 +1938,6 @@ class OpenAIProvider(LLMProvider):
                 else "Could not reach the model provider — check your connection or try again in a moment.",
                 provider="The model provider", code="connection_error",
                 session_backoff=stream_started, model=model,
-            ) from exc
-        except STREAM_DROP_ERRORS as exc:
-            raise stream_drop_error(
-                provider="The model provider", target="the model provider", model=model,
             ) from exc
         except openai.APIError as exc:
             # Bare mid-stream SSE error (no status_code) — not an APIStatusError,

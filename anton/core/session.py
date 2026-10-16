@@ -69,6 +69,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    is_stream_drop,
     provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
@@ -4890,6 +4891,7 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        _drop_retries = 0
         # One-time cap grace, reset once per turn_stream() call rather than in
         # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
         self._spend_ceiling_grace_used = False
@@ -4994,6 +4996,35 @@ class ChatSession:
                     # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
+
+                    # A connection that died after the response started. It is
+                    # counted, not timed like the incident window below: that
+                    # window is wall-clock time from the turn's first transient,
+                    # and one long stream outlasts it, so a second drop would
+                    # end the turn without a retry. Same backoff and no recovery
+                    # note, as for any provider blip. Only the providers' typed
+                    # form: a raw transport error here came from a tool, not the
+                    # model's stream.
+                    if isinstance(_agent_exc, TransientProviderError) and is_stream_drop(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by a transient provider error")
+                        if _drop_retries < _max_auto_retries:
+                            delay = self._transient_backoff_delay(_drop_retries)
+                            _drop_retries += 1
+                            if await self._backoff_sleep(delay):
+                                break
+                            continue
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_attempt_limit"
+                        )
+                        _detail = str(_agent_exc).rstrip()
+                        if _detail and _detail[-1] not in ".!?":
+                            _detail += "."
+                        raise ProviderOverloadedError(
+                            f"{_detail} It did not recover after {_drop_retries + 1} attempts.",
+                            provider=getattr(_agent_exc, "provider", "") or "",
+                            model=(getattr(_agent_exc, "model", "") or "")
+                            or getattr(self._llm, "planning_model", "") or "",
+                        ) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
