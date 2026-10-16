@@ -4373,16 +4373,33 @@ class ChatSession:
         if cancels_continuation:
             yield StreamTaskProgress(phase="handback", message="")
         diagnosis_response = None
+        # Held until the call ends: a content filter marks a reply only in its
+        # last event, after the text has streamed.
+        held_text: list[StreamTextDelta] = []
+        filtered = False
         async for event in self.plan_stream_with_recovery(system=system):
-            yield event
+            if isinstance(event, StreamTextDelta):
+                held_text.append(event)
+                continue
             if isinstance(event, StreamComplete):
                 diagnosis_response = event
+                filtered = event.response.stop_reason == "content_filter"
+                if not filtered:
+                    for delta in held_text:
+                        yield delta
+                held_text = []
+            yield event
         text = (
             (diagnosis_response.response.content or "").strip()
-            if diagnosis_response is not None
+            if diagnosis_response is not None and not filtered
             else ""
         )
-        if text:
+        if filtered:
+            log.warning(
+                "%s diagnosis stopped by the provider's content filter — dropped; "
+                "the turn ends on the reply before it", label,
+            )
+        elif text:
             self._append_history({"role": "assistant", "content": text})
         else:
             log.warning(

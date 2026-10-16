@@ -24,7 +24,7 @@ from tests.test_turn_cost_terminals import (
     _verdict_llm,
 )
 
-from anton.core.llm.provider import StreamComplete, StreamTextDelta, StreamTurnEnded
+from anton.core.llm.provider import LLMResponse, StreamComplete, StreamTextDelta, StreamTurnEnded
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 
 
@@ -191,3 +191,38 @@ async def test_clean_exit_after_a_cancel_sends_no_reason(workspace):
     events, booked = await _drain(session)
     assert booked == "cancelled"
     assert not any(isinstance(e, StreamTurnEnded) for e in events)
+
+
+def _verifier_failure_with_handback(workspace, handback: LLMResponse):
+    mock_llm = _handback_verifier_failure(workspace)._llm
+    plans = [
+        _Iter([StreamComplete(response=_tool_call(1))]),
+        _Iter([StreamTextDelta(text="the answer"), StreamComplete(response=_text("the answer"))]),
+        _Iter([StreamTextDelta(text=handback.content), StreamComplete(response=handback)]),
+    ]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    return _plain(workspace, mock_llm)
+
+
+async def test_filtered_handback_is_dropped(workspace):
+    # Azure streams the refusal, then marks the reply content_filter (ENG-3478).
+    refusal = "I'm sorry, but I cannot assist with that request."
+    filtered = LLMResponse(content=refusal, stop_reason="content_filter")
+    session = _verifier_failure_with_handback(workspace, filtered)
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert refusal not in shown
+    assert "the answer" in shown
+    assert session.history[-1]["role"] == "assistant"
+    assert refusal not in str(session.history[-1]["content"])
+    assert "the answer" in str(session.history[-1]["content"])
+    assert booked == "handback_verifier_failure"
+    assert events[-1] == StreamTurnEnded(ended_by="handback_verifier_failure")
+
+
+async def test_unfiltered_handback_still_streams(workspace):
+    session = _verifier_failure_with_handback(workspace, _text("here is what I did"))
+    events, _ = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert shown.endswith("here is what I did")
+    assert session.history[-1] == {"role": "assistant", "content": "here is what I did"}
