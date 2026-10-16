@@ -4,6 +4,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 # The top-level packages the MCP SDK installs.
 _MCP_SDK_PACKAGES = ("mcp", "mcp_types")
 
@@ -20,9 +22,12 @@ def _sdk_modules_after_importing(*, module: str) -> list[str]:
     return json.loads(result.stdout)
 
 
-def test_importing_names_does_not_import_the_mcp_sdk():
+@pytest.mark.parametrize("module", ["anton.core.mcp.names", "anton.core.mcp.access"])
+def test_importing_names_or_access_does_not_import_the_mcp_sdk(module):
     """A caller that only splits a stored tool row's name imports `names`,
-    and must not load the MCP SDK to do it. `registry` does load it, which
-    shows the probe sees the SDK when it is there."""
+    and one that asks whether a tool returns records imports `access`.
+    cowork-server's figure sources import both, and must not load the MCP
+    SDK to do it. `registry` does load it, which shows the probe sees the
+    SDK when it is there."""
     assert _sdk_modules_after_importing(module="anton.core.mcp.registry")
-    assert _sdk_modules_after_importing(module="anton.core.mcp.names") == []
+    assert _sdk_modules_after_importing(module=module) == []

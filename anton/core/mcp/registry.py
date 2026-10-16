@@ -33,14 +33,7 @@ from __future__ import annotations
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.errors import McpPermanentError, McpTransientError
-
-# ToolNameParts and parse_namespaced_tool_name are re-exported for callers
-# that import them from here.
-from anton.core.mcp.names import (  # noqa: F401
-    ToolNameParts,
-    namespaced_tool_name,
-    parse_namespaced_tool_name,
-)
+from anton.core.mcp.names import namespaced_tool_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 

@@ -750,6 +750,11 @@ class _TurnSegment:
     start: int
     end: int | None = None
 
+    @property
+    def stop(self) -> int:
+        """Where the segment's messages end in its list."""
+        return len(self.messages) if self.end is None else self.end
+
 
 # Process-wide latches for hosts that rebuild a session per message. Keyed on
 # the coding endpoint, model, and credential: a denial belongs to the account,
@@ -1196,6 +1201,71 @@ def _render_tool_result_content(content, cap: int) -> str:
         joined = " ".join(p for p in parts if p)
         return _clip_keep_cause(joined, cap) or "[non-text result]"
     return _clip_keep_cause(str(content), cap)
+
+
+# Replaces a tool result that `ChatSession.hard_truncate_history` keeps but the
+# retried request has no room for. The tool_use keeps an answer, and the model
+# learns to ask for less.
+_RESULT_TOO_LARGE = (
+    "[Result removed: too large for the context window. "
+    "Narrow the request and call the tool again.]"
+)
+
+
+def _window_byte_budget(model: str) -> int:
+    """UTF-8 bytes of text that fill about a quarter of `model`'s window.
+
+    One byte per window token: a quarter of the window at the ~4 chars/token
+    rule of thumb, where an ASCII char is one byte.
+    """
+    return context_window(model)
+
+
+def _result_text_bytes(content) -> int:
+    """How many UTF-8 bytes of text a tool_result's content carries.
+
+    An image block counts none: a provider scales an image down and bills it
+    by its pixels, a bounded cost, not by the length of its base64.
+    """
+    if isinstance(content, list):
+        text = "".join(
+            block.get("text") or ""
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    else:
+        text = str(content)
+    # "replace": a lone surrogate, which decoded JSON can hold, would raise.
+    return len(text.encode("utf-8", "replace"))
+
+
+def _stub_largest_results(*, messages: list[dict], model: str) -> list[dict]:
+    """`messages` with their largest tool_results stubbed until the rest fit
+    in `_window_byte_budget(model)` bytes of text.
+
+    Of two results the same size, the earlier one goes first: the next
+    planning call answers the latest. A message with no result stubbed is
+    returned as itself, so a caller can tell by identity whether it changed.
+    """
+    sizes: dict[tuple[int, int], int] = {
+        (i, j): _result_text_bytes(block.get("content", ""))
+        for i, message in enumerate(messages)
+        if isinstance(message.get("content"), list)
+        for j, block in enumerate(message["content"])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+    if not sizes:
+        return messages
+    stubbed = list(messages)
+    over = sum(sizes.values()) - _window_byte_budget(model)
+    for i, j in sorted(sizes, key=lambda position: (-sizes[position], position)):
+        if over <= 0:
+            break
+        content = list(stubbed[i]["content"])
+        content[j] = {**content[j], "content": _RESULT_TOO_LARGE}
+        stubbed[i] = {**stubbed[i], "content": content}
+        over -= sizes[i, j]
+    return stubbed
 
 
 # Stands in for a multimodal block in the verify transcript. Named because
@@ -2336,6 +2406,8 @@ class ChatSession:
         content this turn added, so the segment starts one message earlier.
         If the outgoing list's last turn message is the one replaced, its
         segment stops before it, so the message is not read twice.
+        `hard_truncate_history` claims the carried-over message the same way
+        when it stubs a tool_result in the turn's last message.
 
         The first segment is left alone: a merge into the last seeded message
         (the turn's user input after a seed that ends with a user message) is
@@ -2347,12 +2419,20 @@ class ChatSession:
         if current.start != len(self._history):
             return
         current.start -= 1
+        written = self._last_written_segment()
+        if written is not None and written.messages[written.stop - 1] is replaced:
+            written.end = written.stop - 1
+
+    def _last_written_segment(self) -> _TurnSegment | None:
+        """The latest segment before the current one that holds a message.
+
+        Walks past a segment that holds none: two swaps on one planning call
+        leave the first swap's list with nothing appended.
+        """
         for segment in reversed(self._turn_segments[:-1]):
-            stop = len(segment.messages) if segment.end is None else segment.end
-            if stop > segment.start:
-                if segment.messages[stop - 1] is replaced:
-                    segment.end = stop - 1
-                return
+            if segment.stop > segment.start:
+                return segment
+        return None
 
     @staticmethod
     def _coerce_to_block_list(content) -> list[dict]:
@@ -3451,7 +3531,9 @@ class ChatSession:
         In a tool loop every kept message is a tool row, and the retried
         planning call answers the last tool_result. So the tail keeps its
         leading assistant message: the placeholder user message goes before
-        it, and dropping it would orphan the tool_result after it.
+        it, and dropping it would orphan the tool_result after it. When the
+        kept tool_results are too large for the retry, the largest become
+        stubs that ask the model to narrow the request and call the tool again.
         """
         if len(self._history) <= keep:
             return
@@ -3479,6 +3561,17 @@ class ChatSession:
                         tail[0] = {**head, "content": filtered}
             break
 
+        # A kept tool result can be what overflowed on its own: a connector
+        # result has no size cap. The largest kept results become stubs until
+        # the rest fit a quarter of the planning model's window, which leaves
+        # the other three quarters for the system prompt, the tools and the
+        # reply. Every tool_use keeps its tool_result, and the retry fits.
+        # Sizes count UTF-8 bytes, one per ASCII char, so text that packs more
+        # tokens into each char, such as CJK at three bytes per char, counts
+        # closer to what it costs.
+        unstubbed_last = tail[-1] if tail else None
+        tail = _stub_largest_results(messages=tail, model=self._llm.planning_model)
+
         placeholder = {
             "role": "user",
             "content": "[Earlier conversation was truncated due to persistent context overflow.]",
@@ -3492,6 +3585,19 @@ class ChatSession:
             self._replace_history(messages=[placeholder, *tail])
         else:
             self._replace_history(messages=[placeholder, separator, *tail])
+        # A stubbed last message replaces the outgoing list's last message, as
+        # a merge does, so `turn_messages` reads that tool_result once: as the
+        # stub the model saw. Each swap keeps the last tool_result message as
+        # it is, or claims the stub that replaces it, so the latest segment
+        # that holds a message ends with the one stubbed here. When no segment
+        # holds one, the turn has appended nothing: the stubbed message is the
+        # seed's and stays the seed's.
+        if (
+            tail
+            and tail[-1] is not unstubbed_last
+            and self._last_written_segment() is not None
+        ):
+            self._claim_merged_message(replaced=unstubbed_last)
 
         # A hard truncate discards the compacted summary — the turns it covered
         # are gone from history, so replaying it next turn would describe

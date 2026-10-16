@@ -93,8 +93,9 @@ def test_a_read_tool_that_returns_docs_schema_or_account_metadata_does_not_retur
 
 
 def test_a_write_tier_tool_never_returns_records():
-    """A write tool's output echoes what the model wrote plus defaults the
-    server filled in, so none of it counts as the customer's records."""
+    """Some write tools also view data (`manage_aeo_prompts` can view tracked
+    prompts), but a tool's name can't tell a view from a write, so no write
+    tool's output counts as the customer's records."""
     for write_tool, access in TOOL_ACCESS["hubspot"].items():
         if access == "write":
             assert returns_records(engine="hubspot", tool=write_tool) is False, write_tool
@@ -127,6 +128,6 @@ def test_every_read_tier_tool_has_an_output_classification():
 
 def test_a_write_tier_tool_listed_as_records_still_does_not_return_records(monkeypatch):
     """The read-tier check holds even when TOOL_OUTPUT wrongly lists a write
-    tool, so a table mistake never turns a write tool's echo into evidence."""
+    tool, so a table mistake never turns a write tool's output into evidence."""
     monkeypatch.setitem(TOOL_OUTPUT, "hubspot", {**TOOL_OUTPUT["hubspot"], "manage_crm_objects": "records"})
     assert returns_records(engine="hubspot", tool="manage_crm_objects") is False

@@ -55,8 +55,9 @@ A caller that attributes an answer's numbers to tool calls, such as
 cowork-server's figure sources, should count only ``returns_records``
 tools, so a limit quoted from ``tool_guidance`` or a ``displayOrder`` from
 ``get_properties`` never reads as a sourced figure. Write-tier tools stay
-out of it: their output echoes what the model wrote plus defaults the
-server filled in. The same fail-closed default applies: an unlisted tool
+out of it too. Some also view data (``manage_aeo_prompts`` can view tracked
+prompts), but a tool's name can't tell a view from a write, so none of
+their output counts. The same fail-closed default applies: an unlisted tool
 or engine returns no records.
 """
 
@@ -129,7 +130,7 @@ TOOL_OUTPUT: dict[str, dict[str, ToolOutput]] = {
         "search_crm_objects": "records",  # CRM objects matching filters
         "get_crm_objects": "records",  # CRM objects by id
         "query_crm_data": "records",  # SQL-shaped query over CRM objects
-        "read_campaign_data": "records",  # campaigns, budgets, spend, assets
+        "read_campaign_data": "records",  # campaign analytics, asset metrics, contact ids
         "get_campaign_attribution_reports": "records",  # attributed revenue/contacts
         "get_marketing_email_analytics": "records",  # sends, opens, clicks
         "get_content_analytics_report": "records",  # page/blog views, sessions

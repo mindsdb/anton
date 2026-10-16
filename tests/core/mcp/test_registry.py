@@ -4,12 +4,8 @@ from mcp.server.mcpserver import MCPServer
 
 from anton.core.mcp.access import TOOL_ACCESS
 from anton.core.mcp.client import McpSession
-from anton.core.mcp.registry import (
-    ToolNameParts,
-    discover_tool_defs,
-    namespaced_tool_name,
-    parse_namespaced_tool_name,
-)
+from anton.core.mcp.names import ToolNameParts, namespaced_tool_name, parse_namespaced_tool_name
+from anton.core.mcp.registry import discover_tool_defs
 from anton.core.tools.registry import ToolOutcome
 
 

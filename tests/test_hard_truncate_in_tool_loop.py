@@ -27,10 +27,14 @@ from anton.core.llm.provider import (
     LLMResponse,
     StreamContextCompacted,
     Usage,
+    context_window,
 )
 from anton.core.session import ChatSession, ChatSessionConfig
 from tests._turn_rows_helpers import (
     ANSWER,
+    PAGES,
+    TOO_LARGE_PAGE,
+    TOOL_IDS,
     PlanCalls,
     run_turn,
     scripted_session,
@@ -155,6 +159,15 @@ def _tool_rows(messages: list[dict]) -> list[tuple[str, str]]:
     ]
 
 
+def _result_content(*, messages: list[dict], tid: str) -> str | list[dict]:
+    """The content of the tool_result in `messages` that answers `tid`."""
+    for message in messages:
+        for block in message["content"] if isinstance(message.get("content"), list) else []:
+            if isinstance(block, dict) and block.get("tool_use_id") == tid:
+                return block["content"]
+    raise AssertionError(f"no tool_result for {tid}")
+
+
 def _tool_loop(*tids: str) -> list[dict]:
     """A question, then one tool round per id, ending with the last tool_result."""
     history: list[dict] = [{"role": "user", "content": "How many lines does the plant run?"}]
@@ -186,6 +199,70 @@ async def test_the_retry_after_a_hard_truncation_in_a_tool_loop_is_a_valid_reque
     assert session.history[-1] == {"role": "assistant", "content": ANSWER}
     for request in calls.requests[calls.overflowed[-1] + 1:]:
         assert _provider_violations(request) == _VALID
+
+
+async def _lookup_too_large(session, tc_input):
+    return TOO_LARGE_PAGE if tc_input["id"] == "toolu_3" else PAGES[tc_input["id"]]
+
+
+async def test_a_latest_tool_result_too_large_for_the_window_is_stubbed_and_the_turn_answers():
+    """toolu_3's result alone is over the window, so every request that holds
+    it overflows. The hard truncation keeps toolu_3's round. Kept whole, the
+    result overflows every retry and the turn ends in ContextOverflowError.
+    The truncation stubs it instead: the pairing stays valid, and the retry
+    fits and asks the model for less."""
+    calls = PlanCalls()
+    session = scripted_session(mode="too-large", handler=_lookup_too_large, calls=calls)
+    await run_turn(session)
+
+    # Precondition: the planning call after toolu_3 overflowed twice, so the
+    # hard truncation ran.
+    assert len(calls.overflowed) == 2
+    retried = calls.requests[calls.overflowed[-1] + 1]
+    assert retried[0]["content"].startswith(PLACEHOLDER_PREFIX)
+
+    assert _provider_violations(retried) == _VALID
+    assert _tool_rows(retried)[-2:] == [("assistant", "toolu_3"), ("user", "toolu_3")]
+    stub = _result_content(messages=retried, tid="toolu_3")
+    assert "too large" in stub and "call the tool again" in stub
+    # The other kept result fits, so it stays whole.
+    assert _result_content(messages=retried, tid="toolu_2") == PAGES["toolu_2"]
+    # The turn goes on to run toolu_4 and answer.
+    assert _tool_rows(session.history)[-2:] == [("assistant", "toolu_4"), ("user", "toolu_4")]
+    assert session.history[-1] == {"role": "assistant", "content": ANSWER}
+    for request in calls.requests[calls.overflowed[-1] + 1:]:
+        assert _provider_violations(request) == _VALID
+    # The turn's messages hold each tool row once.
+    assert _tool_rows(session.turn_messages()) == [
+        (role, tid) for tid in TOOL_IDS for role in ("assistant", "user")
+    ]
+
+
+# Seed messages long enough that the summary after the first overflow folds
+# them away, so the hard truncation after the second follows a real swap.
+_LONG_SEED = [
+    {"role": "user" if i % 2 == 0 else "assistant", "content": f"seed {i} " + "x" * 60_000}
+    for i in range(10)
+]
+
+
+@pytest.mark.parametrize("cut", [False, True])
+async def test_a_result_stubbed_right_after_a_summary_is_read_once(cut):
+    """On a long seed, the summary after the first overflow swaps history and
+    the hard truncation after the second stubs toolu_3's result, with nothing
+    appended between. The stub's claim walks past the summary's empty list to
+    the one toolu_3's result was appended to, so the turn's messages hold that
+    result once, as the stub. With `cut`, a nudge then merges into the stub."""
+    session = scripted_session(mode="too-large", cut=cut, handler=_lookup_too_large, seed=_LONG_SEED)
+    events = await run_turn(session)
+
+    # Precondition: the summary and the hard truncation both swapped history.
+    assert sum(isinstance(e, StreamContextCompacted) for e in events) == 2
+    assert session.history[-1] == {"role": "assistant", "content": ANSWER}
+    assert _tool_rows(session.turn_messages()) == [
+        (role, tid) for tid in TOOL_IDS for role in ("assistant", "user")
+    ]
+    assert "call the tool again" in _result_content(messages=session.turn_messages(), tid="toolu_3")
 
 
 async def test_the_non_streaming_retry_after_a_hard_truncation_is_a_valid_request():
@@ -262,3 +339,137 @@ def test_the_truncated_tool_loop_ends_with_its_latest_tool_result(rounds):
 
     assert _provider_violations(session.history) == _VALID
     assert session.history[-2:] == [tool_use(tids[-1]), tool_result(tids[-1])]
+
+
+def _result_of(*, tid: str, content) -> dict:
+    return {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": content},
+    ]}
+
+
+_BUDGET = context_window("claude-sonnet-4-6")
+
+
+def test_kept_results_that_fit_the_budget_together_stay_whole():
+    """The kept results share one budget, so a result larger than an even
+    share of it stays whole while all of them fit together."""
+    parallel = ["toolu_3", "toolu_4", "toolu_5", "toolu_6"]
+    sizes = dict(zip(parallel, [60_000, 1_000, 1_000, 1_000]))
+    history = [
+        *_tool_loop("toolu_1", "toolu_2"),
+        tool_use(*parallel),
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tid, "content": "x" * size}
+            for tid, size in sizes.items()
+        ]},
+    ]
+    session = _session(history=history)
+    session.hard_truncate_history()
+
+    assert _provider_violations(session.history) == _VALID
+    for tid, size in sizes.items():
+        assert _result_content(messages=session.history, tid=tid) == "x" * size
+
+
+@pytest.mark.parametrize(("small", "stubbed"), [(1_000, False), (1_001, True)])
+def test_the_largest_kept_result_is_stubbed_once_the_results_overflow_the_budget(small, stubbed):
+    """The budget is one UTF-8 byte of text per window token, one ASCII char.
+    Results that fill it exactly stay whole; one char more and the largest
+    becomes a stub, which leaves the rest under it."""
+    history = [
+        *_tool_loop("toolu_1"),
+        tool_use("toolu_2"), _result_of(tid="toolu_2", content="x" * (_BUDGET - 1_000)),
+        tool_use("toolu_3"), _result_of(tid="toolu_3", content="x" * small),
+    ]
+    session = _session(history=history)
+    session.hard_truncate_history()
+
+    assert _provider_violations(session.history) == _VALID
+    large = _result_content(messages=session.history, tid="toolu_2")
+    assert ("call the tool again" in large) is stubbed
+    assert _result_content(messages=session.history, tid="toolu_3") == "x" * small
+
+
+def test_of_two_results_the_same_size_the_earlier_one_is_stubbed():
+    """The retried planning call answers the latest result, so that one is
+    kept when either would do."""
+    page = "x" * (_BUDGET * 3 // 5)
+    history = [
+        *_tool_loop("toolu_1"),
+        tool_use("toolu_2"), _result_of(tid="toolu_2", content=page),
+        tool_use("toolu_3"), _result_of(tid="toolu_3", content=page),
+    ]
+    session = _session(history=history)
+    session.hard_truncate_history()
+
+    assert "call the tool again" in _result_content(messages=session.history, tid="toolu_2")
+    assert _result_content(messages=session.history, tid="toolu_3") == page
+
+
+def test_text_outside_ascii_counts_by_its_utf8_bytes():
+    """CJK text packs more tokens into each char than English does. The
+    budget counts UTF-8 bytes, three per CJK char, so half a budget of CJK
+    chars is over it."""
+    page = "数" * (_BUDGET // 2)
+    history = [
+        *_tool_loop("toolu_1", "toolu_2"), tool_use("toolu_3"), _result_of(tid="toolu_3", content=page),
+    ]
+    session = _session(history=history)
+    session.hard_truncate_history()
+
+    assert "call the tool again" in _result_content(messages=session.history, tid="toolu_3")
+
+
+def test_an_image_result_is_measured_by_its_text_not_its_base64():
+    """A provider bills an image by its pixels, so megabytes of base64 do not
+    make a read_image result too large."""
+    source = {"type": "base64", "media_type": "image/png", "data": TOO_LARGE_PAGE}
+    image = [
+        {"type": "image", "source": source},
+        {"type": "text", "text": "Loaded chart.png (800x600, 960 KB)."},
+    ]
+    session = _session(history=[
+        *_tool_loop("toolu_1", "toolu_2"), tool_use("toolu_3"), _result_of(tid="toolu_3", content=image),
+    ])
+    session.hard_truncate_history()
+
+    assert _result_content(messages=session.history, tid="toolu_3") == image
+
+
+def test_a_message_merged_into_a_stubbed_tool_result_is_read_once():
+    """A retry that comes back empty at max_tokens appends a nudge right after
+    the truncation, and the nudge merges into the stubbed message. The turn's
+    messages hold toolu_3's result once, as the stub the model saw."""
+    session = _session(history=_tool_loop("toolu_1"))
+    session._start_turn_segments()
+    for message in (
+        tool_use("toolu_2"), tool_result("toolu_2"),
+        tool_use("toolu_3"), _result_of(tid="toolu_3", content=TOO_LARGE_PAGE),
+    ):
+        session._append_history(message)
+    session.hard_truncate_history()
+    session._append_history({"role": "user", "content": "a nudge"})
+
+    assert _tool_rows(session.turn_messages()) == [
+        ("assistant", "toolu_2"), ("user", "toolu_2"),
+        ("assistant", "toolu_3"), ("user", "toolu_3"),
+    ]
+    assert "call the tool again" in _result_content(messages=session.turn_messages(), tid="toolu_3")
+
+
+def test_a_tool_result_the_seed_ends_with_is_stubbed_but_stays_the_seeds():
+    """A seed can end with a tool_result, as when an earlier turn stopped
+    after its tool ran. The turn's input merges into that seeded message, and
+    the hard truncation stubs its result. The message is still the seed's, so
+    the turn's messages stay empty, as they are before the truncation."""
+    session = _session(history=[
+        *_tool_loop("toolu_1"), tool_use("toolu_2"), _result_of(tid="toolu_2", content=TOO_LARGE_PAGE),
+    ])
+    session._start_turn_segments()
+    session._append_history({"role": "user", "content": "continue"})
+    assert session.turn_messages() == []
+    session.hard_truncate_history()
+
+    # Precondition: the stub went out in history.
+    assert "call the tool again" in _result_content(messages=session.history, tid="toolu_2")
+    assert session.turn_messages() == []

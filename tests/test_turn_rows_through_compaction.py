@@ -156,12 +156,12 @@ async def test_a_swap_no_event_announces_keeps_the_rows_appended_after_it():
 # ── swaps driven directly ────────────────────────────────────────────────────
 
 
-def _seeded_session() -> ChatSession:
+def _seeded_session(*, messages: int = 10) -> ChatSession:
     llm = make_mock_llm()
     llm.summarize = AsyncMock(return_value=LLMResponse(content="SUMMARY"))
     seed = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 50}
-        for i in range(10)
+        for i in range(messages)
     ]
     return ChatSession(ChatSessionConfig(llm_client=llm, initial_history=seed))
 
@@ -177,6 +177,29 @@ async def test_rows_appended_right_after_a_swap_are_kept_without_a_read_between(
     outgoing = session.history
     assert await session._summarize_history() is True
     assert session.history is not outgoing
+    session._append_history(tool_use("t2"))
+    session._append_history(tool_result("t2"))
+
+    rows = split_turn_into_rows(_trim(session.turn_messages()))
+    assert _row_ids(rows) == [
+        ("assistant", "t1"), ("user", "t1"), ("assistant", "t2"), ("user", "t2"),
+    ]
+
+
+async def test_rows_appended_after_a_summary_with_a_separator_are_kept():
+    """With an 8-message seed the compaction cut lands on a user message, so
+    the summary swap puts an assistant separator after the summary. That
+    branch swaps history too, and the rows appended after it are kept."""
+    session = _seeded_session(messages=8)
+    session._start_turn_segments()
+    session._append_history({"role": "user", "content": "q"})
+    session._append_history(tool_use("t1"))
+    session._append_history(tool_result("t1"))
+    assert await session._summarize_history() is True
+    # Precondition: the separator branch ran.
+    assert session.history[1] == {
+        "role": "assistant", "content": "Understood — using that as reference.",
+    }
     session._append_history(tool_use("t2"))
     session._append_history(tool_result("t2"))
 
@@ -248,6 +271,31 @@ async def test_a_merge_into_the_hard_truncation_separator_is_kept():
     assert _row_ids(rows) == [
         ("assistant", "t1"), ("user", "t1"), ("assistant", "t2"), ("user", "t2"),
     ]
+
+
+async def test_a_nudge_after_two_swaps_on_one_call_keeps_each_row_once():
+    """Two overflows on one planning call swap history twice with nothing
+    appended between, so the summary's list holds none of the turn's
+    messages. The retry then comes back empty and cut at max_tokens, and
+    anton's nudge merges into toolu_3's result, which both swaps carried
+    over. The claim walks past the empty segment to the list toolu_3's
+    result was appended to, so that result is read once."""
+    session = scripted_session(mode="hard-truncate", cut=True)
+    events = await run_turn(session)
+
+    # Precondition: the summary and the hard truncation both ran, and the
+    # nudge merged into toolu_3's result.
+    assert sum(isinstance(e, StreamContextCompacted) for e in events) == 2
+    carried = next(
+        message
+        for message in session.history
+        if isinstance(message.get("content"), list)
+        and any(block.get("tool_use_id") == "toolu_3" for block in message["content"])
+    )
+    assert [block["type"] for block in carried["content"]] == ["tool_result", "text"]
+
+    rows = split_turn_into_rows(_trim(session.turn_messages()))
+    assert _row_ids(rows) == _EXPECTED_IDS
 
 
 async def test_a_swap_before_the_first_turn_is_not_recorded():
@@ -324,5 +372,5 @@ def test_the_pod_sends_its_history_frame_after_a_compaction(mode):
     assert kinds.index("history") < kinds.index("turn_completed")
     if mode != "hard-truncate":
         # A hard truncation clears the compaction record, so only a summary
-        # sends a compaction frame, and it rides beside the history frame.
-        assert kinds.index("compaction") < kinds.index("turn_completed")
+        # sends a compaction frame, and it goes before the history frame.
+        assert kinds.index("compaction") < kinds.index("history") < kinds.index("turn_completed")

@@ -43,8 +43,9 @@ def parse_namespaced_tool_name(*, name: str) -> ToolNameParts | None:
     after the last `__`. Anything between is the connection name. A
     connection's name is free text from the vault and may start or end with
     `_` or hold `__`, while tool names come from the MCP server's fixed list,
-    so the split trusts the tool side: a tool name that starts with `_` or
-    holds `__` would not parse back when a connection name is present.
+    so the split trusts the tool side: a tool name that holds `__` never
+    parses back, and one that starts with `_` parses back only when no
+    connection name is present.
     """
     engine, _, rest = name.partition("__")
     connection_name, separator, tool_name = rest.rpartition("__")

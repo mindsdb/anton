@@ -36,6 +36,8 @@ PAGES = {
     "toolu_4": "Line roster: the plant runs 9 lines.",
 }
 TOOL_IDS = list(PAGES)
+# A page over a 200k-token window on its own: about 960,000 characters.
+TOO_LARGE_PAGE = "Line roster: " + "the plant runs 9 lines. " * 40_000
 SEED = [
     {"role": "user", "content": "seed question one"},
     {"role": "assistant", "content": "seed answer one"},
@@ -58,18 +60,23 @@ class PlanCalls:
     overflowed: list[int] = field(default_factory=list)
 
 
-def scripted_llm(*, mode: str, calls: PlanCalls | None = None):
+def scripted_llm(*, mode: str, cut: bool = False, calls: PlanCalls | None = None):
     """A planner that calls `lookup` four times, then answers.
 
     `mode` picks what happens on SWAP_ROUND: "proactive" reports a context
     pressure over the threshold, so the tool loop compacts; "overflow" raises
     ContextOverflowError once (summarize and retry); "hard-truncate" raises it
     twice (summarize, then hard-truncate and retry); "none" does neither.
+    "too-large" raises it on every request that holds TOO_LARGE_PAGE, on any
+    round, as a provider rejects a request over its window.
+    With `cut`, the first planning call on SWAP_ROUND that does not overflow
+    comes back empty and cut at max_tokens, so anton appends a nudge before
+    the call is made again.
     Pass `calls` to read back what each planning call received.
     """
     llm = make_mock_llm()
     calls = calls if calls is not None else PlanCalls()
-    state = {"round": 0}
+    state = {"round": 0, "cut_pending": cut}
     overflow_budget = {"overflow": 1, "hard-truncate": 2}.get(mode, 0)
 
     def plan_stream(messages, **kwargs):
@@ -77,9 +84,18 @@ def scripted_llm(*, mode: str, calls: PlanCalls | None = None):
 
         async def gen():
             r = state["round"]
-            if r == SWAP_ROUND and len(calls.overflowed) < overflow_budget:
+            too_large = mode == "too-large" and TOO_LARGE_PAGE in json.dumps(messages)
+            if too_large or (r == SWAP_ROUND and len(calls.overflowed) < overflow_budget):
                 calls.overflowed.append(len(calls.requests) - 1)
                 raise ContextOverflowError("too long")
+            if r == SWAP_ROUND and state["cut_pending"]:
+                state["cut_pending"] = False
+                yield StreamComplete(response=LLMResponse(
+                    content="",
+                    usage=Usage(input_tokens=100, output_tokens=8192),
+                    stop_reason="length",
+                ))
+                return
             state["round"] += 1
             pressure = 0.99 if mode == "proactive" and r == SWAP_ROUND else 0.0
             if r < len(TOOL_IDS):
@@ -113,10 +129,15 @@ async def _lookup(session, tc_input):
 
 
 def scripted_session(
-    *, mode: str, handler=_lookup, seed: list[dict] = SEED, calls: PlanCalls | None = None,
+    *,
+    mode: str,
+    cut: bool = False,
+    handler=_lookup,
+    seed: list[dict] = SEED,
+    calls: PlanCalls | None = None,
 ) -> ChatSession:
-    """A session whose planner is `scripted_llm(mode=mode)` and whose one
-    tool, `lookup`, runs `handler`."""
+    """A session whose planner is `scripted_llm(mode=mode, cut=cut)` and whose
+    one tool, `lookup`, runs `handler`."""
     lookup = ToolDef(
         name="lookup",
         description="Look up a page by id.",
@@ -124,7 +145,9 @@ def scripted_session(
         handler=handler,
     )
     session = ChatSession(ChatSessionConfig(
-        llm_client=scripted_llm(mode=mode, calls=calls), initial_history=list(seed), tools=[lookup],
+        llm_client=scripted_llm(mode=mode, cut=cut, calls=calls),
+        initial_history=list(seed),
+        tools=[lookup],
     ))
     session._verify_min_tool_rounds = 99  # no verifier LLM call
     return session
