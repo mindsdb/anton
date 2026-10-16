@@ -730,6 +730,27 @@ class _VerifierLatch:
     last_no_verdict: str = ""
 
 
+@dataclass
+class _TurnSegment:
+    """The messages one turn appended to one history list.
+
+    A turn writes to a new list each time compaction or hard truncation
+    replaces `ChatSession.history`. While the turn runs, the segment holds the
+    list itself, not a copy, so rows appended after the swap land in it. A
+    dataclass rather than a pydantic model for that reason: validation would
+    copy the list. When the turn ends, one segment over a copy of the turn's
+    messages replaces them all (see `ChatSession._close_turn_segments`).
+
+    `end` is None to read to the list's end. It is set when a merge moves the
+    list's last message into the next segment (see
+    `ChatSession._claim_merged_message`).
+    """
+
+    messages: list[dict]
+    start: int
+    end: int | None = None
+
+
 # Process-wide latches for hosts that rebuild a session per message. Keyed on
 # the coding endpoint, model, and credential: a denial belongs to the account,
 # so a new api key gets a fresh latch. Only a digest of the key is held, and the
@@ -1765,6 +1786,13 @@ class ChatSession:
         self._seed_covered = 0
         self._synthetic_prefix_len = 0
         self._compaction_sealed = False
+        # The latest turn's messages, one segment per history list it wrote to
+        # (see `turn_messages`). Set when a turn starts and frozen into one
+        # copied segment when it ends, so a host reads them once the stream is
+        # done. `_turn_open` is True only while `turn_stream` runs: a swap
+        # outside a turn is not recorded.
+        self._turn_segments: list[_TurnSegment] = []
+        self._turn_open = False
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
@@ -1941,6 +1969,27 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    def turn_messages(self) -> list[dict]:
+        """Every message the latest turn appended to history, in order.
+
+        Compaction and hard truncation replace `history` with a new list that
+        no longer holds the turn's earlier messages, so a slice of `history`
+        taken from the turn's start would drop them, or keep a tool_result
+        whose tool_use was folded away. This reads each list the turn wrote to
+        from where the turn started writing to it.
+
+        Without a swap it equals `history[n:]`, where n is the history length
+        when the turn started, so it includes the turn's own user input. Empty
+        before the first turn. Fixed once the turn ends: later appends or
+        rewrites of `history` (a CLI command between turns, the next turn's
+        compaction before it starts) do not change it.
+        """
+        return [
+            message
+            for segment in self._turn_segments
+            for message in segment.messages[segment.start:segment.end]
+        ]
 
     @property
     def act_first(self) -> bool:
@@ -2244,6 +2293,67 @@ class ChatSession:
     # mixed shapes get normalised to a list-of-blocks (the form
     # every chat API accepts for both roles).
 
+    def _start_turn_segments(self) -> None:
+        """Mark the turn's start: its messages begin at the end of history."""
+        self._turn_segments = [
+            _TurnSegment(messages=self._history, start=len(self._history))
+        ]
+        self._turn_open = True
+
+    def _close_turn_segments(self) -> None:
+        """Mark the turn's end: freeze its messages and release the lists.
+
+        The turn's messages are copied into one segment, so the session no
+        longer holds the history lists a swap replaced, and edits to `history`
+        between turns do not reach `turn_messages`.
+        """
+        self._turn_segments = [_TurnSegment(messages=self.turn_messages(), start=0)]
+        self._turn_open = False
+
+    def _replace_history(self, *, messages: list[dict]) -> None:
+        """Make `messages` the session's history.
+
+        Every swap of the history list goes through here. During a turn the
+        outgoing list stays in `_turn_segments` (anton never writes to it
+        again), and the new list starts a segment at its current end, so
+        `turn_messages` still returns the rows the swap folded away. Recorded
+        at the swap rather than by the host watching events, so rows anton
+        appends before its next yield are kept too.
+        """
+        if self._turn_open:
+            self._turn_segments.append(
+                _TurnSegment(messages=messages, start=len(messages))
+            )
+        self._history = messages
+
+    def _claim_merged_message(self, *, replaced: dict) -> None:
+        """Move a merged message into the turn's current segment.
+
+        Right after a swap the new list's last message sits just before the
+        segment's start: the swap carried it over from the outgoing list, or
+        made it (the summary, or the hard-truncation separator). When
+        `_append_history` merges a message into it, the merged message holds
+        content this turn added, so the segment starts one message earlier.
+        If the outgoing list's last turn message is the one replaced, its
+        segment stops before it, so the message is not read twice.
+
+        The first segment is left alone: a merge into the last seeded message
+        (the turn's user input after a seed that ends with a user message) is
+        not this turn's, and `turn_messages` stays equal to the plain slice.
+        """
+        if not self._turn_open or len(self._turn_segments) < 2:
+            return
+        current = self._turn_segments[-1]
+        if current.start != len(self._history):
+            return
+        current.start -= 1
+        for segment in reversed(self._turn_segments[:-1]):
+            stop = len(segment.messages) if segment.end is None else segment.end
+            if stop > segment.start:
+                if segment.messages[stop - 1] is replaced:
+                    segment.end = stop - 1
+                return
+
     @staticmethod
     def _coerce_to_block_list(content) -> list[dict]:
         """Normalise a message's content into a list of blocks.
@@ -2301,6 +2411,7 @@ class ChatSession:
             + self._coerce_to_block_list(content)
         )
         self._history[-1] = {**prev, "role": role, "content": merged_blocks}
+        self._claim_merged_message(replaced=prev)
         logger.info(
             "Merged consecutive %s messages in history (would have violated "
             "Anthropic role alternation). Combined block count: %d.",
@@ -3090,14 +3201,14 @@ class ChatSession:
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
-            self._history = [
+            self._replace_history(messages=[
                 summary_msg,
                 {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
-            ]
+            ])
             self._synthetic_prefix_len = 2
         else:
-            self._history = [summary_msg] + recent_turns
+            self._replace_history(messages=[summary_msg, *recent_turns])
             self._synthetic_prefix_len = 1
         self._seed_covered = covered
         if recorded and not self._compaction_sealed:
@@ -3377,9 +3488,9 @@ class ChatSession:
         # case — the tail's first assistant message can directly
         # respond to the placeholder user message.
         if tail and tail[0].get("role") == "assistant":
-            self._history = [placeholder, *tail]
+            self._replace_history(messages=[placeholder, *tail])
         else:
-            self._history = [placeholder, separator, *tail]
+            self._replace_history(messages=[placeholder, separator, *tail])
 
         # A hard truncate discards the compacted summary — the turns it covered
         # are gone from history, so replaying it next turn would describe
@@ -4829,6 +4940,9 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        # Before the inner turn appends the user input, so `turn_messages`
+        # starts where a slice of the seeded history would.
+        self._start_turn_segments()
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -4849,8 +4963,14 @@ class ChatSession:
             async for event in inner:
                 yield event
         finally:
-            await inner.aclose()
-            self.emitter = None
+            # Nested so the turn still closes when the inner turn's own
+            # cleanup raises; a turn left open would record the next
+            # between-turn swap as its own.
+            try:
+                await inner.aclose()
+            finally:
+                self._close_turn_segments()
+                self.emitter = None
 
     async def _turn_stream_inner(
         self,
