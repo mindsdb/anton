@@ -380,6 +380,8 @@ class TestScrubOutput:
         '$url = "x?access_token=" . $accessTokenValue . "&scope=a";',
         "local url = 'x?access_token=' .. access_token_value .. '&scope=a'",
         "SELECT 'access_token=' || access_token_value || '&x' FROM tokens",
+        'if "access_token=" in response_body:',
+        'if "access_token=" not in body and "client_secret=" in other_body:',
     ])
     def test_source_code_the_model_reads_is_left_alone(self, line):
         """Code the model reads and may write back is never rewritten."""
@@ -439,11 +441,26 @@ class TestScrubOutput:
         """Compact JSON, exactly as the report printed it."""
         assert scrub_output(text) == text.split(":")[0] + ':"[REDACTED_TOKEN]"}'
 
+    @pytest.mark.parametrize(("text", "expected"), [
+        ("""{"client_secret":"abc',defGhIjKlMnOpQrStu"}""", '{"client_secret":"[REDACTED_TOKEN]"}'),
+        ('{"client_secret":"+ AbCdEfGhIjKlMnOpQrSt"}', '{"client_secret":"[REDACTED_TOKEN]"}'),
+        ('client_secret="+ AbCdEfGhIjKlMnOpQrSt"', 'client_secret="[REDACTED_TOKEN]"'),
+        (
+            """It's here: {"client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """It's here: {"client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+    ], ids=["quote-and-comma", "leading-plus", "key-value-leading-plus", "after-prose-apostrophe"])
+    def test_a_value_holding_code_operators_is_redacted_whole(self, text, expected):
+        """Quotes and operators inside a literal the key opened are part of the value, not code."""
+        assert scrub_output(text) == expected
+
     @pytest.mark.parametrize("closing", ['"', ""], ids=["closed", "cut-off"])
-    def test_a_value_longer_than_the_scan_is_redacted_whole(self, closing):
+    @pytest.mark.parametrize("tail", ["", " tailGhIjKlMnOpQrStu", '\\"tailGhIjKlMnOpQrStu'], ids=["none", "space", "escaped-quote"])
+    def test_a_value_longer_than_the_scan_is_redacted_whole(self, closing, tail):
         """Past the scan limit, the rest of a long value is still redacted."""
-        result = scrub_output('"access_token": "' + "A" * 20_000 + closing)
+        result = scrub_output('"access_token": "' + "A" * 20_000 + tail + closing)
         assert "AAAAAAAA" not in result
+        assert "GhIjKlMn" not in result
         assert result.startswith('"access_token": "[REDACTED_TOKEN]')
 
     def test_a_value_ending_in_a_backslash_leaves_nothing_of_it(self):

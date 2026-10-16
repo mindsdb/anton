@@ -161,12 +161,17 @@ async def test_a_printed_saved_secret_shows_its_placeholder_in_the_stream(tmp_pa
     assert "connecting with [DS_POSTGRES_PROD__PASSWORD]" in recorded[-1].stdout
 
 
-async def test_a_printed_secret_holding_an_apostrophe_is_redacted_whole(tmp_path):
-    """A client secret can hold a quote; the printed response still loses all of it."""
+@pytest.mark.parametrize("secret_expression", [
+    "'abc' + chr(39) + 'def' + 'Gh' + 'Ij' + 'Kl' + 'Mn' + 'OpQr'",
+    "'abc' + chr(39) + ',def' + 'Gh' + 'Ij' + 'Kl' + 'Mn' + 'OpQrStu'",
+    "'+ AbCdEf' + 'Gh' + 'Ij' + 'Kl' + 'Mn' + 'OpQrSt'",
+], ids=["apostrophe", "quote-and-comma", "leading-plus"])
+async def test_a_printed_secret_holding_an_apostrophe_is_redacted_whole(tmp_path, secret_expression):
+    """A client secret can hold a quote or an operator; the printed response still loses all of it."""
     out = await _run_one_cell_turn(
         tmp_path,
         "import json\n"
-        "secret = 'abc' + chr(39) + 'def' + 'Gh' + 'Ij' + 'Kl' + 'Mn' + 'OpQr'\n"
+        f"secret = {secret_expression}\n"
         "print(json.dumps({'client_secret': secret, 'expires_in': 3600}))\n",
     )
 
