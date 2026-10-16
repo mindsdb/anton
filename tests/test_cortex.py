@@ -1050,13 +1050,45 @@ class TestManagedLayer:
         )
         assert _OPERATOR_WINS.strip() not in await bare.build_memory_context("hola")
 
+    async def test_a_managed_rule_with_a_kind_comment_renders_under_its_heading(
+        self, person, read_only_dir
+    ):
+        """A trailing `<!-- kind:... -->` on a managed rule must not reach
+        Engram next to the heading's kind, which raises TypeError on every
+        turn. The "## " heading decides the kind; the comment's kind is
+        dropped."""
+        managed = read_only_dir("managed", {
+            "rules.md": "# Rules\n\n## When\n- Use pallets <!-- kind:always -->\n",
+        })
+        prompt = await _managed_cortex(person, managed).build_memory_context("hola")
+        assert (
+            "## Operator Memory — Rules\n" + _OPERATOR_WINS + "## When\n- Use pallets"
+        ) in prompt
+
     async def test_operator_wisdom_leads_the_scratchpad_context(self, person, managed):
         context = _managed_cortex(person, managed).get_scratchpad_context()
         # Within the operator's tier, Hippocampus's own order: the dated
-        # lesson ranks ahead of the undated rule.
+        # lesson ranks ahead of the undated rule. The operator's block is
+        # labeled and the person's own follows under its own label.
         assert context == (
+            "Operator (applies to everyone, wins on conflict):\n"
             "- Scratchpad cells stop after 120 seconds\n"
-            "- If a scratchpad cell loads a large table, page through it\n" + _TODAY_SCRATCHPAD
+            "- If a scratchpad cell loads a large table, page through it\n"
+            "Your own:\n" + _TODAY_SCRATCHPAD
+        )
+
+    async def test_an_operator_layer_without_scratchpad_wisdom_leaves_the_context_unlabeled(
+        self, person, read_only_dir
+    ):
+        managed = read_only_dir("managed", {"rules.md": "# Rules\n\n## Always\n- Use pallets\n"})
+        assert _managed_cortex(person, managed).get_scratchpad_context() == _TODAY_SCRATCHPAD
+
+    async def test_operator_wisdom_alone_carries_no_your_own_label(self, dirs, managed):
+        # `dirs` gives the person empty global and project tiers.
+        assert _managed_cortex(dirs, managed).get_scratchpad_context() == (
+            "Operator (applies to everyone, wins on conflict):\n"
+            "- Scratchpad cells stop after 120 seconds\n"
+            "- If a scratchpad cell loads a large table, page through it"
         )
 
     async def test_the_operator_profile_is_never_read(self, person, managed):
@@ -1064,7 +1096,9 @@ class TestManagedLayer:
         assert "Operator" not in (await cortex.build_memory_context("hola")).replace(
             "Operator Memory", ""
         )
-        assert "Operator" not in cortex.get_scratchpad_context()
+        # The scratchpad context labels the operator's block, so the word
+        # "Operator" is expected there; what must never leak is the profile.
+        assert "Name: Operator" not in cortex.get_scratchpad_context()
 
     async def test_an_operator_datasource_lesson_renders_as_an_operator_lesson(
         self, person, read_only_dir
