@@ -171,7 +171,7 @@ def returns_records(*, engine: str, tool: str) -> bool:
     True only for a read-tier tool this engine's TOOL_OUTPUT marks
     "records". False for metadata tools, write-tier tools, and any tool or
     engine TOOL_OUTPUT does not list. `tool` is the bare tool name; split a
-    registered name with `registry.parse_namespaced_tool_name` first.
+    registered name with `names.parse_namespaced_tool_name` first.
     """
     if not allowed_for_mode(engine, tool, "read"):
         return False

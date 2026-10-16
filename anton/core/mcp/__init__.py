@@ -21,7 +21,9 @@ Module map:
   - ``access``   — fail-closed read/write/none tool classification.
                    Also says which read tools return the customer's records.
   - ``registry`` — turns a discovered tool list into namespaced ``ToolDef``s,
-                   applying the access filter; parses a namespaced name back.
+                   applying the access filter. It names tools with
+                   ``names``, which also parses a namespaced name back
+                   without importing the MCP SDK.
   - ``errors``   — permanent (dead credential) vs. transient (rate limit /
                    transport hiccup) failure classification, with one silent
                    retry on transient.
