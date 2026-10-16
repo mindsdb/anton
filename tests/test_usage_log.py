@@ -7,6 +7,7 @@ when the reply then fails a check.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -270,3 +271,64 @@ async def test_end_of_turn_work_keeps_the_turns_trace_when_the_usage_log_is_on(m
 async def test_end_of_turn_work_runs_without_a_trace_when_the_usage_log_is_off(monkeypatch):
     monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
     assert await _trace_seen_by_end_of_turn_work(monkeypatch) is None
+
+
+@pytest.fixture
+def background_done(caplog):
+    caplog.set_level("INFO", logger="anton.usage")
+
+    def lines():
+        messages = [r.getMessage() for r in caplog.records if r.name == "anton.usage"]
+        return [json.loads(m.removeprefix("usage_background_done ")) for m in messages
+                if m.startswith("usage_background_done ")]
+
+    return lines
+
+
+async def test_a_turn_marks_its_end_of_turn_work_done_only_after_it_finishes(monkeypatch, background_done):
+    """The eval stops waiting for a turn's usage lines on this marker, so it must
+    not come before a slow end-of-turn call has written its own line."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    llm = make_mock_llm()
+    llm.plan.return_value = LLMResponse(content="hi", usage=Usage(input_tokens=1))
+    session = ChatSession(ChatSessionConfig(llm_client=llm))
+    release = asyncio.Event()
+    monkeypatch.setattr(session, "_schedule_cerebellum_flush",
+                        lambda: asyncio.create_task(release.wait()))
+
+    async for _ in session.turn_stream("one", trace_metadata={"turn": "0"}):
+        pass
+    await asyncio.sleep(0.05)
+    assert background_done() == []
+
+    release.set()
+    await asyncio.sleep(0.05)
+    assert background_done() == [{"conversation": session._session_id, "turn": "0"}]
+
+
+async def test_a_turn_that_raises_marks_its_end_of_turn_work_done_at_once(monkeypatch, background_done):
+    """It writes a turn_cost line and starts no end-of-turn work; without the
+    marker the eval would wait for one that never comes."""
+    monkeypatch.setenv("ANTON_USAGE_LOG", "1")
+    llm = make_mock_llm()
+    llm.plan.side_effect = RuntimeError("planning failed")
+    session = ChatSession(ChatSessionConfig(llm_client=llm))
+
+    with pytest.raises(RuntimeError):
+        async for _ in session.turn_stream("one", trace_metadata={"turn": "0"}):
+            pass
+
+    assert background_done() == [{"conversation": session._session_id, "turn": "0"}]
+
+
+async def test_no_end_of_turn_marker_when_the_usage_log_is_off(monkeypatch, background_done):
+    monkeypatch.delenv("ANTON_USAGE_LOG", raising=False)
+    llm = make_mock_llm()
+    llm.plan.return_value = LLMResponse(content="hi", usage=Usage(input_tokens=1))
+    session = ChatSession(ChatSessionConfig(llm_client=llm))
+
+    async for _ in session.turn_stream("one", trace_metadata={"turn": "0"}):
+        pass
+    await asyncio.sleep(0.05)
+
+    assert background_done() == []

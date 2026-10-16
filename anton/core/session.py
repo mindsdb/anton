@@ -69,6 +69,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    log_background_done,
     provider_failure_kind,
     usage_log_enabled,
 )
@@ -210,6 +211,17 @@ _LEGACY_FAILURE_MARKERS = ("[error]", "Task failed:", "failed", "timed out", "Re
 
 def _legacy_looks_like_failure(text: str) -> bool:
     return any(m in text for m in _LEGACY_FAILURE_MARKERS)
+
+
+# Strong references: asyncio keeps only a weak one to a task nothing else holds.
+_BACKGROUND_MARKERS: set[asyncio.Task] = set()
+
+
+async def _log_background_done_after(tasks: set[asyncio.Task], trace: TraceContext) -> None:
+    # `wait`, not `gather`: a failed task keeps its exception for asyncio to report.
+    if tasks:
+        await asyncio.wait(tasks)
+    log_background_done(trace)
 
 
 def _discarded_call_reason(tc: ToolCall) -> str:
@@ -4928,6 +4940,7 @@ class ChatSession:
         _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
+        _turn_raised = False
         # A wrap-up failure the retry-exhausted site has already booked, so
         # the finally keeps that terminal instead of filing it as "error".
         _booked_exc: BaseException | None = None
@@ -5362,6 +5375,7 @@ class ChatSession:
             # happens to be handling (#309 review). Covers GeneratorExit and
             # CancelledError too, both BaseException, both real turn endings.
             _turn_exc = None if _e is _booked_exc else _e
+            _turn_raised = True
             raise
         finally:
             self._turn_memory = None
@@ -5388,6 +5402,9 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            if _turn_raised and usage_log_enabled():
+                # A turn that raised starts no end-of-turn work, so it is done now.
+                log_background_done(_turn_trace)
             try:
                 reset_trace_context(_trace_token)
             except ValueError:
@@ -5411,7 +5428,15 @@ class ChatSession:
             # neither the turn's cost books nor its Langfuse trace include it.
             background = contextvars.copy_context()
             background.run(set_trace_context, _turn_trace)
+            # The passes keep no handle on the tasks they start, and nothing
+            # else can start one during this synchronous call.
+            before = asyncio.all_tasks()
             background.run(self._start_background_work, user_input)
+            marker = asyncio.create_task(
+                _log_background_done_after(asyncio.all_tasks() - before, _turn_trace)
+            )
+            _BACKGROUND_MARKERS.add(marker)
+            marker.add_done_callback(_BACKGROUND_MARKERS.discard)
         else:
             self._start_background_work(user_input)
 

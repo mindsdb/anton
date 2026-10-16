@@ -419,8 +419,8 @@ def usage_lines(caplog) -> Callable[[], list[dict]]:
     caplog.set_level("INFO", logger="anton.usage")
 
     def lines() -> list[dict]:
-        return [json.loads(r.getMessage().removeprefix("llm_usage "))
-                for r in caplog.records if r.name == "anton.usage"]
+        messages = [r.getMessage() for r in caplog.records if r.name == "anton.usage"]
+        return [json.loads(m.removeprefix("llm_usage ")) for m in messages if m.startswith("llm_usage ")]
 
     return lines
 

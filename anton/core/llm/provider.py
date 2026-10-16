@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from .tracing import get_call_role, get_trace_context
+from .tracing import TraceContext, get_call_role, get_trace_context
 
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
@@ -30,6 +30,16 @@ def usage_log_enabled() -> bool:
 def log_usage_record(record: dict) -> None:
     # default=str: an odd value from a host or an SDK must not fail the call.
     _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
+
+
+def log_background_done(trace: TraceContext) -> None:
+    """Mark that a turn's end-of-turn work has finished, so an eval stops waiting for its usage.
+
+    One line per turn that wrote a `turn_cost` line. The trace is passed in, not
+    read: a late finalizer of an abandoned turn runs in another context.
+    """
+    record = {"conversation": trace.session_id, "turn": (trace.metadata or {}).get("turn")}
+    _usage_logger.info("usage_background_done %s", json.dumps(record, separators=(",", ":"), default=str))
 
 
 def _usage_record(*, role: str | None, model: str | None, served_model: str | None,
