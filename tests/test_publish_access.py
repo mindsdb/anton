@@ -63,16 +63,16 @@ def test_restricted_mode_defaults():
 def _publish_with(tmp_path: Path, fake_request, **publish_kwargs) -> dict:
     f = tmp_path / "index.html"
     f.write_text("<html>hi</html>", encoding="utf-8")
-    with mock.patch.object(publisher, "minds_request", fake_request):
+    with mock.patch.object(publisher, "minds_request_with_status", fake_request):
         return publish(f, api_key="k", **publish_kwargs)
 
 
 def _accepting_request(captured: dict):
     def fake_request(url, api_key, *, method="POST", payload=None, verify=True, timeout=30):
         captured["payload"] = json.loads(payload.decode())
-        return json.dumps(
+        return 200, json.dumps(
             {"user_prefix": "u", "report_id": "r", "md5": "m", "view_url": "url", "version": 1, "files": []}
-        )
+        ).encode()
     return fake_request
 
 
