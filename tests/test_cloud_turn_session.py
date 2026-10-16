@@ -88,6 +88,8 @@ def test_all_cross_tenant_hazards_off(tmp_path, monkeypatch):
     assert cfg.tools == []               # no host connector/publish tools
     assert cfg.web_search_enabled is False
     assert cfg.web_fetch_enabled is False
+    # The pod is its own gVisor sandbox; the Landlock policy stays off there.
+    assert cfg.cell_sandbox is None
 
 
 def test_datasource_turn_carries_only_its_references_to_the_child(tmp_path, monkeypatch):

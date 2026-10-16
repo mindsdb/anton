@@ -16,6 +16,7 @@ from pathlib import Path
 
 from anton.core.artifacts import html_lint
 from anton.core.artifacts.html_lint import lint_html, lint_url
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of, refusal_from
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
 
@@ -452,8 +453,11 @@ def _browser_verdict(findings, *, served: bool) -> VerifyResult:
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def browser_check_skip_reason() -> str:
+def browser_check_skip_reason(*, sandboxed: bool = False) -> str:
     """Why `verify_frontend_live` returned None, for the trace.
+
+    `sandboxed` says the check never ran because agent code runs in a sandbox
+    on this host, which starts no browser.
 
     `lint_html` folds every "could not check" into one None. A live trace
     said "ANTON_HTML_LINT_BROWSER unset" for what may
@@ -462,6 +466,8 @@ def browser_check_skip_reason() -> str:
     that changes between the check and this call could mislabel one run; the
     environment of a generation process does not change underneath it.
     """
+    if sandboxed:
+        return "skipped: agent code runs in a sandbox on this deployment, which starts no browser"
     configured = os.environ.get(html_lint.BROWSER_ENV_VAR)
     if not configured:
         return f"no headless browser configured ({html_lint.BROWSER_ENV_VAR} unset)"
@@ -788,6 +794,68 @@ print(json.dumps(result))
 '''
 
 
+# The syntax gate runs agent code too (`-m` with the artifact folder as cwd
+# imports an agent-written py_compile.py), so under a sandbox policy it gets a
+# bound like the import. Without a policy it waits as long as it takes.
+_COMPILE_TIMEOUT = 30.0
+
+
+async def _spawn_check(
+    *,
+    policy: CellSandbox | None,
+    argv: list[str],
+    cwd: Path,
+    env: dict[str, str] | None,
+) -> asyncio.subprocess.Process:
+    """Start one verifier check, through the sandbox launcher when the pool has a policy.
+
+    With no policy the call is the verifier's original one: no `env` keyword
+    when `env` is None, so the child inherits the server's environment.
+    """
+    if policy is None:
+        return await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **({} if env is None else {"env": env}),
+        )
+    launch = policy.launch(argv, env=policy.child_env(env or {}))
+    try:
+        return await asyncio.create_subprocess_exec(
+            *launch.argv,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=launch.env,
+            pass_fds=launch.pass_fds,
+        )
+    finally:
+        launch.close()
+
+
+async def _finish_check(
+    proc: asyncio.subprocess.Process, *, timeout: float | None
+) -> tuple[bytes, bytes] | None:
+    """The check's output, or None after killing it at `timeout` (None waits unbounded)."""
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return None
+
+
+def _sandboxed_check_env(ds_env: dict[str, str] | None) -> dict[str, str]:
+    """The import check's environment under a sandbox, before the allowlist.
+
+    The server's environment with its `DS_*` replaced by the artifact's own.
+    No `anton_state_pp` folder: `anton_state` imports from the server's
+    site-packages, which the venv's `_parent_venv.pth` already lists.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DS_")}
+    env.update(ds_env or {})
+    return env
+
+
 async def verify_backend(
     *,
     scratchpad_pool,
@@ -796,7 +864,14 @@ async def verify_backend(
     import_timeout: float = 15.0,
     artifact_type: str = "",
     api_operations: set[str] | None = None,
+    ds_env: dict[str, str] | None = None,
 ) -> tuple[VerifyResult, list[str]]:
+    """Install the backend's requirements, compile it, then import it in its venv.
+
+    Under the pool's sandbox policy both checks run through the launcher, and
+    the import sees `ds_env` (the artifact's own `DS_*`) instead of the
+    server's.
+    """
     backend_py = artifact_path / "backend.py"
     if not backend_py.is_file():
         return VerifyResult(errors=["backend.py was not written."]), []
@@ -828,13 +903,24 @@ async def verify_backend(
     if not venv_python:
         return VerifyResult(errors=["Scratchpad venv Python is unavailable (remote runtime?)."]), []
 
-    # py_compile first (fast syntax gate).
-    proc = await asyncio.create_subprocess_exec(
-        venv_python, "-m", "py_compile", "backend.py",
-        cwd=str(artifact_path),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    policy = cell_sandbox_of(scratchpad_pool)
+
+    # py_compile first (fast syntax gate). -P under the sandbox keeps the
+    # artifact folder off sys.path, so an agent-written py_compile.py there
+    # does not stand in for the standard library's.
+    compile_argv = (
+        [venv_python, "-m", "py_compile", "backend.py"]
+        if policy is None
+        else [venv_python, "-P", "-m", "py_compile", "backend.py"]
     )
-    _, cerr = await proc.communicate()
+    proc = await _spawn_check(policy=policy, argv=compile_argv, cwd=artifact_path, env=None)
+    finished = await _finish_check(proc, timeout=_COMPILE_TIMEOUT if policy is not None else None)
+    if finished is None:
+        return VerifyResult(errors=[f"backend.py compile timed out after {_COMPILE_TIMEOUT:.0f}s."]), \
+            _ds_keys(source)
+    _, cerr = finished
+    if policy is not None and (refusal := refusal_from(proc.returncode, cerr)) is not None:
+        raise refusal
     if proc.returncode != 0:
         return VerifyResult(errors=[f"backend.py failed to compile:\n{cerr.decode(errors='replace')}"]), \
             _ds_keys(source)
@@ -843,19 +929,19 @@ async def verify_backend(
     # `build_backend_env` puts `anton_state` on PYTHONPATH exactly like the
     # launcher does for the real backend process — without it a correct
     # stateful backend fails right here on its own SDK import.
-    proc = await asyncio.create_subprocess_exec(
-        venv_python, "-c", _INTROSPECT_SCRIPT,
-        cwd=str(artifact_path),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env=build_backend_env(None),
+    proc = await _spawn_check(
+        policy=policy,
+        argv=[venv_python, "-c", _INTROSPECT_SCRIPT],
+        cwd=artifact_path,
+        env=build_backend_env(None) if policy is None else _sandboxed_check_env(ds_env),
     )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=import_timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+    finished = await _finish_check(proc, timeout=import_timeout)
+    if finished is None:
         return VerifyResult(errors=[f"backend.py import timed out after {import_timeout}s."]), \
             _ds_keys(source)
+    out, err = finished
+    if policy is not None and (refusal := refusal_from(proc.returncode, err)) is not None:
+        raise refusal
 
     line = (out.decode(errors="replace").strip().splitlines() or [""])[-1]
     try:

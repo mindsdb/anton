@@ -16,6 +16,8 @@ the LLM drives like a notebook. The code lives in `anton/core/backends/`:
 | `manager.py` | `ScratchpadManager` — lifecycle of named runtimes |
 | `scratchpad_boot.py` | The boot script that runs *inside* the subprocess: REPL loop, `get_llm()`, `progress()`, `sample()`, `agentic_loop()`, `web_search()` |
 | `wire.py` | Protocol markers (cell delimiter, progress marker, result delimiters) |
+| `sandbox.py` | `CellSandbox`, the per-session Landlock policy, and the launcher call each spawn goes through when a policy is set |
+| `landlock_launcher.py` | The launcher: locks itself with Landlock, then execs the target in place (standard library only) |
 
 ## The `Cell` and the runtime contract
 
@@ -85,6 +87,81 @@ under `<workspace>/.anton/scratchpad-venvs/<name>/` (falling back to
   is bound, so relative paths in scratchpad code operate on the project.
 - **Windows**: a per-venv outbound firewall rule is added so the scratchpad can
   reach the internet.
+- **Pad names**: the name becomes a folder the host deletes and recreates, so
+  an empty name, a NUL, an absolute path or a `..` part is refused
+  (`validate_pad_name`), and the venv path must resolve inside the venvs
+  folder before any create or delete.
+- **Host writes**: the files the host writes into a venv
+  (`_parent_venv.pth`, `requirements.txt`, `.python_version`), the venv build
+  and removal, and `_agent_pads.json` refuse a symlink at or inside the venv
+  or session folder in every mode (`anton/utils/nofollow.py`). Under a
+  sandbox policy they also refuse one anywhere below the workspace root, a
+  linked `.anton` included, and a host that calls
+  `Workspace.initialize(refuse_links=True)` gets `.anton`, `anton.md` and
+  `.env` created the same way. Without a policy a linked `.anton` is
+  followed.
+
+## Sandbox policy (Landlock)
+
+A host that runs several people's agent code in one process tree passes a
+`CellSandbox` as `ChatSessionConfig.cell_sandbox`. It names the person's
+project folder (read, write, execute), a per-person `HOME` and `TMPDIR`
+(read and write), an optional shared folder, and read-only folders and files
+such as linked skills and attachments. The model refuses a grant that equals
+or contains `/`, `/home`, `/opt`, `/opt/cowork`, `/tmp`, `/var/tmp`, `/dev`,
+`/etc`, `/proc`, `/sys`, the server's own home, or a root the host names in
+`forbidden_roots`.
+
+With a policy set, every spawn that runs agent code starts through the
+launcher: the cell (the installed `scratchpad_boot.py`, run with `-P`), the
+venv health check, package installs (pip only; uv is never used), and the
+artifact verifier's compile and import checks, each with a timeout.
+`CellSandbox.launch()` returns the launcher's argv, its fixed two-variable
+environment and one descriptor.
+The descriptor carries the rules and the target's environment as JSON, so no
+secret appears in an argv another process can read, and nothing from the
+target's environment loads into the launcher before the lock.
+
+The launcher (`python -I -S landlock_launcher.py`) reads and closes the
+descriptor, sets `no_new_privs`, requires Landlock ABI 3 (Linux 6.2) or later,
+handles every filesystem right of the running ABI, and on ABI 6 or later also
+scopes signals and abstract unix sockets. It adds the system rules
+(`/usr`, the interpreter's prefixes and site-packages, `/proc`, `/sys`, a
+fixed list of `/etc` files, `/dev/null`, `/dev/shm` without listing) and the
+policy's grants, skips a missing optional grant, restricts itself, closes
+every descriptor above 2 and execs the target. The process id, process group
+and exit code are the target's, so cancel and the stdout protocol work as
+before.
+
+The child environment is an allowlist (`CellSandbox.child_env`): model and
+coding-provider keys, `ANTON_SCRATCHPAD_*`, `DS_*`, the pip, proxy and CA
+variables, `PATH`, `PYTHONPATH` and locale, plus the per-person `HOME`,
+`TMPDIR`, `USER`, `LOGNAME`, `MPLCONFIGDIR`, `XDG_*` and `PIP_CACHE_DIR`.
+`COWORK_*`, `DATABASE_URI`, `MINDS_API_KEY`, `ANTON_MINDS_API_KEY` and `LD_*`
+never pass. A workspace `.env` key passes where the server doesn't already
+set it, unless it could repoint the interpreter, the loader, the folders or
+the certificate trust. A key the server sets keeps the allowlist's verdict,
+so naming it in the `.env` never passes the server's value.
+
+Every refusal is one stderr line starting with `anton-sandbox: refused:` and
+exit code 87. anton raises it as `SandboxUnavailable`, which the agent sees by
+name, and keeps the venv and the saved cell state: a refusal never counts as
+a broken venv or toward the auto-resume reset. After a refused restart the
+cell error does not offer a reset, and `reset()` runs the health check before
+it discards the saved namespace, so a refused reset keeps it too.
+
+Under a policy, app backends are refused (`launch_artifact_backend` returns
+`BACKENDS_OFF_MESSAGE` before it touches the pool, and `generate_artifact`
+refuses a fullstack artifact before the spec), and the lints that start a
+browser or LibreOffice are skipped. The in-process lints still run.
+
+`ScratchpadManager` refuses at construction a runtime factory that cannot
+take the policy, so a policy is never dropped. A pool whose `cell_sandbox`
+holds anything other than a `CellSandbox` or None raises `TypeError` where
+anton reads it (`cell_sandbox_of`). With no policy (the desktop,
+the CLI and the cloud pod), every spawn runs unlocked with the server's
+environment, and `tests/test_sandbox_off_capture.py` pins each call's argv,
+environment, cwd and keyword arguments.
 
 ## Remote backend
 

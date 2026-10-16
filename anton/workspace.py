@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from anton.config.settings import AntonSettings
+from anton.utils.nofollow import create_text_nofollow, make_dirs_nofollow
 
 ANTON_MD_TEMPLATE = """\
 # Anton Workspace
@@ -125,7 +126,7 @@ class Workspace:
 
     # ── Initialization ───────────────────────────────────────────
 
-    def initialize(self, *, create_anton_md: bool = True) -> list[str]:
+    def initialize(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
         """Create the workspace structure. Returns list of actions taken.
 
         Retries once on ESTALE: on a shared NFS/EFS workspace another
@@ -143,33 +144,46 @@ class Workspace:
         the retry above cannot recover. Not creating the file removes the
         ownership fight entirely; skipping the stat also removes the one
         ESTALE-prone call from the cloud turn's critical path.
+
+        ``refuse_links=True`` is for a host that runs agent code in a sandbox,
+        where that code can write the workspace: ``.anton`` and
+        ``.anton/memory`` must not be links, and ``anton.md`` and ``.env`` are
+        created only where nothing, not even a dangling link, holds the name.
+        The default follows links, as the desktop, the CLI and the cloud pod
+        always have.
         """
         try:
-            return self._initialize_once(create_anton_md=create_anton_md)
+            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links)
         except OSError as exc:
             if exc.errno != errno.ESTALE:
                 raise
-            return self._initialize_once(create_anton_md=create_anton_md)
+            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links)
 
-    def _initialize_once(self, *, create_anton_md: bool = True) -> list[str]:
+    def _initialize_once(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
         actions: list[str] = []
 
         # Create .anton/ directory and memory subdirectory
-        self._anton_dir.mkdir(parents=True, exist_ok=True)
-        (self._anton_dir / "memory").mkdir(exist_ok=True)
+        if refuse_links:
+            self._base.mkdir(parents=True, exist_ok=True)
+            make_dirs_nofollow(self._base, self._anton_dir / "memory")
+        else:
+            self._anton_dir.mkdir(parents=True, exist_ok=True)
+            (self._anton_dir / "memory").mkdir(exist_ok=True)
         actions.append(f"Created {self._anton_dir}")
 
         # Create anton.md if it doesn't exist
-        if create_anton_md and not self._anton_md.is_file():
-            self._anton_md.write_text(
-                ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d")),
-                encoding="utf-8",
-            )
+        if create_anton_md and self._create_if_missing(
+            self._anton_md,
+            ANTON_MD_TEMPLATE.format(date=datetime.now().strftime("%Y-%m-%d")),
+            private=False,
+            refuse_links=refuse_links,
+        ):
             actions.append(f"Created {self._anton_md}")
 
         # Create .env if it doesn't exist
-        if not self._env_file.is_file():
-            _write_private(self._env_file, "# Anton environment variables\n")
+        if self._create_if_missing(
+            self._env_file, "# Anton environment variables\n", private=True, refuse_links=refuse_links
+        ):
             actions.append(f"Created {self._env_file}")
 
         # Visible artifacts directory at the workspace root. Replaces
@@ -181,6 +195,25 @@ class Workspace:
             actions.append(f"Created {self._artifacts_dir}")
 
         return actions
+
+    def _create_if_missing(self, path: Path, text: str, *, private: bool, refuse_links: bool) -> bool:
+        """Write ``text`` to ``path`` unless it is already there; returns whether it wrote.
+
+        ``private`` creates the file 0600. With ``refuse_links``, nothing (not
+        even a dangling link) may hold the name, and no folder between the
+        workspace and the file may be a link.
+        """
+        if refuse_links:
+            return create_text_nofollow(
+                self._base, path, text, mode=_SECRET_FILE_MODE if private else 0o666
+            )
+        if path.is_file():
+            return False
+        if private:
+            _write_private(path, text)
+        else:
+            path.write_text(text, encoding="utf-8")
+        return True
 
     @property
     def artifacts_dir(self) -> Path:
