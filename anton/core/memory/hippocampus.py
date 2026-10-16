@@ -441,6 +441,9 @@ class Hippocampus:
                 current_kind = stripped[3:].lower()
             elif stripped.startswith("- ") and current_kind:
                 text, meta = _extract_metadata(stripped[2:])
+                # The "## " heading decides the kind, so drop a `kind:` key from
+                # the trailing comment; passing both to Engram raises TypeError.
+                meta.pop("kind", None)
                 if text and current_kind is not None:
                     entries.append(Engram(text=text, kind=current_kind, **meta))
 

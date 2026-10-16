@@ -193,7 +193,7 @@ class Cortex:
         *,
         managed_hc: HippocampusProtocol | None = None,
     ) -> None:
-        """Initialize the executive with two hippocampal stores.
+        """Initialize the executive with the global and project stores, plus an optional read-only managed store.
 
         Args:
             global_hc: Memory store for cross-project memories (global scope)
@@ -257,6 +257,10 @@ class Cortex:
 
     # ~6000 chars ≈ ~1500 tokens — above this, use LLM to filter rules
     _RULES_BUDGET_CHARS = 6000
+
+    # Each lesson tier — the operator's and each of the person's — gets this
+    # budget, counted apart from the others.
+    _LESSONS_BUDGET_TOKENS = 1000
 
     _RULES_RETRIEVAL_PROMPT = """\
 Given the user's current message, select only the conditional (When/If) rules that are \
@@ -323,7 +327,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             )
         if self.managed_hc is not None:
             managed_lessons = self.managed_hc.recall_lessons(
-                token_budget=1000, exclude_scratchpad=True
+                token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
             )
             if managed_lessons:
                 precedence = "" if managed_engrams else f"{self._OPERATOR_PRECEDENCE}\n"
@@ -347,16 +351,22 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         # 5. Global lessons. recall_lessons() excludes scratchpad-related
         # entries internally — same reasoning as the rules exclusion above.
-        global_lessons = self.global_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
+        global_lessons = self.global_hc.recall_lessons(
+            token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
+        )
         if global_lessons:
             sections.append(f"## Your Memory — Global Lessons\n{global_lessons}")
 
         # 6. Project lessons — same scratchpad exclusion.
-        project_lessons = self.project_hc.recall_lessons(token_budget=1000, exclude_scratchpad=True)
+        project_lessons = self.project_hc.recall_lessons(
+            token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
+        )
         if project_lessons:
             sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
             if self._episodic is not None:
-                for engram in self.project_hc.get_lessons(token_budget=1000, exclude_scratchpad=True):
+                for engram in self.project_hc.get_lessons(
+                    token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True
+                ):
                     self._log_read_engram(engram)
 
         # 7. Minds datasource context (auto-loaded if present)
@@ -500,17 +510,30 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         Like the vmPFC integrating memories for action planning — combines
         the operator's, global and project scratchpad wisdom, in that order,
         into a coherent set of guidelines.
+
+        When an operator layer contributes wisdom, its block is labeled so the
+        agent can tell which lines win on conflict, and the person's own wisdom
+        follows under its own label. With no operator wisdom the output is the
+        person's lines alone, unlabeled.
         """
-        parts: list[str] = []
+        managed_wisdom = (
+            self.managed_hc.recall_scratchpad_wisdom()
+            if self.managed_hc is not None
+            else ""
+        )
+        person_parts = [
+            self.global_hc.recall_scratchpad_wisdom(),
+            self.project_hc.recall_scratchpad_wisdom(),
+        ]
+        person_wisdom = "\n".join(p for p in person_parts if p)
 
-        for hc in (self.managed_hc, self.global_hc, self.project_hc):
-            if hc is None:
-                continue
-            wisdom = hc.recall_scratchpad_wisdom()
-            if wisdom:
-                parts.append(wisdom)
+        if not managed_wisdom:
+            return person_wisdom
 
-        return "\n".join(parts)
+        labeled = f"Operator (applies to everyone, wins on conflict):\n{managed_wisdom}"
+        if person_wisdom:
+            labeled += f"\nYour own:\n{person_wisdom}"
+        return labeled
 
     async def encode(self, engrams: list[Engram]) -> list[str]:
         """Direct the hippocampus to encode new memories.
