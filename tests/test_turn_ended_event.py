@@ -220,8 +220,11 @@ async def test_filtered_handback_is_dropped(workspace):
     assert refusal not in shown
     assert "the answer" in shown
     assert refusal not in str(session.history)
-    # Like an empty hand-back, history keeps its tail: the answer, then the note.
-    assert session.history[-2] == {"role": "assistant", "content": "the answer"}
+    # The note goes with its reply, so the turn ends on the answer.
+    assert session.history[-1] == {"role": "assistant", "content": "the answer"}
+    # And the next question stays the user's own words, not merged into the note.
+    session._append_history({"role": "user", "content": "next question"})
+    assert session.history[-1] == {"role": "user", "content": "next question"}
     assert booked == "handback_verifier_failure"
     assert events[-1] == StreamTurnEnded(ended_by="handback_verifier_failure")
 
@@ -262,6 +265,7 @@ async def test_escape_while_a_handback_is_held_stops_the_call(workspace):
     assert "first" not in shown and "second" not in shown
     assert booked == "cancelled"
     assert isinstance(events[-1], StreamTaskProgress), "the CLI needs a last event to see Escape on"
+    assert session.history[-1] == {"role": "assistant", "content": "the answer"}
 
 
 async def test_escape_while_a_handback_is_held_cancels_the_turn_as_the_cli_sees_it(workspace):

@@ -4388,6 +4388,7 @@ class ChatSession:
                     watcher = self.escape_watcher
                     if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
                         log.info("%s diagnosis cancelled while held — dropped", label)
+                        self._drop_handback_note()
                         # Set here so the books say cancelled, then one event for the CLI to stop on.
                         self._cancel_event.set()
                         yield StreamTaskProgress(phase="analyzing", message="Cancelled")
@@ -4414,6 +4415,7 @@ class ChatSession:
                 "%s diagnosis stopped by the provider's content filter — dropped; "
                 "the turn ends on the reply before it", label,
             )
+            self._drop_handback_note()
         elif text:
             self._append_history({"role": "assistant", "content": text})
         else:
@@ -4424,6 +4426,20 @@ class ChatSession:
                 "max-tool-rounds path, since the cap block appends that last)",
                 label,
             )
+
+    def _drop_handback_note(self) -> None:
+        """Remove the hand-back's note once its reply is dropped, so the turn ends on the answer.
+
+        Left in place, the user's next message merges into it. Only a standalone note goes: one
+        merged into tool results (a list) would take those results with it.
+        """
+        last = self._history[-1] if self._history else None
+        if (
+            isinstance(last, dict) and last.get("role") == "user"
+            and isinstance(last.get("content"), str)
+            and last["content"].strip().startswith(_NOTE_PREFIXES)
+        ):
+            self._history.pop()
 
     async def plan_stream_with_recovery(
         self,
