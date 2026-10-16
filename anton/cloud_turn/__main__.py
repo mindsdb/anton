@@ -64,6 +64,8 @@ RESULT_FIELD_CAP = 16384
 #: Matches cowork's SSE-side PROGRESS_THROTTLE.
 PROGRESS_WIRE_INTERVAL = 0.25
 
+#: cowork-server's figure sources split a cut cell result at this marker
+#: (cowork/harnesses/anton_harness/figure_sources.py).
 _TRUNCATION_MARKER = "\n[… truncated …]\n"
 
 

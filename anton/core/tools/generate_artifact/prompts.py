@@ -134,6 +134,13 @@ USING DATA:
 # (html-app and the fullstack `static/index.html`).
 _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
+- SCOPE: render ONLY what the request, the PRD, `spec.md` and the API
+  specification ask for. No invented brand or company names, logos,
+  taglines, marketing copy or intro paragraphs, status pills or badges,
+  footers or disclaimers unless asked. Requested content includes the
+  functional states (loading, empty, error and API error messages) and what
+  the rules below require: chart subtitles, units, estimated or converted
+  notes. The layout rules arrange that content; they never add other content.
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
@@ -445,6 +452,11 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
   ```
+  `Collection` stores its items under ITS OWN keys: `pk="_"` (unless you
+  pass `pk=`) and `sk="<name>#<key>"`. Data written through a `Collection`
+  is read back ONLY through the same `Collection` (`get`/`list`) — never
+  with raw `store.get(...)`/`store.query(...)` on your own pk/sk, which
+  finds nothing. Pick one style per piece of data and stick to it.
 - CHANGE A STORED DOCUMENT by reading it, modifying it and putting it back
   with the `_v` it was read with. If another request wrote in between, the
   put raises `ConditionalCheckFailed` and writes nothing, instead of
@@ -475,6 +487,13 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
     never read-modify-write a counter by hand
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
+- An item that `increment`/`update` CREATES carries NO `pk`/`sk` attributes
+  (and no `_key` via `Collection`): `query`/`list` return it without them,
+  so a listing must never read the key from such items. When a listing needs
+  the key, keep it as a plain field in the same atomic call —
+  `await store.update("counts", option, set_fields={"option": option},
+  add_fields={"count": 1})`. Never `put` a counter item before each
+  increment: `put` replaces the whole item and resets the count.
 - DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
   `query(pk=...)` call (or `Collection.list()`). Never call the store in a
   loop to assemble a listing.

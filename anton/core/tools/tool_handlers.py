@@ -1091,7 +1091,8 @@ async def handle_scratchpad(
         if lint_messages:
             # [artifact lint] follows format_cell_result's own [output]/[error]
             # labeling convention so the agent can tell the finding apart from
-            # its own code's output.
+            # its own code's output. cowork-server's figure sources cut this
+            # block from a replayed cell's output.
             content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
             content=content,

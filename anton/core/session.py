@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import hashlib
 import httpx2 as httpx
@@ -72,8 +73,11 @@ from anton.core.llm.provider import (
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
+    JEV_CALL_ROLE,
     VALID_SURFACES,
     TraceContext,
+    call_role,
+    detached_from_session,
     reset_trace_context,
     set_trace_context,
 )
@@ -267,6 +271,8 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         ),
         # "exec failed" is the wording the cell-status classifier keys on for a
         # non-JSON result; without a recognised marker the cell reads as ok.
+        # cowork-server's figure sources key on the same "[error] exec failed"
+        # prefix to drop the call (cowork/harnesses/anton_harness/figure_sources.py).
         StreamToolResult(
             name="scratchpad",
             content=f"[error] exec failed — {reason}",
@@ -3237,6 +3243,8 @@ class ChatSession:
         with tool_use blocks and inserts a user message carrying
         synthetic `is_error: true` results for whichever ids didn't
         get acknowledged in the immediately following message.
+        cowork-server's figure sources skip results marked is_error, so
+        keep the flag on every result anton makes up itself.
 
         Returns the number of synthetic results inserted (0 if the
         history is already clean).
@@ -4268,12 +4276,27 @@ class ChatSession:
             return _jev.JevVerdict(error="credentials")
         if not api_key:
             return None
+        # Traced like the LLM verifier it stands in for (same turn and harness);
+        # without these headers the gateway files the check as direct-API use. Its
+        # own role: it runs on Jev, not on any of the session's model slots.
+        with call_role(JEV_CALL_ROLE):
+            headers = provider.trace_headers()
+        # Kept out of the conversation's session: the console marks a conversation
+        # failed when any call in it fails, and a refused check is one the turn
+        # recovers from. The conversation rides in the metadata instead, so the
+        # check can still be joined to it.
+        conversation_id = headers.pop("Langfuse-Session-Id", None)
+        if conversation_id and "Langfuse-Metadata" in headers:
+            metadata = json.loads(headers["Langfuse-Metadata"])
+            metadata["conversation_id"] = conversation_id
+            headers["Langfuse-Metadata"] = json.dumps(metadata)
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
         return await _jev.classify(
             base_url=base_url,
             api_key=api_key,
+            headers=headers,
             model=self._jev_model,
             state={
                 "request": (user_message or "").strip(),
@@ -4601,7 +4624,24 @@ class ChatSession:
 
         asyncio.create_task(_drain())
 
-    def _schedule_cerebellum_flush(self) -> None:
+    @staticmethod
+    def _background_context(trace: TraceContext | None) -> contextvars.Context:
+        """A context for background work of the turn `trace` identifies.
+
+        LLM calls made in it are attributed to that turn, but kept out of the
+        conversation's session (see `detached_from_session`). Tasks started in
+        it inherit it.
+        """
+        context = contextvars.copy_context()
+        if trace is not None:
+            context.run(set_trace_context, detached_from_session(trace))
+        return context
+
+    def _spawn_background(self, coro, trace: TraceContext | None) -> asyncio.Task:
+        """Start `coro` as background work of the turn `trace` identifies."""
+        return asyncio.create_task(coro, context=self._background_context(trace))
+
+    def _schedule_cerebellum_flush(self, trace: TraceContext | None = None) -> None:
         """Fire the cerebellum's batched diff pass without blocking the turn.
 
         The cerebellum buffered any errored / warning cells across the
@@ -4623,7 +4663,7 @@ class ChatSession:
         if cb.buffered_count == 0:
             return
         try:
-            asyncio.create_task(cb.flush())
+            self._spawn_background(cb.flush(), trace)
         except RuntimeError:
             # No running loop (e.g. called from a sync context in tests).
             # Cerebellum learning is best-effort, so just drop the buffer.
@@ -4891,19 +4931,17 @@ class ChatSession:
         # talking to MindsHub and attaches langfuse-style headers so the
         # router can attribute every LLM call (and any spans nested
         # inside this turn via tools / scratchpad) to the right session.
-        # ContextVar propagation also covers `asyncio.create_task` spawns
-        # — the cerebellum flush + identity extraction tasks scheduled
-        # below inherit a copy of this context.
-        _trace_token = set_trace_context(
-            TraceContext(
-                session_id=self._session_id,
-                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
-                harness=self._harness,
-                surface=self._surface,
-                tags=tuple(trace_tags or ()),
-                metadata=trace_metadata or None,
-            )
+        # Tasks spawned during the turn inherit it. The end-of-turn memory
+        # tasks start after it is reset, so they get it from `_background_context`.
+        _turn_trace = TraceContext(
+            session_id=self._session_id,
+            turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+            harness=self._harness,
+            surface=self._surface,
+            tags=tuple(trace_tags or ()),
+            metadata=trace_metadata or None,
         )
+        _trace_token = set_trace_context(_turn_trace)
 
         # Open the turn's cost books and listen at the LLM-client narrow
         # waist — planning, coding (incl. verifier verdicts), and router
@@ -5417,14 +5455,15 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                asyncio.create_task(self._cortex.maybe_update_identity(messages_str))
-            # Periodic memory vacuum (Systems Consolidation)
-            self._cortex.maybe_vacuum()
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
+            # Periodic memory vacuum (Systems Consolidation). Its compaction
+            # task is started inside, so it runs in the background context.
+            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush()
+        self._schedule_cerebellum_flush(_turn_trace)
         self._schedule_acc_flush()
 
         # The books are closed, so ended_by is final. A clean exit can still book
@@ -5974,6 +6013,8 @@ class ChatSession:
                                             exc_info=True,
                                         )
                                     if lint_messages:
+                                        # cowork-server's figure sources cut this
+                                        # block from a replayed cell's output.
                                         result_text += (
                                             "\n\n[artifact lint]\n"
                                             + "\n".join(lint_messages)

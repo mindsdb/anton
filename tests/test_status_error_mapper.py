@@ -192,6 +192,43 @@ def test_retry_after_http_date_form_is_ignored_not_misparsed():
     assert err.value.retry_after is None
 
 
+@pytest.mark.parametrize("code", ["429", "rate_limit_exceeded"])
+def test_azure_429_with_retry_after_ms_waits_the_named_interval(code):
+    # Azure's per-minute limit, in both of its body dialects.
+    exc = _sdk_error(429, json_body={"error": {
+        "code": code,
+        "message": "Requests have exceeded the token rate limit. Please retry after 6 seconds.",
+    }}, headers={"retry-after-ms": "5500", "retry-after": "6"})
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "gpt")
+    assert err.value.code == "rate_limited"
+    assert err.value.session_backoff is True
+    assert err.value.retry_after == 5.5
+
+
+@pytest.mark.parametrize("headers,expected", [
+    ({"retry-after-ms": "bogus", "retry-after": "30"}, 30.0),
+    ({"retry-after-ms": "-5", "retry-after": "30"}, 30.0),
+    ({"Retry-After-Ms": "5500", "Retry-After": "6"}, 5.5),
+])
+def test_retry_after_ms_falls_back_and_ignores_case(headers, expected):
+    from anton.core.llm.provider import retry_after_seconds
+
+    exc = Exception()
+    exc.headers = headers
+    assert retry_after_seconds(exc) == expected
+
+
+def test_rate_limit_exceeded_without_retry_after_ms_stays_unconfirmed():
+    # OpenAI uses the same code for daily limits, which a short wait cannot clear.
+    exc = _sdk_error(429, json_body={"error": {"code": "rate_limit_exceeded"}},
+                     headers={"retry-after": "6"})
+    with pytest.raises(TransientProviderError) as err:
+        _raise_for_status_error(exc, "gpt")
+    assert err.value.session_backoff is False
+    assert err.value.retry_after is None
+
+
 def _openai_quota_429():
     """OpenAI's own quota dialect, byte-shaped like the live body captured
     from a zero-quota project key on 2026-07-28."""

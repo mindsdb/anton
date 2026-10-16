@@ -379,6 +379,10 @@ def format_cell_result(cell) -> str:
     [logs]   — library logging (httpx, urllib3, etc.) captured at INFO+
     [stderr] — warnings and stderr writes
     [error]  — Python traceback if the cell raised an exception
+
+    cowork-server's figure sources read these labels, the truncation note and
+    the no-output sentence (cowork/harnesses/anton_harness/stream_formatter.py),
+    so a change here needs the same change there.
     """
     parts: list[str] = []
     if cell.stdout:
