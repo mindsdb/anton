@@ -37,6 +37,7 @@ from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
+    ANTON_NOTE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -151,7 +152,7 @@ _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
 # Composed from one lead and per-loss tails so the both-halves case reads as a
 # single message instead of repeating the lead twice.
 _TRUNCATED_LEAD = (
-    "SYSTEM: Your response was truncated because it exceeded the output token limit."
+    f"{ANTON_NOTE} Your response was truncated because it exceeded the output token limit."
 )
 _TRUNCATED_CONTINUE_TAIL = (
     "Continue exactly where you left off. If you were about to call a tool, "
@@ -171,7 +172,7 @@ _TRUNCATED_TEXT_AND_TOOL_CALL_NUDGE = (
     f"{_TRUNCATED_CONTINUE_NUDGE} {_TRUNCATED_TOOL_CALL_TAIL}"
 )
 _TRUNCATED_SILENT_NUDGE = (
-    "SYSTEM: Your previous response spent its entire output-token budget before "
+    f"{ANTON_NOTE} Your previous response spent its entire output-token budget before "
     "producing any visible text or tool call — the user saw nothing. Respond again, "
     "and lead with the answer or the tool call immediately; keep deliberation brief. "
     "If the output you are building is large, produce it in smaller parts."
@@ -849,6 +850,8 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+# How anton's notes open. "SYSTEM:" stays for histories saved before the notes were labelled.
+_NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 
 # Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
 _NO_GUESS_AT_LIMIT = (
@@ -1202,7 +1205,7 @@ def _render_verify_transcript(
     ``max_tool`` tool events, merged back into chronological order. Speaker is
     taken from the message role (list-based *user* content — images/files — is
     labelled USER, not ASSISTANT); multimodal blocks are rendered block-by-block
-    (text kept, images as a placeholder, never raw base64); internal ``SYSTEM:``
+    (text kept, images as a placeholder, never raw base64); anton's internal notes (``_NOTE_PREFIXES``)
     injections are dropped before budgeting so they don't consume slots. Keeps
     the call cheap and free of tool_use/tool_result pairing constraints
     (ENG-716).
@@ -1243,7 +1246,7 @@ def _render_verify_transcript(
         speaker = "USER" if role == "user" else "ASSISTANT"
         if isinstance(content, str):
             text = content.strip()
-            if not text or (role == "user" and text.startswith(("SYSTEM:", _CHECK_NOTE))):
+            if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
                 continue
             convo.append((i, speaker, text))
         elif isinstance(content, list):
@@ -2108,7 +2111,7 @@ class ChatSession:
 
         if streak >= self._max_consecutive_errors:
             result_text += (
-                f"\n\nSYSTEM: The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
+                f"\n\n{ANTON_NOTE} The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
                 "in a row. Stop retrying this approach. Either try a completely different "
                 "strategy or tell the user what's going wrong so they can help."
             )
@@ -4247,7 +4250,7 @@ class ChatSession:
         """
         spent = self._turn_cost.total_tokens if self._turn_cost is not None else 0
         return (
-            f"SYSTEM: This turn has used {spent:,} tokens, which is a large amount "
+            f"{ANTON_NOTE} This turn has used {spent:,} tokens, which is a large amount "
             "of work for a single request and counts against the user's plan. "
             "Pause here. Summarize what you have accomplished so far and what "
             "remains. Be straightforward that this has already taken a lot of "
@@ -4725,7 +4728,7 @@ class ChatSession:
         # A dropped hand-back leaves anton's own note last; the reply is the one before it.
         tail = list(self._history)
         while tail and tail[-1].get("role") == "user" and isinstance(tail[-1].get("content"), str) \
-                and tail[-1]["content"].strip().startswith(("SYSTEM:", _CHECK_NOTE)):
+                and tail[-1]["content"].strip().startswith(_NOTE_PREFIXES):
             tail.pop()
         last = tail[-1] if tail else None
         if not isinstance(last, dict) or last.get("role") != "assistant":
@@ -5240,13 +5243,13 @@ class ChatSession:
                         # just note it was transient and continue as planned (ENG-673).
                         if isinstance(_agent_exc, TransientProviderError):
                             recovery_note = (
-                                f"SYSTEM: A temporary provider error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} A temporary provider error interrupted execution: {_agent_exc}\n\n"
                                 "This was a transient service issue, not a problem with your approach — "
                                 "continue the task as planned."
                             )
                         else:
                             recovery_note = (
-                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} An error interrupted execution: {_agent_exc}\n\n"
                                 "If you can diagnose and fix the issue, continue working on the task. "
                                 "Adjust your approach to avoid the same error. "
                                 "If this is unrecoverable, summarize what you accomplished and suggest next steps."
@@ -5359,7 +5362,7 @@ class ChatSession:
                             {
                                 "role": "user",
                                 "content": (
-                                    f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
+                                    f"{ANTON_NOTE} The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
                                     "Stop retrying. Please:\n"
                                     "1. Summarize what you accomplished so far.\n"
                                     "2. Explain what went wrong in plain language.\n"
@@ -5789,7 +5792,7 @@ class ChatSession:
                         {
                             "role": "user",
                             "content": (
-                                f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
+                                f"{ANTON_NOTE} You have used {effective_round_cap} tool-call rounds on this turn. "
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
@@ -6482,7 +6485,7 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: You have attempted to complete this task multiple times "
+                            f"{_CHECK_NOTE} You have attempted to complete this task multiple times "
                             "but verification indicates it is still not done. Do NOT try again. "
                             "Instead:\n"
                             "1. Summarize exactly what was accomplished so far.\n"
