@@ -193,12 +193,12 @@ async def test_clean_exit_after_a_cancel_sends_no_reason(workspace):
     assert not any(isinstance(e, StreamTurnEnded) for e in events)
 
 
-def _verifier_failure_with_handback(workspace, handback: LLMResponse):
+def _verifier_failure_with_handback(workspace, handback: LLMResponse, handback_stream=None):
     mock_llm = _handback_verifier_failure(workspace)._llm
     plans = [
         _Iter([StreamComplete(response=_tool_call(1))]),
         _Iter([StreamTextDelta(text="the answer"), StreamComplete(response=_text("the answer"))]),
-        _Iter([StreamTextDelta(text=handback.content), StreamComplete(response=handback)]),
+        handback_stream or _Iter([StreamTextDelta(text=handback.content), StreamComplete(response=handback)]),
     ]
     mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
     return _plain(workspace, mock_llm)
@@ -226,3 +226,32 @@ async def test_unfiltered_handback_still_streams(workspace):
     shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert shown.endswith("here is what I did")
     assert session.history[-1] == {"role": "assistant", "content": "here is what I did"}
+
+
+async def test_filtered_handback_keeps_the_answer_for_turn(workspace):
+    filtered = LLMResponse(content="I'm sorry, but I cannot assist with that request.", stop_reason="content_filter")
+    session = _verifier_failure_with_handback(workspace, filtered)
+    with patch("anton.analytics.send_event"):
+        assert await session.turn("do the thing") == "the answer"
+
+
+async def test_escape_while_a_handback_is_held_stops_the_call(workspace):
+    session = None
+    reached: list[str] = []
+
+    async def _handback():
+        yield StreamTextDelta(text="first")
+        reached.append("first")
+        session.escape_watcher.cancelled.set()  # Escape between held deltas
+        yield StreamTextDelta(text="second")
+        reached.append("second")
+        yield StreamComplete(response=_text("first second"))
+        reached.append("complete")
+
+    session = _verifier_failure_with_handback(workspace, None, handback_stream=_handback())
+    session.escape_watcher = MagicMock(cancelled=asyncio.Event())
+    events, _ = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert "complete" not in reached, "the held call ran on to its end after Escape"
+    assert "first" not in shown and "second" not in shown
+    assert isinstance(events[-1], StreamTurnEnded), "the CLI needs a last event to see Escape on"

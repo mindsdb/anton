@@ -4377,18 +4377,27 @@ class ChatSession:
         # last event, after the text has streamed.
         held_text: list[StreamTextDelta] = []
         filtered = False
-        async for event in self.plan_stream_with_recovery(system=system):
-            if isinstance(event, StreamTextDelta):
-                held_text.append(event)
-                continue
-            if isinstance(event, StreamComplete):
-                diagnosis_response = event
-                filtered = event.response.stop_reason == "content_filter"
-                if not filtered:
-                    for delta in held_text:
-                        yield delta
-                held_text = []
-            yield event
+        stream = self.plan_stream_with_recovery(system=system)
+        try:
+            async for event in stream:
+                if isinstance(event, StreamTextDelta):
+                    # Held text yields no event for the CLI to see Escape on, so check here.
+                    watcher = self.escape_watcher
+                    if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
+                        log.info("%s diagnosis cancelled while held — dropped", label)
+                        return
+                    held_text.append(event)
+                    continue
+                if isinstance(event, StreamComplete):
+                    diagnosis_response = event
+                    filtered = event.response.stop_reason == "content_filter"
+                    if not filtered:
+                        for delta in held_text:
+                            yield delta
+                    held_text = []
+                yield event
+        finally:
+            await stream.aclose()
         text = (
             (diagnosis_response.response.content or "").strip()
             if diagnosis_response is not None and not filtered
@@ -4713,7 +4722,12 @@ class ChatSession:
         """
         async for _event in self.turn_stream(user_input, enable_interaction=False):
             pass
-        last = self._history[-1] if self._history else None
+        # A dropped hand-back leaves anton's own note last; the reply is the one before it.
+        tail = list(self._history)
+        while tail and tail[-1].get("role") == "user" and isinstance(tail[-1].get("content"), str) \
+                and tail[-1]["content"].strip().startswith(("SYSTEM:", _CHECK_NOTE)):
+            tail.pop()
+        last = tail[-1] if tail else None
         if not isinstance(last, dict) or last.get("role") != "assistant":
             return ""
         content = last.get("content")
