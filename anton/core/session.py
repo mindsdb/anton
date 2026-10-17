@@ -70,6 +70,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    is_stream_drop,
     provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
@@ -3353,6 +3354,27 @@ class ChatSession:
             return min(max(float(retry_after), d), max_delay)
         return d
 
+    def _attempt_limit_error(
+        self, exc: TransientProviderError, attempts: int
+    ) -> ProviderOverloadedError:
+        """The terminal for a transient that outlasted its retry count.
+
+        Keeps anton's own typed message: it already says what happened ("The
+        model provider returned 500.") and is the one detail that tells a user
+        or a support thread which failure this was. Only the attempt count is
+        new. Names the model that actually failed (planning or coding), so the
+        card's provider lookup and its BYOK-vs-managed nudge are right.
+        """
+        detail = str(exc).rstrip()
+        if detail and detail[-1] not in ".!?":
+            detail += "."
+        return ProviderOverloadedError(
+            f"{detail} It did not recover after {attempts} attempts.",
+            provider=getattr(exc, "provider", "") or "",
+            model=(getattr(exc, "model", "") or "")
+            or getattr(self._llm, "planning_model", "") or "",
+        )
+
     async def _backoff_sleep(self, delay: float) -> bool:
         """Sleep `delay` seconds, waking early if the turn is cancelled.
 
@@ -5212,6 +5234,7 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        _drop_retries = 0
         # One-time cap grace, reset once per turn_stream() call rather than in
         # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
         self._spend_ceiling_grace_used = False
@@ -5316,6 +5339,27 @@ class ChatSession:
                     # host's reconnect/update-key card.
                     if _is_provider_auth_error(_agent_exc):
                         raise
+
+                    # A connection that died after the response started. It is
+                    # counted, not timed like the incident window below: that
+                    # window is wall-clock time from the turn's first transient,
+                    # and one long stream outlasts it, so a second drop would
+                    # end the turn without a retry. Same backoff and no recovery
+                    # note, as for any provider blip.
+                    if is_stream_drop(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by a transient provider error")
+                        if _drop_retries < _max_auto_retries:
+                            delay = self._transient_backoff_delay(_drop_retries)
+                            _drop_retries += 1
+                            if await self._backoff_sleep(delay):
+                                break
+                            continue
+                        _stamp_retry_terminal(
+                            self._turn_cost, _agent_exc, "request_attempt_limit"
+                        )
+                        raise self._attempt_limit_error(
+                            _agent_exc, _drop_retries + 1
+                        ) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
@@ -5587,12 +5631,6 @@ class ChatSession:
                             _stamp_retry_terminal(
                                 self._turn_cost, _agent_exc, "request_attempt_limit"
                             )
-                            # Name the model that actually failed (planning OR
-                            # coding) so the card's provider lookup — and so the
-                            # BYOK-vs-managed nudge it picks — is right.
-                            _model = (getattr(_agent_exc, "model", "") or "") or getattr(
-                                self._llm, "planning_model", ""
-                            ) or ""
                             # NO rate-limit special case here, deliberately.
                             # A 429 reaching the COUNT path is by definition one
                             # `classify_transient` could NOT confirm was a
@@ -5610,21 +5648,8 @@ class ChatSession:
                             # rate_limited card has no interval to time-gate its
                             # Retry with. The generic branch below is honest —
                             # anton's own typed message, no claim either way.
-                            # KEEP anton's own classification in the copy. The
-                            # typed message already says what happened ("The
-                            # model provider returned 500.") and ENG-673 put it
-                            # there deliberately; replacing it with a generic
-                            # "could not be reached" would throw away the one
-                            # detail that tells a user — or a support thread —
-                            # which failure this was. Only the attempt count is
-                            # new information.
-                            _detail = str(_agent_exc).rstrip()
-                            if _detail and _detail[-1] not in ".!?":
-                                _detail += "."
-                            raise ProviderOverloadedError(
-                                f"{_detail} It did not recover after {_retry_count} attempts.",
-                                provider=getattr(_agent_exc, "provider", "") or "",
-                                model=_model,
+                            raise self._attempt_limit_error(
+                                _agent_exc, _retry_count
                             ) from _agent_exc
                         # Exhausted retries — stop and summarize for the user.
                         # Mark the terminal: the apology below is yielded as

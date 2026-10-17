@@ -22,6 +22,7 @@ from .provider import (
     ProviderAuthError,
     ProviderConnectionInfo,
     ProviderErrorBody,
+    STREAM_DROP_ERROR,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -1506,7 +1507,7 @@ class OpenAIProvider(LLMProvider):
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
-        except openai.APIConnectionError as exc:
+        except (openai.APIConnectionError, STREAM_DROP_ERROR) as exc:
             # A connection error here is retryable. If it dropped mid-stream
             # (after the 200), the SDK never retried it → the session must back
             # off and retry. If it failed during request establishment, the SDK
@@ -1927,7 +1928,7 @@ class OpenAIProvider(LLMProvider):
             raise
         except openai.APIStatusError as exc:
             _raise_for_status_error(exc, model)
-        except openai.APIConnectionError as exc:
+        except (openai.APIConnectionError, STREAM_DROP_ERROR) as exc:
             # A connection error here is retryable. Mid-stream (after the 200) was
             # never SDK-retried → session backs off; request-establishment was
             # already SDK-retried → fail fast (ENG-673).

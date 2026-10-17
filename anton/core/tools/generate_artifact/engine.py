@@ -23,14 +23,9 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-# Same alias the rest of the codebase uses since the httpx2 migration: the
-# transport errors caught below must be the ones the LLM client's own HTTP
-# stack raises, and a second httpx install would give us a different class
-# tree that silently never matches.
-import httpx2 as httpx
-
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.llm.provider import is_stream_drop
 from anton.core.llm.structured import looks_truncated
 
 from . import sub_tools
@@ -156,18 +151,6 @@ async def _drain_stream(events, on_text=None) -> "LLMResponse":
     return result
 
 
-# Mid-stream transport failures. `httpx` is not declared by anton directly but
-# is a hard requirement of both `openai` and `anthropic`, so it is always
-# installed; it is declared in pyproject alongside this use rather than relied
-# on transitively. The measured failure is RemoteProtocolError ("peer closed
-# connection without sending complete message body"); the neighbours are the
-# same class of half-open-connection death.
-_STREAM_DROP_ERRORS: tuple[type[BaseException], ...] = (
-    httpx.RemoteProtocolError,
-    httpx.ReadError,
-    httpx.ReadTimeout,
-)
-
 # Floor for the halved retry budget — below this a chunk is too small to make
 # progress and the round is wasted either way.
 _RETRY_BUDGET_FLOOR = 2048
@@ -195,8 +178,7 @@ async def _call_with_stream_retry(
     re-run. So the retry halves the budget, which halves the silence. If the
     shorter budget truncates instead, that is a strictly better outcome — the
     loop already recovers from truncation by asking for a smaller chunk, while
-    a dropped connection propagates as a raw transport error and kills the
-    whole generation.
+    a dropped connection would otherwise end the whole generation.
 
     Nothing has been executed when a drop happens: tool calls run only after
     the stream is fully drained, so a retry cannot double-apply a write.
@@ -207,7 +189,9 @@ async def _call_with_stream_retry(
             llm_call(system=system, messages=messages, tools=tools, max_tokens=budget),
             on_text,
         ), budget
-    except _STREAM_DROP_ERRORS:
+    except Exception as exc:
+        if not is_stream_drop(exc):
+            raise
         effective = budget or default_cap
         retry_budget = max(_RETRY_BUDGET_FLOOR, effective // 2) if effective else None
         logger.warning(

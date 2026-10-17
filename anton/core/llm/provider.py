@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import httpx2
+
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
 
@@ -905,6 +907,27 @@ def _loggable_transient_code(*, code: object) -> str:
 def _log_status(*, status: object) -> int | str:
     """An HTTP status for a log line: a real status code, else `unknown`."""
     return status if type(status) is int and 100 <= status <= 599 else "unknown"
+
+
+# Transport errors a stream raises while its body is read. The SDKs wrap
+# transport failures only while they open the request; once the 200 is in,
+# a dying connection surfaces as the raw httpx2 error and the SDK never
+# retried it. Providers catch it next to the SDK's own connection error.
+STREAM_DROP_ERROR = httpx2.TransportError
+
+
+def is_stream_drop(exc: BaseException) -> bool:
+    """True for a connection that died after the response started.
+
+    Providers raise ``connection_error`` for every lost connection and set
+    ``session_backoff`` only once the stream has started, so a failure to
+    connect never matches.
+    """
+    return (
+        isinstance(exc, TransientProviderError)
+        and exc.code == "connection_error"
+        and exc.session_backoff
+    )
 
 
 class ProviderOverloadedError(ConnectionError):
