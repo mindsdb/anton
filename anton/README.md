@@ -359,7 +359,7 @@ Like the Locus Coeruleus-Norepinephrine system that controls how aggressively th
 | **copilot** | Auto-save high-confidence memories, confirm ambiguous ones after the answer | Moderate NE — selective encoding |
 | **off** | Never save (still reads existing memory) | Suppressed — encoding blocked |
 
-Configure via `/setup` > Memory, or the `ANTON_MEMORY_MODE` environment variable.
+Configure via `/setup` > Memory, or the `ANTON_MEMORY_MODE` environment variable. `ANTON_MEMORY_ENABLED=false` runs the cortex in **off** whatever the mode says (`AntonSettings.effective_memory_mode`).
 
 **The encoding gate logic** (in `cortex.py`):
 ```python
@@ -550,13 +550,13 @@ For Anton, the "motor command" is a scratchpad cell. Before the cell runs, the L
 
 ### Decoupling: Hooks Live in the Dispatcher, Not the Runtime
 
-The Cerebellum operates via two observer hooks called from the scratchpad tool dispatcher (`handle_scratchpad`), NOT from the runtime backend itself:
+The Cerebellum operates via two observer hooks called from the two scratchpad exec paths, NOT from the runtime backend itself. The main agent's cells run through the inline streaming exec in `ChatSession._stream_and_handle_tools`, on every host. The `handle_scratchpad` dispatcher's exec branch runs the cells of the `generate_artifact` sub-loops. Both fire the hooks the same way:
 
 ```
-handle_scratchpad (orchestration layer)
-  ├─ build prelim Cell from tool input
+handle_scratchpad / _stream_and_handle_tools (orchestration layer)
+  ├─ preliminary_cell(...) from tool input
   ├─ FIRE pre-execute observers ──→ Cerebellum.on_pre_execute (counter)
-  ├─ pad.execute(code, ...)        (pure execution — runtime never sees observers)
+  ├─ pad.execute(...) / pad.execute_streaming(...)   (pure execution — runtime never sees observers)
   ├─ FIRE post-execute observers ─→ Cerebellum.on_post_execute (buffer if errored)
   └─ return formatted result
 ```
@@ -569,11 +569,11 @@ Most cells succeed cleanly. The Cerebellum's `on_post_execute` hook checks `cell
 
 ### Batched Per-Turn Diff
 
-When errored cells exist, they accumulate in a buffer across the turn. At end-of-turn, `_schedule_cerebellum_flush()` fires `Cerebellum.flush()` as a fire-and-forget background task. The user gets their reply immediately while the diff runs in parallel:
+When errored cells exist, they accumulate in a buffer across the turn. A cancelled turn drops its buffer (`Cerebellum.reset()`), so no later flush learns from it. At end-of-turn, `_schedule_cerebellum_flush()` fires `Cerebellum.flush()` as a fire-and-forget background task. The user gets their reply immediately while the diff runs in parallel:
 
 1. The buffered cells get formatted into a compact post-mortem prompt
 2. One LLM call via `LLMClient.generate_object_code` (the cheap coding model) returns a `_DiffPassResult` Pydantic model with extracted lessons
-3. Each lesson is wrapped as an `Engram` with `kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`, and routed through `Cortex.encode()` — the same path manual lessons and the consolidator already use
+3. Each lesson is wrapped as an `Engram` with `kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`, `confidence="medium"`, and checked against the cortex's encoding gate, the same split the consolidator makes. In autopilot it is routed through `Cortex.encode()`, the same path manual lessons and the consolidator already use. In copilot the gate holds it back, and it goes on `session._pending_memory_confirmations` for the person to confirm. The CLI asks before its next prompt; a host that never reads that queue writes nothing
 4. Future scratchpad cells see those lessons via the existing `recall_scratchpad_wisdom()` injection into the scratchpad tool description (confidence tier + recency ordered, budget-limited — not all lessons are guaranteed to survive the cut)
 
 The cerebellum is a **producer** only — it generates new lesson entries for the existing storage and retrieval pipeline. There's no parallel storage system, no separate `corrections.md` file. Whatever the consolidator and `/memorize` write to, the cerebellum also writes to.
@@ -874,13 +874,13 @@ The EpisodicMemory handles raw conversation logging and recall.
 
 | Method | Purpose |
 |---|---|
-| `on_pre_execute(cell)` | Pre-execute hook called by `handle_scratchpad`. Counter only in v1. |
+| `on_pre_execute(cell)` | Pre-execute hook called by both scratchpad exec paths. Counter only. |
 | `on_post_execute(cell)` | Post-execute hook. Cheap path skips clean cells; errored/warning cells get buffered. |
-| `flush()` | Run the batched diff pass on all buffered cells, encode lessons via Cortex, clear buffer. Fire-and-forget at end-of-turn. |
-| `reset()` | Drop the buffer without encoding (used when a turn is cancelled mid-flight). |
+| `flush()` | Run the batched diff pass on all buffered cells, encode or queue the lessons, clear buffer. Fire-and-forget at end-of-turn. |
+| `reset()` | Drop the buffer without encoding. `turn_stream` calls it when a turn is cancelled, and `_schedule_cerebellum_flush` calls it in place of a flush when automatic memory passes are off. |
 | `buffered_count` | Number of cells waiting for the next flush. |
 | `_run_diff(cells)` | Internal: send buffered cells to `generate_object_code(_DiffPassResult, ...)` and return validated lessons. |
-| `_encode_lessons(lessons)` | Internal: wrap lessons as Engrams (`kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`) and route through `Cortex.encode()`. |
+| `_encode_lessons(lessons)` | Internal: wrap lessons as Engrams (`kind="lesson"`, `topic="scratchpad"`, `source="consolidation"`), route the ones the encoding gate passes through `Cortex.encode()`, and hand the rest to `queue_for_confirmation`. |
 
 ### `acc.py` — Anterior Cingulate Cortex (turn-level)
 
@@ -995,7 +995,8 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
    → Stores cortex as self._cortex
    → Stores episodic as self._episodic
    → Initializes self._skill_store = SkillStore() (procedural memory)
-   → Initializes self._cerebellum = Cerebellum(cortex=self._cortex, llm=self._llm)
+   → Initializes self._cerebellum = Cerebellum(cortex=self._cortex, llm=self._llm,
+     queue_for_confirmation=self._queue_memory_confirmations)
    → Initializes self._scratchpad_observers = [self._cerebellum]
    → Initializes self._pending_memory_confirmations = []
 
@@ -1014,13 +1015,17 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
    → "memorize" → handle_memorize() → cortex.encode()
    → "recall" → handle_recall() → episodic.recall_formatted()
    → "recall_skill" → handle_recall_skill() → SkillStore.load() + increment_recommended()
-   → "scratchpad" exec → handle_scratchpad() fires pre/post observers around pad.execute()
+   → "scratchpad" exec → never dispatched: runs inline in _stream_and_handle_tools (see 6)
+   → other "scratchpad" actions → handle_scratchpad()
+     (its exec branch is reached from the generate_artifact sub-loops only)
 
-6. handle_scratchpad (tool_handlers.py) — observer dispatch:
-   → Build prelim Cell from tool input (code + description + estimated_time)
+6. Scratchpad exec observer dispatch, run by both handle_scratchpad (tool_handlers.py)
+   and the inline streaming exec in _stream_and_handle_tools (session.py):
+   → preliminary_cell(...) from tool input (code + description + estimated_time)
    → _fire_pre_execute(session, prelim_cell) → cerebellum.on_pre_execute (counter)
-   → pad.execute(...) — pure execution, runtime never sees observers
+   → pad.execute(...) or pad.execute_streaming(...): pure execution, runtime never sees observers
    → _fire_post_execute(session, cell) → cerebellum.on_post_execute (buffer if errored)
+     (skipped when the exec is cancelled or raises, so no cell exists)
 
 7. turn_stream():
    → Logs user input to episodic memory (before LLM call)
@@ -1033,10 +1038,13 @@ The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure tha
    → _maybe_consolidate_scratchpads() → background asyncio.create_task
 
 9. End of turn (turn / turn_stream):
+   → A cancelled turn (Stop, closed generator, or _cancel_event) → cerebellum.reset()
    → Every 5 turns → cortex.maybe_update_identity() as background task
    → _schedule_cerebellum_flush() → fire-and-forget background task
+     (drops the buffer instead when background_memory is off, there is no cortex, or memory mode is "off")
      → Runs cerebellum diff on all buffered cells
-     → Encodes extracted lessons via cortex.encode()
+     → Encodes extracted lessons via cortex.encode(), or queues them for
+       confirmation when the encoding gate holds them back (copilot)
      → Lessons appear in next turn's scratchpad tool description automatically
 
 10. Before user prompt (_chat_loop):

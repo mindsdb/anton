@@ -270,6 +270,8 @@ class TestScrubOutput:
         f'{{"access_token": "[X]{OPAQUE_TOKEN}"}}',
         f'{{"access_token": "${OPAQUE_TOKEN}"}}',
         f'{{"access_token": "{{a}}{OPAQUE_TOKEN}"}}',
+        f'{{"access_token": "{{x}} {OPAQUE_TOKEN}"}}',
+        f'{{"access_token": "[DS_A] {OPAQUE_TOKEN}"}}',
         f"'Bearer {{x}}{OPAQUE_TOKEN}'",
     ])
     def test_a_value_that_only_starts_like_a_marker_or_placeholder_is_redacted(self, text):
@@ -346,6 +348,7 @@ class TestScrubOutput:
         "the bearer tokens/credentials are sent",
         "token_type    Bearer\nrefresh_token_expires_in    7200",
         "uses Bearer token-based-authentication-scheme",
+        '"Bearer token is missing, sign in again"',
     ])
     def test_prose_short_values_and_markers_are_left_alone(self, text):
         """Prose, short values and existing scrub markers stay as they are."""
@@ -364,10 +367,161 @@ class TestScrubOutput:
         "def refresh(access_token: AccessTokenResponse) -> None:",
         "client_secret = CLIENT_SECRET_ENV_VAR",
         "    access_token=ACCESS_TOKEN_DEFAULT_NAME,",
+        """print("access_token='" + access_token[:6] + "...'")""",
+        """const body = '{"access_token": "' + accessToken + '"}'""",
+        'print("access_token: ", response.headers.get("x-request-id"))',
+        'log("client_secret=" + mask(client_secret) + " for tenant")',
+        r'body = "{\"access_token\": \"" + access_token_value + "\"}"',
+        'x = "access_token=\'" if quoted_output else "access_token="',
+        r'"{\"client_secret\": \"%s\"}" % secret_name',
+        'client_secret: "{{ .Values.oauth.clientSecret }}"',
+        'client_secret: "${{ secrets.GOOGLE_CLIENT_SECRET }}"',
+        '"access_token": "{{ access_token }}"',
+        '$url = "x?access_token=" . $accessTokenValue . "&scope=a";',
+        "local url = 'x?access_token=' .. access_token_value .. '&scope=a'",
+        "SELECT 'access_token=' || access_token_value || '&x' FROM tokens",
+        "body = b'client_secret=' + secret_bytes + b'&grant_type=client_credentials'",
+        "url = f'https://x?access_token=' + access_token_value + '&scope=a'",
+        'if "access_token=" in response_body:',
+        'if "access_token=" not in body and "client_secret=" in other_body:',
     ])
     def test_source_code_the_model_reads_is_left_alone(self, line):
         """Code the model reads and may write back is never rewritten."""
         assert scrub_output(line) == line
+
+    @pytest.mark.parametrize("value", [
+        "abc'defGhIjKlMnOpQr",
+        "abc defGhIjKlMnOpQrStu",
+        'abc"defGhIjKlMnOpQrStu',
+        "abc\\defGhIjKlMnOpQrStu",
+    ], ids=["apostrophe", "space", "quote", "backslash"])
+    @pytest.mark.parametrize("encode", [
+        json.dumps,
+        str,
+        lambda body: json.dumps({"stdout": json.dumps(body)}),
+        lambda body: repr(json.dumps(body)),
+        lambda body: repr(json.dumps(body).encode()),
+        lambda body: repr(str(body)),
+    ], ids=["json", "dict-repr", "json-in-json", "repr-of-json", "bytes-repr-of-json", "repr-of-dict-repr"])
+    def test_a_quoted_value_is_redacted_up_to_its_closing_quote(self, encode, value):
+        """A value is a literal up to its real closing quote, whatever it holds,
+        however many times its encoder escaped it."""
+        result = scrub_output(encode({"client_secret": value, "expires_in": 3600}))
+
+        for start in range(len(value) - 7):
+            piece = value[start : start + 8]
+            if piece.isalnum():
+                assert piece not in result
+        assert "client_secret" in result
+        assert "[REDACTED_TOKEN]" in result
+        assert "expires_in" in result and "3600" in result
+
+    @pytest.mark.parametrize("text", [
+        """client_secret='abc def\\'GhIjKlMnOpQr'""",
+        'access_token="abc\\"defGhIjKlMnOpQrStu"',
+        'access_token="abc defGhIjKlMnOpQrStu"',
+    ], ids=["single-quoted", "double-quoted", "space"])
+    def test_a_quoted_value_in_key_value_form_is_redacted_whole(self, text):
+        """The .env and shell form escapes its quote with a backslash."""
+        result = scrub_output(text)
+        assert "GhIjKlMn" not in result
+        assert result.endswith("[REDACTED_TOKEN]" + text[-1])
+
+    @pytest.mark.parametrize("value", ["abc'defGhIjKlMnOpQr", "abc defGhIjKlMnOpQrStu", 'abc"defGhIjKlMnOpQrStu'])
+    def test_a_value_with_a_quote_or_space_cut_off_before_its_closing_quote_is_redacted(self, value):
+        """Clipped output ends mid-value; the value is redacted to the end."""
+        result = scrub_output(json.dumps({"client_secret": value})[:-2])
+        assert "GhIjKlMn" not in result
+        assert result.endswith("[REDACTED_TOKEN]")
+
+    @pytest.mark.parametrize("text", [
+        """{"client_secret":"abc'defGhIjKlMnOpQr"}""",
+        '{"access_token":"abc defGhIjKlMnOpQrStu"}',
+        '{"access_token":"abc\\"defGhIjKlMnOpQrStu"}',
+    ], ids=["apostrophe", "space", "quote"])
+    def test_the_reported_examples_are_redacted_as_written(self, text):
+        """Compact JSON, exactly as the report printed it."""
+        assert scrub_output(text) == text.split(":")[0] + ':"[REDACTED_TOKEN]"}'
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        ("""{"client_secret":"abc',defGhIjKlMnOpQrStu"}""", '{"client_secret":"[REDACTED_TOKEN]"}'),
+        ('{"client_secret":"+ AbCdEfGhIjKlMnOpQrSt"}', '{"client_secret":"[REDACTED_TOKEN]"}'),
+        ('client_secret="+ AbCdEfGhIjKlMnOpQrSt"', 'client_secret="[REDACTED_TOKEN]"'),
+        (
+            """It's here: {"client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """It's here: {"client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            """users' tokens: {"client_secret":"abc', defGhIjKlMnOpQrStu"}""",
+            """users' tokens: {"client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            """Plan B's tokens: {"client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """Plan B's tokens: {"client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            """{"msg":"rock 'n roll","client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """{"msg":"rock 'n roll","client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            """{"msg":"90's","client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """{"msg":"90's","client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
+            repr({"note": "users' data", "client_secret": "abc', defGhIjKlMnOpQrStu"}),
+            """{'note': "users' data", 'client_secret': "[REDACTED_TOKEN]"}""",
+        ),
+    ], ids=[
+        "quote-and-comma", "leading-plus", "key-value-leading-plus", "after-prose-apostrophe",
+        "after-plural-possessive", "after-capital-letter-possessive", "apostrophe-in-earlier-value", "digit-apostrophe-in-earlier-value",
+        "apostrophe-in-earlier-repr-value",
+    ])
+    def test_a_value_holding_code_operators_is_redacted_whole(self, text, expected):
+        """Quotes and operators inside a literal the key opened are part of the value, not code."""
+        assert scrub_output(text) == expected
+
+    def test_a_value_after_one_that_ran_past_its_end_is_still_redacted(self):
+        """A value ending in a backslash runs into the next key; what follows on the line is data."""
+        text = json.dumps({"client_secret": "AbCdEfGhIjKlMnOp\\", "access_token": "+ defGhIjKlMnOpQrStu"})
+        result = scrub_output(text)
+        assert "AbCdEfGh" not in result
+        assert "GhIjKlMn" not in result
+
+    def test_a_value_nested_five_json_levels_deep_is_redacted(self):
+        """Thirty-one backslashes before the quote is five levels of JSON in JSON."""
+        text = {"access_token": "abc defGhIjKlMnOpQrStuVw"}
+        for _ in range(5):
+            text = json.dumps(text)
+        result = scrub_output(text)
+        assert "GhIjKlMn" not in result
+        assert "[REDACTED_TOKEN]" in result
+
+    @pytest.mark.parametrize("closing", ['"', ""], ids=["closed", "cut-off"])
+    @pytest.mark.parametrize("tail", ["", " tailGhIjKlMnOpQrStu", '\\"tailGhIjKlMnOpQrStu'], ids=["none", "space", "escaped-quote"])
+    def test_a_value_longer_than_the_scan_is_redacted_whole(self, closing, tail):
+        """Past the scan limit, the rest of a long value is still redacted."""
+        result = scrub_output('"access_token": "' + "A" * 20_000 + tail + closing)
+        assert "AAAAAAAA" not in result
+        assert "GhIjKlMn" not in result
+        assert result.startswith('"access_token": "[REDACTED_TOKEN]')
+
+    def test_a_value_ending_in_a_backslash_leaves_nothing_of_it(self):
+        """JSON's escaped trailing backslash reads like a bytes repr's escaped
+        quote; the scrub takes the reading that cannot leak, so the separator
+        after the value may go with it."""
+        result = scrub_output(json.dumps({"client_secret": "AbCdEfGhIjKlMnOp\\", "expires_in": 3600}))
+        assert "AbCdEfGh" not in result
+        assert result.startswith('{"client_secret": "[REDACTED_TOKEN]')
+
+    def test_a_value_nested_two_escapes_deep_is_redacted(self):
+        """The repr of a cell result escapes the inner quotes twice."""
+        text = repr(json.dumps({"stdout": json.dumps({"access_token": OPAQUE_TOKEN})}))
+        assert OPAQUE_TOKEN not in scrub_output(text)
+
+    def test_a_value_starting_with_a_plus_is_still_a_value(self):
+        """Standard base64 can start with `+`; only `+ ` reads as code."""
+        result = scrub_output('{"client_secret": "+AbCd EfGhIjKlMnOpQrSt"}')
+        assert result == '{"client_secret": "[REDACTED_TOKEN]"}'
 
     def test_marker_is_one_the_connect_flow_refuses_to_save(self):
         """An echoed marker is never saved as a real credential."""

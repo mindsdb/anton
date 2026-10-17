@@ -229,6 +229,12 @@ class AntonSettings(CoreSettings):
     _workspace: Path = PrivateAttr(default=None)
 
     @property
+    def effective_memory_mode(self) -> str:
+        """The mode the cortex runs in: `memory_mode`, or "off" when
+        `memory_enabled` is false, so a disabled memory writes nothing."""
+        return self.memory_mode if self.memory_enabled else "off"
+
+    @property
     def workspace_path(self) -> Path:
         """Return the resolved workspace root (parent of .anton/)."""
         if self._workspace is not None:

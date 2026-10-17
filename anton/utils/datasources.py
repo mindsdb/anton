@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -220,15 +221,34 @@ _TOKEN_KEY = (
     r"(?<![A-Za-z0-9])"
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
-# A quoted value after a token key or `Bearer` is a string literal, so it is
-# redacted whatever its characters; only a placeholder or a marker is kept.
-# No closing quote is required: clipped output can end mid-value.
-_QUOTED_TOKEN_VALUE_PATTERN = re.compile(
-    r"(" + _TOKEN_KEY + r"\\?[\"']?\s*[:=]\s*\\?[\"']"
-    r"|\\?[\"'](?i:bearer)[ \t]+)"
+# A quoted value with no quote, backslash or space, unless it is a whole marker; for
+# Bearer values and code-like token values. Clipped output may lack the closing quote.
+_NARROW_QUOTED_VALUE = (
     r"(?!(?:\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\])(?![^\"'\\\s]))"
     r"(?:[^\"'\\\s]|\\/|\\u[0-9a-fA-F]{4}){16,}"
 )
+# A Bearer value cannot hold a space or a quote, so prose after `"Bearer ` stays.
+_QUOTED_BEARER_VALUE_PATTERN = re.compile(r"(\\?[\"'](?i:bearer)[ \t]+)" + _NARROW_QUOTED_VALUE)
+_NARROW_QUOTED_VALUE_PATTERN = re.compile(_NARROW_QUOTED_VALUE)
+# Group 1 is the backslashes before the value's quote, which its closing quote
+# repeats; 31 covers five levels of JSON in JSON.
+_QUOTED_TOKEN_OPENER_PATTERN = re.compile(_TOKEN_KEY + r"\\*[\"']?\s*[:=]\s*(\\{0,31})([\"'])")
+# Scanned length of one value; longer than any token or secret a cell prints.
+_QUOTED_VALUE_SCAN_MAX = 16_384
+# A template expression (Helm, Jinja, GitHub Actions) is a whole marker too.
+_WHOLE_MARKER_PATTERN = re.compile(
+    r"\$?\{[^\"'\\\s{}]*\}|\[[A-Z][A-Z0-9_]*\]|\$?\{\{[^{}\r\n]*\}\}"
+)
+# PHP, Lua and SQL join strings with ` . `, ` .. ` and ` || `.
+_CODE_OPERATOR_AFTER = re.compile(r"\s*(?:[+,()%]|(?:if|else|or|and)\b)|\s+(?:\.\.?|\|\|)\s")
+_CODE_OPERATOR_BEFORE = re.compile(r"(?:[+,()%]|\b(?:if|else|or|and))\s*$|\s(?:\.\.?|\|\|)\s*$")
+_CODE_OPERATOR_BEFORE_WINDOW = 64
+_CODE_LEADING_OPERATOR = re.compile(r"\s*(?:[+,)]|\.\.?|\|\||[=!]=|(?:not\s+)?in|is)(?:\s|$)")
+_QUOTE_OR_LINE_BREAK_PATTERN = re.compile(r"(?<!\\)(\\*)([\"'])|[\r\n]")
+_LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
+_WORD_BEFORE_PATTERN = re.compile(r"[A-Za-z0-9]+$")
+# Lowercase Python string prefixes; `b'`, `f'` and `rb'` open a literal, not prose.
+_STRING_PREFIXES = frozenset({"b", "r", "u", "f", "rb", "br", "fr", "rf"})
 # Unquoted values can be source code the model reads and may write back: after a
 # key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
 # type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
@@ -429,6 +449,151 @@ def exact_secret_suffix_at_start(text: str) -> int:
     return longest
 
 
+@functools.cache
+def _value_end_pattern(quote: str, depth: int) -> re.Pattern[str]:
+    """Return the pattern for what ends a value opened by `quote` after `depth` backslashes.
+
+    That is the same quote after exactly `depth` backslashes, or a line break
+    for a value cut off early.
+    """
+    return re.compile(r"(?<!\\)\\{%d}%s|[\r\n]" % (depth, quote))
+
+
+class _OpenLiterals:
+    """Track which string literal is open at each escape depth on the current line.
+
+    A quote opens a literal at its depth, and only the same kind of quote
+    closes it; the other kind inside is content. After a redacted value the
+    rest of its line reads as data, since a value that ran past its real
+    end leaves the state wrong. A line break resets both.
+    """
+
+    def __init__(self, text: str) -> None:
+        """Start at the beginning of `text` with no literal open."""
+        self.text = text
+        self.position = 0
+        self.open: dict[int, str] = {}
+        self.trusted = True
+
+    def advance(self, end: int) -> None:
+        """Count every quote and line break from the current position up to `end`."""
+        for found in _QUOTE_OR_LINE_BREAK_PATTERN.finditer(self.text, self.position, end):
+            quote, depth = found.group(2), len(found.group(1) or "")
+            if quote is None:
+                self.open.clear()
+                self.trusted = True
+            elif depth in self.open:
+                if self.open[depth] == quote:
+                    del self.open[depth]
+            elif not _is_apostrophe(self.text, found):
+                self.open[depth] = quote
+        self.position = max(self.position, end)
+
+    def is_open(self, quote: str, depth: int) -> bool:
+        """Return whether a `quote` literal at `depth` is open and the line can still be read as code."""
+        return self.trusted and self.open.get(depth) == quote
+
+    def skip_redacted(self, end: int) -> None:
+        """Pass over a redacted value; the rest of its line is data."""
+        self.trusted = False
+        self.position = end
+
+
+def _is_apostrophe(text: str, found: re.Match[str]) -> bool:
+    """Return whether a matched `'` is prose, as in `it's`, `90's` or `users'`, and so opens no literal.
+
+    A lowercase string prefix right before it (`b'`, `f'`, `rb'`) opens a
+    literal. Otherwise a word right before it of three or more characters,
+    or a letter right after it, marks prose.
+    """
+    if found.group(2) != "'" or found.group(1):
+        return False
+    word = _WORD_BEFORE_PATTERN.search(text, max(0, found.start() - 3), found.start())
+    if word is None or word.group() in _STRING_PREFIXES:
+        return False
+    return len(word.group()) >= 3 or (found.end() < len(text) and text[found.end()].isalpha())
+
+
+def _quoted_value_end(text: str, start: int, quote: str, depth: int) -> int:
+    """Return where a quoted value starting at `start` ends.
+
+    It ends at the first `quote` preceded by exactly `depth` backslashes, the
+    escaping its opening quote had; a quote with more backslashes is part of
+    the value. A line break or the end of `text` ends a value cut off early.
+    A value with no end within `_QUOTED_VALUE_SCAN_MAX` runs to the end of
+    its line, so nothing past the scan is shown.
+    """
+    limit = min(len(text), start + _QUOTED_VALUE_SCAN_MAX)
+    found = _value_end_pattern(quote, depth).search(text, start, limit)
+    if found:
+        return found.start()
+    line_break = _LINE_BREAK_PATTERN.search(text, limit)
+    return line_break.start() if line_break else len(text)
+
+
+def _looks_like_code(
+    text: str, start: int, end: int, quote: str, depth: int, literals: _OpenLiterals
+) -> bool:
+    """Return whether `text[start:end]`, a quoted value, is really code between two string literals.
+
+    Only a quote that closes a literal opened before the key is a code
+    boundary: the opening quote itself, when an operator follows it, or a
+    quote inside the value next to an operator. Inside a literal the key
+    opened, every quote and operator is part of the value.
+    """
+    if literals.is_open(quote, depth) and _CODE_LEADING_OPERATOR.match(text, start, end):
+        return True
+    other = "'" if quote == '"' else '"'
+    for boundary in _QUOTE_OR_LINE_BREAK_PATTERN.finditer(text, start, end):
+        boundary_quote, boundary_depth = boundary.group(2), len(boundary.group(1))
+        if not (
+            (boundary_quote == other and boundary_depth == depth)
+            or (boundary_quote == quote and boundary_depth < depth)
+        ):
+            continue
+        if not literals.is_open(boundary_quote, boundary_depth):
+            continue
+        if _CODE_OPERATOR_AFTER.match(text, boundary.end(), end):
+            return True
+        window_start = max(start, boundary.start() - _CODE_OPERATOR_BEFORE_WINDOW)
+        if _CODE_OPERATOR_BEFORE.search(text, window_start, boundary.start()):
+            return True
+    return False
+
+
+def _redact_quoted_token_values(text: str) -> str:
+    """Redact each quoted value after a token key, up to its real closing quote.
+
+    The value may hold quotes, spaces and escapes at any nesting depth. A
+    value that looks like code falls back to the narrow grammar, so source
+    lines read as written. Returns `text` with each redacted value replaced.
+    """
+    parts: list[str] = []
+    position = 0
+    literals = _OpenLiterals(text)
+    for opener in _QUOTED_TOKEN_OPENER_PATTERN.finditer(text):
+        if opener.start() < position:
+            continue
+        literals.advance(opener.start(1))
+        start = opener.end()
+        depth, quote = len(opener.group(1)), opener.group(2)
+        end = _quoted_value_end(text, start, quote, depth)
+        scanned_whole = end - start < _QUOTED_VALUE_SCAN_MAX
+        if scanned_whole and _looks_like_code(text, start, end, quote, depth, literals):
+            narrow = _NARROW_QUOTED_VALUE_PATTERN.match(text, start)
+            if narrow is None:
+                continue
+            end = narrow.end()
+        elif end - start < 16 or _WHOLE_MARKER_PATTERN.fullmatch(text, start, end):
+            continue
+        parts.append(text[position:start])
+        parts.append("[REDACTED_TOKEN]")
+        literals.skip_redacted(end)
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
+
+
 def scrub_output(text: str) -> str:
     """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
 
@@ -440,7 +605,8 @@ def scrub_output(text: str) -> str:
     """
     text = scrub_credentials(text)
     text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
-    text = _QUOTED_TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    text = _redact_quoted_token_values(text)
+    text = _QUOTED_BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
     return _TOKEN_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
 
 

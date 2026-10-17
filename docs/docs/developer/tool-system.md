@@ -130,8 +130,11 @@ Details that matter:
 - **Round cap**: the loop runs until the LLM returns a text-only response or
   the tool-round cap is exhausted (which emits `cap_exhausted` and forces a
   wrap-up).
-- **Observer firing**: only `handle_scratchpad` fires the pre/post-execute
-  scratchpad observers; other tools have no observer surface.
+- **Observer firing**: a scratchpad exec fires the pre/post-execute scratchpad
+  observers on both exec paths: the inline streaming exec in
+  `ChatSession._stream_and_handle_tools`, which every host's main agent takes,
+  and `handle_scratchpad`, which serves the generate_artifact sub-loops. Other
+  tools have no observer surface.
 
 ## Adding your own
 

@@ -11,6 +11,7 @@ which is the model's own text and is not scrubbed.
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -158,6 +159,28 @@ async def test_a_printed_saved_secret_shows_its_placeholder_in_the_stream(tmp_pa
         assert _SAVED_PASSWORD not in copy
     assert "connecting with [DS_POSTGRES_PROD__PASSWORD]" in results[0]
     assert "connecting with [DS_POSTGRES_PROD__PASSWORD]" in recorded[-1].stdout
+
+
+@pytest.mark.parametrize("secret_expression", [
+    "'abc' + chr(39) + 'def' + 'Gh' + 'Ij' + 'Kl' + 'Mn' + 'OpQr'",
+    "'abc' + chr(39) + ',def' + 'Gh' + 'Ij' + 'Kl' + 'Mn' + 'OpQrStu'",
+    "'+ AbCdEf' + 'Gh' + 'Ij' + 'Kl' + 'Mn' + 'OpQrSt'",
+], ids=["apostrophe", "quote-and-comma", "leading-plus"])
+async def test_a_printed_secret_holding_an_apostrophe_is_redacted_whole(tmp_path, secret_expression):
+    """A client secret can hold a quote or an operator; the printed response still loses all of it."""
+    out = await _run_one_cell_turn(
+        tmp_path,
+        "import json\n"
+        f"secret = {secret_expression}\n"
+        "print(json.dumps({'client_secret': secret, 'expires_in': 3600}))\n",
+    )
+
+    results, recorded = out["results"], out["recorded"]
+    assert results, "no tool result was streamed"
+    for copy in [*results, out["next_model_input"], out["episodes"], out["notebook"], recorded[-1].stdout]:
+        assert "GhIjKlMn" not in copy
+    assert json.loads(results[0])["stdout"] == '{"client_secret": "[REDACTED_TOKEN]", "expires_in": 3600}\n'
+    assert recorded[-1].stdout == '{"client_secret": "[REDACTED_TOKEN]", "expires_in": 3600}\n'
 
 
 async def _print_saved_secret(tmp_path, secret: str, printed: str):
