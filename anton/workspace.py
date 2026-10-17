@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from anton.config.settings import AntonSettings
-from anton.utils.nofollow import create_text_nofollow, make_dirs_nofollow
+from anton.utils.nofollow import create_text_nofollow, make_dirs_nofollow, read_text_nofollow
 
 ANTON_MD_TEMPLATE = """\
 # Anton Workspace
@@ -77,6 +77,8 @@ class Workspace:
         self._anton_md = self._anton_dir / "anton.md"
         self._env_file = self._anton_dir / ".env"
         self._anton_md_last_read: datetime | None = None
+        # Set by initialize(refuse_links=True): the reads below refuse a link too.
+        self._refuse_links = False
 
         # Reuse a caller's settings so the cloud pod's dotenv-disabled
         # AntonSettings isn't bypassed by a second one built here. Only
@@ -149,9 +151,13 @@ class Workspace:
         where that code can write the workspace: ``.anton`` and
         ``.anton/memory`` must not be links, and ``anton.md`` and ``.env`` are
         created only where nothing, not even a dangling link, holds the name.
-        The default follows links, as the desktop, the CLI and the cloud pod
-        always have.
+        From then on ``read_anton_md`` and ``load_env`` raise OSError when
+        either file is a link, a hard link or not a regular file, or
+        ``.anton`` is a link. The default follows links, as the desktop, the
+        CLI and the cloud pod always have.
         """
+        if refuse_links:
+            self._refuse_links = True
         try:
             return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links)
         except OSError as exc:
@@ -222,11 +228,26 @@ class Workspace:
 
     # ── anton.md reading ─────────────────────────────────────────
 
+    def _read_own_file(self, path: Path) -> str | None:
+        """``path``'s text, or None when it doesn't exist.
+
+        After ``initialize(refuse_links=True)``, a link at the file or at
+        ``.anton``, a hard link, or anything but a regular file raises
+        OSError: a host that runs unlocked would otherwise read another
+        person's file through a link left in the project.
+        """
+        if not self._refuse_links:
+            if not path.is_file():
+                return None
+            return path.read_text(encoding="utf-8")
+        try:
+            return read_text_nofollow(self._base, path)
+        except FileNotFoundError:
+            return None
+
     def read_anton_md(self) -> str | None:
         """Read anton.md content. Returns None if it doesn't exist."""
-        if not self._anton_md.is_file():
-            return None
-        return self._anton_md.read_text(encoding="utf-8")
+        return self._read_own_file(self._anton_md)
 
     def anton_md_modified_since_last_read(self) -> bool:
         """Check if anton.md has been modified since last read_anton_md_tracked()."""
@@ -261,9 +282,10 @@ class Workspace:
     def load_env(self) -> dict[str, str]:
         """Load all variables from .anton/.env. Returns key=value dict."""
         result: dict[str, str] = {}
-        if not self._env_file.is_file():
+        text = self._read_own_file(self._env_file)
+        if text is None:
             return result
-        for line in self._env_file.read_text(encoding="utf-8").splitlines():
+        for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue

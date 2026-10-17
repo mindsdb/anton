@@ -12,11 +12,12 @@ import asyncio
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from anton.core.artifacts import html_lint
 from anton.core.artifacts.html_lint import lint_html, lint_url
-from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of, refusal_from
+from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbox_of
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
 
@@ -369,7 +370,7 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path) -> VerifyResult | None:
+def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> VerifyResult | None:
     """Load the written page once in a headless browser (`html_lint`).
 
     The class of defects the text checks above cannot see: a script that
@@ -392,15 +393,16 @@ def verify_frontend_live(entry: Path) -> VerifyResult | None:
     page gets the same check from `verify_app_live`, through its running
     backend, after `run_app`. The path is resolved here as well as in
     `lint_html`: Electron's `loadFile` reads a relative path against its own
-    app directory, not the cwd.
+    app directory, not the cwd. Under a sandbox policy it returns `None`
+    without starting the browser.
     """
-    findings = lint_html(entry.resolve())
+    findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:
         return None
     return _browser_verdict(findings, served=False)
 
 
-def verify_app_live(url: str) -> VerifyResult | None:
+def verify_app_live(url: str, *, cell_sandbox: CellSandbox | None) -> VerifyResult | None:
     """Load the fullstack page from its running backend in a headless browser.
 
     The counterpart of `verify_frontend_live` for `static/index.html`: served
@@ -408,9 +410,10 @@ def verify_app_live(url: str) -> VerifyResult | None:
     fetches resolve, so a console error is the page's own. A 4xx/5xx from the
     origin — an asset missing from `static/`, a `fetch()` to a route the
     backend does not serve — is reported as a failed request. Same `None`
-    contract as the file-based check (no browser, timeout, garbage output).
+    contract as the file-based check (no browser, timeout, garbage output,
+    a sandbox policy).
     """
-    findings = lint_url(url)
+    findings = lint_url(url, cell_sandbox=cell_sandbox)
     if findings is None:
         return None
     return _browser_verdict(findings, served=True)
@@ -800,48 +803,68 @@ print(json.dumps(result))
 _COMPILE_TIMEOUT = 30.0
 
 
+@dataclass
+class _Check:
+    """One running verifier check, and its launch when it runs under a sandbox policy."""
+
+    proc: asyncio.subprocess.Process
+    launch: SandboxedSpawn | None = None
+
+
 async def _spawn_check(
     *,
     policy: CellSandbox | None,
     argv: list[str],
     cwd: Path,
     env: dict[str, str] | None,
-) -> asyncio.subprocess.Process:
+) -> _Check:
     """Start one verifier check, through the sandbox launcher when the pool has a policy.
 
     With no policy the call is the verifier's original one: no `env` keyword
     when `env` is None, so the child inherits the server's environment.
     """
     if policy is None:
-        return await asyncio.create_subprocess_exec(
+        return _Check(await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             **({} if env is None else {"env": env}),
-        )
+        ))
     launch = policy.launch(argv, env=policy.child_env(env or {}))
     try:
-        return await asyncio.create_subprocess_exec(
+        proc = await asyncio.create_subprocess_exec(
             *launch.argv,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=launch.env,
             pass_fds=launch.pass_fds,
         )
+    except BaseException:
+        launch.refusal()
+        raise
     finally:
         launch.close()
+    return _Check(proc, launch)
 
 
-async def _finish_check(
-    proc: asyncio.subprocess.Process, *, timeout: float | None
-) -> tuple[bytes, bytes] | None:
-    """The check's output, or None after killing it at `timeout` (None waits unbounded)."""
+async def _finish_check(check: _Check, *, timeout: float | None) -> tuple[bytes, bytes] | None:
+    """The check's output, or None after killing it at `timeout` (None waits unbounded).
+
+    Under a sandbox policy, raises the launcher's refusal, read from its
+    refusal pipe: the check's own exit code and stderr are agent code's.
+    """
+    proc = check.proc
     try:
-        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        return None
+        output = None
+    finally:
+        refusal = check.launch.refusal() if check.launch is not None else None
+    if refusal is not None:
+        raise refusal
+    return output
 
 
 def _sandboxed_check_env(ds_env: dict[str, str] | None) -> dict[str, str]:
@@ -913,15 +936,13 @@ async def verify_backend(
         if policy is None
         else [venv_python, "-P", "-m", "py_compile", "backend.py"]
     )
-    proc = await _spawn_check(policy=policy, argv=compile_argv, cwd=artifact_path, env=None)
-    finished = await _finish_check(proc, timeout=_COMPILE_TIMEOUT if policy is not None else None)
+    check = await _spawn_check(policy=policy, argv=compile_argv, cwd=artifact_path, env=None)
+    finished = await _finish_check(check, timeout=_COMPILE_TIMEOUT if policy is not None else None)
     if finished is None:
         return VerifyResult(errors=[f"backend.py compile timed out after {_COMPILE_TIMEOUT:.0f}s."]), \
             _ds_keys(source)
     _, cerr = finished
-    if policy is not None and (refusal := refusal_from(proc.returncode, cerr)) is not None:
-        raise refusal
-    if proc.returncode != 0:
+    if check.proc.returncode != 0:
         return VerifyResult(errors=[f"backend.py failed to compile:\n{cerr.decode(errors='replace')}"]), \
             _ds_keys(source)
 
@@ -929,19 +950,17 @@ async def verify_backend(
     # `build_backend_env` puts `anton_state` on PYTHONPATH exactly like the
     # launcher does for the real backend process — without it a correct
     # stateful backend fails right here on its own SDK import.
-    proc = await _spawn_check(
+    check = await _spawn_check(
         policy=policy,
         argv=[venv_python, "-c", _INTROSPECT_SCRIPT],
         cwd=artifact_path,
         env=build_backend_env(None) if policy is None else _sandboxed_check_env(ds_env),
     )
-    finished = await _finish_check(proc, timeout=import_timeout)
+    finished = await _finish_check(check, timeout=import_timeout)
     if finished is None:
         return VerifyResult(errors=[f"backend.py import timed out after {import_timeout}s."]), \
             _ds_keys(source)
     out, err = finished
-    if policy is not None and (refusal := refusal_from(proc.returncode, err)) is not None:
-        raise refusal
 
     line = (out.decode(errors="replace").strip().splitlines() or [""])[-1]
     try:

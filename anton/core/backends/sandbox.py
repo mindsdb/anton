@@ -18,8 +18,10 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -57,7 +59,9 @@ _READ = ("read_file", "read_dir")
 _READ_EXEC = ("execute", "read_file", "read_dir")
 _WRITE = ("write_file", "remove_dir", "remove_file", "make_dir", "make_reg", "truncate")
 _PROJECT_RIGHTS = _READ_EXEC + _WRITE + ("refer",)
-_HOME_RIGHTS = _READ + _WRITE + ("refer",)
+# Execute as in the project, so a file renamed between HOME, TMPDIR and the
+# project keeps its rights, and a tool a build or a cache puts there runs.
+_HOME_RIGHTS = _READ_EXEC + _WRITE + ("refer",)
 # multiprocessing.Manager binds its listener socket under TMPDIR.
 _TMP_RIGHTS = _HOME_RIGHTS + ("make_sock",)
 _SHARED_RIGHTS = _READ + _WRITE
@@ -72,7 +76,13 @@ _SYSTEM_READ_FILES = (
     "/etc/localtime", "/etc/ld.so.cache", "/etc/debian_version", "/etc/os-release",
     "/etc/lsb-release",
 )
-_CA_BUNDLE_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "PIP_CERT")
+# The host's certificate settings the cell inherits, each granted read: a
+# bundle file, or the folder SSL_CERT_DIR names.
+_CA_FILE_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "CURL_CA_BUNDLE")
+_CA_DIR_VARS = ("SSL_CERT_DIR",)
+# Each (variable, value) that got no read rule and was already logged. The
+# rules are built on every spawn, so one bad setting is logged once per process.
+_LOGGED_CA_PROBLEMS: set[tuple[str, str]] = set()
 _DEVICE_RULES = (
     ("/dev/null", ("read_file", "write_file")),
     ("/dev/zero", ("read_file", "write_file")),
@@ -100,7 +110,8 @@ _ENV_NEVER_PREFIXES = ("COWORK_", "LD_")
 # loader, the per-person folders or the certificate trust.
 _OVERLAY_DENIED_NAMES = frozenset({
     "HOME", "TMPDIR", "TMP", "TEMP", "PATH", "USER", "LOGNAME", "MPLCONFIGDIR", "PIP_CACHE_DIR",
-    "REQUESTS_CA_BUNDLE", "PIP_CERT", "DATABASE_URI", "MINDS_API_KEY", "ANTON_MINDS_API_KEY",
+    "REQUESTS_CA_BUNDLE", "PIP_CERT", "CURL_CA_BUNDLE", "DATABASE_URI", "MINDS_API_KEY",
+    "ANTON_MINDS_API_KEY",
 })
 _OVERLAY_DENIED_PREFIXES = ("LD_", "PYTHON", "XDG_", "SSL_", "COWORK_")
 
@@ -124,6 +135,10 @@ class LandlockRule:
     access: tuple[str, ...]
     # A missing required path refuses the launch; a missing optional one is skipped.
     required: bool = False
+    # A person's folder: the launcher treats a path that is a link, or sits
+    # below one, like a missing path. System rules follow links, since /bin
+    # and /lib are links on Debian.
+    refuse_links: bool = False
 
 
 @dataclass
@@ -131,14 +146,22 @@ class SandboxedSpawn:
     """The launcher invocation for one spawn.
 
     Pass ``argv``, ``env=env`` and ``pass_fds=pass_fds`` to the spawn call and
-    call ``close()`` in a ``finally`` once it returns, so the parent's copy of
-    the policy descriptor never outlives the spawn.
+    call ``close()`` in a ``finally`` once it returns, so the parent's copies
+    of the descriptors the launcher gets never outlive the spawn. Once the
+    process has ended, ``refusal()`` says whether the launcher refused.
     """
 
     argv: list[str]
     env: dict[str, str]
     pass_fds: tuple[int, ...]
+    # The read end of the launcher's refusal pipe. The launcher writes its
+    # reason there before any target code runs, and the pipe closes when it
+    # execs the target, so nothing the target prints or exits with reads as
+    # a refusal.
+    refusal_fd: int
     _closed: bool = field(default=False, repr=False)
+    _refusal_read: bool = field(default=False, repr=False)
+    _refusal: SandboxUnavailable | None = field(default=None, repr=False)
 
     def close(self) -> None:
         if self._closed:
@@ -149,6 +172,28 @@ class SandboxedSpawn:
                 os.close(fd)
             except OSError:
                 pass
+
+    def refusal(self) -> SandboxUnavailable | None:
+        """The launcher's refusal, or None when it started the target.
+
+        Call it once the spawned process has ended: one still running reads
+        as no refusal. Closes the pipe, and later calls return the same answer.
+        """
+        if self._refusal_read:
+            return self._refusal
+        self._refusal_read = True
+        chunks: list[bytes] = []
+        try:
+            while chunk := os.read(self.refusal_fd, 1 << 16):
+                chunks.append(chunk)
+        except OSError:
+            pass
+        finally:
+            os.close(self.refusal_fd)
+        text = b"".join(chunks).decode("utf-8", errors="replace").strip()
+        if text:
+            self._refusal = SandboxUnavailable(text)
+        return self._refusal
 
 
 def _norm(path: Path | str) -> str:
@@ -202,9 +247,9 @@ class CellSandbox(BaseModel):
 
     # Read, write and execute: the venv, saved cell state and working directory.
     project_dir: Path
-    # Read and write, no execute: the per-person HOME with its caches.
+    # Read, write and execute: the per-person HOME with its caches.
     home_dir: Path
-    # Read and write, no execute: the per-person TMPDIR.
+    # Read, write and execute: the per-person TMPDIR.
     tmp_dir: Path
     # Read and write files and folders, no renames in or out, no special files.
     shared_dir: Path | None = None
@@ -212,6 +257,10 @@ class CellSandbox(BaseModel):
     read_only_files: tuple[Path, ...] = ()
     # Host roots no grant may equal or contain, besides the fixed system ones.
     forbidden_roots: tuple[Path, ...] = ()
+    # Other people's partitions. No grant may equal or contain one, and no
+    # writable grant may sit inside one; a read-only grant inside one (a
+    # skill its owner shares) is allowed.
+    other_partitions: tuple[Path, ...] = ()
     # USER and LOGNAME in the child environment.
     user_name: str
 
@@ -219,7 +268,7 @@ class CellSandbox(BaseModel):
     def _check_grants(self) -> CellSandbox:
         if not self.user_name or "\0" in self.user_name:
             raise ValueError("user_name must be a non-empty name")
-        for root in self.forbidden_roots:
+        for root in (*self.forbidden_roots, *self.other_partitions):
             _require_normal_absolute(root)
         for grant in self._grants():
             _require_normal_absolute(grant)
@@ -227,6 +276,10 @@ class CellSandbox(BaseModel):
                 if _overlaps(grant, root):
                     raise ValueError(f"grant {grant} equals or contains {root}")
         private = self._writable_dirs()
+        for grant in private:
+            for partition in self.other_partitions:
+                if _overlaps(partition, grant):
+                    raise ValueError(f"writable grant {grant} sits in another person's partition {partition}")
         for i, first in enumerate(private):
             for second in private[i + 1:]:
                 if _overlaps(first, second) or _overlaps(second, first):
@@ -234,7 +287,12 @@ class CellSandbox(BaseModel):
         return self
 
     def _denied_roots(self) -> list[str]:
-        return [*_DENIED_GRANT_ROOTS, str(Path.home()), *(str(r) for r in self.forbidden_roots)]
+        return [
+            *_DENIED_GRANT_ROOTS,
+            str(Path.home()),
+            *(str(r) for r in self.forbidden_roots),
+            *(str(p) for p in self.other_partitions),
+        ]
 
     def _grants(self) -> list[Path]:
         return [*self._writable_dirs(), *self.read_only_dirs, *self.read_only_files]
@@ -269,10 +327,20 @@ class CellSandbox(BaseModel):
 
         ``overlay_keys`` names the workspace ``.env`` keys in ``env``. Each
         passes unless it could repoint the interpreter, the loader, the folders
-        or the certificate trust, even where the allowlist names it.
+        or the certificate trust, even where the allowlist names it. An entry
+        execve would reject (an empty key, a key with ``=`` or NUL, a value
+        with NUL) is dropped and logged, so it cannot fail every spawn after
+        the lock.
         """
         overlay = frozenset(overlay_keys)
-        child = {k: v for k, v in env.items() if _env_key_allowed(k, overlay)}
+        child: dict[str, str] = {}
+        for key, value in env.items():
+            if not _env_key_allowed(key, overlay):
+                continue
+            if not key or "=" in key or "\0" in key or "\0" in value:
+                logger.warning("sandbox: dropped the environment entry %r, which execve refuses", key)
+                continue
+            child[key] = value
         child.update(self._fixed_env())
         return child
 
@@ -285,21 +353,65 @@ class CellSandbox(BaseModel):
             rules.append(LandlockRule(path, _READ_EXEC))
         for path in _SYSTEM_READ_DIRS:
             rules.append(LandlockRule(path, _READ))
-        ca_files = [host_env.get(name, "") for name in _CA_BUNDLE_VARS]
-        for path in _unique([*_SYSTEM_READ_FILES, *(p for p in ca_files if p)]):
+        for path in _SYSTEM_READ_FILES:
             rules.append(LandlockRule(path, ("read_file",)))
+        rules.extend(self._ca_rules(host_env))
         for path, access in _DEVICE_RULES:
             rules.append(LandlockRule(path, access))
-        rules.append(LandlockRule(str(self.project_dir), _PROJECT_RIGHTS, required=True))
-        rules.append(LandlockRule(str(self.home_dir), _HOME_RIGHTS, required=True))
-        rules.append(LandlockRule(str(self.tmp_dir), _TMP_RIGHTS, required=True))
+        rules.append(LandlockRule(str(self.project_dir), _PROJECT_RIGHTS, required=True, refuse_links=True))
+        rules.append(LandlockRule(str(self.home_dir), _HOME_RIGHTS, required=True, refuse_links=True))
+        rules.append(LandlockRule(str(self.tmp_dir), _TMP_RIGHTS, required=True, refuse_links=True))
         if self.shared_dir is not None:
-            rules.append(LandlockRule(str(self.shared_dir), _SHARED_RIGHTS))
+            rules.append(LandlockRule(str(self.shared_dir), _SHARED_RIGHTS, refuse_links=True))
         for path in self.read_only_dirs:
-            rules.append(LandlockRule(str(path), _READ))
+            rules.append(LandlockRule(str(path), _READ, refuse_links=True))
         for path in self.read_only_files:
-            rules.append(LandlockRule(str(path), ("read_file",)))
+            rules.append(LandlockRule(str(path), ("read_file",), refuse_links=True))
         return rules
+
+    def _ca_rules(self, host_env: Mapping[str, str]) -> list[LandlockRule]:
+        """Read rules for the host's certificate bundle files and SSL_CERT_DIR.
+
+        A value is held to the same roots as a grant and must be a regular
+        file (a folder for SSL_CERT_DIR); anything else is skipped and logged,
+        since a folder named as a bundle would let every cell read beneath it.
+        """
+        rules: list[LandlockRule] = []
+        seen: set[str] = set(_SYSTEM_READ_FILES)
+        for name in (*_CA_FILE_VARS, *_CA_DIR_VARS):
+            value = host_env.get(name, "")
+            if not value:
+                continue
+            path = os.path.normpath(value)
+            if path in seen:
+                continue
+            is_dir = name in _CA_DIR_VARS
+            problem = self._ca_path_problem(path, is_dir=is_dir)
+            if problem is not None:
+                if (name, value) not in _LOGGED_CA_PROBLEMS:
+                    _LOGGED_CA_PROBLEMS.add((name, value))
+                    logger.warning("sandbox: no read rule for %s=%s: %s", name, value, problem)
+                continue
+            seen.add(path)
+            rules.append(LandlockRule(path, _READ if is_dir else ("read_file",)))
+        return rules
+
+    def _ca_path_problem(self, path: str, *, is_dir: bool) -> str | None:
+        """Why the certificate path ``path`` gets no read rule, or None when it gets one."""
+        if not os.path.isabs(path):
+            return "it is not an absolute path"
+        for root in self._denied_roots():
+            if _overlaps(path, root):
+                return f"it equals or contains {root}"
+        try:
+            mode = os.stat(path).st_mode
+        except OSError as exc:
+            return exc.strerror or str(exc)
+        if is_dir and not stat.S_ISDIR(mode):
+            return "it is not a folder"
+        if not is_dir and not stat.S_ISREG(mode):
+            return "it is not a regular file"
+        return None
 
     def launch(self, argv: Sequence[str], *, env: Mapping[str, str]) -> SandboxedSpawn:
         """The launcher invocation that runs ``argv`` under this policy.
@@ -315,11 +427,17 @@ class CellSandbox(BaseModel):
         if leaked:
             raise ValueError(f"launch() takes an environment from child_env(); it holds {', '.join(leaked)}")
         python = launcher_python()
+        # The launcher runs unlocked from these, so a cell that could write
+        # one would run its own code before the next lock.
+        before_the_lock = {
+            "the launcher's interpreter": python,
+            "the launcher": str(launcher_path()),
+            "the standard library": sysconfig.get_path("stdlib"),
+        }
         for folder in self._writable_dirs():
-            if _overlaps(folder, python):
-                raise SandboxUnavailable(
-                    f"the launcher's interpreter {python} sits under the writable grant {folder}"
-                )
+            for label, path in before_the_lock.items():
+                if path and _overlaps(folder, path):
+                    raise SandboxUnavailable(f"{label} {path} sits under the writable grant {folder}")
         # The launcher grants these folders read and execute on every spawn,
         # so they are held to the same roots as a host's grants.
         for prefix in _interpreter_dirs():
@@ -333,16 +451,30 @@ class CellSandbox(BaseModel):
         for path in optional:
             if not path.exists():
                 logger.info("sandbox grant skipped, path missing: %s", path)
+            elif os.path.realpath(path) != str(path):
+                logger.warning("sandbox grant skipped, path is a link or sits below one: %s", path)
         payload = json.dumps({
             "version": LAUNCHER_API_VERSION,
             "rules": [
-                {"path": r.path, "access": list(r.access), "required": r.required} for r in rules
+                {"path": r.path, "access": list(r.access), "required": r.required, "refuse_links": r.refuse_links}
+                for r in rules
             ],
             "env": {**env, **self._fixed_env()},
         }).encode("utf-8")
         fd = _payload_fd(payload)
-        argv_out = [python, "-I", "-S", str(launcher_path()), "--policy-fd", str(fd), "--", *target]
-        return SandboxedSpawn(argv=argv_out, env=dict(_LAUNCHER_ENV), pass_fds=(fd,))
+        try:
+            refusal_read, refusal_write = os.pipe()
+        except OSError as exc:
+            os.close(fd)
+            raise SandboxUnavailable(f"could not create the launcher's refusal pipe: {exc}") from exc
+        os.set_blocking(refusal_read, False)
+        argv_out = [
+            python, "-I", "-S", str(launcher_path()),
+            "--policy-fd", str(fd), "--refusal-fd", str(refusal_write), "--", *target,
+        ]
+        return SandboxedSpawn(
+            argv=argv_out, env=dict(_LAUNCHER_ENV), pass_fds=(fd, refusal_write), refusal_fd=refusal_read
+        )
 
 
 def cell_sandbox_of(pool: object) -> CellSandbox | None:
@@ -442,17 +574,6 @@ def landlock_abi() -> int:
     return int(abi) if abi > 0 else 0
 
 
-def refusal_from(returncode: int | None, output: bytes | str) -> SandboxUnavailable | None:
-    """The launcher's refusal in a finished spawn's exit code and stderr, if any."""
-    if returncode != SANDBOX_REFUSED_EXIT:
-        return None
-    text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
-    for line in text.splitlines():
-        if line.startswith(SANDBOX_REFUSED_MARKER):
-            return SandboxUnavailable(line.strip())
-    return None
-
-
 _SELF_TEST_CHECK = """\
 import errno, sys
 with open(sys.argv[1], "w") as f:
@@ -474,7 +595,8 @@ def self_test(*, scratch_dir: Path) -> None:
     ``SandboxUnavailable`` unless the write lands and the read gets EACCES.
     Never locks the caller. Removes the folder afterwards.
     """
-    base = Path(tempfile.mkdtemp(prefix="anton-sandbox-selftest-", dir=scratch_dir))
+    # Resolved, since the launcher refuses a grant that sits below a link.
+    base = Path(os.path.realpath(tempfile.mkdtemp(prefix="anton-sandbox-selftest-", dir=scratch_dir)))
     try:
         project, home, tmp = base / "project", base / "home", base / "tmp"
         for folder in (project, home, tmp):
@@ -502,7 +624,7 @@ def self_test(*, scratch_dir: Path) -> None:
             raise SandboxUnavailable(f"the self-test could not run the launcher: {exc}") from exc
         finally:
             spawn.close()
-        refusal = refusal_from(result.returncode, result.stderr)
+            refusal = spawn.refusal()
         if refusal is not None:
             raise refusal
         stdout = result.stdout.decode("utf-8", errors="replace").strip()
@@ -518,22 +640,31 @@ def self_test(*, scratch_dir: Path) -> None:
 
 
 def validate_pad_name(name: str) -> str:
-    """Return ``name`` when it names a folder inside the venvs base, else raise ValueError.
+    """Return ``name`` when it names one folder inside the venvs base, else raise ValueError.
 
-    A pad name becomes a path under ``<workspace>/.anton/scratchpad-venvs``,
-    and the host deletes and recreates the folder it names. So an empty name,
-    a NUL, an absolute path (POSIX or Windows), a ``..`` part, or a name that
-    resolves to the base itself is refused.
+    A pad name becomes a folder under ``<workspace>/.anton/scratchpad-venvs``,
+    and the host deletes and recreates it. So the name must be one plain
+    folder name on every platform: not empty, no NUL, no ``:`` (a Windows
+    drive or NTFS stream), not an absolute path, no ``..``, no ``/`` or ``\\``
+    (one pad's venv would sit inside another's, and rebuilding the outer one
+    would delete it), not only dots, and no trailing dot or space (Windows
+    drops them, so ``x.`` would name pad ``x``'s folder).
     """
     if not isinstance(name, str) or not name:
         raise ValueError("A scratchpad name must not be empty.")
     if "\0" in name:
         raise ValueError("A scratchpad name must not contain a NUL character.")
+    if ":" in name:
+        raise ValueError(f"A scratchpad name must not contain a drive or stream separator (:): {name!r}.")
     posix, windows = PurePosixPath(name), PureWindowsPath(name)
     if posix.is_absolute() or windows.anchor:
         raise ValueError(f"A scratchpad name must not be an absolute path: {name!r}.")
     if ".." in posix.parts or ".." in windows.parts:
         raise ValueError(f"A scratchpad name must not contain '..': {name!r}.")
-    if not [part for part in windows.parts if part != "."]:
+    if "/" in name or "\\" in name:
+        raise ValueError(f"A scratchpad name must be one folder name, without '/' or '\\': {name!r}.")
+    if not name.strip("."):
         raise ValueError(f"A scratchpad name must name a folder: {name!r}.")
+    if name.endswith((".", " ")):
+        raise ValueError(f"A scratchpad name must not end with '.' or a space: {name!r}.")
     return name

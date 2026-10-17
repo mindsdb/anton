@@ -1,13 +1,16 @@
 """Lock this process with Landlock, then replace it with the target program.
 
-Run as ``<host python> -I -S landlock_launcher.py --policy-fd N -- <target argv>``.
-Reads the policy (rules and the target's environment) as JSON from descriptor
-N and closes it, sets no_new_privs, restricts itself to the policy's paths,
-closes every inherited descriptor above 2 and execs the target in place. The
-process id, process group and exit code are then the target's own.
+Run as ``<host python> -I -S landlock_launcher.py --policy-fd N --refusal-fd M --
+<target argv>``. Reads the policy (rules and the target's environment) as
+JSON from descriptor N and closes it, sets no_new_privs, restricts itself to
+the policy's paths, closes every inherited descriptor above 2 except M and
+execs the target in place. The process id, process group and exit code are
+then the target's own.
 
-Every refusal writes one stderr line that starts with SANDBOX_REFUSED_MARKER
-and exits SANDBOX_REFUSED_EXIT before any target code runs.
+Every refusal writes one line that starts with SANDBOX_REFUSED_MARKER to
+descriptor M and to stderr, and exits SANDBOX_REFUSED_EXIT, before any target
+code runs. M is close-on-exec, so a target the launcher starts never holds
+it: only the launcher can report a refusal there.
 
 Standard library only: under -S it cannot import anton, so the four values
 below repeat anton.core.backends.sandbox's, and a test keeps them equal.
@@ -77,20 +80,28 @@ class _Refused(Exception):
     """A reason to refuse, written after the marker."""
 
 
-def _refuse(reason):
-    try:
-        os.write(2, f"{SANDBOX_REFUSED_MARKER} {reason}\n".encode("utf-8", "replace"))
-    finally:
-        os._exit(SANDBOX_REFUSED_EXIT)
+def _refuse(reason, refusal_fd=None):
+    line = f"{SANDBOX_REFUSED_MARKER} {reason}\n".encode("utf-8", "replace")
+    for fd in (refusal_fd, 2):
+        if fd is None:
+            continue
+        try:
+            os.write(fd, line)
+        except OSError:
+            pass
+    os._exit(SANDBOX_REFUSED_EXIT)
 
 
 def _parse_args(args):
-    if len(args) < 4 or args[0] != "--policy-fd" or args[2] != "--":
-        raise _Refused("usage: --policy-fd N -- PROGRAM [ARGS...]")
+    if len(args) < 6 or args[0] != "--policy-fd" or args[2] != "--refusal-fd" or args[4] != "--":
+        raise _Refused("usage: --policy-fd N --refusal-fd M -- PROGRAM [ARGS...]")
     try:
-        return int(args[1]), args[3:]
+        policy_fd, refusal_fd = int(args[1]), int(args[3])
     except ValueError:
-        raise _Refused(f"--policy-fd takes a descriptor number, not {args[1]!r}") from None
+        raise _Refused(f"--policy-fd and --refusal-fd take descriptor numbers, not {args[1]!r} and {args[3]!r}") from None
+    if refusal_fd <= 2:
+        raise _Refused(f"--refusal-fd must be above 2, not {refusal_fd}")
+    return policy_fd, refusal_fd, args[5:]
 
 
 def _read_policy(fd):
@@ -159,21 +170,39 @@ def _lock(rules):
         raise _Refused(f"landlock_restrict_self failed: {exc.strerror}") from None
 
 
+def _reached_through_a_link(fd, path):
+    """Whether the opened ``path`` is a symlink, or a folder above it is one."""
+    if stat.S_ISLNK(os.fstat(fd).st_mode):
+        return True
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}") != path
+    except OSError:
+        return os.path.realpath(path) != path
+
+
 def _add_rule(libc, ruleset, rule, handled):
     path, required = rule["path"], bool(rule.get("required"))
+    refuse_links = bool(rule.get("refuse_links"))
     allowed = 0
     for name in rule["access"]:
         if name not in _RIGHTS:
             raise _Refused(f"unknown right {name!r} for {path}")
         allowed |= _RIGHTS[name][0]
     allowed &= handled
+    flags = os.O_PATH | os.O_CLOEXEC | (os.O_NOFOLLOW if refuse_links else 0)
     try:
-        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        fd = os.open(path, flags)
     except OSError as exc:
         if required:
             raise _Refused(f"required path {path} cannot be opened: {exc.strerror}") from None
         return
     try:
+        # A person's folder through a link would grant wherever the link
+        # points, maybe another person's folder.
+        if refuse_links and _reached_through_a_link(fd, path):
+            if required:
+                raise _Refused(f"required path {path} is a link or sits below one")
+            return
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             allowed &= _FILE_RIGHTS
         if not allowed:
@@ -190,36 +219,46 @@ def _add_rule(libc, ruleset, rule, handled):
         os.close(fd)
 
 
-def _close_inherited_fds():
+def _close_inherited_fds(keep):
+    """Close every descriptor above 2 but ``keep``, which closes when the target starts."""
     try:
         limit = os.sysconf("SC_OPEN_MAX")
     except (OSError, ValueError):
         limit = 1 << 16
-    os.closerange(3, limit if limit > 3 else 1 << 16)
+    limit = limit if limit > 3 else 1 << 16
+    os.closerange(3, keep)
+    os.closerange(keep + 1, max(limit, keep + 1))
+    os.set_inheritable(keep, False)
 
 
-def _exec(target, env):
+def _exec(target, env, refusal_fd):
     try:
         os.execve(target[0], target, env)
+    except ValueError as exc:
+        _refuse(f"execve refused the target's environment: {exc}", refusal_fd)
     except OSError as exc:
-        if exc.errno in (errno.EACCES, errno.EPERM):
-            _refuse(f"the sandbox denies running {target[0]}: {exc.strerror}")
+        denied = exc.errno in (errno.EACCES, errno.EPERM)
+        # Landlock does not mediate access(2), so it answers from the file's
+        # own permissions: a target they forbid is a broken file, not a refusal.
+        if denied and os.access(target[0], os.X_OK):
+            _refuse(f"the sandbox denies running {target[0]}: {exc.strerror}", refusal_fd)
         os.write(2, f"anton-sandbox: cannot run {target[0]}: {exc.strerror}\n".encode("utf-8", "replace"))
-        os._exit(127)
+        os._exit(126 if denied else 127)
 
 
 def main(args):
+    refusal_fd = None
     try:
-        fd, target = _parse_args(args)
-        policy = _read_policy(fd)
+        policy_fd, refusal_fd, target = _parse_args(args)
+        policy = _read_policy(policy_fd)
         env = {str(k): str(v) for k, v in policy["env"].items()}
         _lock(policy["rules"])
     except _Refused as exc:
-        _refuse(str(exc))
+        _refuse(str(exc), refusal_fd)
     except Exception as exc:
-        _refuse(f"{type(exc).__name__}: {exc}")
-    _close_inherited_fds()
-    _exec(target, env)
+        _refuse(f"{type(exc).__name__}: {exc}", refusal_fd)
+    _close_inherited_fds(refusal_fd)
+    _exec(target, env, refusal_fd)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 """A whole pad under the real lock: venv build and check, cell boot, and cells.
 
-Needs Linux with Landlock ABI 3 or later and skips elsewhere with that reason.
-Each denial check runs in a cell that also shows an allowed action working.
+Needs Linux with Landlock ABI 3 or later: tests/conftest.py skips the
+`landlock` tests elsewhere with that reason, or fails them on Linux under
+GitHub Actions or with LANDLOCK_REQUIRED=1. Each denial check runs in a cell
+that also shows an allowed action working.
 """
 
 from __future__ import annotations
@@ -10,18 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.backends import sandbox
 from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.sandbox import CellSandbox
 
-_ABI = sandbox.landlock_abi()
-pytestmark = [
-    pytest.mark.slow,
-    pytest.mark.skipif(
-        _ABI < sandbox.MIN_LANDLOCK_ABI,
-        reason=f"needs Linux with Landlock ABI >= {sandbox.MIN_LANDLOCK_ABI}; this host reports {_ABI}",
-    ),
-]
+pytestmark = [pytest.mark.slow, pytest.mark.landlock]
 
 _CELL = """
 import errno, getpass, os, multiprocessing, subprocess, sys
@@ -73,3 +67,36 @@ async def test_a_pad_builds_checks_and_runs_cells_under_the_lock(tmp_path: Path,
         "host-packages True",
     ]
     assert (project / ".anton" / "scratchpad-venvs" / "main" / "bin" / "python").exists()
+
+
+async def test_a_venv_python_its_own_permissions_forbid_is_rebuilt_not_refused(tmp_path: Path):
+    project, home, tmp = tmp_path / "project", tmp_path / "home", tmp_path / "tmp"
+    for folder in (project, home, tmp):
+        folder.mkdir()
+    policy = CellSandbox(project_dir=project, home_dir=home, tmp_dir=tmp, user_name="bob")
+
+    def pad() -> LocalScratchpadRuntime:
+        return LocalScratchpadRuntime(
+            "main", coding_provider="anthropic", coding_model="", coding_api_key="", coding_base_url="",
+            workspace_path=project, cell_sandbox=policy,
+        )
+
+    first = pad()
+    await first.start()
+    await first.close()
+    # What a cell can do to its own venv: swap the interpreter link for a
+    # file nobody may run.
+    python = project / ".anton" / "scratchpad-venvs" / "main" / "bin" / "python"
+    python.unlink()
+    python.write_text("not a program\n")
+    python.chmod(0o644)
+
+    second = pad()
+    await second.start()
+    try:
+        cell = await second.execute("print('rebuilt')")
+    finally:
+        await second.close()
+    assert cell.error in (None, ""), cell.error
+    assert cell.stdout.strip() == "rebuilt"
+    assert python.is_symlink()

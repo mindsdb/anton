@@ -3,15 +3,18 @@
 Agent code could plant links in its project before the sandbox, and the host
 runs unlocked, so a write that followed one would land in the link's target:
 another person's file. Writes inside a venv anton builds, and the agent-pads
-record, refuse a link in every mode. Workspace-level folders (a linked
-`.anton`) are refused only under a sandbox policy; without one, the desktop,
-the CLI and the cloud pod follow them as they always have.
+record, refuse a symlink and write no file with another hard link on Linux
+and macOS; Windows follows links. Workspace-level folders (a linked `.anton`
+or conversation folder) and the reads of the workspace's `.env`, `anton.md`
+and agent-pads record are refused only under a sandbox policy; without one,
+the desktop, the CLI and the cloud pod follow them as they always have.
 """
 
 from __future__ import annotations
 
 import errno
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,9 +23,10 @@ import pytest
 
 import anton.core.backends.local as local
 from anton.core.artifacts import backend_launcher
-from anton.core.backends.local import LocalScratchpadRuntime
+from anton.core.backends.local import LocalScratchpadRuntime, snapshot_file
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.backends.sandbox import CellSandbox
+from anton.utils import nofollow
 from anton.utils.nofollow import make_dirs_nofollow, write_text_nofollow
 from anton.workspace import Workspace
 
@@ -66,10 +70,10 @@ def linked_anton(tmp_path: Path, project: Path) -> Path:
     return target
 
 
-def _pad(project: Path, policy: CellSandbox | None = None) -> LocalScratchpadRuntime:
+def _pad(project: Path, policy: CellSandbox | None = None, *, session_id: str | None = None) -> LocalScratchpadRuntime:
     return LocalScratchpadRuntime(
         "main", coding_provider="anthropic", coding_model="", coding_api_key="", coding_base_url="",
-        workspace_path=project, cell_sandbox=policy,
+        workspace_path=project, cell_sandbox=policy, session_id=session_id,
     )
 
 
@@ -129,27 +133,39 @@ def test_building_a_venv_never_empties_another_pads_venv_a_link_points_at(projec
     assert (base / "other" / "alice-data.csv").read_text() == "alice"
 
 
-def test_deleting_a_venv_never_follows_a_link_at_it(project, victim):
-    base = project / ".anton" / "scratchpad-venvs"
-    base.mkdir(parents=True)
-    (base / "main").symlink_to(victim, target_is_directory=True)
+def test_requirements_and_version_files_refuse_a_hard_link(project, victim):
+    venv = _venv(project)
+    os.link(victim / "private.txt", venv / "requirements.txt")
+    os.link(victim / "private.txt", venv / ".python_version")
     pad = _pad(project)
-    pad._venv_dir = str(base / "main")
-    pad._nuke_venv()
+    pad._venv_dir = str(venv)
+    pad._installed_packages.add("pandas")
+    pad._save_requirements()
+    pad._save_python_version()
     assert _unchanged(victim)
 
 
-def test_the_agent_pads_record_refuses_a_link(project, victim):
+def test_a_host_write_refuses_a_fifo_without_waiting_for_a_reader(project):
+    venv = _venv(project)
+    os.mkfifo(venv / "requirements.txt")
+    with pytest.raises(OSError):
+        write_text_nofollow(project, venv / "requirements.txt", "pandas\n")
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hard link"])
+@pytest.mark.parametrize("name", ["_agent_pads.json.tmp", "_agent_pads.json"])
+def test_the_agent_pads_record_never_writes_through_a_link(project, victim, kind, name):
     manager = _manager(project)
     record = project / ".anton" / "scratchpad-sessions" / "conv-1"
     record.mkdir(parents=True)
-    (record / "_agent_pads.json.tmp").symlink_to(victim / "private.txt")
+    if kind == "symlink":
+        (record / name).symlink_to(victim / "private.txt")
+    else:
+        os.link(victim / "private.txt", record / name)
     manager.record_agent_pad("main")
     assert _unchanged(victim)
-
-    (record / "_agent_pads.json.tmp").unlink()
-    manager.record_agent_pad("main")
     assert json.loads((record / "_agent_pads.json").read_text()) == ["main"]
+    assert not (record / "_agent_pads.json.tmp").exists()
 
 
 def test_a_refused_link_is_named_with_its_full_path(project, victim):
@@ -200,6 +216,38 @@ def test_the_agent_pads_record_under_the_sandbox_refuses_a_linked_anton_folder(p
     manager.record_agent_pad("main")
     assert manager.agent_pads() == set()
     assert _unchanged(victim)
+
+
+def _alice_pads(victim: Path, sessions: Path, how: str) -> None:
+    """Alice's agent-pads record, reached from Bob's conversation `conv-1` through a link."""
+    (victim / "_agent_pads.json").write_text('["alice-pad"]')
+    sessions.mkdir(parents=True)
+    if how == "linked folder":
+        (sessions / "conv-1").symlink_to(victim, target_is_directory=True)
+        return
+    (sessions / "conv-1").mkdir()
+    if how == "linked file":
+        (sessions / "conv-1" / "_agent_pads.json").symlink_to(victim / "_agent_pads.json")
+    else:
+        os.link(victim / "_agent_pads.json", sessions / "conv-1" / "_agent_pads.json")
+
+
+@pytest.mark.parametrize("how", ["linked folder", "linked file", "hard link"])
+def test_the_agent_pads_record_under_the_sandbox_never_reads_through_a_link(project, victim, policy, how):
+    _alice_pads(victim, project / ".anton" / "scratchpad-sessions", how)
+    assert _manager(project, policy).agent_pads() == set()
+
+
+def test_under_the_sandbox_the_agent_pads_record_still_reads_its_own(project, policy):
+    manager = _manager(project, policy)
+    manager.record_agent_pad("main")
+    manager.record_agent_pad("other")
+    assert manager.agent_pads() == {"main", "other"}
+
+
+def test_without_the_sandbox_the_agent_pads_record_follows_a_linked_folder(project, victim):
+    _alice_pads(victim, project / ".anton" / "scratchpad-sessions", "linked folder")
+    assert _manager(project).agent_pads() == {"alice-pad"}
 
 
 def test_without_the_sandbox_a_linked_anton_folder_still_builds_and_deletes_venvs(
@@ -257,6 +305,149 @@ def test_workspace_setup_still_creates_its_files_once(project, refuse_links):
     assert (anton_dir / ".env").stat().st_mode & 0o777 == 0o600
     assert (anton_dir / "memory").is_dir()
     assert Workspace(project).initialize(refuse_links=refuse_links) == [f"Created {anton_dir}"]
+
+
+@pytest.mark.parametrize("name", [".env", "anton.md"])
+@pytest.mark.parametrize("kind", ["symlink", "hard link"])
+def test_under_the_sandbox_workspace_reads_refuse_a_linked_env_or_anton_md(project, victim, name, kind):
+    (victim / "private.txt").write_text("ALICE_KEY=alice's\n")
+    anton_dir = project / ".anton"
+    anton_dir.mkdir()
+    if kind == "symlink":
+        (anton_dir / name).symlink_to(victim / "private.txt")
+    else:
+        os.link(victim / "private.txt", anton_dir / name)
+    workspace = Workspace(project)
+    workspace.initialize(refuse_links=True)
+    read = workspace.load_env if name == ".env" else workspace.build_anton_md_context
+    with pytest.raises(OSError, match="symlink|hard link"):
+        read()
+
+
+def test_under_the_sandbox_workspace_reads_refuse_a_linked_anton_folder(project, victim):
+    (victim / ".env").write_text("ALICE_KEY=alice's\n")
+    (victim / "anton.md").write_text("alice's notes")
+    workspace = Workspace(project)
+    workspace.initialize(refuse_links=True)
+    (project / ".anton" / ".env").unlink()
+    (project / ".anton" / "anton.md").unlink()
+    (project / ".anton").rename(project / ".anton-was")
+    (project / ".anton").symlink_to(victim, target_is_directory=True)
+    with pytest.raises(OSError, match="refused to follow a symlink"):
+        workspace.load_env()
+    with pytest.raises(OSError, match="refused to follow a symlink"):
+        workspace.read_anton_md()
+
+
+def test_under_the_sandbox_workspace_reads_still_read_their_own_files(project):
+    workspace = Workspace(project)
+    workspace.initialize(refuse_links=True)
+    (project / ".anton" / ".env").write_text("MY_KEY=mine\n")
+    (project / ".anton" / "anton.md").write_text("my notes")
+    assert workspace.load_env() == {"MY_KEY": "mine"}
+    assert workspace.read_anton_md() == "my notes"
+    (project / ".anton" / "anton.md").unlink()
+    assert workspace.read_anton_md() is None
+
+
+def test_without_the_sandbox_workspace_reads_follow_a_link(project, victim):
+    (victim / "private.txt").write_text("ALICE_KEY=alice's\n")
+    anton_dir = project / ".anton"
+    anton_dir.mkdir()
+    (anton_dir / ".env").symlink_to(victim / "private.txt")
+    workspace = Workspace(project)
+    workspace.initialize()
+    assert workspace.load_env() == {"ALICE_KEY": "alice's"}
+
+
+def _alice_snapshot(victim: Path) -> tuple[Path, bytes]:
+    """Alice's saved state for a pad named `main`, under the name Bob's pad would use."""
+    name = snapshot_file(Path("/x/.anton/scratchpad-venvs"), "conv-1", "main").name
+    saved = victim / name
+    saved.write_bytes(b"alice's namespace")
+    (victim / f"{name}.123.tmp").write_bytes(b"alice's partial save")
+    return saved, saved.read_bytes()
+
+
+def test_under_the_sandbox_a_reset_never_deletes_through_a_linked_conversation_folder(project, victim, policy):
+    saved, before = _alice_snapshot(victim)
+    sessions = project / ".anton" / "scratchpad-sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "conv-1").symlink_to(victim, target_is_directory=True)
+    pad = _pad(project, policy, session_id="conv-1")
+    pad._discard_session_snapshot()
+    assert saved.read_bytes() == before
+    assert (victim / f"{saved.name}.123.tmp").read_bytes() == b"alice's partial save"
+    # Nor does the next start hand the cell the linked folder.
+    assert pad._session_snapshot_path(create=True) is None
+
+
+def test_under_the_sandbox_a_reset_still_deletes_its_own_snapshot(project, policy):
+    pad = _pad(project, policy, session_id="conv-1")
+    own = pad._session_snapshot_path(create=True)
+    assert own == project / ".anton" / "scratchpad-sessions" / "conv-1" / own.name
+    own.write_bytes(b"my namespace")
+    (own.parent / f"{own.name}.42.tmp").write_bytes(b"partial")
+    (own.parent / "_agent_pads.json").write_text('["main"]')
+    pad._discard_session_snapshot()
+    assert sorted(p.name for p in own.parent.iterdir()) == ["_agent_pads.json"]
+
+
+def test_under_the_sandbox_a_folder_at_the_snapshot_name_still_lets_a_reset_delete_the_rest(project, policy):
+    pad = _pad(project, policy, session_id="conv-1")
+    own = pad._session_snapshot_path(create=True)
+    own.mkdir()
+    (own.parent / f"{own.name}.42.tmp").write_bytes(b"partial")
+    pad._discard_session_snapshot()
+    assert sorted(p.name for p in own.parent.iterdir()) == [own.name]
+
+
+def test_without_the_sandbox_a_linked_conversation_folder_is_followed_as_before(project, victim):
+    saved, _ = _alice_snapshot(victim)
+    sessions = project / ".anton" / "scratchpad-sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "conv-1").symlink_to(victim, target_is_directory=True)
+    _pad(project, session_id="conv-1")._discard_session_snapshot()
+    assert not saved.exists()
+
+
+# ── The Windows branches, driven on this host ───────────────────────────────
+
+
+def test_the_windows_branches_write_where_they_always_did(project, monkeypatch):
+    """Windows has no dir_fd, so each helper acts on the joined path there."""
+    import site
+
+    monkeypatch.setattr(nofollow, "_IS_WINDOWS", True)
+    monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
+    created: list[str] = []
+    monkeypatch.setattr(local.venv, "create", lambda path, **kwargs: created.append(path))
+    pad = _pad(project)
+    pad._create_venv()
+    venv = project / ".anton" / "scratchpad-venvs" / "main"
+    assert created == [str(venv)] and venv.is_dir()
+
+    (venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    monkeypatch.setattr(local.sys, "prefix", "/venv")
+    monkeypatch.setattr(local.sys, "base_prefix", "/usr")
+    monkeypatch.setattr(site, "getsitepackages", lambda: ["/parent/a", "/parent/b"])
+    pad._setup_parent_site_packages()
+    pth = venv / "lib" / "python3.12" / "site-packages" / "_parent_venv.pth"
+    assert pth.read_text() == "/parent/a\n/parent/b\n"
+
+    pad._installed_packages.update({"pandas", "numpy"})
+    pad._save_requirements()
+    assert (venv / "requirements.txt").read_text() == "numpy\npandas\n"
+
+    manager = _manager(project)
+    manager.record_agent_pad("main")
+    assert json.loads((project / ".anton" / "scratchpad-sessions" / "conv-1" / "_agent_pads.json").read_text()) == [
+        "main"
+    ]
+
+    pad._nuke_venv()
+    assert not venv.exists()
+    assert (project / ".anton" / "scratchpad-venvs").is_dir()
 
 
 class _Pool:

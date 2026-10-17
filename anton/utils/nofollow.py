@@ -7,15 +7,20 @@ someone else's files. Each helper
 opens the trusted ``root`` normally and every component below it with
 ``O_NOFOLLOW`` relative to its parent's descriptor, so a link at any level
 raises ``OSError`` instead of being traversed, and nothing can be swapped
-between the check and the write.
+between the check and the write. A file the host reads, or writes in place,
+must also be a regular file with no other hard link: a hard link planted
+earlier is another name for someone else's file, and truncating it would
+empty theirs.
 
 Windows has no ``dir_fd`` or ``O_NOFOLLOW``. There the helpers act on the
-joined path; only the single local user could have planted a link.
+joined path and follow links; only the single local user could have
+planted one.
 """
 
 from __future__ import annotations
 
 import errno
+import fnmatch
 import os
 import shutil
 import stat
@@ -28,6 +33,9 @@ _IS_WINDOWS = sys.platform == "win32"
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# Opening a FIFO planted at the name returns at once instead of waiting for
+# the other end; the regular-file check then refuses it.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 # Read once, from the real rmtree: whether it can delete relative to a dir_fd.
 _RMTREE_TAKES_DIR_FD = bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
 
@@ -116,11 +124,50 @@ def open_nofollow(
         return _open_at(parts[-1], flags | _O_NOFOLLOW | _O_CLOEXEC, mode, dir_fd=dir_fd, shown=Path(path))
 
 
+def _require_lone_regular_file(fd: int, *, shown: Path | str) -> None:
+    """Raise OSError unless ``fd`` is a regular file with no other hard link."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError(errno.EINVAL, "refused a file that is not a regular file", str(shown))
+    if st.st_nlink != 1:
+        raise OSError(errno.EMLINK, "refused a file with another hard link", str(shown))
+
+
+def read_text_nofollow(root: Path | str, path: Path | str) -> str:
+    """Read ``path`` as UTF-8, refusing a symlink at it or any folder above it below ``root``.
+
+    On Linux and macOS the file must also be a regular file with no other
+    hard link.
+    """
+    fd = open_nofollow(root, path, os.O_RDONLY | _O_NONBLOCK)
+    try:
+        if not _IS_WINDOWS:
+            _require_lone_regular_file(fd, shown=path)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
 def write_text_nofollow(
     root: Path | str, path: Path | str, text: str, *, create_parents: bool = False
 ) -> None:
-    """Create or truncate ``path`` and write ``text`` as UTF-8, refusing symlinks."""
-    fd = open_nofollow(root, path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, create_parents=create_parents)
+    """Create or truncate ``path`` and write ``text`` as UTF-8, refusing symlinks.
+
+    On Linux and macOS an existing file must be a regular file with no other
+    hard link; it is checked before anything is truncated.
+    """
+    if _IS_WINDOWS:
+        fd = open_nofollow(root, path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, create_parents=create_parents)
+    else:
+        fd = open_nofollow(root, path, os.O_WRONLY | os.O_CREAT | _O_NONBLOCK, create_parents=create_parents)
+        try:
+            _require_lone_regular_file(fd, shown=path)
+            os.ftruncate(fd, 0)
+        except BaseException:
+            os.close(fd)
+            raise
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
 
@@ -142,7 +189,12 @@ def create_text_nofollow(root: Path | str, path: Path | str, text: str, *, mode:
 def replace_text_nofollow(
     root: Path | str, path: Path | str, text: str, *, create_parents: bool = False
 ) -> None:
-    """Write ``text`` to ``<path>.tmp`` and rename it over ``path`` in the pinned parent."""
+    """Write ``text`` to ``<path>.tmp`` and rename it over ``path`` in the pinned parent.
+
+    Whatever holds the ``.tmp`` name (a stale file, a link, a hard link to
+    someone else's file) is unlinked first and the file is created fresh, so
+    the write never lands in an existing file.
+    """
     parts = relative_parts(root, path)
     tmp_name = parts[-1] + ".tmp"
     if _IS_WINDOWS:
@@ -154,9 +206,13 @@ def replace_text_nofollow(
         tmp.replace(target)
         return
     with opened_dir_nofollow(root, parts[:-1], create=create_parents) as dir_fd:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
         fd = _open_at(
             tmp_name,
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW | _O_CLOEXEC,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
             0o666,
             dir_fd=dir_fd,
             shown=Path(path).with_name(tmp_name),
@@ -164,6 +220,34 @@ def replace_text_nofollow(
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
         os.replace(tmp_name, parts[-1], src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+
+
+def unlink_matching_nofollow(
+    root: Path | str, folder: Path | str, *, patterns: tuple[str, ...]
+) -> None:
+    """Unlink each file in ``folder`` whose name matches a glob in ``patterns``.
+
+    Refuses a symlink at ``folder`` or any folder above it below ``root``. A
+    matching name that is itself a link is unlinked, never followed. Best
+    effort per name: one that cannot be unlinked (a folder planted at it) is
+    left and the rest still go.
+    """
+    parts = relative_parts(root, folder)
+    if _IS_WINDOWS:
+        for pattern in patterns:
+            for path in Path(folder).glob(pattern):
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+        return
+    with opened_dir_nofollow(root, parts) as dir_fd:
+        for name in sorted(os.listdir(dir_fd)):
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
+                try:
+                    os.unlink(name, dir_fd=dir_fd)
+                except OSError:
+                    continue
 
 
 def rmtree_nofollow(root: Path | str, path: Path | str) -> None:

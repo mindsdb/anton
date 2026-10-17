@@ -77,6 +77,14 @@ class ScratchpadRuntime(ABC):
         self._workspace_path = workspace_path or Path("~/.anton").expanduser()
         self._installed_packages: set[str] = set()
 
+    @property
+    def cell_sandbox(self) -> CellSandbox | None:
+        """The sandbox policy this runtime's agent code runs under; None runs it unlocked.
+
+        The manager refuses a runtime built for a policy that reports another.
+        """
+        return None
+
     @abstractmethod
     async def start(self) -> None:
         """Launch the runtime environment."""

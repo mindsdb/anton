@@ -30,10 +30,11 @@ _INSTALL_NOOP_RESULTS = frozenset(
 
 
 def refuse_pad_name(name: str) -> ToolOutcome | None:
-    """A refusal for a scratchpad name that leads outside the venvs folder, else None.
+    """A refusal for a scratchpad name that is not one plain folder name, else None.
 
-    The name becomes a folder the host deletes and recreates, so an absolute
-    path or a `..` part is refused before any pad is built or recorded.
+    The name becomes a folder the host deletes and recreates, so anything but
+    one plain folder name (see `validate_pad_name`) is refused before any pad
+    is built or recorded.
     """
     try:
         validate_pad_name(name)
@@ -396,6 +397,10 @@ def format_cell_result(cell) -> str:
     [logs]   — library logging (httpx, urllib3, etc.) captured at INFO+
     [stderr] — warnings and stderr writes
     [error]  — Python traceback if the cell raised an exception
+
+    cowork-server's figure sources read these labels, the truncation note and
+    the no-output sentence (cowork/harnesses/anton_harness/stream_formatter.py),
+    so a change here needs the same change there.
     """
     parts: list[str] = []
     if cell.stdout:

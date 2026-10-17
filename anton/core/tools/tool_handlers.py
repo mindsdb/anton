@@ -158,7 +158,7 @@ _SANDBOX_BROWSER_SKIP = "browser check skipped: agent code runs in a sandbox on 
 _SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
 
 
-def _artifact_linters(*, sandboxed: bool = False) -> dict[str, Callable[[Path], list[str] | None]]:
+def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, Callable[[Path], list[str] | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
     headless browser); `[]` means it ran and found nothing; a non-empty
     list is real findings — only that last case is ever appended to the
@@ -168,15 +168,18 @@ def _artifact_linters(*, sandboxed: bool = False) -> dict[str, Callable[[Path], 
     `.docx` are registered — every other extension is silently unchecked,
     which is honest as-is: nothing ever claimed to validate a `.csv`.
 
-    `sandboxed` skips the checks that start a browser or LibreOffice on
-    the agent's file; the in-process lints still run. Where the skipped tool
-    is installed, the result says the check was skipped.
+    A `cell_sandbox` policy skips the checks that start a browser or
+    LibreOffice on the agent's file (each of them also refuses under it);
+    the in-process lints still run. Where the skipped tool is installed, the
+    result says the check was skipped.
     """
     from anton.core.artifacts.html_lint import discover_browser, lint_html
     from anton.core.artifacts.office_open_check import check_opens_via_office
     from anton.core.artifacts.ooxml_lint import lint_ooxml
     from anton.core.artifacts.xlsx_lint import lint_xlsx
     from anton.core.artifacts.xlsx_office_check import _discover_office, check_xlsx_via_office
+
+    sandboxed = cell_sandbox is not None
 
     def _office_skip() -> list[str]:
         return [_SANDBOX_OFFICE_SKIP] if _discover_office() is not None else []
@@ -194,7 +197,7 @@ def _artifact_linters(*, sandboxed: bool = False) -> dict[str, Callable[[Path], 
             if structural_findings is None and not skipped:
                 return None
             return [f.message() for f in (structural_findings or [])] + skipped
-        office_findings = check_xlsx_via_office(path)
+        office_findings = check_xlsx_via_office(path, cell_sandbox=cell_sandbox)
         structural_findings = lint_xlsx(path)
 
         if office_findings is None and structural_findings is None:
@@ -216,7 +219,7 @@ def _artifact_linters(*, sandboxed: bool = False) -> dict[str, Callable[[Path], 
     def _html_linter(path: Path) -> list[str] | None:
         if sandboxed:
             return [_SANDBOX_BROWSER_SKIP] if discover_browser() is not None else None
-        findings = lint_html(path)
+        findings = lint_html(path, cell_sandbox=cell_sandbox)
         if findings is not None:
             return [f.message() for f in findings]
         return None
@@ -233,7 +236,7 @@ def _artifact_linters(*, sandboxed: bool = False) -> dict[str, Callable[[Path], 
             if sandboxed:
                 skipped = _office_skip()
                 return skipped if structural_findings is not None or skipped else None
-            office_findings = check_opens_via_office(path)
+            office_findings = check_opens_via_office(path, cell_sandbox=cell_sandbox)
             if structural_findings is None and office_findings is None:
                 return None
             return [f.message() for f in (office_findings or [])]
@@ -260,7 +263,7 @@ def lint_changed_artifact_files(
     """
     from anton.core.artifacts.store import iter_content_files
 
-    linters = _artifact_linters(sandboxed=True) if cell_sandbox is not None else _artifact_linters()
+    linters = _artifact_linters(cell_sandbox=cell_sandbox)
     if not linters:
         return []
     after = snapshot_existing_artifact_mtimes(store)
@@ -1126,7 +1129,8 @@ async def handle_scratchpad(
         if lint_messages:
             # [artifact lint] follows format_cell_result's own [output]/[error]
             # labeling convention so the agent can tell the finding apart from
-            # its own code's output.
+            # its own code's output. cowork-server's figure sources cut this
+            # block from a replayed cell's output.
             content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
             content=content,

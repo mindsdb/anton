@@ -804,14 +804,12 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
                 # fullstack frontend. In a thread: the browser subprocess
                 # blocks for up to its 8-second timeout. The sandbox starts
                 # no browser.
-                sandboxed = _cell_sandbox(state) is not None
-                live = (
-                    None
-                    if sandboxed
-                    else await asyncio.to_thread(verifiers.verify_frontend_live, entry_file)
+                policy = _cell_sandbox(state)
+                live = await asyncio.to_thread(
+                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy
                 )
                 if live is None:
-                    reason = verifiers.browser_check_skip_reason(sandboxed=sandboxed)
+                    reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
                     state.trace_log.node("verify_frontend", "browser_skipped", reason)
                     _note_skipped(state, f"browser load of the page: {reason}")
                 else:
@@ -1068,10 +1066,11 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
     `OVER_BUDGET` propagated from the regeneration.
     """
     target = prompts.FULLSTACK_FRONTEND_TARGET
+    policy = _cell_sandbox(state)
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
-        live = await asyncio.to_thread(verifiers.verify_app_live, state.app_url)
+        live = await asyncio.to_thread(verifiers.verify_app_live, state.app_url, cell_sandbox=policy)
         if live is None:
-            reason = verifiers.browser_check_skip_reason()
+            reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
             state.trace_log.node("verify_fullstack", "browser_skipped", reason)
             _note_skipped(state, f"browser load of {target} via the running backend: {reason}")
             return None
@@ -1268,6 +1267,11 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
 async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     """Walk the whole pipeline from wherever this call is entitled to start."""
     state.entry = entry
+    if state.is_fullstack and _cell_sandbox(state) is not None:
+        # A fullstack artifact is done only once its backend runs, and the
+        # sandbox starts no backend: refuse before any question or brief.
+        state.error = BACKENDS_OFF_MESSAGE
+        return state.error
     if state.act_first and entry not in (cp.ENTRY_FULL, cp.ENTRY_NEW_ITERATION):
         # A repeat call past the brief: an earlier turn showed it (for
         # `ENTRY_CONFIRM`, the budget stop that asked to continue).
@@ -1296,9 +1300,8 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
         _save_checkpoint(state, cp.STAGE_PRD_WRITTEN)
 
     if state.is_fullstack and _cell_sandbox(state) is not None:
-        # A fullstack artifact is done only once its backend runs, and the
-        # sandbox starts no backend: refuse before the spec and generation
-        # spend anything.
+        # The gathering step settled on a fullstack type: refuse before the
+        # spec and generation spend anything.
         state.error = BACKENDS_OFF_MESSAGE
         return state.error
 

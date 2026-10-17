@@ -78,7 +78,7 @@ def test_valid_deck_with_no_office_produces_no_messages(store: _FakeStore):
 def test_office_refusal_of_a_well_formed_deck_still_surfaces(monkeypatch, store: _FakeStore):
     monkeypatch.setattr(
         "anton.core.artifacts.office_open_check.check_opens_via_office",
-        lambda _path: [FileLoadFinding(detail="general input/output error")],
+        lambda _path, *, cell_sandbox: [FileLoadFinding(detail="general input/output error")],
     )
     folder = _make_artifact(store, "deck-abc12345")
     write_minimal_pptx(folder / "deck.pptx")
@@ -95,7 +95,7 @@ def test_oracle_is_skipped_when_the_structure_is_already_broken(monkeypatch, sto
     calls: list[Path] = []
     monkeypatch.setattr(
         "anton.core.artifacts.office_open_check.check_opens_via_office",
-        lambda path: calls.append(path) or [],
+        lambda path, *, cell_sandbox: calls.append(path) or [],
     )
     folder = _make_artifact(store, "deck-abc12345")
     (folder / "deck.pptx").write_text("not a zip")

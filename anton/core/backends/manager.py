@@ -13,7 +13,7 @@ from typing import NamedTuple
 from anton.core.backends.base import Cell, ScratchpadRuntime, ScratchpadRuntimeFactory
 from anton.core.backends.sandbox import CellSandbox
 from anton.core.datasources.data_vault import DataVault
-from anton.utils.nofollow import replace_text_nofollow
+from anton.utils.nofollow import read_text_nofollow, replace_text_nofollow
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +103,13 @@ class ScratchpadManager:
             runtime_factory, "workspace_env_overlay"
         )
         # Unlike the kwargs above, a policy is never dropped: a factory that
-        # cannot take it would run agent code unlocked.
-        if cell_sandbox is not None and not self._probe_factory_kwarg(runtime_factory, "cell_sandbox"):
+        # cannot take it would run agent code unlocked. It must name the
+        # parameter, since a bare **kwargs can swallow it, and get_or_create
+        # checks each runtime it builds reports the policy.
+        if cell_sandbox is not None and not self._factory_names_kwarg(runtime_factory, "cell_sandbox"):
             raise TypeError(
-                "this scratchpad runtime factory does not accept cell_sandbox, so it "
-                "cannot run agent code under the sandbox policy"
+                "this scratchpad runtime factory does not name a cell_sandbox parameter, so it "
+                "cannot be trusted to run agent code under the sandbox policy"
             )
         self._cell_sandbox = cell_sandbox
         self._available_packages: list[str] = self.probe_packages()
@@ -122,6 +124,18 @@ class ScratchpadManager:
         if name in params:
             return True
         return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    @staticmethod
+    def _factory_names_kwarg(factory, name: str) -> bool:
+        """Whether `factory` names keyword `name` in its signature. No if unintrospectable."""
+        try:
+            params = inspect.signature(factory).parameters
+        except (TypeError, ValueError):
+            return False
+        param = params.get(name)
+        return param is not None and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD
+        )
 
     @property
     def pads(self) -> dict[str, ScratchpadRuntime]:
@@ -178,6 +192,10 @@ class ScratchpadManager:
         Deliberately NOT derived from `self._pads` or from the snapshot files: both
         include system-created pads (the artifact backend launcher's slug pad), which
         must never count against the agent. Only names the guard explicitly recorded.
+
+        Under a sandbox policy the record is read from the workspace root without
+        following a link, as `record_agent_pad` writes it, so a linked folder or
+        file never shows another person's pad names.
         """
         path = self._agent_pads_file()
         if path is None:
@@ -185,7 +203,11 @@ class ScratchpadManager:
         try:
             import json
 
-            names = json.loads(path.read_text(encoding="utf-8"))
+            if self._cell_sandbox is not None and self._workspace_path is not None:
+                text = read_text_nofollow(self._workspace_path, path)
+            else:
+                text = path.read_text(encoding="utf-8")
+            names = json.loads(text)
             return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
         except (OSError, ValueError):
             return set()
@@ -205,7 +227,8 @@ class ScratchpadManager:
             if name in current:
                 return
             # The snapshot folder sits in the project, which agent code can
-            # write, so neither it nor the file may be a link. Under a sandbox
+            # write, so on Linux and macOS neither it nor the file may be a
+            # link, and the file is written fresh and renamed in. Under a sandbox
             # policy no folder below the workspace may be one either; without
             # one, the sessions folder is opened as before, following a
             # linked `.anton`.
@@ -298,6 +321,11 @@ class ScratchpadManager:
                 ),
                 **({"cell_sandbox": self._cell_sandbox} if self._cell_sandbox is not None else {}),
             )
+            if self._cell_sandbox is not None and getattr(pad, "cell_sandbox", None) != self._cell_sandbox:
+                raise TypeError(
+                    f"the scratchpad runtime built for {name!r} does not run under the session's "
+                    "sandbox policy, so it was not started"
+                )
             await pad.start()
             self._pads[name] = pad
         if ds_env_override is not None:

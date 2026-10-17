@@ -24,7 +24,13 @@ from tests.test_turn_cost_terminals import (
     _verdict_llm,
 )
 
-from anton.core.llm.provider import StreamComplete, StreamTextDelta, StreamTurnEnded
+from anton.core.llm.provider import (
+    LLMResponse,
+    StreamComplete,
+    StreamTaskProgress,
+    StreamTextDelta,
+    StreamTurnEnded,
+)
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 
 
@@ -191,3 +197,149 @@ async def test_clean_exit_after_a_cancel_sends_no_reason(workspace):
     events, booked = await _drain(session)
     assert booked == "cancelled"
     assert not any(isinstance(e, StreamTurnEnded) for e in events)
+
+
+def _verifier_failure_with_handback(workspace, handback: LLMResponse, handback_stream=None):
+    mock_llm = _handback_verifier_failure(workspace)._llm
+    plans = [
+        _Iter([StreamComplete(response=_tool_call(1))]),
+        _Iter([StreamTextDelta(text="the answer"), StreamComplete(response=_text("the answer"))]),
+        handback_stream or _Iter([StreamTextDelta(text=handback.content), StreamComplete(response=handback)]),
+    ]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    return _plain(workspace, mock_llm)
+
+
+async def test_filtered_handback_is_dropped(workspace):
+    # Azure streams the refusal, then marks the reply content_filter (ENG-3478).
+    refusal = "I'm sorry, but I cannot assist with that request."
+    filtered = LLMResponse(content=refusal, stop_reason="content_filter")
+    session = _verifier_failure_with_handback(workspace, filtered)
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert refusal not in shown
+    assert "the answer" in shown
+    assert refusal not in str(session.history)
+    # The note goes with its reply, so the turn ends on the answer.
+    assert session.history[-1] == {"role": "assistant", "content": "the answer"}
+    # And the next question stays the user's own words, not merged into the note.
+    session._append_history({"role": "user", "content": "next question"})
+    assert session.history[-1] == {"role": "user", "content": "next question"}
+    # The answer stands, so no second try; the reason names the filter.
+    assert session._llm.plan_stream.call_count == 3
+    assert booked == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+async def test_unfiltered_handback_still_streams(workspace):
+    session = _verifier_failure_with_handback(workspace, _text("here is what I did"))
+    events, _ = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert shown.endswith("here is what I did")
+    assert session.history[-1] == {"role": "assistant", "content": "here is what I did"}
+
+
+async def test_filtered_handback_keeps_the_answer_for_turn(workspace):
+    filtered = LLMResponse(content="I'm sorry, but I cannot assist with that request.", stop_reason="content_filter")
+    session = _verifier_failure_with_handback(workspace, filtered)
+    with patch("anton.analytics.send_event"):
+        assert await session.turn("do the thing") == "the answer"
+
+
+async def test_escape_while_a_handback_is_held_stops_the_call(workspace):
+    session = None
+    reached: list[str] = []
+
+    async def _handback():
+        yield StreamTextDelta(text="first")
+        reached.append("first")
+        session.escape_watcher.cancelled.set()  # Escape between held deltas
+        yield StreamTextDelta(text="second")
+        reached.append("second")
+        yield StreamComplete(response=_text("first second"))
+        reached.append("complete")
+
+    session = _verifier_failure_with_handback(workspace, None, handback_stream=_handback())
+    session.escape_watcher = MagicMock(cancelled=asyncio.Event())
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert "complete" not in reached, "the held call ran on to its end after Escape"
+    assert "first" not in shown and "second" not in shown
+    assert booked == "cancelled"
+    assert isinstance(events[-1], StreamTaskProgress), "the CLI needs a last event to see Escape on"
+    assert session.history[-1] == {"role": "assistant", "content": "the answer"}
+
+
+async def test_escape_while_a_handback_is_held_cancels_the_turn_as_the_cli_sees_it(workspace):
+    session = None
+
+    async def _handback():
+        yield StreamTextDelta(text="first")
+        session.escape_watcher.cancelled.set()
+        yield StreamTextDelta(text="second")
+        yield StreamComplete(response=_text("first second"))
+
+    session = _verifier_failure_with_handback(workspace, None, handback_stream=_handback())
+    session.escape_watcher = MagicMock(cancelled=asyncio.Event())
+    # As anton/chat.py reads the stream: on the first event after Escape, set the flag and stop.
+    with patch("anton.analytics.send_event") as send:
+        stream = session.turn_stream("do the thing")
+        stopped = False
+        try:
+            async for _event in stream:
+                if session.escape_watcher.cancelled.is_set():
+                    session._cancel_event.set()
+                    stopped = True
+                    break
+        finally:
+            await stream.aclose()
+    assert stopped
+    assert send.call_args.kwargs["ended_by"] == "cancelled"
+
+
+_REFUSAL = "I'm sorry, but I cannot assist with that request."
+
+
+def _filtered_stream():
+    return _Iter([
+        StreamTextDelta(text=_REFUSAL),
+        StreamComplete(response=LLMResponse(content=_REFUSAL, stop_reason="content_filter")),
+    ])
+
+
+def _unanswered_verifier_failure(workspace, *handbacks):
+    # The reply before the hand-back has no text, so the hand-back is the whole answer.
+    mock_llm = _handback_verifier_failure(workspace)._llm
+    plans = [_Iter([StreamComplete(response=_tool_call(1))]), _Iter([StreamComplete(response=_text(""))]), *handbacks]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    return _plain(workspace, mock_llm)
+
+
+async def test_filtered_handback_without_an_answer_is_tried_once_more(workspace):
+    retried = _Iter([StreamTextDelta(text="here is what I did"), StreamComplete(response=_text("here is what I did"))])
+    session = _unanswered_verifier_failure(workspace, _filtered_stream(), retried)
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert shown == "here is what I did"
+    assert session.history[-1] == {"role": "assistant", "content": "here is what I did"}
+    assert booked == "content_filter"
+
+
+async def test_handback_filtered_twice_ends_with_no_text(workspace):
+    session = _unanswered_verifier_failure(workspace, _filtered_stream(), _filtered_stream())
+    events, booked = await _drain(session)
+    assert not any(isinstance(e, StreamTextDelta) and e.text for e in events)
+    assert _REFUSAL not in str(session.history)
+    assert session._llm.plan_stream.call_count == 4
+    assert booked == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+async def test_filtered_main_reply_names_the_filter(workspace):
+    # Main replies stream as they arrive; the turn's reason still says the filter fired.
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: _filtered_stream())
+    session = _plain(workspace, mock_llm)
+    events, booked = await _drain(session)
+    assert booked == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")

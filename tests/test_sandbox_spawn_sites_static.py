@@ -1,17 +1,26 @@
 """No process spawn in anton/ skips the sandbox launcher unnoticed.
 
-Every call that starts a process is listed here by (file, enclosing function,
-call), counted, with the reason it may exist. The test fails when the found
-sites and the list differ, so a new spawn needs a deliberate entry.
+Every reference to an API that starts a process is listed here by (file,
+enclosing function, API), counted, with the reason it may exist. The test
+fails when the found sites and the list differ, so a new spawn needs a
+deliberate entry.
 
-A site whose kind is LAUNCHER runs agent code (a person's venv Python, or a
-program it can reach) and must route through `CellSandbox.launch()` when a
-policy is set, so its enclosing function must call `.launch(`. A site whose
-kind is REFUSED is skipped under a policy by its caller. The other kinds run
+A reference counts whether it is called or passed along, so a spawn API
+handed to `asyncio.to_thread`, `run_in_executor` or `functools.partial`, or
+bound to a local name, is found where it is named. A site whose kind is
+LAUNCHER runs agent code (a person's venv Python, or a program it can reach)
+and must route through `CellSandbox.launch()` when a policy is set, so its
+enclosing function must call `.launch(`. A site whose kind is REFUSED is
+never reached under a policy: the browser and LibreOffice checks take a
+required `cell_sandbox` and return before the spawn when it is set, and the
+backend launcher reads the policy off its pool first. The other kinds run
 only in the CLI, only in the hosted cloud pod, or run no agent code.
 
-Calls are matched through import aliases (`import subprocess as _sp`), so a
-local rename cannot hide one.
+Names are resolved through import aliases (`import subprocess as _sp`,
+`from asyncio import subprocess`), so a rename cannot hide one. Any
+`.subprocess_exec` or `.subprocess_shell` counts whatever its receiver (an
+event loop), and `getattr(<os|subprocess|asyncio>, name)` counts unless
+`name` is a string that names no spawn API.
 """
 
 from __future__ import annotations
@@ -19,6 +28,8 @@ from __future__ import annotations
 import ast
 from collections import Counter
 from pathlib import Path
+
+import pytest
 
 ANTON_ROOT = Path(__file__).resolve().parent.parent / "anton"
 
@@ -37,9 +48,14 @@ _SPAWN_MODULE_ATTRS = {
     },
     "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
     "pty": {"spawn", "fork"},
-    "multiprocessing": {"Process", "Pool"},
+    "multiprocessing": {"Process", "Pool", "get_context"},
+    "concurrent.futures": {"ProcessPoolExecutor"},
     "webbrowser": {"open", "open_new", "open_new_tab"},
 }
+# Event-loop methods that start a process, whatever object they are read from.
+_LOOP_SPAWN_ATTRS = {"subprocess_exec", "subprocess_shell"}
+# Modules whose attributes a dynamic getattr could turn into a spawn.
+_GETATTR_MODULES = {"os", "subprocess", "asyncio"}
 
 #: (path under anton/, enclosing function, call, kind, reason). One entry per
 #: occurrence.
@@ -71,9 +87,9 @@ ALLOWLIST = (
     ("core/artifacts/backend_launcher.py", "launch_artifact_backend", "asyncio.create_subprocess_exec", REFUSED,
      "app backends; launch_artifact_backend returns BACKENDS_OFF_MESSAGE under a policy first"),
     ("core/artifacts/html_lint.py", "_lint_target", "subprocess.run", REFUSED,
-     "the headless-browser lint; tool_handlers and the generator skip it under a policy"),
+     "the headless-browser lint; lint_html and lint_url return None under a policy first"),
     ("core/artifacts/xlsx_office_check.py", "_convert", "subprocess.Popen", REFUSED,
-     "the LibreOffice check; tool_handlers skips it under a policy"),
+     "the LibreOffice check; check_xlsx_via_office and check_opens_via_office return None under a policy first"),
     ("cli.py", "_reexec", "os.execv", CLI, "the CLI re-executing itself after an update"),
     ("cli.py", "_ensure_dependencies", "subprocess.run", CLI, "the CLI installing its own dependencies"),
     ("cli.py", "_ensure_terms_consent", "os.system", CLI, "clearing the terminal"),
@@ -105,37 +121,72 @@ ALLOWLIST = (
 
 
 def _aliases(tree: ast.AST) -> tuple[dict[str, str], dict[str, str]]:
-    """Local names for imported modules and callables, mapped to their real names."""
+    """Local names for imported modules and imported names, mapped to their dotted names."""
     modules: dict[str, str] = {}
     callables: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                modules[alias.asname or alias.name.split(".")[0]] = alias.name.split(".")[0]
+                if alias.asname:
+                    modules[alias.asname] = alias.name
+                else:
+                    root = alias.name.split(".")[0]
+                    modules[root] = root
         elif isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
                 callables[alias.asname or alias.name] = f"{node.module}.{alias.name}"
     return modules, callables
 
 
-def _spawn_label(fn: ast.expr, modules: dict[str, str], callables: dict[str, str]) -> str | None:
-    if isinstance(fn, ast.Attribute):
-        owner = fn.value
-        # `asyncio.subprocess.create_subprocess_exec` and friends
-        if isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name):
-            root = modules.get(owner.value.id, owner.value.id)
-            if root == "asyncio" and fn.attr in _SPAWN_MODULE_ATTRS["asyncio"]:
-                return f"asyncio.{fn.attr}"
-        if isinstance(owner, ast.Name):
-            module = modules.get(owner.id, owner.id)
-            if fn.attr in _SPAWN_MODULE_ATTRS.get(module, ()):
-                return f"{module}.{fn.attr}"
+def _dotted(node: ast.expr, modules: dict[str, str], callables: dict[str, str]) -> list[str]:
+    """Every dotted name ``node`` can read, resolved through import aliases.
+
+    The alias maps cover the whole file, so a name imported both as a module
+    and as a name (`import subprocess` at the top, `from asyncio import
+    subprocess` in one function) gives both readings.
+    """
+    if isinstance(node, ast.Name):
+        return [name for name in (callables.get(node.id), modules.get(node.id)) if name]
+    if isinstance(node, ast.Attribute):
+        return [f"{owner}.{node.attr}" for owner in _dotted(node.value, modules, callables)]
+    return []
+
+
+def _api_label(dotted: str) -> str | None:
+    """The label of the spawn API ``dotted`` names, or None when it names none."""
+    module, _, attr = dotted.rpartition(".")
+    # `asyncio.subprocess.create_subprocess_exec` is asyncio's own.
+    if module == "asyncio.subprocess":
+        module = "asyncio"
+    if attr in _SPAWN_MODULE_ATTRS.get(module, ()):
+        return f"{module}.{attr}"
+    return None
+
+
+def _spawn_label(node: ast.expr, modules: dict[str, str], callables: dict[str, str]) -> str | None:
+    """The spawn API an ``ast.Name`` or ``ast.Attribute`` refers to, or None."""
+    if isinstance(node, ast.Attribute) and node.attr in _LOOP_SPAWN_ATTRS:
+        return f"loop.{node.attr}"
+    for dotted in _dotted(node, modules, callables):
+        label = _api_label(dotted)
+        if label is not None:
+            return label
+    return None
+
+
+def _getattr_label(node: ast.Call, modules: dict[str, str], callables: dict[str, str]) -> str | None:
+    """The spawn a ``getattr(<module>, name)`` call can reach, or None."""
+    if not (isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2):
         return None
-    if isinstance(fn, ast.Name) and fn.id in callables:
-        module, _, attr = callables[fn.id].rpartition(".")
-        root = module.split(".")[0]
-        if attr in _SPAWN_MODULE_ATTRS.get(root, ()):
-            return f"{root}.{attr}"
+    name = node.args[1]
+    for owner in _dotted(node.args[0], modules, callables):
+        if owner.split(".")[0] not in _GETATTR_MODULES:
+            continue
+        if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+            return f"getattr({owner})"
+        label = _api_label(f"{owner}.{name.value}")
+        if label is not None:
+            return label
     return None
 
 
@@ -145,7 +196,6 @@ class _Visitor(ast.NodeVisitor):
         self._modules = modules
         self._callables = callables
         self._stack: list[str] = []
-        self._launch_calls: list[bool] = []
         self.found: list[tuple[str, str, str]] = []
         self.launching: set[str] = set()
 
@@ -174,10 +224,27 @@ class _Visitor(ast.NodeVisitor):
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self._scope("<lambda>", node)
 
-    def visit_Call(self, node: ast.Call) -> None:
-        label = _spawn_label(node.func, self._modules, self._callables)
+    def _record(self, label: str) -> None:
+        self.found.append((self.rel, self._enclosing(), label))
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        label = _spawn_label(node, self._modules, self._callables)
         if label is not None:
-            self.found.append((self.rel, self._enclosing(), label))
+            # Its inner names are the same reference.
+            self._record(label)
+            return
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load):
+            label = _spawn_label(node, self._modules, self._callables)
+            if label is not None:
+                self._record(label)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        label = _getattr_label(node, self._modules, self._callables)
+        if label is not None:
+            self._record(label)
         self.generic_visit(node)
 
 
@@ -220,9 +287,52 @@ def test_every_site_that_runs_agent_code_calls_the_launcher():
     assert not skipped, f"These sites run agent code without calling CellSandbox.launch(): {skipped}"
 
 
-def test_the_scan_sees_through_an_import_alias():
-    tree = ast.parse("import subprocess as _sp\nfrom asyncio import create_subprocess_exec as go\n"
-                     "def f():\n    _sp.run(['x'])\n    go('x')\n")
+def _found(source: str) -> list[tuple[str, str, str]]:
+    tree = ast.parse(source)
     visitor = _Visitor("x.py", *_aliases(tree))
     visitor.visit(tree)
-    assert visitor.found == [("x.py", "f", "subprocess.run"), ("x.py", "f", "asyncio.create_subprocess_exec")]
+    return visitor.found
+
+
+def test_the_scan_sees_through_an_import_alias():
+    assert _found(
+        "import subprocess as _sp\nfrom asyncio import create_subprocess_exec as go\n"
+        "def f():\n    _sp.run(['x'])\n    go('x')\n"
+    ) == [("x.py", "f", "subprocess.run"), ("x.py", "f", "asyncio.create_subprocess_exec")]
+
+
+@pytest.mark.parametrize(
+    ("source", "label"),
+    [
+        ("import asyncio, subprocess\nasync def f(v):\n    await asyncio.to_thread(subprocess.run, [v])\n",
+         "subprocess.run"),
+        ("import subprocess\nasync def f(loop, v):\n    await loop.run_in_executor(None, subprocess.run, [v])\n",
+         "subprocess.run"),
+        ("import functools, subprocess\ndef f(v):\n    return functools.partial(subprocess.Popen, [v])\n",
+         "subprocess.Popen"),
+        ("import subprocess\ndef f(v):\n    run = subprocess.run\n    run([v])\n", "subprocess.run"),
+        ("from subprocess import run\ndef f(v):\n    go = run\n", "subprocess.run"),
+        ("async def f(loop, v):\n    await loop.subprocess_exec(object, v)\n", "loop.subprocess_exec"),
+        ("async def f(v):\n    await self.loop.subprocess_shell(object, v)\n", "loop.subprocess_shell"),
+        ("from asyncio import subprocess as asp\nasync def f(v):\n    await asp.create_subprocess_exec(v)\n",
+         "asyncio.create_subprocess_exec"),
+        ("from asyncio import subprocess\nasync def f(v):\n    await subprocess.create_subprocess_shell(v)\n",
+         "asyncio.create_subprocess_shell"),
+        ("import subprocess\ndef g():\n    from asyncio import subprocess\ndef f(v):\n    subprocess.run([v])\n",
+         "subprocess.run"),
+        ("import subprocess\ndef f(v):\n    getattr(subprocess, 'run')([v])\n", "subprocess.run"),
+        ("import os\ndef f(name, v):\n    getattr(os, name)(v)\n", "getattr(os)"),
+        ("import multiprocessing\ndef f():\n    multiprocessing.get_context('fork').Pool(2)\n",
+         "multiprocessing.get_context"),
+        ("from concurrent.futures import ProcessPoolExecutor\ndef f():\n    ProcessPoolExecutor()\n",
+         "concurrent.futures.ProcessPoolExecutor"),
+        ("import concurrent.futures\ndef f():\n    concurrent.futures.ProcessPoolExecutor()\n",
+         "concurrent.futures.ProcessPoolExecutor"),
+    ],
+)
+def test_the_scan_sees_a_spawn_api_passed_along_or_renamed(source, label):
+    assert _found(source) == [("x.py", "f", label)]
+
+
+def test_the_scan_ignores_a_getattr_that_names_no_spawn_api():
+    assert _found("import os\ndef f():\n    return getattr(os, 'O_NOFOLLOW', 0)\n") == []

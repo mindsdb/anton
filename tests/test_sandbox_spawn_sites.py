@@ -28,6 +28,9 @@ from anton.core.tools.generate_artifact import orchestrator, verifiers
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.scratchpad import prepare_scratchpad_exec
 
+# The launcher, its descriptors and these POSIX paths need a POSIX host.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the sandbox launcher is POSIX-only")
+
 _LAUNCHER_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
 _SECRETS = {
     "COWORK_AUTH_TOKEN": "tok-secret",
@@ -68,7 +71,7 @@ def policy(tmp_path: Path, project: Path) -> CellSandbox:
 
 
 def _payload(kwargs: dict) -> dict:
-    (fd,) = kwargs["pass_fds"]
+    fd, _refusal_write = kwargs["pass_fds"]
     os.lseek(fd, 0, os.SEEK_SET)
     chunks = []
     while chunk := os.read(fd, 1 << 16):
@@ -77,9 +80,12 @@ def _payload(kwargs: dict) -> dict:
 
 
 def _launcher_argv(args: tuple, kwargs: dict) -> list[str]:
-    """The part of a launch argv before the target, with its descriptor."""
-    (fd,) = kwargs["pass_fds"]
-    head = [sys.executable, "-I", "-S", str(sandbox.launcher_path()), "--policy-fd", str(fd), "--"]
+    """The part of a launch argv after the launcher and its two descriptors: the target."""
+    fd, refusal_write = kwargs["pass_fds"]
+    head = [
+        sys.executable, "-I", "-S", str(sandbox.launcher_path()),
+        "--policy-fd", str(fd), "--refusal-fd", str(refusal_write), "--",
+    ]
     assert list(args[: len(head)]) == head
     return list(args[len(head):])
 
@@ -189,6 +195,22 @@ async def test_the_cell_runs_the_installed_boot_script_through_the_launcher(
         os.fstat(kwargs["pass_fds"][0])
 
 
+async def test_a_cell_with_no_connections_of_its_own_gets_no_inherited_ds_values(
+    project, policy, monkeypatch, server_env
+):
+    pad = _pad(project, policy)
+    monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
+    seen: dict = {}
+
+    async def capture(*args, **kwargs):
+        seen.update(payload=_payload(kwargs))
+        return _Proc()
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", capture)
+    await pad.start()
+    assert not any(key.startswith("DS_") for key in seen["payload"]["env"])
+
+
 async def test_a_dotenv_key_the_server_holds_never_carries_the_servers_value_in(
     project, policy, monkeypatch, server_env
 ):
@@ -217,7 +239,7 @@ async def test_a_dotenv_key_the_server_holds_never_carries_the_servers_value_in(
 def test_the_venv_health_check_runs_through_the_launcher(project, policy, monkeypatch, server_env):
     import subprocess
 
-    pad = _pad(project, policy)
+    pad = _pad(project, policy, scratchpad_ds_env={"DS_PG_MAIN__PASSWORD": "pad-ds"})
     seen: dict = {}
 
     def capture(*args, **kwargs):
@@ -231,6 +253,23 @@ def test_the_venv_health_check_runs_through_the_launcher(project, policy, monkey
         "capture_output": True, "timeout": 5, "env": _LAUNCHER_ENV, "pass_fds": seen["kwargs"]["pass_fds"],
     }
     _assert_no_server_secret(seen["payload"], tuple(seen["args"]), policy)
+    assert "DS_SERVER__PASSWORD" not in seen["payload"]["env"]
+    assert seen["payload"]["env"]["DS_PG_MAIN__PASSWORD"] == "pad-ds"
+
+
+def test_a_health_check_whose_target_fakes_a_refusal_rebuilds_the_venv(project, policy, monkeypatch):
+    """Exit 87 and the marker on stderr are the venv Python's own (a planted
+    .pth can print them); only the launcher's refusal pipe is a refusal."""
+    import subprocess
+
+    pad = _pad(project, policy)
+
+    def fake(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 87, b"", b"anton-sandbox: refused: faked by a .pth\n")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert pad._verify_venv_python() is False
+    assert "faked by a .pth" in pad._last_verify_error
 
 
 async def test_installs_run_pip_through_the_launcher_and_never_uv(project, policy, monkeypatch, server_env):
@@ -256,6 +295,7 @@ async def test_installs_run_pip_through_the_launcher_and_never_uv(project, polic
     }
     _assert_no_server_secret(seen["payload"], args, policy)
     assert seen["payload"]["env"]["PIP_CACHE_DIR"] == str(policy.home_dir / ".cache" / "pip")
+    assert not any(key.startswith("DS_") for key in seen["payload"]["env"])
 
 
 def test_venvs_are_built_with_the_standard_library_under_the_sandbox(project, policy, monkeypatch):
@@ -448,7 +488,59 @@ async def test_a_fullstack_artifact_is_refused_before_the_spec_or_generation(
     assert spent == []
 
 
+async def test_a_fullstack_artifact_is_refused_before_any_question(tmp_path, policy, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from anton.core.tools.generate_artifact.discovery import checkpoint as cp
+    from anton.core.tools.generate_artifact.state import GenState
+
+    asked: list[str] = []
+
+    async def must_not_run(*args, **kwargs):
+        asked.append("discovery")
+
+    monkeypatch.setattr(orchestrator, "run_discovery", must_not_run)
+    session = AsyncMock()
+    session._scratchpads = SimpleNamespace(cell_sandbox=policy)
+    state = GenState(
+        session=session, artifact_type="fullstack-stateless-app", artifact_path=tmp_path,
+        slug="app", brief="b",
+    )
+    assert await orchestrator.run(state, entry=cp.ENTRY_FULL) == BACKENDS_OFF_MESSAGE
+    assert asked == []
+
+
 # ── Lints that start a browser or LibreOffice ────────────────────────────────
+
+
+def test_each_browser_and_office_check_refuses_under_a_policy_before_it_spawns(tmp_path, policy, monkeypatch):
+    import subprocess
+
+    from anton.core.artifacts import html_lint, office_open_check, xlsx_office_check
+
+    monkeypatch.setenv("ANTON_HTML_LINT_BROWSER", sys.executable)
+    monkeypatch.setenv("ANTON_XLSX_LINT_OFFICE", sys.executable)
+    spawned: list[tuple] = []
+
+    # Recorded, not only raised: each check swallows its own errors as None.
+    def must_not_spawn(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError(f"spawned {args!r}")
+
+    monkeypatch.setattr(html_lint.subprocess, "run", must_not_spawn)
+    monkeypatch.setattr(xlsx_office_check.subprocess, "Popen", must_not_spawn)
+    monkeypatch.setattr(subprocess, "run", must_not_spawn)
+    page = tmp_path / "page.html"
+    page.write_text("<html></html>")
+    book = tmp_path / "book.xlsx"
+    book.write_bytes(b"not a zip")
+    assert html_lint.lint_html(page, cell_sandbox=policy) is None
+    assert html_lint.lint_url("http://127.0.0.1:1/", cell_sandbox=policy) is None
+    assert xlsx_office_check.check_xlsx_via_office(book, cell_sandbox=policy) is None
+    assert office_open_check.check_opens_via_office(book, cell_sandbox=policy) is None
+    assert verifiers.verify_frontend_live(page, cell_sandbox=policy) is None
+    assert verifiers.verify_app_live("http://127.0.0.1:1/", cell_sandbox=policy) is None
+    assert spawned == []
 
 
 class _Store:

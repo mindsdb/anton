@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import hashlib
 import httpx2 as httpx
@@ -37,6 +38,7 @@ from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
+    ANTON_NOTE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -77,6 +79,7 @@ from anton.core.llm.tracing import (
     VALID_SURFACES,
     TraceContext,
     call_role,
+    detached_from_session,
     reset_trace_context,
     set_trace_context,
 )
@@ -150,7 +153,7 @@ _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
 # Composed from one lead and per-loss tails so the both-halves case reads as a
 # single message instead of repeating the lead twice.
 _TRUNCATED_LEAD = (
-    "SYSTEM: Your response was truncated because it exceeded the output token limit."
+    f"{ANTON_NOTE} Your response was truncated because it exceeded the output token limit."
 )
 _TRUNCATED_CONTINUE_TAIL = (
     "Continue exactly where you left off. If you were about to call a tool, "
@@ -170,7 +173,7 @@ _TRUNCATED_TEXT_AND_TOOL_CALL_NUDGE = (
     f"{_TRUNCATED_CONTINUE_NUDGE} {_TRUNCATED_TOOL_CALL_TAIL}"
 )
 _TRUNCATED_SILENT_NUDGE = (
-    "SYSTEM: Your previous response spent its entire output-token budget before "
+    f"{ANTON_NOTE} Your previous response spent its entire output-token budget before "
     "producing any visible text or tool call — the user saw nothing. Respond again, "
     "and lead with the answer or the tool call immediately; keep deliberation brief. "
     "If the output you are building is large, produce it in smaller parts."
@@ -270,6 +273,8 @@ def _discarded_tool_call_events(tc: ToolCall) -> list[StreamEvent]:
         ),
         # "exec failed" is the wording the cell-status classifier keys on for a
         # non-JSON result; without a recognised marker the cell reads as ok.
+        # cowork-server's figure sources key on the same "[error] exec failed"
+        # prefix to drop the call (cowork/harnesses/anton_harness/figure_sources.py).
         StreamToolResult(
             name="scratchpad",
             content=f"[error] exec failed — {reason}",
@@ -727,6 +732,32 @@ class _VerifierLatch:
     last_no_verdict: str = ""
 
 
+@dataclass
+class _TurnSegment:
+    """The messages one turn appended to one history list.
+
+    A turn writes to a new list each time compaction or hard truncation
+    replaces `ChatSession.history`. While the turn runs, the segment holds the
+    list itself, not a copy, so rows appended after the swap land in it. A
+    dataclass rather than a pydantic model for that reason: validation would
+    copy the list. When the turn ends, one segment over a copy of the turn's
+    messages replaces them all (see `ChatSession._close_turn_segments`).
+
+    `end` is None to read to the list's end. It is set when a merge moves the
+    list's last message into the next segment (see
+    `ChatSession._claim_merged_message`).
+    """
+
+    messages: list[dict]
+    start: int
+    end: int | None = None
+
+    @property
+    def stop(self) -> int:
+        """Where the segment's messages end in its list."""
+        return len(self.messages) if self.end is None else self.end
+
+
 # Process-wide latches for hosts that rebuild a session per message. Keyed on
 # the coding endpoint, model, and credential: a denial belongs to the account,
 # so a new api key gets a fresh latch. Only a digest of the key is held, and the
@@ -846,6 +877,8 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+# How anton's notes open. "SYSTEM:" stays for histories saved before the notes were labelled.
+_NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 
 # Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
 _NO_GUESS_AT_LIMIT = (
@@ -1174,6 +1207,71 @@ def _render_tool_result_content(content, cap: int) -> str:
     return _clip_keep_cause(str(content), cap)
 
 
+# Replaces a tool result that `ChatSession.hard_truncate_history` keeps but the
+# retried request has no room for. The tool_use keeps an answer, and the model
+# learns to ask for less.
+_RESULT_TOO_LARGE = (
+    "[Result removed: too large for the context window. "
+    "Narrow the request and call the tool again.]"
+)
+
+
+def _window_byte_budget(model: str) -> int:
+    """UTF-8 bytes of text that fill about a quarter of `model`'s window.
+
+    One byte per window token: a quarter of the window at the ~4 chars/token
+    rule of thumb, where an ASCII char is one byte.
+    """
+    return context_window(model)
+
+
+def _result_text_bytes(content) -> int:
+    """How many UTF-8 bytes of text a tool_result's content carries.
+
+    An image block counts none: a provider scales an image down and bills it
+    by its pixels, a bounded cost, not by the length of its base64.
+    """
+    if isinstance(content, list):
+        text = "".join(
+            block.get("text") or ""
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    else:
+        text = str(content)
+    # "replace": a lone surrogate, which decoded JSON can hold, would raise.
+    return len(text.encode("utf-8", "replace"))
+
+
+def _stub_largest_results(*, messages: list[dict], model: str) -> list[dict]:
+    """`messages` with their largest tool_results stubbed until the rest fit
+    in `_window_byte_budget(model)` bytes of text.
+
+    Of two results the same size, the earlier one goes first: the next
+    planning call answers the latest. A message with no result stubbed is
+    returned as itself, so a caller can tell by identity whether it changed.
+    """
+    sizes: dict[tuple[int, int], int] = {
+        (i, j): _result_text_bytes(block.get("content", ""))
+        for i, message in enumerate(messages)
+        if isinstance(message.get("content"), list)
+        for j, block in enumerate(message["content"])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+    if not sizes:
+        return messages
+    stubbed = list(messages)
+    over = sum(sizes.values()) - _window_byte_budget(model)
+    for i, j in sorted(sizes, key=lambda position: (-sizes[position], position)):
+        if over <= 0:
+            break
+        content = list(stubbed[i]["content"])
+        content[j] = {**content[j], "content": _RESULT_TOO_LARGE}
+        stubbed[i] = {**stubbed[i], "content": content}
+        over -= sizes[i, j]
+    return stubbed
+
+
 # Stands in for a multimodal block in the verify transcript. Named because
 # the judged-entry selection below has to be able to tell it apart from a
 # real reply.
@@ -1199,8 +1297,8 @@ def _render_verify_transcript(
     ``max_tool`` tool events, merged back into chronological order. Speaker is
     taken from the message role (list-based *user* content — images/files — is
     labelled USER, not ASSISTANT); multimodal blocks are rendered block-by-block
-    (text kept, images as a placeholder, never raw base64); internal ``SYSTEM:``
-    injections are dropped before budgeting so they don't consume slots. Keeps
+    (text kept, images as a placeholder, never raw base64); anton's internal notes (``_NOTE_PREFIXES``)
+    are dropped before budgeting so they don't consume slots. Keeps
     the call cheap and free of tool_use/tool_result pairing constraints
     (ENG-716).
 
@@ -1240,7 +1338,7 @@ def _render_verify_transcript(
         speaker = "USER" if role == "user" else "ASSISTANT"
         if isinstance(content, str):
             text = content.strip()
-            if not text or (role == "user" and text.startswith(("SYSTEM:", _CHECK_NOTE))):
+            if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
                 continue
             convo.append((i, speaker, text))
         elif isinstance(content, list):
@@ -1768,6 +1866,13 @@ class ChatSession:
         self._seed_covered = 0
         self._synthetic_prefix_len = 0
         self._compaction_sealed = False
+        # The latest turn's messages, one segment per history list it wrote to
+        # (see `turn_messages`). Set when a turn starts and frozen into one
+        # copied segment when it ends, so a host reads them once the stream is
+        # done. `_turn_open` is True only while `turn_stream` runs: a swap
+        # outside a turn is not recorded.
+        self._turn_segments: list[_TurnSegment] = []
+        self._turn_open = False
         self._pending_memory_confirmations: list = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
@@ -1953,6 +2058,27 @@ class ChatSession:
     def history(self) -> list[dict]:
         return self._history
 
+    def turn_messages(self) -> list[dict]:
+        """Every message the latest turn appended to history, in order.
+
+        Compaction and hard truncation replace `history` with a new list that
+        no longer holds the turn's earlier messages, so a slice of `history`
+        taken from the turn's start would drop them, or keep a tool_result
+        whose tool_use was folded away. This reads each list the turn wrote to
+        from where the turn started writing to it.
+
+        Without a swap it equals `history[n:]`, where n is the history length
+        when the turn started, so it includes the turn's own user input. Empty
+        before the first turn. Fixed once the turn ends: later appends or
+        rewrites of `history` (a CLI command between turns, the next turn's
+        compaction before it starts) do not change it.
+        """
+        return [
+            message
+            for segment in self._turn_segments
+            for message in segment.messages[segment.start:segment.end]
+        ]
+
     @property
     def act_first(self) -> bool:
         """The "act first, ask later" setting this session was built with."""
@@ -2119,7 +2245,7 @@ class ChatSession:
 
         if streak >= self._max_consecutive_errors:
             result_text += (
-                f"\n\nSYSTEM: The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
+                f"\n\n{ANTON_NOTE} The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
                 "in a row. Stop retrying this approach. Either try a completely different "
                 "strategy or tell the user what's going wrong so they can help."
             )
@@ -2255,6 +2381,77 @@ class ChatSession:
     # mixed shapes get normalised to a list-of-blocks (the form
     # every chat API accepts for both roles).
 
+    def _start_turn_segments(self) -> None:
+        """Mark the turn's start: its messages begin at the end of history."""
+        self._turn_segments = [
+            _TurnSegment(messages=self._history, start=len(self._history))
+        ]
+        self._turn_open = True
+
+    def _close_turn_segments(self) -> None:
+        """Mark the turn's end: freeze its messages and release the lists.
+
+        The turn's messages are copied into one segment, so the session no
+        longer holds the history lists a swap replaced, and edits to `history`
+        between turns do not reach `turn_messages`.
+        """
+        self._turn_segments = [_TurnSegment(messages=self.turn_messages(), start=0)]
+        self._turn_open = False
+
+    def _replace_history(self, *, messages: list[dict]) -> None:
+        """Make `messages` the session's history.
+
+        Every swap of the history list goes through here. During a turn the
+        outgoing list stays in `_turn_segments` (anton never writes to it
+        again), and the new list starts a segment at its current end, so
+        `turn_messages` still returns the rows the swap folded away. Recorded
+        at the swap rather than by the host watching events, so rows anton
+        appends before its next yield are kept too.
+        """
+        if self._turn_open:
+            self._turn_segments.append(
+                _TurnSegment(messages=messages, start=len(messages))
+            )
+        self._history = messages
+
+    def _claim_merged_message(self, *, replaced: dict) -> None:
+        """Move a merged message into the turn's current segment.
+
+        Right after a swap the new list's last message sits just before the
+        segment's start: the swap carried it over from the outgoing list, or
+        made it (the summary, or the hard-truncation separator). When
+        `_append_history` merges a message into it, the merged message holds
+        content this turn added, so the segment starts one message earlier.
+        If the outgoing list's last turn message is the one replaced, its
+        segment stops before it, so the message is not read twice.
+        `hard_truncate_history` claims the carried-over message the same way
+        when it stubs a tool_result in the turn's last message.
+
+        The first segment is left alone: a merge into the last seeded message
+        (the turn's user input after a seed that ends with a user message) is
+        not this turn's, and `turn_messages` stays equal to the plain slice.
+        """
+        if not self._turn_open or len(self._turn_segments) < 2:
+            return
+        current = self._turn_segments[-1]
+        if current.start != len(self._history):
+            return
+        current.start -= 1
+        written = self._last_written_segment()
+        if written is not None and written.messages[written.stop - 1] is replaced:
+            written.end = written.stop - 1
+
+    def _last_written_segment(self) -> _TurnSegment | None:
+        """The latest segment before the current one that holds a message.
+
+        Walks past a segment that holds none: two swaps on one planning call
+        leave the first swap's list with nothing appended.
+        """
+        for segment in reversed(self._turn_segments[:-1]):
+            if segment.stop > segment.start:
+                return segment
+        return None
+
     @staticmethod
     def _coerce_to_block_list(content) -> list[dict]:
         """Normalise a message's content into a list of blocks.
@@ -2312,6 +2509,7 @@ class ChatSession:
             + self._coerce_to_block_list(content)
         )
         self._history[-1] = {**prev, "role": role, "content": merged_blocks}
+        self._claim_merged_message(replaced=prev)
         logger.info(
             "Merged consecutive %s messages in history (would have violated "
             "Anthropic role alternation). Combined block count: %d.",
@@ -3101,14 +3299,14 @@ class ChatSession:
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
-            self._history = [
+            self._replace_history(messages=[
                 summary_msg,
                 {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
-            ]
+            ])
             self._synthetic_prefix_len = 2
         else:
-            self._history = [summary_msg] + recent_turns
+            self._replace_history(messages=[summary_msg, *recent_turns])
             self._synthetic_prefix_len = 1
         self._seed_covered = covered
         if recorded and not self._compaction_sealed:
@@ -3254,6 +3452,8 @@ class ChatSession:
         with tool_use blocks and inserts a user message carrying
         synthetic `is_error: true` results for whichever ids didn't
         get acknowledged in the immediately following message.
+        cowork-server's figure sources skip results marked is_error, so
+        keep the flag on every result anton makes up itself.
 
         Returns the number of synthetic results inserted (0 if the
         history is already clean).
@@ -3345,23 +3545,26 @@ class ChatSession:
         throws away everything except the last `keep` messages, preserving
         tool_use/tool_result pairing and the API rule that the first
         message must be from the user.
+
+        In a tool loop every kept message is a tool row, and the retried
+        planning call answers the last tool_result. So the tail keeps its
+        leading assistant message: the placeholder user message goes before
+        it, and dropping it would orphan the tool_result after it. When the
+        kept tool_results are too large for the retry, the largest become
+        stubs that ask the model to narrow the request and call the tool again.
         """
         if len(self._history) <= keep:
             return
         tail = list(self._history[-keep:])
 
-        # Strip leading messages that would leave tail in an invalid state:
-        # - assistant at head (API requires user first)
-        # - user whose only blocks are tool_result references (their
-        #   matching tool_use is in the dropped prefix, so they're orphaned)
-        # Repeat because dropping one can expose another. A user message
-        # with mixed content keeps its non-tool_result blocks.
+        # Strip a leading user message's tool_result blocks: their tool_use
+        # is in the dropped prefix, so nothing in the request calls them. A
+        # user message with mixed content keeps its non-tool_result blocks;
+        # one with nothing else goes. Repeat in case the next message is a
+        # user message too.
         while tail:
             head = tail[0]
             role = head.get("role")
-            if role == "assistant":
-                tail.pop(0)
-                continue
             if role == "user":
                 content = head.get("content")
                 if isinstance(content, list):
@@ -3376,6 +3579,17 @@ class ChatSession:
                         tail[0] = {**head, "content": filtered}
             break
 
+        # A kept tool result can be what overflowed on its own: a connector
+        # result has no size cap. The largest kept results become stubs until
+        # the rest fit a quarter of the planning model's window, which leaves
+        # the other three quarters for the system prompt, the tools and the
+        # reply. Every tool_use keeps its tool_result, and the retry fits.
+        # Sizes count UTF-8 bytes, one per ASCII char, so text that packs more
+        # tokens into each char, such as CJK at three bytes per char, counts
+        # closer to what it costs.
+        unstubbed_last = tail[-1] if tail else None
+        tail = _stub_largest_results(messages=tail, model=self._llm.planning_model)
+
         placeholder = {
             "role": "user",
             "content": "[Earlier conversation was truncated due to persistent context overflow.]",
@@ -3386,9 +3600,22 @@ class ChatSession:
         # case — the tail's first assistant message can directly
         # respond to the placeholder user message.
         if tail and tail[0].get("role") == "assistant":
-            self._history = [placeholder, *tail]
+            self._replace_history(messages=[placeholder, *tail])
         else:
-            self._history = [placeholder, separator, *tail]
+            self._replace_history(messages=[placeholder, separator, *tail])
+        # A stubbed last message replaces the outgoing list's last message, as
+        # a merge does, so `turn_messages` reads that tool_result once: as the
+        # stub the model saw. Each swap keeps the last tool_result message as
+        # it is, or claims the stub that replaces it, so the latest segment
+        # that holds a message ends with the one stubbed here. When no segment
+        # holds one, the turn has appended nothing: the stubbed message is the
+        # seed's and stays the seed's.
+        if (
+            tail
+            and tail[-1] is not unstubbed_last
+            and self._last_written_segment() is not None
+        ):
+            self._claim_merged_message(replaced=unstubbed_last)
 
         # A hard truncate discards the compacted summary — the turns it covered
         # are gone from history, so replaying it next turn would describe
@@ -3545,6 +3772,9 @@ class ChatSession:
             # so "error" covered a parse failure, a tool crash, a bad config
             # and an anton bug alike — indistinguishable in any query.
             tc.error_type = _safe_error_type(exc)
+        elif tc.content_filtered:
+            # Wins over a hand-back's reason, so a client can tell the filter fired and rerun.
+            tc.ended_by = "content_filter"
 
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
@@ -4256,7 +4486,7 @@ class ChatSession:
         """
         spent = self._turn_cost.total_tokens if self._turn_cost is not None else 0
         return (
-            f"SYSTEM: This turn has used {spent:,} tokens, which is a large amount "
+            f"{ANTON_NOTE} This turn has used {spent:,} tokens, which is a large amount "
             "of work for a single request and counts against the user's plan. "
             "Pause here. Summarize what you have accomplished so far and what "
             "remains. Be straightforward that this has already taken a lot of "
@@ -4353,7 +4583,7 @@ class ChatSession:
             logger.debug("completion-verifier jev bookkeeping failed", exc_info=True)
 
     async def _stream_handback_diagnosis(
-        self, *, system: str, label: str, cancels_continuation: bool = False
+        self, *, system: str, label: str, answered: bool, cancels_continuation: bool = False
     ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -4373,6 +4603,10 @@ class ChatSession:
         the callers know from the continuation counter. It announces the
         hand-back so no consumer mistakes this diagnosis for the replacement
         answer that boundary promised.
+
+        `answered` says the reply before the diagnosis has text; the tool-loop
+        stops have none. A diagnosis the provider's content filter stops is
+        dropped; with no answer to end on, it is tried once more.
         """
         log = logging.getLogger(__name__)
         # Marks this diagnosis as an explanation, not the replacement answer a
@@ -4381,17 +4615,53 @@ class ChatSession:
         # turn that never continued is unchanged on the wire.
         if cancels_continuation:
             yield StreamTaskProgress(phase="handback", message="")
-        diagnosis_response = None
-        async for event in self.plan_stream_with_recovery(system=system):
-            yield event
-            if isinstance(event, StreamComplete):
-                diagnosis_response = event
+        # A turn with no answer of its own tries a filtered diagnosis once more;
+        # one with an answer ends on it instead.
+        for attempt in range(1 if answered else 2):
+            diagnosis_response = None
+            # Held until the call ends: a content filter marks a reply only in its
+            # last event, after the text has streamed.
+            held_text: list[StreamTextDelta] = []
+            filtered = False
+            stream = self.plan_stream_with_recovery(system=system)
+            try:
+                async for event in stream:
+                    if isinstance(event, StreamTextDelta):
+                        # Held text yields no event for the CLI to see Escape on, so check here.
+                        watcher = self.escape_watcher
+                        if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
+                            log.info("%s diagnosis cancelled while held — dropped", label)
+                            self._drop_handback_note()
+                            # Set here so the books say cancelled, then one event for the CLI to stop on.
+                            self._cancel_event.set()
+                            yield StreamTaskProgress(phase="analyzing", message="Cancelled")
+                            return
+                        held_text.append(event)
+                        continue
+                    if isinstance(event, StreamComplete):
+                        diagnosis_response = event
+                        filtered = event.response.stop_reason == "content_filter"
+                        if not filtered:
+                            for delta in held_text:
+                                yield delta
+                        held_text = []
+                    yield event
+            finally:
+                await stream.aclose()
+            if not filtered:
+                break
+            log.warning(
+                "%s diagnosis stopped by the provider's content filter — dropped (try %d)",
+                label, attempt + 1,
+            )
         text = (
             (diagnosis_response.response.content or "").strip()
-            if diagnosis_response is not None
+            if diagnosis_response is not None and not filtered
             else ""
         )
-        if text:
+        if filtered:
+            self._drop_handback_note()
+        elif text:
             self._append_history({"role": "assistant", "content": text})
         else:
             log.warning(
@@ -4401,6 +4671,20 @@ class ChatSession:
                 "max-tool-rounds path, since the cap block appends that last)",
                 label,
             )
+
+    def _drop_handback_note(self) -> None:
+        """Remove the hand-back's note once its reply is dropped, so the turn ends on the answer.
+
+        Left in place, the user's next message merges into it. Only a standalone note goes: one
+        merged into tool results (a list) would take those results with it.
+        """
+        last = self._history[-1] if self._history else None
+        if (
+            isinstance(last, dict) and last.get("role") == "user"
+            and isinstance(last.get("content"), str)
+            and last["content"].strip().startswith(_NOTE_PREFIXES)
+        ):
+            self._history.pop()
 
     async def plan_stream_with_recovery(
         self,
@@ -4446,6 +4730,7 @@ class ChatSession:
 
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+                self._book_content_filter(event)
                 yield event
             return
         except ContextOverflowError:
@@ -4460,6 +4745,7 @@ class ChatSession:
             )
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+                self._book_content_filter(event)
                 yield event
             return
         except ContextOverflowError:
@@ -4470,7 +4756,17 @@ class ChatSession:
             message="Context still exceeded limits — older history was hard-truncated."
         )
         async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+            self._book_content_filter(event)
             yield event
+
+    def _book_content_filter(self, event: StreamEvent) -> None:
+        """Note a call the provider's content filter stopped, so the turn ends naming it."""
+        if (
+            isinstance(event, StreamComplete)
+            and event.response.stop_reason == "content_filter"
+            and self._turn_cost is not None
+        ):
+            self._turn_cost.content_filtered = True
 
     def _acc_observe(
         self,
@@ -4633,7 +4929,24 @@ class ChatSession:
 
         asyncio.create_task(_drain())
 
-    def _schedule_cerebellum_flush(self) -> None:
+    @staticmethod
+    def _background_context(trace: TraceContext | None) -> contextvars.Context:
+        """A context for background work of the turn `trace` identifies.
+
+        LLM calls made in it are attributed to that turn, but kept out of the
+        conversation's session (see `detached_from_session`). Tasks started in
+        it inherit it.
+        """
+        context = contextvars.copy_context()
+        if trace is not None:
+            context.run(set_trace_context, detached_from_session(trace))
+        return context
+
+    def _spawn_background(self, coro, trace: TraceContext | None) -> asyncio.Task:
+        """Start `coro` as background work of the turn `trace` identifies."""
+        return asyncio.create_task(coro, context=self._background_context(trace))
+
+    def _schedule_cerebellum_flush(self, trace: TraceContext | None = None) -> None:
         """Fire the cerebellum's batched diff pass without blocking the turn.
 
         The cerebellum buffered any errored / warning cells across the
@@ -4655,7 +4968,7 @@ class ChatSession:
         if cb.buffered_count == 0:
             return
         try:
-            asyncio.create_task(cb.flush())
+            self._spawn_background(cb.flush(), trace)
         except RuntimeError:
             # No running loop (e.g. called from a sync context in tests).
             # Cerebellum learning is best-effort, so just drop the buffer.
@@ -4688,7 +5001,12 @@ class ChatSession:
         """
         async for _event in self.turn_stream(user_input, enable_interaction=False):
             pass
-        last = self._history[-1] if self._history else None
+        # A dropped hand-back leaves anton's own note last; the reply is the one before it.
+        tail = list(self._history)
+        while tail and tail[-1].get("role") == "user" and isinstance(tail[-1].get("content"), str) \
+                and tail[-1]["content"].strip().startswith(_NOTE_PREFIXES):
+            tail.pop()
+        last = tail[-1] if tail else None
         if not isinstance(last, dict) or last.get("role") != "assistant":
             return ""
         content = last.get("content")
@@ -4821,6 +5139,9 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        # Before the inner turn appends the user input, so `turn_messages`
+        # starts where a slice of the seeded history would.
+        self._start_turn_segments()
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -4841,8 +5162,14 @@ class ChatSession:
             async for event in inner:
                 yield event
         finally:
-            await inner.aclose()
-            self.emitter = None
+            # Nested so the turn still closes when the inner turn's own
+            # cleanup raises; a turn left open would record the next
+            # between-turn swap as its own.
+            try:
+                await inner.aclose()
+            finally:
+                self._close_turn_segments()
+                self.emitter = None
 
     async def _turn_stream_inner(
         self,
@@ -4923,19 +5250,17 @@ class ChatSession:
         # talking to MindsHub and attaches langfuse-style headers so the
         # router can attribute every LLM call (and any spans nested
         # inside this turn via tools / scratchpad) to the right session.
-        # ContextVar propagation also covers `asyncio.create_task` spawns
-        # — the cerebellum flush + identity extraction tasks scheduled
-        # below inherit a copy of this context.
-        _trace_token = set_trace_context(
-            TraceContext(
-                session_id=self._session_id,
-                turn_id=turn_id if turn_id is not None else self._turn_count + 1,
-                harness=self._harness,
-                surface=self._surface,
-                tags=tuple(trace_tags or ()),
-                metadata=trace_metadata or None,
-            )
+        # Tasks spawned during the turn inherit it. The end-of-turn memory
+        # tasks start after it is reset, so they get it from `_background_context`.
+        _turn_trace = TraceContext(
+            session_id=self._session_id,
+            turn_id=turn_id if turn_id is not None else self._turn_count + 1,
+            harness=self._harness,
+            surface=self._surface,
+            tags=tuple(trace_tags or ()),
+            metadata=trace_metadata or None,
         )
+        _trace_token = set_trace_context(_turn_trace)
 
         # Open the turn's cost books and listen at the LLM-client narrow
         # waist — planning, coding (incl. verifier verdicts), and router
@@ -5203,13 +5528,13 @@ class ChatSession:
                         # just note it was transient and continue as planned (ENG-673).
                         if isinstance(_agent_exc, TransientProviderError):
                             recovery_note = (
-                                f"SYSTEM: A temporary provider error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} A temporary provider error interrupted execution: {_agent_exc}\n\n"
                                 "This was a transient service issue, not a problem with your approach — "
                                 "continue the task as planned."
                             )
                         else:
                             recovery_note = (
-                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} An error interrupted execution: {_agent_exc}\n\n"
                                 "If you can diagnose and fix the issue, continue working on the task. "
                                 "Adjust your approach to avoid the same error. "
                                 "If this is unrecoverable, summarize what you accomplished and suggest next steps."
@@ -5322,7 +5647,7 @@ class ChatSession:
                             {
                                 "role": "user",
                                 "content": (
-                                    f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
+                                    f"{ANTON_NOTE} The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
                                     "Stop retrying. Please:\n"
                                     "1. Summarize what you accomplished so far.\n"
                                     "2. Explain what went wrong in plain language.\n"
@@ -5449,14 +5774,15 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                asyncio.create_task(self._cortex.maybe_update_identity(messages_str))
-            # Periodic memory vacuum (Systems Consolidation)
-            self._cortex.maybe_vacuum()
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
+            # Periodic memory vacuum (Systems Consolidation). Its compaction
+            # task is started inside, so it runs in the background context.
+            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush()
+        self._schedule_cerebellum_flush(_turn_trace)
         self._schedule_acc_flush()
 
         # The books are closed, so ended_by is final. A clean exit can still book
@@ -5751,7 +6077,7 @@ class ChatSession:
                         {
                             "role": "user",
                             "content": (
-                                f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
+                                f"{ANTON_NOTE} You have used {effective_round_cap} tool-call rounds on this turn. "
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
@@ -5770,7 +6096,7 @@ class ChatSession:
                     # the highest-traffic one of the four).
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="max-tool-rounds",
+                        system=system, label="max-tool-rounds", answered=False,
                         cancels_continuation=continuation > 0,
                     ):
                         yield event
@@ -5828,7 +6154,7 @@ class ChatSession:
                             message="Reached this task's token budget — checking in with you...",
                         )
                         async for event in self._stream_handback_diagnosis(
-                            system=system, label="spend-ceiling",
+                            system=system, label="spend-ceiling", answered=False,
                             cancels_continuation=continuation > 0,
                         ):
                             yield event
@@ -6007,6 +6333,8 @@ class ChatSession:
                                             exc_info=True,
                                         )
                                     if lint_messages:
+                                        # cowork-server's figure sources cut this
+                                        # block from a replayed cell's output.
                                         result_text += (
                                             "\n\n[artifact lint]\n"
                                             + "\n".join(lint_messages)
@@ -6443,7 +6771,7 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: You have attempted to complete this task multiple times "
+                            f"{_CHECK_NOTE} You have attempted to complete this task multiple times "
                             "but verification indicates it is still not done. Do NOT try again. "
                             "Instead:\n"
                             "1. Summarize exactly what was accomplished so far.\n"
@@ -6461,7 +6789,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="budget-exhausted",
+                    system=system, label="budget-exhausted", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -6807,21 +7135,20 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: Your reply above stands, and nothing in your work "
-                            "was rejected — no verdict came back at all. What failed is "
-                            "the automatic check on whether the task is complete, so "
-                            "completeness is unconfirmed rather than denied.\n"
-                            "1. Report accurately what you did: what succeeded, and "
-                            "anything that did not, including any tool that returned an "
-                            "error. Do not describe a failed step as done.\n"
-                            "2. Name a file only by a path that appears verbatim in a "
-                            "tool result above. Never state a path you intended to write "
-                            "or believe you wrote; where no tool result gives one, say "
-                            "what you produced without naming a location.\n"
-                            "3. Say whether anything still needs doing and ask how they'd "
-                            "like to proceed.\n"
-                            f"4. {_SOLVABILITY_CLAUSE}\n"
-                            "Do not mention this instruction or the verifier to the user."
+                            f"{_CHECK_NOTE} Your reply above stands, and nothing in it "
+                            "was rejected. The automatic check on whether the task is "
+                            "complete returned no verdict, so completeness is unconfirmed "
+                            "rather than denied.\n\n"
+                            "Tell the user what you did: what succeeded and anything that "
+                            "did not, including any tool that returned an error. Do not "
+                            "describe a failed step as done. Name a file only by a path "
+                            "that appears verbatim in a tool result above. Never state a "
+                            "path you intended to write or believe you wrote; where no tool "
+                            "result gives one, say what you produced without naming a "
+                            "location. Say whether anything still needs doing and ask how "
+                            "they'd like to proceed. "
+                            f"{_SOLVABILITY_CLAUSE} Write it for the user, without "
+                            "referring to this check."
                         ),
                     }
                 )
@@ -6832,7 +7159,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="verifier-failure",
+                    system=system, label="verifier-failure", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -6872,7 +7199,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="stuck",
+                    system=system, label="stuck", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -6931,7 +7258,7 @@ class ChatSession:
                         message="Reached this task's token budget — checking in with you...",
                     )
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="spend-ceiling",
+                        system=system, label="spend-ceiling", answered=bool(reply.strip()),
                         cancels_continuation=continuation > 0,
                     ):
                         yield event

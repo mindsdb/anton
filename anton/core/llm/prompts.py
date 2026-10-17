@@ -487,8 +487,12 @@ If no meaningful lessons exist, return [].
 Do NOT extract trivial observations. Only encode genuinely reusable knowledge.
 """
 
+# Labels each note anton adds to the history. A "SYSTEM:" note reads as an injection,
+# which models refuse and Azure's filter stops (ENG-3478).
+ANTON_NOTE = "[Automatic note from anton, not written by the user]"
+
 RESILIENCE_NUDGE = (
-    "\n\nSYSTEM: This tool has failed twice in a row. Before retrying the same approach, "
+    f"\n\n{ANTON_NOTE} This tool has failed twice in a row. Before retrying the same approach, "
     "try one or two more genuine workarounds — different headers/user-agent, a public API, "
     "archive.org, an alternate library, or a different data source. If those also fail, "
     "STOP and tell the user exactly what failed and what you need — do NOT fabricate a "
@@ -501,14 +505,14 @@ RESILIENCE_NUDGE = (
 # when a cell is too big or too slow just sends it renaming-and-retrying. These
 # are chosen by failure type in ChatSession._apply_error_tracking.
 SCRATCHPAD_SIZE_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps failing on its size, not its logic. "
+    f"\n\n{ANTON_NOTE} This scratchpad cell keeps failing on its size, not its logic. "
     "Stop retrying the same large cell. Write the output to disk incrementally — "
     "open(path, 'w') once, then open(path, 'a') to append each chunk, keeping each "
     "cell's string under ~5KB — or generate the content inside the cell instead of "
     "passing a large literal. Reuse the SAME scratchpad; do not rename it."
 )
 SCRATCHPAD_TIMEOUT_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps timing out — the work is too heavy, not "
+    f"\n\n{ANTON_NOTE} This scratchpad cell keeps timing out — the work is too heavy, not "
     "the write. Make the next cell smaller: fewer rows/items per cell, split a long "
     "loop across cells (process a batch, return, continue), or narrow the scope. Call "
     "progress() inside long loops so active work isn't mistaken for a hang. Reuse the "
@@ -519,7 +523,7 @@ SCRATCHPAD_TIMEOUT_NUDGE = (
 # round-trip pattern that made ENG-578 expensive. Selection is routed on the
 # kill-message wording in _select_resilience_nudge.
 SCRATCHPAD_STUCK_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell was killed because the worker stopped "
+    f"\n\n{ANTON_NOTE} This scratchpad cell was killed because the worker stopped "
     "signalling liveness — the process died or a native call is stuck holding "
     "it below Python. This is NOT a size problem: do not shrink the batch or "
     "split the loop; deliberate sleeps and blocking calls are kept alive "
@@ -537,7 +541,7 @@ SCRATCHPAD_STUCK_NUDGE = (
 # import that gets echoed into 'packages' is the same unattended install one
 # turn later, with the agent as the only approver.
 SCRATCHPAD_INSTALL_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell keeps failing on a missing module, not "
+    f"\n\n{ANTON_NOTE} This scratchpad cell keeps failing on a missing module, not "
     "on its logic — imports never install anything. Do not shrink or split "
     "the cell. Question the import itself first: get_llm, agentic_loop, "
     "web_search, sample and progress are already globals (no import), and a "
@@ -550,7 +554,7 @@ SCRATCHPAD_INSTALL_NUDGE = (
 # work look identical from outside. Say so, rather than confidently claiming
 # "too heavy" (the guess that taught the ENG-578 per-item pattern).
 SCRATCHPAD_SILENT_TIMEOUT_NUDGE = (
-    "\n\nSYSTEM: This scratchpad cell ran out of its total time budget without "
+    f"\n\n{ANTON_NOTE} This scratchpad cell ran out of its total time budget without "
     "producing any output — either a call is stuck or the work is heavier than "
     "estimated; the runtime cannot tell which. Retry once with a realistic "
     "estimated_execution_time_seconds, print intermediate results, call "

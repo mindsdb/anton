@@ -21,8 +21,8 @@ from anton.core.backends.base import Cell, ScratchpadRuntime, scrub_cell
 from anton.core.backends.sandbox import (
     CellSandbox,
     SandboxUnavailable,
+    SandboxedSpawn,
     overlay_key_allowed,
-    refusal_from,
     validate_pad_name,
 )
 from anton.core.backends.wire import (
@@ -47,7 +47,12 @@ from anton.utils.datasources import (
     scrub_output,
 )
 from anton.core.backends.utils import compute_timeouts
-from anton.utils.nofollow import make_dirs_nofollow, rmtree_nofollow, write_text_nofollow
+from anton.utils.nofollow import (
+    make_dirs_nofollow,
+    rmtree_nofollow,
+    unlink_matching_nofollow,
+    write_text_nofollow,
+)
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
@@ -201,6 +206,13 @@ def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
     env = dict(base)
     env.setdefault("PYTHONUTF8", "1")
     return env
+
+
+def _replace_ds_env(env: dict[str, str], *, ds_env: dict[str, str]) -> None:
+    """Drop every inherited ``DS_*`` from ``env`` in place, then add ``ds_env``."""
+    for key in [k for k in env if k.startswith("DS_")]:
+        del env[key]
+    env.update(ds_env)
 
 
 def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
@@ -389,6 +401,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # The Landlock policy every spawn of agent code runs under; None runs
         # them unlocked with the server's environment.
         self._cell_sandbox: CellSandbox | None = cell_sandbox
+        # The running cell's launch under a policy, whose refusal pipe says
+        # whether the launcher refused once the process has ended.
+        self._cell_launch: SandboxedSpawn | None = None
         self._venv_workers: set[asyncio.Task[object]] = set()
         self._proc: asyncio.subprocess.Process | None = None
         self._boot_path: str | None = None
@@ -413,6 +428,21 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
         self._scratchpad_ds_env = ds_env
 
+    @property
+    def cell_sandbox(self) -> CellSandbox | None:
+        """The sandbox policy this pad's agent code runs under, or None for none."""
+        return self._cell_sandbox
+
+    def _sandboxed_check_env(self) -> dict[str, str]:
+        """The server's environment for a sandboxed health check or install, before the allowlist.
+
+        UTF-8 mode, and only this pad's own ``DS_*``: inherited ones never
+        reach a spawn under a policy.
+        """
+        env = _utf8_env(os.environ)
+        _replace_ds_env(env, ds_env=self._scratchpad_ds_env or {})
+        return env
+
     def _venv_path(self) -> Path:
         """This pad's venv folder, refused when it resolves outside the venvs base.
 
@@ -436,7 +466,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         link anywhere below the workspace (a linked `.anton` included) is
         refused. Otherwise the venvs base itself: opening it follows a linked
         `.anton` as before, and the venv folder and everything in it are
-        still opened without following links.
+        still opened without following links. Windows follows links in both
+        cases (`anton/utils/nofollow.py`).
         """
         workspace = self._explicit_workspace_path
         if self._cell_sandbox is not None and workspace is not None:
@@ -444,6 +475,16 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if base.startswith(root.rstrip(os.sep) + os.sep):
                 return Path(workspace)
         return self._venvs_base
+
+    def _snapshot_write_root(self) -> Path:
+        """The trusted folder the snapshot folder's create and delete start from under a sandbox policy.
+
+        The workspace when the venvs live in it, so a link anywhere below it
+        (a linked `.anton` or conversation folder included) is refused.
+        Otherwise the folder that holds the venvs and the sessions folders.
+        """
+        root = self._host_write_root()
+        return root if root != self._venvs_base else self._venvs_base.parent
 
     def _uv(self) -> str | None:
         """The uv binary to build and install with, or None for stdlib venv and pip.
@@ -472,13 +513,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         Also returns None when the directory cannot be created; the caller then leaves
         ANTON_SCRATCHPAD_SESSION_PATH unset so the failure is reported rather than silent.
+        Under a sandbox policy the folder is made without following a link
+        below the trusted root, so a linked conversation folder is never used.
         """
         path = snapshot_file(self._venvs_base, self._session_id, self.name)
         if path is None or not create:
             return path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
+            if self._cell_sandbox is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                root = self._snapshot_write_root()
+                root.mkdir(parents=True, exist_ok=True)
+                make_dirs_nofollow(root, path.parent)
+        except (OSError, ValueError):
             return None
         return path
 
@@ -501,9 +549,23 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         ).lower() in {"1", "true", "yes", "on"}
 
     def _discard_session_snapshot(self) -> None:
-        """Delete this pad's namespace snapshot, if any. Best-effort."""
+        """Delete this pad's namespace snapshot, if any. Best-effort.
+
+        Under a sandbox policy the snapshot folder is opened from the trusted
+        root without following a link, so a conversation folder linked to
+        another person's never loses their saved state.
+        """
         path = self._session_snapshot_path()
         if path is None:
+            return
+        if self._cell_sandbox is not None:
+            # The writer suffixes its temp file with a pid, so match any of them.
+            try:
+                unlink_matching_nofollow(
+                    self._snapshot_write_root(), path.parent, patterns=(path.name, f"{path.name}.*.tmp")
+                )
+            except (OSError, ValueError):
+                pass
             return
         candidates = [path]
         # The writer suffixes its temp file with a pid, so match any of them.
@@ -693,15 +755,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     def _verify_venv_python_sandboxed(self, policy: CellSandbox) -> bool:
         """The health check through the launcher.
 
-        A refusal, or a launcher that cannot start, raises SandboxUnavailable
-        instead of answering False: False makes the caller delete the venv,
-        and nothing is wrong with the venv.
+        A refusal on the launcher's refusal pipe, or a launcher that cannot
+        start, raises SandboxUnavailable instead of answering False: False
+        makes the caller delete the venv, and nothing is wrong with the venv.
+        Anything the venv's own Python prints or exits with, a refusal marker
+        included, answers False, so a broken venv is rebuilt.
         """
         import subprocess
 
         argv = [self._venv_python, "-c", "print('ok')"]
         try:
-            spawn = policy.launch(argv, env=policy.child_env(_utf8_env(os.environ)))
+            spawn = policy.launch(argv, env=policy.child_env(self._sandboxed_check_env()))
         except SandboxUnavailable:
             raise
         except (OSError, ValueError) as exc:
@@ -721,7 +785,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             raise SandboxUnavailable(f"could not start the sandbox launcher: {exc}") from exc
         finally:
             spawn.close()
-        refusal = refusal_from(result.returncode, result.stderr)
+            refusal = spawn.refusal()
         if refusal is not None:
             raise refusal
         ok = result.returncode == 0 and "ok" in result.stdout.decode("utf-8", errors="replace")
@@ -734,8 +798,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         with _venv_lock(venv_path=self._venvs_base / self.name):
             if self._venv_dir is not None:
                 try:
-                    # Refuses a link at the venv folder or any folder above it,
-                    # so the delete never leaves the workspace.
+                    # Refuses a link at the venv folder or any folder above it
+                    # (on Linux and macOS), so the delete never leaves the
+                    # workspace.
                     rmtree_nofollow(self._host_write_root(), self._venv_dir)
                 except (OSError, ValueError):
                     pass
@@ -937,12 +1002,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             overlay = {k: v for k, v in overlay.items() if overlay_key_allowed(k)}
         # Before the DS_* strip, so a project .env cannot smuggle a credential.
         overlaid = _apply_workspace_overlay(env, overlay)
-        if self._scratchpad_ds_env is not None:
+        if self._scratchpad_ds_env is not None or policy is not None:
             # Never trust inherited DS_* values — strip them, then overlay
-            # exactly what this pad should see.
-            for key in [k for k in env if k.startswith("DS_")]:
-                del env[key]
-            env.update(self._scratchpad_ds_env)
+            # exactly what this pad should see. Under a policy a pad with no
+            # DS_* of its own gets none.
+            _replace_ds_env(env, ds_env=self._scratchpad_ds_env or {})
         if self._coding_model:
             env["ANTON_SCRATCHPAD_MODEL"] = self._coding_model
         else:
@@ -1087,7 +1151,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 )
             launch = policy.launch(argv, env=env)
             try:
-                return await asyncio.create_subprocess_exec(
+                proc = await asyncio.create_subprocess_exec(
                     *launch.argv,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
@@ -1097,8 +1161,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     start_new_session=(sys.platform != "win32"),
                     pass_fds=launch.pass_fds,
                 )
+            except BaseException:
+                launch.refusal()
+                raise
             finally:
                 launch.close()
+            self._release_cell_launch()
+            self._cell_launch = launch
+            return proc
 
         if policy is not None:
             # A launcher that cannot start says nothing about the venv, so the
@@ -1703,16 +1773,25 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 }
 
     async def _dead_cell_refusal(self) -> SandboxUnavailable | None:
-        """The launcher's refusal behind a cell process that ended, if that is why it ended."""
-        proc = self._proc
-        if proc is None or proc.stderr is None:
+        """The launcher's refusal behind a cell process that ended, if that is why it ended.
+
+        Read from the launch's refusal pipe, never from the process's exit
+        code or stderr, which agent code controls once the target runs.
+        """
+        proc, launch = self._proc, self._cell_launch
+        if proc is None or launch is None:
             return None
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
-            stderr = await asyncio.wait_for(proc.stderr.read(), timeout=5)
-        except (asyncio.TimeoutError, OSError):
+        except asyncio.TimeoutError:
             return None
-        return refusal_from(proc.returncode, stderr)
+        return launch.refusal()
+
+    def _release_cell_launch(self) -> None:
+        """Close the refusal pipe of the cell's last launch, if any."""
+        if self._cell_launch is not None:
+            self._cell_launch.refusal()
+            self._cell_launch = None
 
     async def install_packages(self, packages: list[str]) -> str:
         if not packages:
@@ -1740,6 +1819,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         _install_timeout = CoreSettings().cell_install_timeout
         policy = self._cell_sandbox
+        launch: SandboxedSpawn | None = None
         if policy is None:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1752,7 +1832,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         else:
             # pip runs the venv's Python and any build backend it fetches, so
             # it is agent code too.
-            launch = policy.launch(cmd, env=policy.child_env(_utf8_env(os.environ)))
+            launch = policy.launch(cmd, env=policy.child_env(self._sandboxed_check_env()))
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *launch.argv,
@@ -1762,6 +1842,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     cwd=str(policy.project_dir),
                     pass_fds=launch.pass_fds,
                 )
+            except BaseException:
+                launch.refusal()
+                raise
             finally:
                 launch.close()
         try:
@@ -1772,6 +1855,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             proc.kill()
             await proc.wait()
             return f"Install timed out after {_install_timeout}s."
+        finally:
+            if launch is not None:
+                # Closes the refusal pipe; the launcher's stderr line in the
+                # output already names a refusal.
+                launch.refusal()
         output = stdout.decode("utf-8", errors="replace")
         if proc.returncode != 0:
             return f"Install failed (exit {proc.returncode}):\n{output}"
@@ -1795,6 +1883,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 else:
                     pipe.close()
         self._proc = None
+        self._release_cell_launch()
         if self._boot_path is not None:
             try:
                 os.unlink(self._boot_path)
