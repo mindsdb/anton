@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from anton.core.backends.base import Cell
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
@@ -16,6 +17,7 @@ from anton.core.utils.scratchpad import (
     observe_scratchpad_cell,
     cell_failure_reason,
     install_call_installed_something,
+    refuse_pad_name,
     reject_invalid_packages,
     send_package_install_event,
 )
@@ -172,7 +174,13 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+# Said once per file when a check that would start a browser or LibreOffice
+# is skipped because agent code runs in a sandbox on this host.
+_SANDBOX_BROWSER_SKIP = "browser check skipped: agent code runs in a sandbox on this deployment"
+_SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
+
+
+def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, Callable[[Path], list[str] | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
     headless browser); `[]` means it ran and found nothing; a non-empty
     list is real findings — only that last case is ever appended to the
@@ -181,12 +189,22 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
     `.docx` are registered — every other extension is silently unchecked,
     which is honest as-is: nothing ever claimed to validate a `.csv`.
+
+    A `cell_sandbox` policy skips the checks that start a browser or
+    LibreOffice on the agent's file (each of them also refuses under it);
+    the in-process lints still run. Where the skipped tool is installed, the
+    result says the check was skipped.
     """
-    from anton.core.artifacts.html_lint import lint_html
+    from anton.core.artifacts.html_lint import discover_browser, lint_html
     from anton.core.artifacts.office_open_check import check_opens_via_office
     from anton.core.artifacts.ooxml_lint import lint_ooxml
     from anton.core.artifacts.xlsx_lint import lint_xlsx
-    from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
+    from anton.core.artifacts.xlsx_office_check import _discover_office, check_xlsx_via_office
+
+    sandboxed = cell_sandbox is not None
+
+    def _office_skip() -> list[str]:
+        return [_SANDBOX_OFFICE_SKIP] if _discover_office() is not None else []
 
     def _xlsx_linter(path: Path) -> list[str] | None:
         # Both always run — LibreOffice recalculates and catches any
@@ -195,7 +213,13 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         # sheet prefix") where the oracle only names the symptom
         # ("#VALUE!"), and some cells only the oracle catches at all
         # (a genuine #REF!/#DIV/0! unrelated to same-sheet circularity).
-        office_findings = check_xlsx_via_office(path)
+        if sandboxed:
+            structural_findings = lint_xlsx(path)
+            skipped = _office_skip()
+            if structural_findings is None and not skipped:
+                return None
+            return [f.message() for f in (structural_findings or [])] + skipped
+        office_findings = check_xlsx_via_office(path, cell_sandbox=cell_sandbox)
         structural_findings = lint_xlsx(path)
 
         if office_findings is None and structural_findings is None:
@@ -215,7 +239,9 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         return messages
 
     def _html_linter(path: Path) -> list[str] | None:
-        findings = lint_html(path)
+        if sandboxed:
+            return [_SANDBOX_BROWSER_SKIP] if discover_browser() is not None else None
+        findings = lint_html(path, cell_sandbox=cell_sandbox)
         if findings is not None:
             return [f.message() for f in findings]
         return None
@@ -229,7 +255,10 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             structural_findings = lint_ooxml(path, kind)
             if structural_findings:
                 return [f.message() for f in structural_findings]
-            office_findings = check_opens_via_office(path)
+            if sandboxed:
+                skipped = _office_skip()
+                return skipped if structural_findings is not None or skipped else None
+            office_findings = check_opens_via_office(path, cell_sandbox=cell_sandbox)
             if structural_findings is None and office_findings is None:
                 return None
             return [f.message() for f in (office_findings or [])]
@@ -244,14 +273,19 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     }
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
+def lint_changed_artifact_files(
+    store, before: dict[str, float], *, cell_sandbox: CellSandbox | None = None
+) -> list[str]:
     """Run the format-appropriate checker on artifact folders this cell
     edited (mtime moved since `before`), so findings reach the agent as
     tool-result text right away, not only via a later open()/list().
+
+    Under a sandbox policy the checks that start a browser or LibreOffice
+    are skipped: they would run the agent's file outside the sandbox.
     """
     from anton.core.artifacts.store import iter_content_files
 
-    linters = _artifact_linters()
+    linters = _artifact_linters(cell_sandbox=cell_sandbox)
     if not linters:
         return []
     after = snapshot_existing_artifact_mtimes(store)
@@ -1027,6 +1061,9 @@ async def handle_scratchpad(
             ok=False,
             reason="scratchpad_missing_name",
         )
+    refused_name = refuse_pad_name(name)
+    if refused_name is not None:
+        return refused_name
 
     # ACC emit helper: use the session's safe wrapper if it exists,
     # otherwise no-op. Defined as a local closure so each emit site
@@ -1094,6 +1131,7 @@ async def handle_scratchpad(
                     lint_messages = await asyncio.to_thread(
                         lint_changed_artifact_files,
                         artifact_store, before_artifact_mtimes,
+                        cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)),
                     )
                 except Exception:
                     # Best-effort: a lint crash must never fail

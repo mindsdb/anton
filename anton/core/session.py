@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
@@ -1581,6 +1582,12 @@ class ChatSessionConfig:
     # the only source; see anton.utils.datasources._resolve_usage_notes.
     connector_usage_notes: dict[str, str] | None = None
     workspace_env_overlay: dict[str, str] | None = None
+    # The Landlock policy every spawn of this session's agent code runs under
+    # (cells, venv checks, installs, the artifact verifier). None runs them
+    # unlocked, as on the desktop and in the cloud pod. A host sets it per
+    # session, since the folders differ per person; a runtime factory that
+    # cannot take it makes the session refuse to build.
+    cell_sandbox: CellSandbox | None = None
     console: Console | None = None
     initial_history: list[dict] | None = None
     history_store: HistoryStore | None = None
@@ -1929,6 +1936,7 @@ class ChatSession:
             session_id=config.session_id,
             data_vault=config.data_vault,
             workspace_env_overlay=config.workspace_env_overlay,
+            cell_sandbox=config.cell_sandbox,
         )
 
         self.tool_registry = ToolRegistry()
@@ -6349,6 +6357,7 @@ class ChatSession:
                                         lint_messages = await asyncio.to_thread(
                                             lint_changed_artifact_files,
                                             artifact_store, before_artifact_mtimes,
+                                            cell_sandbox=cell_sandbox_of(self._scratchpads),
                                         )
                                     except Exception:
                                         lint_messages = []

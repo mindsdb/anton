@@ -42,9 +42,16 @@ def _stream_mock(response):
     return Mock(side_effect=lambda **kw: _one_event_stream(response))
 
 
+def _session() -> AsyncMock:
+    """A mock chat session whose scratchpad pool carries no sandbox policy."""
+    session = AsyncMock()
+    session._scratchpads.cell_sandbox = None
+    return session
+
+
 def _state(tmp_path, **kw):
     base = dict(
-        session=AsyncMock(), artifact_type="html-app", artifact_path=tmp_path,
+        session=_session(), artifact_type="html-app", artifact_path=tmp_path,
         slug="a", brief="Show current time", is_fullstack=False,
         progress=asyncio.Queue(),
     )

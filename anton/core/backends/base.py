@@ -9,9 +9,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from anton.utils.datasources import scrub_output
+
+if TYPE_CHECKING:
+    from anton.core.backends.sandbox import CellSandbox
 
 
 @dataclass
@@ -73,6 +76,14 @@ class ScratchpadRuntime(ABC):
         self.cells: list[Cell] = cells if cells is not None else []
         self._workspace_path = workspace_path or Path("~/.anton").expanduser()
         self._installed_packages: set[str] = set()
+
+    @property
+    def cell_sandbox(self) -> CellSandbox | None:
+        """The sandbox policy this runtime's agent code runs under; None runs it unlocked.
+
+        The manager refuses a runtime built for a policy that reports another.
+        """
+        return None
 
     @abstractmethod
     async def start(self) -> None:
@@ -311,4 +322,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # Explicit workspace .env values for this pad. Optional for hosts
         # and test doubles that predate it.
         workspace_env_overlay: dict[str, str] | None = None,
+        # The Landlock policy the pad's agent code runs under. The manager
+        # passes it only when set, and refuses a factory without it then.
+        cell_sandbox: CellSandbox | None = None,
     ) -> ScratchpadRuntime: ...

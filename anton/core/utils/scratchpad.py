@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from anton.core.backends.sandbox import validate_pad_name
 from anton.core.tools.registry import ToolOutcome
 
 if TYPE_CHECKING:
@@ -26,6 +27,20 @@ _INSTALL_FAILURE_PREFIXES = ("Install failed", "Install timed out", "Install ref
 _INSTALL_NOOP_RESULTS = frozenset(
     {"No packages specified.", "All packages already installed."}
 )
+
+
+def refuse_pad_name(name: str) -> ToolOutcome | None:
+    """A refusal for a scratchpad name that is not one plain folder name, else None.
+
+    The name becomes a folder the host deletes and recreates, so anything but
+    one plain folder name (see `validate_pad_name`) is refused before any pad
+    is built or recorded.
+    """
+    try:
+        validate_pad_name(name)
+    except ValueError as exc:
+        return ToolOutcome(content=str(exc), ok=False, reason="scratchpad_invalid_name")
+    return None
 
 
 def install_call_failed(result: str) -> bool:
@@ -239,6 +254,9 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
     """
     name = tc_input.get("name", "")
     code = tc_input.get("code", "")
+    refused_name = refuse_pad_name(name)
+    if refused_name is not None:
+        return refused_name
     if not code or not code.strip():
         # An empty `code` on an exec call is almost never the model meaning
         # to run nothing — it's the large-payload drop: an oversized `code`

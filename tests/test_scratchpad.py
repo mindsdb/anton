@@ -1533,14 +1533,19 @@ class TestSessionPersistence:
             await again.cleanup()
 
     def test_snapshot_path_contains_a_traversing_pad_name(self, tmp_path):
-        """A model-chosen pad name flows into a path, so it must not escape the root."""
-        pad = make_scratchpad(
-            name="../../etc/passwd", _venvs_base=tmp_path / "venvs", session_id="conv"
-        )
-        path = pad._session_snapshot_path()
+        """A model-chosen pad name flows into a path, so it must not escape the root.
+
+        The runtime refuses such a name outright; the snapshot path stays
+        inside its root even for a name that reaches it some other way.
+        """
+        from anton.core.backends.local import snapshot_file
+
+        with pytest.raises(ValueError, match="'..'"):
+            make_scratchpad(name="../../etc/passwd", _venvs_base=tmp_path / "venvs", session_id="conv")
+        path = snapshot_file(tmp_path / "venvs", "conv", "../../etc/passwd")
         assert path is not None
         root = (tmp_path / "venvs").parent / "scratchpad-sessions"
-        assert str(path).startswith(str(root.resolve()))
+        assert str(path.resolve()).startswith(str(root.resolve()))
         assert ".." not in path.parts
 
     async def test_reset_still_clears_state(self, tmp_path, monkeypatch):
