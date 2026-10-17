@@ -34,6 +34,9 @@ class CoreSettings(BaseSettings):
     # browser instance for the CLI; hosts pass their own via ChatSessionConfig.
     browser_url: str = ""
     browser_profile: str = "main"
+    # A standalone browser service's BROWSER_SERVICE_TOKEN. Empty = MindsHub,
+    # where the session's MindsHub credential is the bearer.
+    browser_token: str = ""
     # How much Jev steers the browser: "on" takes its confident steps,
     # "shadow" only records its picks against the model's, "off" never asks.
     browser_jev: Literal["on", "shadow", "off"] = "shadow"

@@ -16,6 +16,7 @@ to the chat, and takes over for sign-ins, CAPTCHAs and confirmations.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from anton.core.browser.client import BrowserClient, BrowserError
-from anton.core.browser.page import format_page, signature
+from anton.core.browser.page import format_page, human_check, signature
 from anton.core.browser.policy import (
     StepDecision,
     parse_step,
@@ -87,8 +88,15 @@ def _mindshub_connection(session: "ChatSession"):
 
 
 async def _credential(session: "ChatSession") -> str:
-    """The MindsHub credential the worker checks: the turn key in a cloud pod,
-    the user's key or token on desktop and the CLI."""
+    """The bearer the browser checks.
+
+    A standalone service's own token when the host gave one. Otherwise the
+    MindsHub credential the worker checks: the turn key in a cloud pod, the
+    user's key or token on desktop and the CLI.
+    """
+    token = getattr(session._browser_config, "token", "")
+    if token:
+        return token
     _, provider = _mindshub_connection(session)
     if provider is not None:
         try:
@@ -98,6 +106,12 @@ async def _credential(session: "ChatSession") -> str:
         if key:
             return key
     return _setting(session, "minds_api_key", "") or ""
+
+
+def _reconnect_hint(session: "ChatSession") -> str:
+    if getattr(session._browser_config, "token", ""):
+        return "The browser service's API key in the browser settings may be wrong or rotated."
+    return "The user may need to reconnect MindsHub."
 
 
 def _state(session: "ChatSession") -> _BrowserState:
@@ -155,8 +169,24 @@ def _track(session: "ChatSession", event: str, **props) -> None:
         pass
 
 
-async def _ask(session: "ChatSession", prompt: str, options: list[tuple[str, str]]) -> str | None:
-    """Ask the user to pick one option; the value, or None when nobody can answer."""
+#: How often a hand-over checks whether the person clicked Done in the viewer.
+HANDBACK_POLL_S = 2.0
+
+
+async def _ask(
+    session: "ChatSession",
+    prompt: str,
+    options: list[tuple[str, str]],
+    *,
+    answered_elsewhere=None,
+) -> str | None:
+    """Ask the user to pick one option; the value, or None when nobody can answer.
+
+    ``answered_elsewhere`` is an optional async check, polled while the
+    question is open, that returns the option value when the person answered
+    some other way (Done in the browser viewer). The chat card is then retired
+    with that answer, so the user never has to answer twice.
+    """
     elicitor = getattr(session, "elicitor", None)
     if elicitor is None or "choice" not in getattr(elicitor, "supported_kinds", ()):
         return None
@@ -171,10 +201,50 @@ async def _ask(session: "ChatSession", prompt: str, options: list[tuple[str, str
         options=tuple(AskOption(value=v, label=label, style="primary" if i == 0 else "default") for i, (v, label) in enumerate(options)),
         allow_custom=False,
     )
-    answer = await elicit(session, f"browser:{uuid.uuid4().hex}", request)
+    question_id = f"browser:{uuid.uuid4().hex}"
+    if answered_elsewhere is None:
+        answer = await elicit(session, question_id, request)
+    else:
+        answer = await _elicit_or_elsewhere(session, question_id, request, answered_elsewhere)
     if answer.status != "answered" or not answer.values:
         return answer.status
     return answer.values[0]
+
+
+async def _elicit_or_elsewhere(session, question_id, request, answered_elsewhere):
+    """Run the question and the poll side by side; whichever answers first wins."""
+    from anton.core.interaction.elicit import AskAnswer, elicit
+    from anton.core.llm.provider import StreamAskUserAnswered
+
+    async def poll() -> str:
+        while True:
+            await asyncio.sleep(HANDBACK_POLL_S)
+            try:
+                value = await answered_elsewhere()
+            except Exception:
+                value = None
+            if value:
+                return value
+
+    ask = asyncio.ensure_future(elicit(session, question_id, request))
+    watch = asyncio.ensure_future(poll())
+    try:
+        done, _ = await asyncio.wait({ask, watch}, return_when=asyncio.FIRST_COMPLETED)
+        if ask in done:
+            return ask.result()
+        value = watch.result()
+        ask.cancel()
+        await asyncio.gather(ask, return_exceptions=True)
+        # elicit() leaves a cancelled card for the host to retire only when the
+        # whole run ends; this run carries on, so retire it here with the answer
+        # the person gave in the viewer.
+        answer = AskAnswer(status="answered", values=(value,))
+        await session.emit(StreamAskUserAnswered(id=question_id, answer=answer))
+        return answer
+    finally:
+        for task in (ask, watch):
+            task.cancel()
+        await asyncio.gather(ask, watch, return_exceptions=True)
 
 
 # ── actions ────────────────────────────────────────────────────────────────
@@ -230,17 +300,18 @@ async def _do_open(session: "ChatSession", tc_input: dict) -> str:
     await _ensure_open(session, tc_input.get("url") or None)
     page = await state.client.page(state.session_id)
     sites = await state.client.sites(state.session_id)
-    return (
-        "The browser is open and the user can see it beside the chat.\n"
-        f"{_sites_line(sites)}\n\n{format_page(page)}"
-    )
+    lead = f"The browser is open and the user can see it beside the chat.\n{_sites_line(sites)}"
+    checked = await _unless_human_check(session, page)
+    if checked is not None:
+        return f"{lead}\n\n{checked}"
+    return f"{lead}\n\n{format_page(page)}"
 
 
 async def _do_page(session: "ChatSession", tc_input: dict) -> str:
     state = _state(session)
     await _ensure_open(session)
     page = await state.client.page(state.session_id)
-    return format_page(page)
+    return await _unless_human_check(session, page) or format_page(page)
 
 
 def _step_body(tc_input: dict) -> dict:
@@ -258,7 +329,8 @@ async def _do_act(session: "ChatSession", tc_input: dict) -> str:
     result = await state.client.act(state.session_id, body)
     state.steps.append(_describe(body))
     page = result.get("page") or await state.client.page(state.session_id)
-    return f"Done: {_describe(body)}.\n\n{format_page(page)}"
+    checked = await _unless_human_check(session, page)
+    return f"Done: {_describe(body)}.\n\n{checked or format_page(page)}"
 
 
 async def _do_screenshot(session: "ChatSession", tc_input: dict):
@@ -274,28 +346,85 @@ async def _do_screenshot(session: "ChatSession", tc_input: dict):
     )
 
 
-async def _do_hand_to_user(session: "ChatSession", tc_input: dict) -> str:
-    reason = (tc_input.get("reason") or "").strip() or "This step needs you."
+async def _set_control(session: "ChatSession", holder: str, reason: str = "") -> None:
+    """Best effort: an older browser service has no control endpoint, and the
+    hand-over still works there through the chat card alone."""
+    state = _state(session)
+    try:
+        await state.client.set_control(state.session_id, holder, reason)
+    except BrowserError as exc:
+        if exc.status != 404:
+            logger.info("browser control -> %s failed: %s", holder, exc)
+
+
+async def _hand_over(session: "ChatSession", reason: str) -> str:
+    """Give the person the browser until they say they're done.
+
+    The viewer switches to "your turn" (and the service holds off the agent's
+    actions) while the chat shows a Done/Stop card. Done in either place ends
+    the hand-over. Returns "done", "stop"/"timeout"/"cancelled", or None when
+    nobody can answer in this conversation (the browser stays theirs).
+    """
     state = _state(session)
     await _ensure_open(session)
+    await _set_control(session, "human", reason)
+
+    async def handed_back_in_viewer() -> str | None:
+        control = await state.client.control(state.session_id)
+        return "done" if control.get("holder") == "agent" else None
+
     answer = await _ask(
         session,
-        f"{reason}\n\nUse the browser beside the chat. Choose Done when you're finished.",
+        f"{reason}\n\nUse the browser beside the chat. Choose Done here or in the browser when you're finished.",
         [("done", "Done"), ("stop", "Stop")],
+        answered_elsewhere=handed_back_in_viewer,
     )
+    if answer is not None:
+        await _set_control(session, "agent")
+    return answer
+
+
+async def _after_hand_over(session: "ChatSession", answer: str | None, lead: str = "The user finished in the browser.") -> str:
+    state = _state(session)
     if answer is None:
         return (
-            "No one can answer in this conversation right now. Tell the user what they need to do in "
-            "the browser (they can see it beside the chat), then end your turn and wait for them."
+            "No one can answer in this conversation right now. The browser is now the user's (the viewer "
+            "shows it's their turn). Tell them what to do there and to click Done in the browser when "
+            "finished, then end your turn and wait for them."
         )
     if answer != "done":
         return f"The user did not take over ({answer}). Do not retry the step; ask how they want to continue."
     page = await state.client.page(state.session_id)
+    lines = [lead]
+    if human_check(page):
+        lines.append("The page still shows a human check. Ask the user whether it went through; do not click it yourself.")
     noted = await _maybe_note_login(session, page)
-    lines = ["The user finished in the browser."]
     if noted:
         lines.append(noted)
     return "\n".join(lines) + f"\n\n{format_page(page)}"
+
+
+async def _do_hand_to_user(session: "ChatSession", tc_input: dict) -> str:
+    reason = (tc_input.get("reason") or "").strip() or "This step needs you."
+    return await _after_hand_over(session, await _hand_over(session, reason))
+
+
+async def _unless_human_check(session: "ChatSession", page: dict) -> str | None:
+    """When ``page`` is a human-verification page, hand it to the user at once
+    and return what to tell the model; None for an ordinary page."""
+    kind = human_check(page)
+    if not kind:
+        return None
+    site = urlparse(page.get("url", "")).hostname or "This site"
+    _track(session, "browser_human_check", kind=kind)
+    answer = await _hand_over(
+        session,
+        f"{site} wants to confirm you're a person ({kind}). Complete the check in the browser.",
+    )
+    return await _after_hand_over(
+        session, answer,
+        lead=f"{site} showed a human check ({kind}); it was handed to the user and they finished.",
+    )
 
 
 async def _maybe_note_login(session: "ChatSession", page: dict) -> str:
@@ -336,7 +465,7 @@ def _remember_login(session: "ChatSession", site: str, hint: str) -> None:
     who = f" as {hint}" if hint else ""
     engram = Engram(
         text=(
-            f"The user is signed in to {site}{who} in their MindsHub browser. For work in {site}, use "
+            f"The user is signed in to {site}{who} in their shared browser. For work in {site}, use "
             "the browser tool instead of asking for credentials; if the session has expired, hand over "
             "so they can sign in again."
         ),
@@ -451,6 +580,9 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
     page = await state.client.page(state.session_id)
 
     if mode != "on":
+        checked = await _unless_human_check(session, page)
+        if checked is not None:
+            return checked + "\n\nContinue step by step with action=act."
         if mode == "shadow":
             jev_state, questions, _ = step_request(goal, page, inputs, state.steps)
             decision = await _jev(session, jev_state, questions)
@@ -465,6 +597,9 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
     taken: list[str] = []
     stalls = 0
     for _ in range(max_steps):
+        checked = await _unless_human_check(session, page)
+        if checked is not None:
+            return _handback(checked + "\nContinue toward the goal from here.", taken, await state.client.page(state.session_id))
         jev_state, questions, _ = step_request(goal, page, inputs, state.steps)
         decision = await _jev(session, jev_state, questions)
         if decision is None or decision.error:
@@ -540,9 +675,17 @@ async def handle_browser(session: "ChatSession", tc_input: dict):
     except BrowserError as exc:
         if exc.code == "stale_element":
             return ToolOutcome(content=f"{exc.message}", ok=False, reason="browser_stale_element")
+        if exc.code == "human_in_control":
+            return ToolOutcome(
+                content=(
+                    f"{exc.message} The user has the browser. Don't act or read the page until they click "
+                    "Done in the browser; if you need them, say so in chat and end your turn."
+                ),
+                ok=False, reason="browser_human_in_control",
+            )
         if exc.status in (401, 403):
             return ToolOutcome(
-                content=f"The browser refused this session's credentials ({exc.code}). The user may need to reconnect MindsHub.",
+                content=f"The browser refused this session's credentials ({exc.code}). {_reconnect_hint(session)}",
                 ok=False, reason="browser_unauthorized",
             )
         if exc.status in (0, 502, 503):
@@ -557,12 +700,13 @@ async def handle_browser(session: "ChatSession", tc_input: dict):
 
 
 BROWSER_TOOL_PROMPT = """\
-BROWSER: you and the user share a real browser (Chromium, their own MindsHub instance). The user sees it beside this chat and can click and type in it at any time.
+BROWSER: you and the user share a real browser (Chromium, their own browser instance). The user sees it beside this chat and can click and type in it at any time.
 - Prefer a connector or API when one can do the job; use the browser for sites without one, or when the user asks.
 - Only open sites the user named or that the task plainly needs. Never invent URLs.
 - Start a task with action=run and a goal; give values to type in `inputs`. run takes the steps it is sure of and hands back with the page when it isn't.
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
 - Never ask for, read out, or type a password, one-time code, or card number. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
+- Never click or try to solve a "verify you are human" check (Cloudflare, reCAPTCHA, hCaptcha). The tool hands those to the user by itself; wait for them.
 - After the user signs in to a site, call action=note_login with the site (and an account hint they'd recognise, never a secret) so later conversations know the login is there.
 - Ask before anything that commits on the user's behalf: buying, paying, sending, deleting, or submitting a form.
 - Only report what the page actually shows. If a step fails or the page didn't change, say so.

@@ -11,7 +11,7 @@ import pytest
 
 from anton.core.browser.client import BrowserClient
 from anton.core.browser.config import BrowserConfig
-from anton.core.browser.page import format_page, shortlist, signature
+from anton.core.browser.page import format_page, human_check, shortlist, signature
 from anton.core.browser.policy import parse_step, step_request
 from anton.core.browser import tool as browser_tool
 from anton.core.interaction.elicit import AskAnswer
@@ -40,6 +40,8 @@ class FakeInstance:
         self.calls: list[tuple[str, str, dict | None, str]] = []
         self.pages = list(pages or [PAGE])
         self.sites: list[dict] = []
+        self.control = {"holder": "agent", "reason": ""}
+        self.control_changes: list[str] = []
 
     def page(self):
         return self.pages[0] if len(self.pages) == 1 else self.pages.pop(0)
@@ -50,6 +52,12 @@ class FakeInstance:
         self.calls.append((request.method, path, body, request.headers.get("authorization", "")))
         if path == "/sessions" and request.method == "POST":
             return httpx.Response(201, json={"session_id": body["session_id"], "url": "about:blank"})
+        if path.endswith("/control") and request.method == "POST":
+            self.control = {"holder": body["holder"], "reason": body.get("reason", "")}
+            self.control_changes.append(body["holder"])
+            return httpx.Response(200, json=self.control)
+        if path == "/sessions/main" and request.method == "GET":
+            return httpx.Response(200, json={"session_id": "main", "control": self.control})
         if path == "/_embed":
             return httpx.Response(200, json={"view_url": f"{BASE}/sessions/main/view?et=tok", "expires_at": 1999999999})
         if path.endswith("/page"):
@@ -91,14 +99,14 @@ class FakeCortex:
         self.encoded.extend(engrams)
 
 
-def make_session(instance: FakeInstance, *, jev_mode="on", elicitor=None, mindshub=True):
+def make_session(instance: FakeInstance, *, jev_mode="on", elicitor=None, mindshub=True, config=None):
     provider = SimpleNamespace(
         export_connection_info=lambda: SimpleNamespace(base_url="https://api.mindshub.ai/v1" if mindshub else "https://api.openai.com/v1"),
         current_api_key=lambda: _async("turn-key"),
     )
     tasks = []
     session = SimpleNamespace(
-        _browser_config=BrowserConfig(base_url=BASE),
+        _browser_config=config or BrowserConfig(base_url=BASE),
         _browser_state=None,
         _settings=SimpleNamespace(browser_jev=jev_mode, browser_jev_min_p=0.8, browser_max_steps=15, minds_api_key="user-key", verifier_jev_model="jev-test"),
         _llm=SimpleNamespace(coding_provider=provider),
@@ -229,6 +237,24 @@ async def test_credential_falls_back_to_the_users_key_off_mindshub():
     assert await browser_tool._credential(session) == "user-key"
 
 
+async def test_a_standalone_service_gets_its_own_token_not_mindshub(fake_jev):
+    instance = FakeInstance()
+    session = make_session(instance, mindshub=False, config=BrowserConfig(base_url=BASE, token="svc-token"))
+    assert await browser_tool._credential(session) == "svc-token"
+    result = await browser_tool.handle_browser(session, {"action": "open", "url": "shop.example"})
+    assert result.ok is True
+    assert {auth for *_, auth in instance.calls} == {"Bearer svc-token"}
+
+
+async def test_a_refused_standalone_token_points_at_the_api_key():
+    instance = FakeInstance()
+    instance.handler = lambda request: httpx.Response(401, json={"error": "unauthorized", "message": "bad token"})
+    session = make_session(instance, config=BrowserConfig(base_url=BASE, token="wrong"))
+    session._browser_state.client._http = httpx.AsyncClient(transport=httpx.MockTransport(instance.handler))
+    result = await browser_tool.handle_browser(session, {"action": "page"})
+    assert result.ok is False and "API key" in result.content and "MindsHub" not in result.content
+
+
 async def test_act_takes_one_step_and_returns_the_page():
     instance = FakeInstance()
     session = make_session(instance)
@@ -354,6 +380,77 @@ async def test_hand_to_user_then_notes_the_login(fake_jev, elicit_answers):
     assert "acme.my.salesforce.com" in engram.text
 
 
+CHALLENGE = {
+    "url": "https://claude.ai/login",
+    "title": "Just a moment...",
+    "elements": [{"id": 1, "role": "checkbox", "name": "Verify you are human"}],
+    "text": "claude.ai\nPerforming security verification\nThis website uses a security service to protect against malicious bots.",
+}
+
+
+def test_human_check_spots_verification_pages_only():
+    assert human_check(CHALLENGE) == "Cloudflare"
+    assert human_check({"url": "https://x.com/cdn-cgi/challenge-platform/h/b", "title": "", "elements": []}) == "Cloudflare"
+    assert human_check({**PAGE, "elements": [{"id": 9, "role": "iframe", "name": "reCAPTCHA"}]}) == "reCAPTCHA"
+    assert human_check(PAGE) == ""
+    # A page that merely talks about bots isn't a check.
+    assert human_check({**PAGE, "text": "We block malicious bots on our network."}) == ""
+
+
+async def test_a_human_check_is_handed_to_the_user_not_clicked(fake_jev, elicit_answers):
+    instance = FakeInstance(pages=[CHALLENGE, PAGE])
+    session = make_session(instance, elicitor=FakeElicitor())
+    elicit_answers.answers.append("done")
+    result = await browser_tool.handle_browser(session, {"action": "page"})
+    assert result.ok is True
+    assert "claude.ai showed a human check (Cloudflare)" in result.content
+    assert "wants to confirm you're a person (Cloudflare)" in elicit_answers.prompts[0]
+    # The viewer was told it's the user's turn, then the browser came back.
+    assert instance.control_changes == ["human", "agent"]
+    # The model never got an action on the check page, only the page after it.
+    assert not any(path.endswith("/action") for _, path, *_ in instance.calls)
+    assert "Welcome to the shop" in result.content
+
+
+async def test_done_in_the_viewer_ends_the_hand_over(monkeypatch):
+    import anton.core.interaction.elicit as elicit_mod
+
+    monkeypatch.setattr(browser_tool, "HANDBACK_POLL_S", 0.01)
+    never = __import__("asyncio").Event()
+
+    async def elicit(session, question_id, request):
+        await never.wait()  # the chat card is never answered
+
+    monkeypatch.setattr(elicit_mod, "elicit", elicit)
+    instance = FakeInstance()
+    session = make_session(instance, elicitor=FakeElicitor())
+    original = instance.handler
+
+    def handler(request):
+        response = original(request)
+        if request.url.path.endswith("/control") and request.method == "POST" and instance.control["holder"] == "human":
+            instance.control = {"holder": "agent", "reason": ""}  # the user clicks Done in the viewer
+        return response
+
+    session._browser_state.client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Sign in"})
+    assert "The user finished in the browser." in result.content
+    from anton.core.llm.provider import StreamAskUserAnswered
+
+    retired = [e for e in session.events if isinstance(e, StreamAskUserAnswered)]
+    assert len(retired) == 1 and retired[0].answer.values == ("done",)
+
+
+async def test_acting_while_the_user_has_the_browser_says_wait():
+    instance = FakeInstance()
+    instance.handler = lambda request: httpx.Response(409, json={"error": "human_in_control", "message": "The person is using the browser (Sign in)."})
+    session = make_session(instance)
+    session._browser_state.client._http = httpx.AsyncClient(transport=httpx.MockTransport(instance.handler))
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+    assert result.ok is False and result.reason == "browser_human_in_control"
+    assert "click Done in the browser" in result.content
+
+
 async def test_hand_to_user_without_an_elicitor_tells_the_model_to_wait():
     session = make_session(FakeInstance(), elicitor=None)
     result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Sign in"})
@@ -416,6 +513,19 @@ def test_browser_config_parses_only_https_instances():
     assert BrowserConfig.from_dict("nope") is None
 
 
+def test_browser_config_takes_a_standalone_token_and_local_http():
+    config = BrowserConfig.from_dict({"base_url": "https://browser.acme.dev", "profile": "u-1", "token": " svc "})
+    assert config == BrowserConfig(base_url="https://browser.acme.dev", profile="u-1", token="svc")
+    assert "svc" not in repr(config)
+    assert BrowserConfig.from_dict({"base_url": BASE, "token": 7}).token == ""
+    # Plain http only for a service on this machine: anywhere else the token
+    # would cross the network in the clear.
+    for local in ("http://localhost:8080", "http://127.0.0.1:8080/", "http://[::1]:8080"):
+        assert BrowserConfig.from_dict({"base_url": local, "token": "t"}) is not None
+    assert BrowserConfig.from_dict({"base_url": "http://browser.acme.dev", "token": "t"}) is None
+    assert BrowserConfig.from_dict({"base_url": "https://", "token": "t"}) is None
+
+
 def test_turn_request_carries_the_browser_block():
     from anton.cloud_turn.contract import TURN_PROTOCOL_VERSION, TurnRequestV1
 
@@ -431,4 +541,6 @@ def test_session_registers_the_tool_only_with_a_browser():
 
     assert _browser_from_settings(SimpleNamespace(browser_url="", browser_profile="main")) is None
     assert _browser_from_settings(SimpleNamespace(browser_url=BASE, browser_profile="main")) == BrowserConfig(base_url=BASE)
+    standalone = _browser_from_settings(SimpleNamespace(browser_url="http://localhost:8080", browser_profile="main", browser_token="t"))
+    assert standalone == BrowserConfig(base_url="http://localhost:8080", token="t")
     assert _browser_from_settings(None) is None

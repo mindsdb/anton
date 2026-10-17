@@ -1,8 +1,9 @@
 """HTTP client for the browser instance's API.
 
-Every call carries ``Authorization: Bearer <MindsHub credential>``; the
-Cloudflare worker checks it belongs to the instance's owner before anything
-reaches the instance (mindshub_services ENG-3295).
+Every call carries ``Authorization: Bearer <credential>``. On MindsHub that
+is the user's MindsHub credential, which the Cloudflare worker checks belongs
+to the instance's owner before anything reaches the instance (mindshub_services
+ENG-3295). A standalone service checks its own ``BROWSER_SERVICE_TOKEN``.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ class BrowserClient:
     async def _request(self, method: str, path: str, *, json: dict | None = None, params: dict | None = None):
         token = await self._credential()
         if not token:
-            raise BrowserError(401, "no_credential", "no MindsHub credential is available for the browser")
+            raise BrowserError(401, "no_credential", "no credential is available for the browser")
         try:
             response = await self._http.request(
                 method,
@@ -89,7 +90,8 @@ class BrowserClient:
         return (await self._request("GET", f"/sessions/{quote(session_id)}/screenshot", params=params)).content
 
     async def embed(self, session_id: str) -> dict:
-        """A viewer URL another origin can frame (``POST /_embed`` on the worker)."""
+        """A viewer URL another origin can frame (``POST /_embed``: the worker's on
+        MindsHub, the service's own when standalone)."""
         return (await self._request("POST", "/_embed", json={"session_id": session_id})).json()
 
     async def sites(self, session_id: str) -> list[dict]:
@@ -98,6 +100,17 @@ class BrowserClient:
     async def note_site(self, session_id: str, site: str, account_hint: str = "") -> dict:
         body = {"site": site, "account_hint": account_hint}
         return (await self._request("POST", f"/sessions/{quote(session_id)}/sites", json=body)).json().get("site", {})
+
+    async def control(self, session_id: str) -> dict:
+        """Who holds the browser: ``{"holder": "agent"|"human", "reason", "since"}``."""
+        return (await self._request("GET", f"/sessions/{quote(session_id)}")).json().get("control") or {}
+
+    async def set_control(self, session_id: str, holder: str, reason: str = "") -> dict:
+        """Hand the browser to the person ("human") or take it back ("agent").
+        While the person holds it the service refuses the agent's actions and
+        page reads, and the viewer shows them it's their turn."""
+        body = {"holder": holder, "reason": reason[:300]}
+        return (await self._request("POST", f"/sessions/{quote(session_id)}/control", json=body)).json()
 
     async def close_session(self, session_id: str) -> None:
         await self._request("DELETE", f"/sessions/{quote(session_id)}")

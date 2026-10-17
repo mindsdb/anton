@@ -1183,12 +1183,14 @@ def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
 
 
 def _browser_from_settings(settings) -> "BrowserConfig | None":
-    """The CLI's browser: ``ANTON_BROWSER_URL`` when the user set one."""
+    """The CLI's browser: ``ANTON_BROWSER_URL`` when the user set one, with
+    ``ANTON_BROWSER_TOKEN`` for a standalone service."""
     from anton.core.browser.config import BrowserConfig
 
     url = getattr(settings, "browser_url", "") or ""
     profile = getattr(settings, "browser_profile", "") or ""
-    return BrowserConfig.from_dict({"base_url": url, "profile": profile}) if url else None
+    token = getattr(settings, "browser_token", "") or ""
+    return BrowserConfig.from_dict({"base_url": url, "profile": profile, "token": token}) if url else None
 
 
 @functools.cache

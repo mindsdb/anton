@@ -204,6 +204,9 @@ _SENTINEL_REASONS = {
     # a page that has since changed: the agent re-reads the page and fixes it.
     "browser_bad_input": (TIER_SELF, "invalid_argument"),
     "browser_stale_element": (TIER_SELF, "unknown_resource"),
+    # The agent tried to act while the user holds the browser (a hand-over in
+    # progress). Waiting is the fix, and the agent caused the clash: self.
+    "browser_human_in_control": (TIER_SELF, "invalid_argument"),
     # The worker refused the session's credential: the user has to reconnect
     # MindsHub, the agent cannot fix it by retrying (same as a 401).
     "browser_unauthorized": (TIER_WALL, "auth_missing"),
