@@ -308,6 +308,14 @@ def test_stateful_rules_carry_the_state_sdk_contract():
     assert "EXTERNAL database" in stateful
 
 
+def test_stateful_rules_show_versioned_read_modify_write():
+    stateful = prompts.build_backend_system_prompt(Path("/tmp/a"), stateless=False)
+    assert "todos.get(" in stateful
+    assert 'if_version=game["_v"]' in stateful
+    assert "ConditionalCheckFailed" in stateful
+    assert 'games.put("current", new_game(), if_not_exists=True)' in stateful
+
+
 def test_stateful_rules_say_which_items_come_back_without_keys():
     """An app counted with `increment` and listed with `query`, read the option
     from `sk`, got None and showed every count as 0: the items those calls
