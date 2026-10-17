@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Trusted mount path — pod-side config, never from the wire request.
+#: cowork-server maps a pod's file reads from this path back to the project
+#: (cowork/harnesses/anton_harness/agent_files.py).
 DEFAULT_CLOUD_WORKSPACE_PATH = "/workspace"
 #: Operator/CI override for the mount path (pod-side env var, not request data).
 _WORKSPACE_PATH_ENV = "ANTON_CLOUD_WORKSPACE_PATH"

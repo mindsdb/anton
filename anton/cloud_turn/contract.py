@@ -48,17 +48,25 @@ Events written back on stdout (JSONL):
       surfaces a card and the user saves it, so nothing reaches the skill store.
   {"kind": "history", "rows": [...]}  - pre-terminal; this turn's tool
       block-rows as [{"role", "content"}], where content holds only tool_use
-      (assistant) or tool_result (user) blocks. cowork persists them as their
-      own hidden `messages` rows so the NEXT turn's history replays a valid
-      tool_use -> tool_result sequence. Omitted after a mid-turn compaction or
-      on failure, in which case that turn replays text-only.
+      (assistant) or tool_result (user) blocks. For a turn that did not
+      compact, cowork persists them as their own hidden `messages` rows so the
+      NEXT turn's history replays a valid tool_use -> tool_result sequence.
+      Sent after a mid-turn compaction or hard truncation too: the rows come
+      from `ChatSession.turn_messages()`, which still holds the messages the
+      swap folded out of history. For such a turn, cowork-server since
+      mindsdb/cowork-server#712 reads the rows for figure sources and stores
+      none, so the next turn replays that turn text-only; older servers store
+      them. Omitted when the turn used no tools, and on failure, in which case
+      that turn replays text-only.
   {"kind": "compaction", "summary": "...", "covered_through": N}  - pre-terminal;
       this turn folded the first N messages of the REQUEST's `history` into
       `summary`. cowork saves both and seeds `summary` + the uncovered tail next
       turn, instead of resending (and re-summarizing) the whole conversation.
-      Mutually exclusive with `history` above, which the same compaction
-      suppresses. Omitted on failure too: the next turn re-seeds the same
-      history and compacts it again.
+      Sent before `history` above when both apply. `covered_through` counts
+      only seeded messages, never this turn's own. The summary text may still
+      describe rows this turn also sends in full under `history`. Omitted on
+      failure too: the next turn re-seeds the same history and compacts it
+      again.
   {"kind": "ask_user", "id", "prompt", "options": [{"value", "label",
       "detail"}], "select", "allow_custom", "timeout_s"}  - interactive turns
       only: a question the turn is now blocked on. Never rate limited.

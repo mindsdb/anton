@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from anton.core.mcp.access import allowed_for_mode
+from anton.core.mcp.access import TOOL_ACCESS, TOOL_OUTPUT, allowed_for_mode, returns_records
 
 
 def test_none_mode_allows_nothing():
@@ -60,3 +60,74 @@ def test_tools_no_longer_seen_live_are_not_in_the_table():
     it's just no longer specifically classified read."""
     for removed_tool in ("render_landing_page_ui", "render_asset", "manage_blog_post"):
         assert allowed_for_mode("hubspot", removed_tool, "read") is False
+
+
+def test_a_tool_that_returns_the_customers_records_returns_records():
+    for data_tool in (
+        "search_crm_objects",
+        "get_crm_objects",
+        "query_crm_data",
+        "read_campaign_data",
+        "get_campaign_attribution_reports",
+        "get_marketing_email_analytics",
+        "get_content_analytics_report",
+        "get_aeo_metrics",
+        "search_intent_signals",
+        "search_conversations",
+    ):
+        assert returns_records(engine="hubspot", tool=data_tool) is True, data_tool
+
+
+def test_a_read_tool_that_returns_docs_schema_or_account_metadata_does_not_return_records():
+    for metadata_tool in (
+        "tool_guidance",
+        "discover_hubspot_schema",
+        "get_properties",
+        "search_properties",
+        "get_user_details",
+        "get_organization_details",
+        "search_owners",
+        "get_conversation_channel_metadata",
+    ):
+        assert returns_records(engine="hubspot", tool=metadata_tool) is False, metadata_tool
+
+
+def test_a_write_tier_tool_never_returns_records():
+    """Some write tools also view data (`manage_aeo_prompts` can view tracked
+    prompts), but a tool's name can't tell a view from a write, so no write
+    tool's output counts as the customer's records."""
+    for write_tool, access in TOOL_ACCESS["hubspot"].items():
+        if access == "write":
+            assert returns_records(engine="hubspot", tool=write_tool) is False, write_tool
+
+
+def test_an_unknown_engine_or_tool_does_not_return_records():
+    assert returns_records(engine="hubspot", tool="some_new_tool_added_later") is False
+    assert returns_records(engine="linear", tool="list_issues") is False
+
+
+def test_a_read_tool_with_no_output_classification_does_not_return_records(monkeypatch):
+    """A read tool added to TOOL_ACCESS before TOOL_OUTPUT says what it
+    returns counts as no records, so an unclassified tool's numbers never
+    read as sourced figures."""
+    monkeypatch.setitem(TOOL_ACCESS, "hubspot", {**TOOL_ACCESS["hubspot"], "new_read_tool": "read"})
+    assert returns_records(engine="hubspot", tool="new_read_tool") is False
+
+
+def test_every_read_tier_tool_has_an_output_classification():
+    """Adding a read tool to TOOL_ACCESS without saying what it returns fails
+    here, so the two tables stay in step. Write-tier tools stay out of
+    TOOL_OUTPUT because they never return records, and an engine TOOL_ACCESS
+    does not list has no read tier, so its TOOL_OUTPUT entries would do
+    nothing."""
+    assert set(TOOL_OUTPUT) <= set(TOOL_ACCESS)
+    for engine, tools in TOOL_ACCESS.items():
+        read_tools = {name for name, access in tools.items() if access == "read"}
+        assert set(TOOL_OUTPUT.get(engine, {})) == read_tools, engine
+
+
+def test_a_write_tier_tool_listed_as_records_still_does_not_return_records(monkeypatch):
+    """The read-tier check holds even when TOOL_OUTPUT wrongly lists a write
+    tool, so a table mistake never turns a write tool's output into evidence."""
+    monkeypatch.setitem(TOOL_OUTPUT, "hubspot", {**TOOL_OUTPUT["hubspot"], "manage_crm_objects": "records"})
+    assert returns_records(engine="hubspot", tool="manage_crm_objects") is False

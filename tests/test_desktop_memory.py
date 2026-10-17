@@ -162,3 +162,71 @@ async def test_identity_extraction_still_writes_on_desktop(tmp_path, memory_dirs
 
     stored = (global_dir / "profile.md").read_text()
     assert "Name: Zoran" in stored and "Timezone: CET" in stored
+
+
+# ── end-of-turn memory calls are attributed to the turn ──────────────────────
+
+
+async def test_end_of_turn_memory_calls_carry_the_turns_identity_but_not_its_session(
+    tmp_path, memory_dirs, monkeypatch
+):
+    """These tasks start after the turn's trace context is reset. Without one, the
+    gateway files their LLM calls as direct-API use. With the session, a failed
+    background call would mark the user's conversation failed, so they carry the
+    conversation id in metadata instead. Scratchpad consolidation is the contrast:
+    it starts during the turn and keeps the session."""
+    import asyncio
+    import json
+
+    from anton.core.llm.openai import OpenAIProvider
+    from anton.core.llm.provider import LLMResponse, StreamComplete, Usage
+
+    provider = OpenAIProvider(api_key="k", base_url="https://api.mindshub.ai/v1")
+    sent = {}
+
+    def record(name):
+        async def call(*_args, **_kwargs):
+            sent[name] = provider.trace_headers()
+        return call
+
+    session = _desktop_session(
+        tmp_path, memory_dirs, session_id="conv-mem", harness="anton", surface="desktop"
+    )
+    session._turn_count = 4  # identity extraction runs every fifth turn
+    session._cortex.maybe_update_identity = record("identity")
+    session._cortex._turn_count = 9  # the memory vacuum checks every tenth turn
+    session._cortex.needs_compaction = lambda: True
+    session._cortex.compact_all = record("compaction")
+    session._cerebellum = MagicMock(buffered_count=1, flush=record("post-mortem"))
+    session._scratchpads.pads = {"main": MagicMock(cells=["cell"])}
+    monkeypatch.setattr(
+        "anton.core.memory.consolidator.Consolidator.should_replay", lambda self, cells: True
+    )
+    session._consolidate = record("consolidation")
+
+    reply = LLMResponse(content="Hi.", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
+                        stop_reason="end_turn")
+
+    async def stream(**_kwargs):
+        yield StreamComplete(response=reply)
+
+    session._llm.plan_stream = stream
+    try:
+        async for _ in session.turn_stream("hello"):
+            pass
+        for _ in range(5):
+            await asyncio.sleep(0)
+    finally:
+        await provider.aclose()
+
+    assert set(sent) == {"identity", "post-mortem", "compaction", "consolidation"}
+
+    consolidation = sent.pop("consolidation")
+    assert consolidation["Langfuse-Session-Id"] == "conv-mem"
+    assert "conversation_id" not in json.loads(consolidation["Langfuse-Metadata"])
+
+    for name, headers in sent.items():
+        metadata = json.loads(headers["Langfuse-Metadata"])
+        assert "Langfuse-Session-Id" not in headers, name
+        assert metadata["conversation_id"] == "conv-mem", name
+        assert (metadata["harness"], metadata["surface"], metadata["turn_id"]) == ("anton", "desktop", 5), name
