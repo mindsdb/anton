@@ -380,6 +380,8 @@ class TestScrubOutput:
         '$url = "x?access_token=" . $accessTokenValue . "&scope=a";',
         "local url = 'x?access_token=' .. access_token_value .. '&scope=a'",
         "SELECT 'access_token=' || access_token_value || '&x' FROM tokens",
+        "body = b'client_secret=' + secret_bytes + b'&grant_type=client_credentials'",
+        "url = f'https://x?access_token=' + access_token_value + '&scope=a'",
         'if "access_token=" in response_body:',
         'if "access_token=" not in body and "client_secret=" in other_body:',
     ])
@@ -454,6 +456,10 @@ class TestScrubOutput:
             """users' tokens: {"client_secret":"[REDACTED_TOKEN]"}""",
         ),
         (
+            """Plan B's tokens: {"client_secret":"abc',defGhIjKlMnOpQrStu"}""",
+            """Plan B's tokens: {"client_secret":"[REDACTED_TOKEN]"}""",
+        ),
+        (
             """{"msg":"rock 'n roll","client_secret":"abc',defGhIjKlMnOpQrStu"}""",
             """{"msg":"rock 'n roll","client_secret":"[REDACTED_TOKEN]"}""",
         ),
@@ -467,7 +473,7 @@ class TestScrubOutput:
         ),
     ], ids=[
         "quote-and-comma", "leading-plus", "key-value-leading-plus", "after-prose-apostrophe",
-        "after-plural-possessive", "apostrophe-in-earlier-value", "digit-apostrophe-in-earlier-value",
+        "after-plural-possessive", "after-capital-letter-possessive", "apostrophe-in-earlier-value", "digit-apostrophe-in-earlier-value",
         "apostrophe-in-earlier-repr-value",
     ])
     def test_a_value_holding_code_operators_is_redacted_whole(self, text, expected):
