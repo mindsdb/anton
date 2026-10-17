@@ -3757,6 +3757,9 @@ class ChatSession:
             # so "error" covered a parse failure, a tool crash, a bad config
             # and an anton bug alike — indistinguishable in any query.
             tc.error_type = _safe_error_type(exc)
+        elif tc.content_filtered:
+            # Wins over a hand-back's reason, so a client can tell the filter fired and rerun.
+            tc.ended_by = "content_filter"
 
         # Stamped at books-open; the live lookup remains only for bare-session
         # tests and the legacy non-streaming path.
@@ -4565,7 +4568,7 @@ class ChatSession:
             logger.debug("completion-verifier jev bookkeeping failed", exc_info=True)
 
     async def _stream_handback_diagnosis(
-        self, *, system: str, label: str, cancels_continuation: bool = False
+        self, *, system: str, label: str, answered: bool, cancels_continuation: bool = False
     ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -4585,6 +4588,10 @@ class ChatSession:
         the callers know from the continuation counter. It announces the
         hand-back so no consumer mistakes this diagnosis for the replacement
         answer that boundary promised.
+
+        `answered` says the reply before the diagnosis has text; the tool-loop
+        stops have none. A diagnosis the provider's content filter stops is
+        dropped; with no answer to end on, it is tried once more.
         """
         log = logging.getLogger(__name__)
         # Marks this diagnosis as an explanation, not the replacement answer a
@@ -4593,46 +4600,51 @@ class ChatSession:
         # turn that never continued is unchanged on the wire.
         if cancels_continuation:
             yield StreamTaskProgress(phase="handback", message="")
-        diagnosis_response = None
-        # Held until the call ends: a content filter marks a reply only in its
-        # last event, after the text has streamed.
-        held_text: list[StreamTextDelta] = []
-        filtered = False
-        stream = self.plan_stream_with_recovery(system=system)
-        try:
-            async for event in stream:
-                if isinstance(event, StreamTextDelta):
-                    # Held text yields no event for the CLI to see Escape on, so check here.
-                    watcher = self.escape_watcher
-                    if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
-                        log.info("%s diagnosis cancelled while held — dropped", label)
-                        self._drop_handback_note()
-                        # Set here so the books say cancelled, then one event for the CLI to stop on.
-                        self._cancel_event.set()
-                        yield StreamTaskProgress(phase="analyzing", message="Cancelled")
-                        return
-                    held_text.append(event)
-                    continue
-                if isinstance(event, StreamComplete):
-                    diagnosis_response = event
-                    filtered = event.response.stop_reason == "content_filter"
-                    if not filtered:
-                        for delta in held_text:
-                            yield delta
-                    held_text = []
-                yield event
-        finally:
-            await stream.aclose()
+        # A turn with no answer of its own tries a filtered diagnosis once more;
+        # one with an answer ends on it instead.
+        for attempt in range(1 if answered else 2):
+            diagnosis_response = None
+            # Held until the call ends: a content filter marks a reply only in its
+            # last event, after the text has streamed.
+            held_text: list[StreamTextDelta] = []
+            filtered = False
+            stream = self.plan_stream_with_recovery(system=system)
+            try:
+                async for event in stream:
+                    if isinstance(event, StreamTextDelta):
+                        # Held text yields no event for the CLI to see Escape on, so check here.
+                        watcher = self.escape_watcher
+                        if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
+                            log.info("%s diagnosis cancelled while held — dropped", label)
+                            self._drop_handback_note()
+                            # Set here so the books say cancelled, then one event for the CLI to stop on.
+                            self._cancel_event.set()
+                            yield StreamTaskProgress(phase="analyzing", message="Cancelled")
+                            return
+                        held_text.append(event)
+                        continue
+                    if isinstance(event, StreamComplete):
+                        diagnosis_response = event
+                        filtered = event.response.stop_reason == "content_filter"
+                        if not filtered:
+                            for delta in held_text:
+                                yield delta
+                        held_text = []
+                    yield event
+            finally:
+                await stream.aclose()
+            if not filtered:
+                break
+            log.warning(
+                "%s diagnosis stopped by the provider's content filter — dropped (try %d)",
+                label, attempt + 1,
+            )
         text = (
             (diagnosis_response.response.content or "").strip()
             if diagnosis_response is not None and not filtered
             else ""
         )
         if filtered:
-            log.warning(
-                "%s diagnosis stopped by the provider's content filter — dropped; "
-                "the turn ends on the reply before it", label,
-            )
             self._drop_handback_note()
         elif text:
             self._append_history({"role": "assistant", "content": text})
@@ -4703,6 +4715,7 @@ class ChatSession:
 
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+                self._book_content_filter(event)
                 yield event
             return
         except ContextOverflowError:
@@ -4717,6 +4730,7 @@ class ChatSession:
             )
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+                self._book_content_filter(event)
                 yield event
             return
         except ContextOverflowError:
@@ -4727,7 +4741,17 @@ class ChatSession:
             message="Context still exceeded limits — older history was hard-truncated."
         )
         async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
+            self._book_content_filter(event)
             yield event
+
+    def _book_content_filter(self, event: StreamEvent) -> None:
+        """Note a call the provider's content filter stopped, so the turn ends naming it."""
+        if (
+            isinstance(event, StreamComplete)
+            and event.response.stop_reason == "content_filter"
+            and self._turn_cost is not None
+        ):
+            self._turn_cost.content_filtered = True
 
     def _acc_observe(
         self,
@@ -6057,7 +6081,7 @@ class ChatSession:
                     # the highest-traffic one of the four).
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="max-tool-rounds",
+                        system=system, label="max-tool-rounds", answered=False,
                         cancels_continuation=continuation > 0,
                     ):
                         yield event
@@ -6115,7 +6139,7 @@ class ChatSession:
                             message="Reached this task's token budget — checking in with you...",
                         )
                         async for event in self._stream_handback_diagnosis(
-                            system=system, label="spend-ceiling",
+                            system=system, label="spend-ceiling", answered=False,
                             cancels_continuation=continuation > 0,
                         ):
                             yield event
@@ -6749,7 +6773,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="budget-exhausted",
+                    system=system, label="budget-exhausted", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -7119,7 +7143,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="verifier-failure",
+                    system=system, label="verifier-failure", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -7159,7 +7183,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="stuck",
+                    system=system, label="stuck", answered=bool(reply.strip()),
                     cancels_continuation=continuation > 0,
                 ):
                     yield event
@@ -7218,7 +7242,7 @@ class ChatSession:
                         message="Reached this task's token budget — checking in with you...",
                     )
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="spend-ceiling",
+                        system=system, label="spend-ceiling", answered=bool(reply.strip()),
                         cancels_continuation=continuation > 0,
                     ):
                         yield event

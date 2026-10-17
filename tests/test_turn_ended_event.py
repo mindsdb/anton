@@ -225,8 +225,10 @@ async def test_filtered_handback_is_dropped(workspace):
     # And the next question stays the user's own words, not merged into the note.
     session._append_history({"role": "user", "content": "next question"})
     assert session.history[-1] == {"role": "user", "content": "next question"}
-    assert booked == "handback_verifier_failure"
-    assert events[-1] == StreamTurnEnded(ended_by="handback_verifier_failure")
+    # The answer stands, so no second try; the reason names the filter.
+    assert session._llm.plan_stream.call_count == 3
+    assert booked == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
 
 
 async def test_unfiltered_handback_still_streams(workspace):
@@ -293,3 +295,51 @@ async def test_escape_while_a_handback_is_held_cancels_the_turn_as_the_cli_sees_
             await stream.aclose()
     assert stopped
     assert send.call_args.kwargs["ended_by"] == "cancelled"
+
+
+_REFUSAL = "I'm sorry, but I cannot assist with that request."
+
+
+def _filtered_stream():
+    return _Iter([
+        StreamTextDelta(text=_REFUSAL),
+        StreamComplete(response=LLMResponse(content=_REFUSAL, stop_reason="content_filter")),
+    ])
+
+
+def _unanswered_verifier_failure(workspace, *handbacks):
+    # The reply before the hand-back has no text, so the hand-back is the whole answer.
+    mock_llm = _handback_verifier_failure(workspace)._llm
+    plans = [_Iter([StreamComplete(response=_tool_call(1))]), _Iter([StreamComplete(response=_text(""))]), *handbacks]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    return _plain(workspace, mock_llm)
+
+
+async def test_filtered_handback_without_an_answer_is_tried_once_more(workspace):
+    retried = _Iter([StreamTextDelta(text="here is what I did"), StreamComplete(response=_text("here is what I did"))])
+    session = _unanswered_verifier_failure(workspace, _filtered_stream(), retried)
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert shown == "here is what I did"
+    assert session.history[-1] == {"role": "assistant", "content": "here is what I did"}
+    assert booked == "content_filter"
+
+
+async def test_handback_filtered_twice_ends_with_no_text(workspace):
+    session = _unanswered_verifier_failure(workspace, _filtered_stream(), _filtered_stream())
+    events, booked = await _drain(session)
+    assert not any(isinstance(e, StreamTextDelta) and e.text for e in events)
+    assert _REFUSAL not in str(session.history)
+    assert session._llm.plan_stream.call_count == 4
+    assert booked == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+async def test_filtered_main_reply_names_the_filter(workspace):
+    # Main replies stream as they arrive; the turn's reason still says the filter fired.
+    mock_llm = make_mock_llm()
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: _filtered_stream())
+    session = _plain(workspace, mock_llm)
+    events, booked = await _drain(session)
+    assert booked == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
