@@ -461,7 +461,7 @@ async def handle_setup_memory(
     settings.memory_mode = memory_mode
     workspace.set_secret("ANTON_MEMORY_MODE", memory_mode)
     if cortex is not None:
-        cortex.mode = memory_mode
+        cortex.mode = settings.effective_memory_mode
 
     if episodic is not None:
         console.print()

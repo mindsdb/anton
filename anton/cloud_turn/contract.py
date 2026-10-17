@@ -48,17 +48,25 @@ Events written back on stdout (JSONL):
       surfaces a card and the user saves it, so nothing reaches the skill store.
   {"kind": "history", "rows": [...]}  - pre-terminal; this turn's tool
       block-rows as [{"role", "content"}], where content holds only tool_use
-      (assistant) or tool_result (user) blocks. cowork persists them as their
-      own hidden `messages` rows so the NEXT turn's history replays a valid
-      tool_use -> tool_result sequence. Omitted after a mid-turn compaction or
-      on failure, in which case that turn replays text-only.
+      (assistant) or tool_result (user) blocks. For a turn that did not
+      compact, cowork persists them as their own hidden `messages` rows so the
+      NEXT turn's history replays a valid tool_use -> tool_result sequence.
+      Sent after a mid-turn compaction or hard truncation too: the rows come
+      from `ChatSession.turn_messages()`, which still holds the messages the
+      swap folded out of history. For such a turn, cowork-server since
+      mindsdb/cowork-server#712 reads the rows for figure sources and stores
+      none, so the next turn replays that turn text-only; older servers store
+      them. Omitted when the turn used no tools, and on failure, in which case
+      that turn replays text-only.
   {"kind": "compaction", "summary": "...", "covered_through": N}  - pre-terminal;
       this turn folded the first N messages of the REQUEST's `history` into
       `summary`. cowork saves both and seeds `summary` + the uncovered tail next
       turn, instead of resending (and re-summarizing) the whole conversation.
-      Mutually exclusive with `history` above, which the same compaction
-      suppresses. Omitted on failure too: the next turn re-seeds the same
-      history and compacts it again.
+      Sent before `history` above when both apply. `covered_through` counts
+      only seeded messages, never this turn's own. The summary text may still
+      describe rows this turn also sends in full under `history`. Omitted on
+      failure too: the next turn re-seeds the same history and compacts it
+      again.
   {"kind": "ask_user", "id", "prompt", "options": [{"value", "label",
       "detail"}], "select", "allow_custom", "timeout_s"}  - interactive turns
       only: a question the turn is now blocked on. Never rate limited.
@@ -81,6 +89,9 @@ not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
 `round_end`, and `turn_ended` ({"ended_by": "..."}, sent before the terminal
 event when a turn handed back early). A `heartbeat` only resets the
 controller's stall timer.
+A `tool_result` with `action: "message"` is a tool's message to the user,
+rendered as an agent message; the pod sends it only when the request set
+`tool_messages`.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:
@@ -214,6 +225,12 @@ class TurnRequestV1:
     #: answer lines from stdin. Anything but a JSON `true` reads as False, so a
     #: controller that does not know the field leaves every turn non-interactive.
     interactive: bool = False
+    #: Whether the client watching this turn renders a tool's message to the
+    #: user (a `tool_result` with `action: "message"`) as an agent message —
+    #: the cowork UI does, channel bots do not. Without it the pod drops those
+    #: messages and the tool hands the content to the agent instead. Anything
+    #: but a JSON `true` reads as False.
+    tool_messages: bool = False
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
@@ -248,6 +265,7 @@ class TurnRequestV1:
                 d.get("started_at") if isinstance(d.get("started_at"), str) else None
             ),
             interactive=d.get("interactive") is True,
+            tool_messages=d.get("tool_messages") is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None

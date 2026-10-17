@@ -65,7 +65,7 @@ class TestExplicitOutcomeClassification:
         assert streak["scratchpad"] == 1
 
     def test_interleaved_false_success_no_longer_resets(self):
-        # The Kiranam shape: error, "success" that achieved nothing but whose
+        # The ODBC-wall shape: error, "success" that achieved nothing but whose
         # handler still reports the truth, error... With explicit outcomes the
         # streak survives only through real successes.
         s, streak, nudged = _session(), {}, set()

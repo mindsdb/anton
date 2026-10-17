@@ -35,6 +35,7 @@ from .provider import (
     Usage,
     classify_404,
     classify_content_rejection,
+    classify_markup_bad_request,
     classify_request_refusal,
     classify_responses_failure,
     classify_transient,
@@ -151,6 +152,12 @@ def _raise_for_bad_request(exc: "openai.BadRequestError") -> None:
     terminal today. Naming only what we can name leaves every other 400
     byte-identical; the generic-fallback question is ENG-1283's.
     """
+    # First, because the checks below read the body as an API error and a
+    # markup body is not one.
+    misrouted = classify_markup_bad_request(_error_body(exc))
+    if misrouted is not None:
+        raise misrouted from exc
+
     msg = str(exc).lower()
     if "context_length_exceeded" in msg or "maximum context length" in msg:
         raise ContextOverflowError(str(exc)) from exc
@@ -305,8 +312,11 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # Read UNGATED, for the velocity check below only: a velocity limit is not
     # a billing verdict, so the origin gate does not apply to it.
     raw_gate_reason = ""
+    azure_retry_hint = False
     if getattr(exc, "response", None) is not None:
         raw_gate_reason = exc.response.headers.get("x-mindshub-reason", "")
+        # Azure sends retry-after-ms on rate and capacity 429s, which its docs say to wait out.
+        azure_retry_hint = "retry-after-ms" in exc.response.headers
 
     # Origin-gated too (ENG-1693 review): this branch's copy names a MindsHub
     # PLAN and links console.mindshub.ai to upgrade, so it is a billing verdict
@@ -362,7 +372,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # HTTP-200 case), 5xx, or a plain 429 — get backed off and retried by the
     # session loop rather than surfacing an instant, misleading failure (ENG-673).
     # ENG-1537: a session wait needs POSITIVE evidence of a velocity limit —
-    # our gateway names it on the reason header and in the body code. Anything
+    # our gateway names it on the reason header and in the body code, and Azure
+    # by sending retry-after-ms. Anything
     # else (a bare 429, a provider quota in an unrecognised dialect) keeps the
     # old fail-fast path rather than burning the budget on a limit that may not
     # clear.
@@ -373,7 +384,7 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # ungated too, so a spoofer would just use that. What it DID cost was a
     # real regression — a relay or corporate proxy in front of MindsHub
     # forwarding our 429 and `Retry-After` lost its wait (ENG-1537).
-    _velocity = raw_gate_reason == "rate_limited" or code == "rate_limited"
+    _velocity = raw_gate_reason == "rate_limited" or code == "rate_limited" or azure_retry_hint
     transient = classify_transient(
         exc.status_code, raw_body, provider="The model provider", model=model,
         retry_after=retry_after_seconds(exc),
@@ -1113,6 +1124,10 @@ class OpenAIProvider(LLMProvider):
     async def current_api_key(self) -> str | None:
         """The key for the next request: the live supplier's, since a refresh makes the stored one stale."""
         return await self._api_key_provider() if self._api_key_provider else self._api_key
+
+    def trace_headers(self) -> dict[str, str]:
+        """The Langfuse headers this provider's own requests would carry now; empty outside a turn."""
+        return self._build_trace_headers() or {}
 
     def native_web_tools(self) -> set[str]:
         # BYOK OpenAI exposes web_search via Responses API (which covers fetch
@@ -1950,7 +1965,7 @@ class OpenAIProvider(LLMProvider):
             if billing_stop is not None:
                 raise billing_stop from exc
             # A code that names its cause gets that cause's handling instead of
-            # the incident backoff: compaction, the count-based retry for a rate
+            # the incident backoff: compaction, the rate-limit wait for a rate
             # limit, the image repair, or a visible refusal. Covers both the
             # event raised above and an `error` event the SDK raised itself.
             named = classify_responses_failure(

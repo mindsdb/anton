@@ -134,6 +134,13 @@ USING DATA:
 # (html-app and the fullstack `static/index.html`).
 _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
+- SCOPE: render ONLY what the request, the PRD, `spec.md` and the API
+  specification ask for. No invented brand or company names, logos,
+  taglines, marketing copy or intro paragraphs, status pills or badges,
+  footers or disclaimers unless asked. Requested content includes the
+  functional states (loading, empty, error and API error messages) and what
+  the rules below require: chart subtitles, units, estimated or converted
+  notes. The layout rules arrange that content; they never add other content.
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
@@ -195,10 +202,18 @@ VISUAL DESIGN (for every HTML file you produce):
 
 _VERIFIER_CONTRACT = """\
 A static verifier checks each of these after `finish`; a violation fails the
-step and costs a regeneration:
+step and costs a regeneration, unless the item says it is only a warning:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - No absolute URL in any `fetch()` call — relative paths only.
+- No root-relative path in `src`, `href`, `fetch()` or `new EventSource()`
+  (a value that starts with a single `/`, `/api/...` included): the page is
+  served under a path prefix, in the app preview and once published, and
+  such a path drops it, so the file, link or call fails. Use a relative
+  path for files and links (`logo.png`, or the relative name listed under
+  `## Attached files`); `https://`, `//`, `data:`, `blob:`, `#` and
+  `mailto:` values are fine. Moving the same root-relative path into a JS
+  string does not fix it.
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
@@ -206,13 +221,7 @@ step and costs a regeneration:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them.
-- BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
-  / `document.cookie` may be unavailable — the in-app preview runs the page
-  in a sandboxed frame. Never touch them directly during top-level
-  initialisation: a throw there aborts the script before any listener is
-  bound, and the page renders with every control dead. Go through one
-  guarded helper with an in-memory fallback.\
+  to them. A missing `id` is only a warning.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded
@@ -237,10 +246,27 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
+# Rules the verifier does not check, kept after the browser-gate bullet so the
+# list above holds only what is checked.
+_FRAME_NOTES = """\
+Not checked by the verifier, but the page breaks inside the frame without them:
+- BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
+  / `document.cookie` may be unavailable — the in-app preview runs the page
+  in a sandboxed frame. Never touch them directly during top-level
+  initialisation: a throw there aborts the script before any listener is
+  bound, and the page renders with every control dead. Go through one
+  guarded helper with an in-memory fallback.
+- LINKS: the page runs inside a frame, in the app preview and on the
+  published link alike. `target="_top"` and `target="_parent"` do not work;
+  give a link to another artifact or an external site `target="_blank"`,
+  or it opens inside the frame.\
+"""
+
+
 def _verifier_contract(*, served: bool) -> str:
     return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
-    )
+    ) + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +451,11 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
   ```
+  `Collection` stores its items under ITS OWN keys: `pk="_"` (unless you
+  pass `pk=`) and `sk="<name>#<key>"`. Data written through a `Collection`
+  is read back ONLY through the same `Collection` (`get`/`list`) — never
+  with raw `store.get(...)`/`store.query(...)` on your own pk/sk, which
+  finds nothing. Pick one style per piece of data and stick to it.
   Low-level `store` methods (all async; there is NO `scan()` and NO secondary
   indexes — `query` has no `index=` argument):
   * `await store.get(pk, sk=None)` → one item or `None`
@@ -436,6 +467,13 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
     do NOT hand-roll read-modify-write
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
+- An item that `increment`/`update` CREATES carries NO `pk`/`sk` attributes
+  (and no `_key` via `Collection`): `query`/`list` return it without them,
+  so a listing must never read the key from such items. When a listing needs
+  the key, keep it as a plain field in the same atomic call —
+  `await store.update("counts", option, set_fields={"option": option},
+  add_fields={"count": 1})`. Never `put` a counter item before each
+  increment: `put` replaces the whole item and resets the count.
 - DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
   `query(pk=...)` call (or `Collection.list()`). Never call the store in a
   loop to assemble a listing.
@@ -454,9 +492,10 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
 # ---------------------------------------------------------------------------
 
 _FRONTEND_RULES = """\
-Three of these are verifier checks as well: a page without the api-base meta
-tag, one that calls the backend outside `/api/*`, or one whose `fetch()`
-names a path `openapi.json` does not define, fails the step.
+Four of these are verifier checks as well: a page without the api-base meta
+tag, one that calls the backend outside `/api/*`, one that calls it with a
+root-relative path instead of `api()`, or one whose `fetch()` names a path
+`openapi.json` does not define, fails the step.
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
@@ -465,14 +504,20 @@ names a path `openapi.json` does not define, fails the step.
   ```html
   <meta name="api-base" content="">
   ```
-  Empty `content` is the local default — fetch falls back to a relative path
-  and hits the same FastAPI process. At deploy time the publisher rewrites it.
+  Empty `content` is the local default: `api('/api/items')` is then
+  `/api/items` on the same FastAPI process. The publisher and the host
+  rewrite it.
 - Read the meta tag ONCE at startup and use the `api()` helper everywhere:
   ```js
   const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
   const api = (path) => `${API_BASE}${path}`;
   // usage: fetch(api('/api/items'))
   ```
+- API addresses go ONLY through `api()`, with the path's leading `/` kept:
+  `api('/api/items')`. When one is needed in an attribute (a download link,
+  an `<img>`), set it from JS: `a.href = api('/api/export')`. Never write
+  `href="/api/export"` in the markup: a root-relative path fails the step
+  (see the verifier contract).
 - NEVER hardcode an absolute URL in the source.
 - Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
 - Call ONLY the paths listed under `## API Specification`, spelled as the
@@ -480,7 +525,9 @@ names a path `openapi.json` does not define, fails the step.
   fails the step.
 - `static/` is the ONLY folder the backend serves. ANY additional frontend asset
   (separate CSS, JS, images, fonts, large data payloads) MUST live under
-  `static/` too — never at the artifact root, or it will 404 at runtime.\
+  `static/` too — never at the artifact root, or it will 404 at runtime.
+  The page itself is in `static/`, so reference such a file by its name
+  there: `app.js`, not `static/app.js` or `/static/app.js`.\
 """
 
 
@@ -507,7 +554,7 @@ HTML_APP_DEFAULT_PRIMARY = "index.html"
 _GEN_HTML_INPUTS = """\
 ## What you receive
 The user message carries these sections, in this order (some may be absent):
-- `## Product requirements` (prd.md) — reviewed and accepted by the user.
+- `## Product requirements` (prd.md) — written from the latest brief.
   This is the authoritative source; where anything else disagrees with it,
   the PRD wins. It ends at `{prd_footer}`.
 - `## Brief` — only when there is no PRD: the request as the calling agent
@@ -644,8 +691,9 @@ every artifact fits, so the default is the whole file in a single body with
 `write_file(path, mode="w")`. Split ONLY a file that will clearly exceed it:
 - Each part costs a round; splitting a file that would have fit wastes it.
 - Continue exactly where the file now ends and append with `mode="a"`.
-  The `write_file` result reports the CHARACTERS and LINES added and the
-  file's new totals, so you know where the part landed without reading.
+  The `write_file` result reports the characters added,
+  the lines this part occupies and the file's new totals, so you know where
+  the part landed without reading.
 - If a reply is cut off before the closing marker, nothing is written and
   the tool result tells you what to send next. Follow it; never re-emit the
   whole file to "fix" something.
@@ -676,10 +724,13 @@ _GEN_TOOLS = """\
   them from `os.environ`, never from `data_vault` files. If a cell fails the
   same way twice, change strategy instead of re-running it.
 - `write_file(path, mode="w"|"a")` — writes the body of THIS reply.
-- `read_file(path)` — size, line count and tail of a file you wrote.
-  `read_file(path, full=true)` pulls the ENTIRE file into your context and
-  keeps it there for every remaining round. Use either only when you must
-  re-read content in order to keep WRITING — never to check finished work.
+- `read_text_file(path, start_line?, end_line?)` — read a file you wrote,
+  only when you must see it to keep writing; never to check finished work.
+  `path` is relative to the artifact folder. To see where your last part
+  ended, read the end: `start_line=-20`. To see one section, pass its line
+  range; `write_file` reports the lines each part occupies. `end_line=-1`
+  pulls the whole file into your context and keeps it there for every
+  remaining round.
 - `finish(summary)` — call exactly once, after the file is written.
 
 Python → JS: if you ever build file text inside a scratchpad cell, escape
@@ -1123,7 +1174,7 @@ _DATA_CONTEXT_HEADER = (
 
 
 PRD_SECTION_HEADER = (
-    "## Product requirements (prd.md — reviewed and accepted by the user; "
+    "## Product requirements (prd.md — written from the latest brief; "
     "this is the authoritative requirements source)"
 )
 PRD_SECTION_FOOTER = "--- end of prd.md ---"
@@ -1134,7 +1185,7 @@ def prd_section(state) -> str:
 
     The header states the document's standing rather than leaving the node to
     infer it from position: the same context carries `spec.md` and the data
-    record, and on any disagreement the accepted PRD wins. (The brief travels
+    record, and on any disagreement the PRD wins. (The brief travels
     only when there is no PRD — see `orchestrator._spec_context`.) One
     renderer for every node, so no node reads a differently-framed PRD.
 

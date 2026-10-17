@@ -768,6 +768,36 @@ async def test_a_hint_within_the_cap_still_waits_rather_than_carding():
     assert calls["n"] == 2                   # and the SAME step resumed
 
 
+async def test_a_rate_limit_inside_a_200_stream_waits_then_completes():
+    from anton.core.llm.provider import classify_responses_failure
+
+    s = _session()
+    sleeps = []
+
+    async def _record_sleep(delay):
+        sleeps.append(delay)
+        return False
+
+    s._backoff_sleep = _record_sleep
+    calls = {"n": 0}
+
+    async def _fail_then_succeed(user_msg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise classify_responses_failure(
+                {"code": "rate_limit_exceeded", "message": "Slow down"},
+                provider="The model provider", model="gpt",
+            )
+        yield StreamTextDelta("done")
+
+    s._stream_and_handle_tools = _fail_then_succeed
+    events = [e async for e in s.turn_stream("do it")]
+
+    assert len(sleeps) == 1 and 1.6 <= sleeps[0] <= 2.4, sleeps  # the curve's first step
+    assert calls["n"] == 2
+    assert "done" in "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+
+
 async def test_the_wait_budget_is_finite_across_multiple_denials():
     """The loop's ONLY termination guarantee is `_rate_limit_slept += delay`.
 

@@ -295,7 +295,7 @@ class TestNoPathStillNamesASeparatePrdStep:
     `generate_prd` was a separate tool with no `ToolDef.prompt` of its own, so
     these always-on blocks were the only place the model could learn the step
     existed — which is why an ordering lock was worth having. There is one
-    tool now and it agrees the requirements itself, so a block still naming a
+    tool now and it settles the requirements itself, so a block still naming a
     PRD step would be sending the agent to call something that does not exist.
     """
 
@@ -322,13 +322,64 @@ class TestNoPathStillNamesASeparatePrdStep:
         for name, text in self._blocks().items():
             assert "generate_artifact" in text, name
 
-    def test_the_artifacts_block_says_the_tool_agrees_the_requirements_itself(self):
+    def test_the_artifacts_block_says_the_tool_handles_the_brief_itself(self):
         """The agent must not pre-interview the user for something the tool
         will ask about anyway, nor write a PRD by hand."""
         from anton.core.llm.prompts import ARTIFACTS_PROMPT
 
-        assert "agrees a short brief" in ARTIFACTS_PROMPT
+        assert "shows them a short brief" in ARTIFACTS_PROMPT
         assert "Do NOT write a PRD yourself" in ARTIFACTS_PROMPT
+
+
+class TestNoTextPromisesABriefAgreement:
+    """When the agent acts first nobody confirms the brief, so no text the
+    agents read may say the requirements are agreed with the user."""
+
+    STALE = (
+        "agrees a short brief",
+        "agrees the requirements",
+        "agreeing a brief",
+        "read and accept",
+        "the user agreed to",
+        "agreed requirements",
+        "reviewed and accepted",
+    )
+
+    def _texts(self) -> dict[str, str]:
+        from pathlib import Path
+
+        from anton.core.llm import prompts
+        from anton.core.tools import tool_defs
+        from anton.core.tools.generate_artifact import prompts as gen_prompts
+        from anton.core.tools.generate_artifact.discovery.prd import _WRITE_PRD_INSTRUCTION
+        from anton.core.tools.generate_artifact.discovery.prompts import build_pipeline_system_prompt
+        from anton.core.tools.generate_artifact.progress import STEP_LABELS
+        from anton.core.tools.generate_artifact.state import GenState
+
+        state = GenState(session=None, artifact_type="html-app", artifact_path=Path("/tmp/x"), slug="x")
+        texts = {
+            name: getattr(prompts, name)
+            for name in (
+                "ARTIFACTS_PROMPT",
+                "BACKEND_GENERATION_PROMPT",
+                "VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT",
+                "VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT",
+            )
+        }
+        for td in (tool_defs.CREATE_ARTIFACT_TOOL, tool_defs.GENERATE_ARTIFACT_TOOL):
+            texts[f"{td.name}.description"] = td.description
+            texts[f"{td.name}.prompt"] = td.prompt or ""
+        texts["pipeline_system"] = build_pipeline_system_prompt(state)
+        texts["prd_section_header"] = gen_prompts.PRD_SECTION_HEADER
+        texts["gen_html_inputs"] = gen_prompts._GEN_HTML_INPUTS
+        texts["write_prd"] = _WRITE_PRD_INSTRUCTION
+        texts["step_labels"] = "\n".join(STEP_LABELS.values())
+        return texts
+
+    def test_no_text_promises_an_agreement(self):
+        for name, text in self._texts().items():
+            for phrase in self.STALE:
+                assert phrase not in text, (name, phrase)
 
 
 class TestRecallIsConditionalNow:
@@ -516,6 +567,58 @@ class TestCoworkProductSkill:
         assert "browser only" in body
         assert "Coding Mode: **desktop only**" in body
 
+    def test_local_models_are_answered_per_surface(self, store):
+        """Three new users asked how to use local models and were told the
+        product information did not say, or were sent to the docs homepage.
+        The hosted browser build runs in org mode, which hides the LLM
+        Providers group, so the honest browser answer is "not here, use
+        desktop"; desktop takes any OpenAI-compatible base URL."""
+        body = store.load("cowork-product").declarative_md
+        section = body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0]
+        assert "**not available**" in section
+        assert "https://mindshub.ai/download" in section
+        assert "**supported**" in section
+        assert "Settings → Agent → LLM Providers" in section
+        assert "OpenAI-compatible" in section
+        assert "http://localhost:11434/v1" in section
+        assert "Model Router" in section
+        # Cowork does not fetch models; the steps must not imply it does.
+        assert "Cowork does not download" in section
+        assert "tool (function) calling" in section
+
+    def test_local_models_name_every_router_role(self, store):
+        """Model Router has three independent roles, and one left alone keeps
+        its provider: with MindsHub signed in, that role stays on cloud models
+        while the user believes they are running locally."""
+        body = store.load("cowork-product").declarative_md
+        section = " ".join(body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0].split())
+        for role in ("Planning model", "Routing and summarization model", "Coding model"):
+            assert role in section
+        assert "set all three" in section
+
+    def test_local_models_blame_the_server_not_the_model_size(self, store):
+        """Local servers reject the verifier's named tool_choice before the
+        model runs, so "use a larger model" is advice that cannot help."""
+        body = store.load("cowork-product").declarative_md
+        section = " ".join(body.split("\nLOCAL MODELS —")[1].split("\nHERMES —")[0].split())
+        assert "not a setup mistake" in section
+        assert "larger model does not fix it" in section
+
+    def test_maintainer_provenance_stays_out_of_the_loaded_body(self, store):
+        """The body ships to the model on every recall; notes on which code
+        each fact came from are for maintainers and live in SOURCES.md."""
+        body = store.load("cowork-product").declarative_md
+        assert "WHERE THESE FACTS COME FROM" not in body
+        assert "SettingsView.jsx" not in body
+
+    def test_fallback_answers_what_it_can_before_pointing_at_docs(self, store):
+        """A docs-homepage referral on its own is the failure, not the fix."""
+        body = store.load("cowork-product").declarative_md
+        fallback = body.split("IF THIS FILE DOES NOT ANSWER THE QUESTION")[1]
+        assert fallback.index("First give whatever part") < fallback.index(
+            "https://docs.mindshub.ai"
+        )
+
     def test_forbids_answering_from_general_knowledge(self, store):
         body = store.load("cowork-product").declarative_md
         assert "Never answer a question about Cowork from general" in body
@@ -594,10 +697,11 @@ class TestHermesIsNotStatedAsFact:
         for wrong in ("nous research", "third-party harness", "external agent"):
             assert wrong not in body
 
-    def test_the_maintenance_note_says_how_to_settle_it(self, store):
+    def test_the_maintenance_note_says_how_to_settle_it(self):
         """So the next reader resolves the disagreement instead of guessing."""
-        body = store.load("cowork-product").declarative_md
-        assert "cowork/harnesses/" in body
+        skill_dir = Path(skills_mod.__file__).parent / "builtin_skills" / "cowork-product"
+        sources = (skill_dir / "SOURCES.md").read_text()
+        assert "cowork/harnesses/" in sources
 
 
 class TestPipelineContractMirrored:
@@ -617,11 +721,17 @@ class TestPipelineContractMirrored:
         "state_manifest.json",
         'health_path="/api/health"',
         "never derive or invent a `DS_*` key",
+        # A path from the root drops the path prefix the page is served under.
+        "API addresses go ONLY through `api()`",
     )
     FRONTEND_MARKERS = (
         "<body>",
         'name="viewport"',
         "No absolute URL in any `fetch()`",
+        # A path from the root drops the path prefix the page is served
+        # under, and the page always runs inside a frame.
+        "No root-relative path",
+        'target="_blank"',
         "window.__antonCommentsLayer",
         "!important",
         "z-index",

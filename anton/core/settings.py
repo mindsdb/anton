@@ -55,9 +55,9 @@ class CoreSettings(BaseSettings):
     # opposite verdict, because they protect different things.
     #
     # 1.25M measured against 30 days of production (2026-08-12): trips ~15% of
-    # external turns at a median of 16 LLM calls in. Set above Kiranam's worst
-    # turn (1,480,766) and you stop catching the case this exists for — 1.5M
-    # misses it by 20k tokens.
+    # external turns at a median of 16 LLM calls in. Set above the worst turn
+    # of the runaway session this exists for (1,480,766) and you stop catching
+    # it — 1.5M misses it by 20k tokens.
     max_turn_tokens: int = 1_250_000
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5

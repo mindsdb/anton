@@ -122,12 +122,12 @@ async def restore_session(
         session_id=sid,
     )
     # Repaired here as well as at `ChatSessionConfig.initial_history`: this
-    # path assigns `_history` directly and so reaches none of the constructor's
+    # path replaces the history and so reaches none of the constructor's
     # work. It is also the path that matters most for ENG-2420 — `/resume` is
     # what a user types after a conversation stops working, so the surface most
     # likely to meet a poisoned history was the one the repair did not cover
     # (review: pnewsam on #471).
-    new_session._history = repair_replayed_tool_ids(list(history))[0]
+    new_session._replace_history(messages=repair_replayed_tool_ids(list(history))[0])
     # Counted off the REPAIRED list, matching `ChatSession.__init__`, which
     # reads `self._history` rather than `config.initial_history` for the same
     # reason: the repair can turn an unpairable `tool_result` into text, and

@@ -611,6 +611,8 @@ def damaged_tool_call_result(tc: ToolCall) -> dict | None:
             "body; if an argument was large, make it smaller or split the work "
             "across several calls."
         ),
+        # cowork-server's figure sources skip any history result marked
+        # is_error, since its text is anton's, not the tool's output.
         "is_error": True,
     }
 
@@ -984,7 +986,7 @@ _MINDSHUB_BILLING_CTA = (
 # every environment and vanity host is a subdomain of one of them:
 # prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
 # per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
-# `llm.mdb.ai`, `llm.staging.mdb.ai`, `writer.mdb.ai`, `terabase.dev.mdb.ai`,
+# `llm.mdb.ai`, `llm.staging.mdb.ai`, vanity hosts under `*.mdb.ai` and `*.dev.mdb.ai`,
 # `view.mindshub.ai`. Terraform declares no other apex zone, and the wildcards
 # `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
 # positive cases are pinned in tests/test_status_error_mapper.py so this
@@ -1305,7 +1307,8 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     """Seconds from a response's ``Retry-After`` header, or ``None`` (ENG-1537).
 
     The MindsHub gateway sends this on the velocity 429 (``rate_limited``,
-    `minds/inference/errors.py`) as integer seconds — the only form we act on.
+    `minds/inference/errors.py`) as integer seconds. Azure's ``retry-after-ms``
+    is read first when present, since it is the precise interval.
     The HTTP-date form is legal but nothing in use emits it, and mis-reading a
     date as a number would produce an absurd delay, so an unparseable value is
     treated as absent: the caller then falls back to its own backoff curve.
@@ -1321,18 +1324,21 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     if headers is None:
         return None
     try:
+        raw_ms = headers.get("retry-after-ms") or headers.get("Retry-After-Ms")
         raw = headers.get("retry-after") or headers.get("Retry-After")
     except Exception:
         return None
-    if raw is None:
-        return None
-    try:
-        secs = float(str(raw).strip())
-    except (TypeError, ValueError):
-        return None  # HTTP-date form, or junk
-    if secs != secs or secs in (float("inf"), float("-inf")) or secs < 0:
-        return None
-    return secs
+    # Azure sends the precise interval in milliseconds next to a rounded-up Retry-After.
+    for value, scale in ((raw_ms, 1000), (raw, 1)):
+        if value is None:
+            continue
+        try:
+            secs = float(str(value).strip()) / scale
+        except (TypeError, ValueError):
+            continue  # HTTP-date form, or junk
+        if secs == secs and secs not in (float("inf"), float("-inf")) and secs >= 0:
+            return secs
+    return None
 
 
 def _rate_limited(
@@ -1375,7 +1381,8 @@ def classify_transient(
     the session waits the interval the server actually named (ENG-1537).
 
     ``velocity_confirmed`` says the caller POSITIVELY identified a velocity
-    limit — our gateway's ``rate_limited`` reason header or body code. Only then
+    limit — our gateway's ``rate_limited`` reason header or body code, or
+    Azure's ``retry-after-ms`` header. Only then
     does the 429 earn a session wait. The absence of billing carriers is not
     evidence of transience: both fail-fast guards below are string-exact, so a
     provider whose quota denial uses a different dialect (Gemini sends an
@@ -1909,14 +1916,14 @@ def classify_responses_failure(
     In-band means a ``response.failed`` event, a stream ``error`` event, or a
     non-streamed response with status ``failed``: all arrive inside a 200. Each
     named code gets the typed error for its cause, so the session runs that
-    cause's handling: compaction for an overflow, the count-based retry for a
+    cause's handling: compaction for an overflow, the session wait for a
     rate limit, the history repair for an image, and a visible error for a
     refused prompt. ``None`` leaves any other code to the caller's transient
     handling.
 
-    A rate limit gets what an unconfirmed 429 gets, not the session wait. The
-    code does not say whether a per-minute or a per-day limit was hit, and only
-    a confirmed velocity limit earns the wait (see :func:`classify_transient`).
+    A rate limit gets the session wait. Its code names a rate limit, quotas and
+    spend caps have their own codes, and with no hint the wait runs the backoff
+    curve inside the rate-limit budget.
     """
     parsed = ProviderErrorBody.parse(body)
     code = parsed.code
@@ -1927,7 +1934,7 @@ def classify_responses_failure(
         return ContextOverflowError(message if isinstance(message, str) else code)
     if code == "rate_limit_exceeded":
         return _rate_limited(
-            provider=provider, model=model, velocity_confirmed=False,
+            provider=provider, model=model, velocity_confirmed=True,
             retry_after=None, status_code=None,
         )
     if code in _PROMPT_REFUSAL_CODES:
@@ -2000,6 +2007,34 @@ def classify_404(
     return EndpointConfigurationError(
         f"The model endpoint returned 404 — check the endpoint URL and model "
         f"configuration.{suffix}"
+    )
+
+
+def classify_markup_bad_request(body: object) -> "EndpointConfigurationError | None":
+    """Classify a 400 whose body is HTML or XML as a misrouted request.
+
+    Shared by the OpenAI-compatible and Anthropic 400 paths. Both SDKs keep a
+    body that is not JSON as the raw string, and use that string as the
+    exception's message too. A model API answers in JSON, so markup means the
+    request reached some other service, such as a web server, a proxy, a CDN
+    or a storage bucket.
+
+    The 400 path is the one that needs this. Its unclassified errors re-raise
+    the SDK error, raw body included. Other statuses go through
+    ``_raise_for_status_error``, which always ends in anton's own copy.
+
+    The identical request fails identically on a retry, and the raw body is
+    neither safe nor useful to show. So this returns curated copy that leaves
+    the body out, and the session fails the turn at once instead of spending
+    its retries. Returns None for any other body, so JSON 400s keep their
+    existing handling.
+    """
+    if not (isinstance(body, str) and body.lstrip().startswith("<")):
+        return None
+    return EndpointConfigurationError(
+        "The model endpoint returned 400 with a web page or other non-API "
+        "response, so the request likely reached the wrong service — check "
+        "the endpoint URL configuration."
     )
 
 

@@ -1,11 +1,13 @@
 """Sub-tools exposed to the inner generation LLM.
 
-Only three are needed for stage 1:
+The write loop offers four:
 
-  - ``write_file(path, content)``  — produce one file inside the artifact folder.
-  - ``read_file(path)``             — read a file the sub-agent previously wrote
-    (useful for iterative refinement when a single write doesn't cut it).
-  - ``finish(summary)``             — terminal tool; signals the loop to stop.
+  - ``write_file(path, mode)`` — produce one file inside the artifact folder;
+    the body travels as plain text in the reply (see the file-body protocol).
+  - ``read_text_file``         — the main agent's tool; the engine reads paths
+    relative to the artifact folder and never returns line numbers.
+  - ``finish(summary)``        — terminal tool; signals the loop to stop.
+  - ``scratchpad``             — the main agent's scratchpad, unchanged.
 
 Each handler accepts the artifact ``root`` plus the sub-agent's input dict and
 returns a string the engine forwards back to the LLM via a ``tool_result``
@@ -17,8 +19,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Tail returned by read_file when `full` is not requested.
-READ_TAIL_CHARS = 500
+from anton.core.tools.text_file import (
+    DEFAULT_LINE_COUNT,
+    MAX_LINE_CHARS,
+    count_lines,
+    next_line_number,
+)
 
 
 # ── Tool-call protocol helpers shared by both loops ─────────────────────────
@@ -243,36 +249,6 @@ WRITE_FILE_SCHEMA: dict = {
 }
 
 
-READ_FILE_SCHEMA: dict = {
-    "name": "read_file",
-    "description": (
-        "Check a file you previously wrote into the artifact folder. By default "
-        "returns the file's size and its tail — enough to see what landed and "
-        "whether the file is closed. Pass `full=true` ONLY when you must "
-        "re-read the entire content (expensive: the whole file enters your "
-        "context) — never to verify finished work, the pipeline verifier does "
-        "that after `finish`. Path is relative to the artifact root."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "Relative path inside the artifact folder.",
-            },
-            "full": {
-                "type": "boolean",
-                "description": (
-                    "Return the entire file content instead of size + tail. "
-                    "Default false."
-                ),
-            },
-        },
-        "required": ["path"],
-    },
-}
-
-
 FINISH_SCHEMA: dict = {
     "name": "finish",
     "description": (
@@ -301,25 +277,84 @@ def _scratchpad_schema() -> dict:
     return tool_schema(SCRATCHPAD_TOOL)
 
 
+GEN_READ_TEXT_FILE_DESCRIPTION = (
+    "Read a file you are writing, only when you must see it to keep writing; "
+    "never to check finished work. `path` is relative to the artifact folder. "
+    "To see where your last part ended, read the end: `start_line=-20`. To see "
+    "one section, pass its line range; `write_file` reports the lines each part "
+    f"occupies. Without a range you get the first {DEFAULT_LINE_COUNT} lines; `end_line=-1` "
+    "returns the whole file. Whatever you read stays in your context for every "
+    "remaining round. If the lines you asked for do not fit into one call, a line "
+    f"longer than {MAX_LINE_CHARS:,} characters is shortened to its "
+    f"first and last {MAX_LINE_CHARS // 2:,} characters with a mark in between; never copy the "
+    "mark into what you write."
+)
+
+
+def _read_text_file_schema() -> dict:
+    # The main agent's contract with two changes for the write loop: paths are
+    # relative to the artifact folder, and there are no line numbers to copy
+    # into a file. Deep-copied because `tool_schema` hands out the shared dict.
+    import copy
+
+    from anton.core.tools.tool_defs import READ_TEXT_FILE_TOOL
+
+    schema = tool_schema(READ_TEXT_FILE_TOOL, description=GEN_READ_TEXT_FILE_DESCRIPTION)
+    input_schema = copy.deepcopy(schema["input_schema"])
+    input_schema["properties"]["path"]["description"] = (
+        "Path relative to the artifact folder, or absolute."
+    )
+    input_schema["properties"].pop("line_numbers", None)
+    return {**schema, "input_schema": input_schema}
+
+
 def tool_schemas() -> list[dict]:
-    return [WRITE_FILE_SCHEMA, READ_FILE_SCHEMA, FINISH_SCHEMA, _scratchpad_schema()]
+    return [WRITE_FILE_SCHEMA, _read_text_file_schema(), FINISH_SCHEMA, _scratchpad_schema()]
+
+
+def is_host_path(path: str) -> bool:
+    """`path` starts at a directory that exists on this machine.
+
+    A model writes "/index.html" or "/static/app.js" meaning the artifact
+    folder's root; "/home/u/project/data.csv" names a real file elsewhere.
+    """
+    if not path.startswith("/"):
+        return False
+    parts = Path(path).parts
+    if len(parts) < 2:
+        return False
+    try:
+        return Path(parts[0], parts[1]).is_dir()
+    except OSError:
+        return False
 
 
 def _sandboxed_path(root: Path, rel: str) -> Path | None:
     """Resolve ``rel`` against ``root`` and reject anything escaping it.
 
     Returns ``None`` for paths that traverse outside the artifact folder
-    (via ``..`` or absolute prefixes). The engine surfaces a clear error
-    to the sub-agent so it can retry with a corrected path.
+    (via ``..``, or an absolute path to another place on this machine). The
+    engine surfaces a clear error to the sub-agent so it can retry with a
+    corrected path.
     """
     if not rel or not isinstance(rel, str):
         return None
-    rel = rel.strip().lstrip("/")
+    rel = rel.strip()
+    root_resolved = root.resolve()
+    if rel.startswith("/"):
+        absolute = Path(rel).resolve()
+        if absolute != root_resolved and absolute.is_relative_to(root_resolved):
+            return absolute
+        # Re-rooting a real path would bury a copy of it inside the artifact,
+        # where nothing reads it and the publish ships it.
+        if is_host_path(rel):
+            return None
+    rel = rel.lstrip("/")
     if not rel:
         return None
     candidate = (root / rel).resolve()
     try:
-        candidate.relative_to(root.resolve())
+        candidate.relative_to(root_resolved)
     except ValueError:
         return None
     return candidate
@@ -350,42 +385,36 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
     if not isinstance(content, str):
         return {"ok": False, "message": "Error: `content` must be a string."}
     target.parent.mkdir(parents=True, exist_ok=True)
+    before = ""
+    if mode == "a":
+        try:
+            before = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            before = ""
     with open(target, mode, encoding="utf-8") as f:
         f.write(content)
     rel_written = str(target.relative_to(root.resolve()))
     verb = "Appended to" if mode == "a" else "Wrote"
-    # Lines beside the size: the model's next question after a chunk lands is
-    # "where did it land, and is the file closed" — a size alone answers
-    # neither, and the round it spends re-learning what this message already
-    # reported is pure loss (measured 2026-09-14). With the chunk's line count
-    # and the file's, an append's span is the last N lines, which is the map a
-    # targeted re-read needs instead of pulling the whole file back through the
-    # context.
+    # The model's next question after a part lands is "where did it land, and
+    # is the file closed"; answering it here saves the round it would spend
+    # reading (measured 2026-09-14). The line range is counted the way
+    # `read_text_file` counts, so it can read exactly that range back.
     #
-    # Both figures are CHARACTERS, and that is a correction: the delta used to
-    # be len(content) labelled "bytes" while the total came from stat(), so a
-    # `mode="w"` write of Cyrillic reported "+28114 bytes ... file now 29004
-    # bytes" — the two disagreeing by the UTF-8 overhead alone, implying 890
-    # bytes had been there before. The model is told to reason about sizes in
-    # characters (REPLY_BODY_CHARS), `read_file` answers in characters, and it
-    # counts what it writes in characters; a second unit here bought nothing
-    # and contradicted the rest.
-    chunk_lines = content.count("\n") + 1 if content else 0
+    # Sizes are CHARACTERS, the unit the model writes in (REPLY_BODY_CHARS): a
+    # byte count from stat() once disagreed with the character delta by the
+    # UTF-8 overhead alone, implying text had been there before.
     try:
         whole = target.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         # The write succeeded; only the read-back is unavailable. Reporting the
         # write as failed here would be a lie about what is on disk.
         tail = ""
     else:
-        tail = (
-            f", file now {len(whole)} characters"
-            f" / {whole.count(chr(10)) + 1} lines"
-        )
-    message = (
-        f"{verb} {rel_written} "
-        f"(+{len(content)} characters / {chunk_lines} lines{tail})."
-    )
+        total = count_lines(whole)
+        first = next_line_number(before)
+        span = f"; this part is lines {first}-{total}" if content and first <= total else ""
+        tail = f"{span}; file now {len(whole)} characters / {total} lines"
+    message = f"{verb} {rel_written} (+{len(content)} characters{tail})."
     # A reminder about the NEXT part, delivered at the only moment it is needed.
     #
     # Measured twice, 2026-09-15: after a successful first part the model
@@ -407,43 +436,4 @@ def write_file(root: Path, rel_path: str, content: str, *, mode: str = "w") -> d
         "ok": True,
         "written": rel_written,
         "message": message,
-    }
-
-
-def read_file(root: Path, rel_path: str, *, full: bool = False) -> dict:
-    """Read ``<root>/<rel_path>``.
-
-    By default returns the size plus the tail of the file, not the whole
-    content: the loop's own prompt tells the model to use this call to check
-    what landed, and for that the tail is sufficient. Returning the full text
-    by default meant re-reading a whole 48 KB page into the context (and
-    through the prompt-cache prefix) just to confirm it ends with ``</html>``
-    — measured 2026-08-27 at ~19k input tokens per check. ``full=True``
-    returns the entire content for genuine re-reads.
-    """
-    target = _sandboxed_path(root, rel_path)
-    if target is None:
-        return {
-            "ok": False,
-            "message": (
-                "Error: `path` must be inside the artifact folder "
-                f"(received: {rel_path!r})."
-            ),
-        }
-    if not target.is_file():
-        return {"ok": False, "message": f"Error: file not found: {rel_path}"}
-    try:
-        text = target.read_text(encoding="utf-8")
-    except OSError as exc:
-        return {"ok": False, "message": f"Error reading {rel_path}: {exc}"}
-    if full or len(text) <= READ_TAIL_CHARS:
-        return {"ok": True, "message": text}
-    return {
-        "ok": True,
-        "message": (
-            f"{rel_path} is {len(text)} characters, "
-            f"{text.count(chr(10)) + 1} lines. Last {READ_TAIL_CHARS} "
-            f"characters:\n…{text[-READ_TAIL_CHARS:]}\n\n"
-            "(pass `full=true` to read the entire file)"
-        ),
     }

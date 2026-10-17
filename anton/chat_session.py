@@ -83,7 +83,7 @@ async def rebuild_session(
     # Update cortex with new LLM client and memory mode
     if cortex is not None:
         cortex._llm = state["llm_client"]
-        cortex.mode = settings.memory_mode
+        cortex.mode = settings.effective_memory_mode
 
     # Refresh mind knowledge from remote server
     refresh_knowledge(settings, cortex)
@@ -116,6 +116,8 @@ async def rebuild_session(
         harness=HARNESS_ANTON,
         # WHERE it ran — the other axis, and now the only place "cli" appears.
         surface=SURFACE_CLI,
+        # Same host as chat.py's fresh session: it prints a tool's message.
+        tool_messages=True,
         proactive_dashboards=settings.proactive_dashboards,
         act_first=settings.act_first,
         output_dir=settings.artifacts_dir,

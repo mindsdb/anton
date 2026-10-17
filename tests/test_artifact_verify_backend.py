@@ -454,3 +454,34 @@ async def test_verify_backend_stateful_missing_manifest_fails(tmp_path: Path):
     )
     assert not result.ok
     assert any("state_manifest.json is missing" in e for e in result.errors)
+
+
+_LOGGED_TOKEN = "FAKE0tok3nZr1xK2mN4pL7vT9wY3sB6dF"
+
+
+def test_an_import_error_carrying_a_token_is_redacted():
+    """The import error is the backend's own exception text and goes into the
+    regeneration prompt, so a token in it must not ride along."""
+    intro = {
+        **GOOD_INTROSPECTION,
+        "import_ok": False,
+        "import_error": f"HTTPError: 401 for {{'access_token': '{_LOGGED_TOKEN}'}}",
+    }
+    result, _ = evaluate_backend(intro, GOOD_SOURCE, "fastapi\nmangum\n")
+    assert any("access_token" in e for e in result.errors)
+    assert not any(_LOGGED_TOKEN in e for e in result.errors)
+
+
+async def test_introspection_stderr_carrying_a_token_is_redacted(tmp_path: Path):
+    """A backend that logs a token at import and dies before the JSON line
+    reaches the prompt only through stderr; the token must be redacted there."""
+    (tmp_path / "backend.py").write_text(
+        "import os, sys\n"
+        f"print('Authorization: Bearer {_LOGGED_TOKEN}', file=sys.stderr, flush=True)\n"
+        "os._exit(1)\n"
+    )
+    result, _ = await verify_backend(
+        scratchpad_pool=_FakePool(), slug="x", artifact_path=tmp_path,
+    )
+    assert any("produced no JSON" in e and "Bearer" in e for e in result.errors)
+    assert not any(_LOGGED_TOKEN in e for e in result.errors)
