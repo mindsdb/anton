@@ -380,9 +380,9 @@ async def test_gate_stays_proportional_to_the_ceiling(workspace):
     session._turn_cost.peak_context_tokens = 5_000_000  # absurd, on purpose
     assert session._spend_ceiling_gate() >= 300_000 // 2
     # …and the cap does not disturb the shipped default.
-    session._max_turn_tokens = 1_250_000
+    session._max_turn_tokens = 25_000_000
     session._turn_cost.peak_context_tokens = 190_000
-    assert session._spend_ceiling_gate() == 1_250_000 - 380_000
+    assert session._spend_ceiling_gate() == 25_000_000 - 380_000
 
 
 async def test_the_setting_actually_reaches_the_session(workspace):
@@ -397,7 +397,7 @@ async def test_the_setting_actually_reaches_the_session(workspace):
 
     session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm(),
                                             workspace=workspace))
-    assert session._max_turn_tokens == CoreSettings().max_turn_tokens == 1_250_000
+    assert session._max_turn_tokens == CoreSettings().max_turn_tokens == 25_000_000
 
 
 async def test_ceiling_trips_at_the_continuation_gate(workspace):
@@ -558,3 +558,12 @@ async def _empty_stream():
     """A hand-back that streams nothing — the guarded empty-diagnosis case."""
     return
     yield  # pragma: no cover - makes this an async generator
+
+
+def test_the_built_in_limits_are_the_safety_limits():
+    """A host that sets nothing gets these; they are sized from production, so
+    a change here is a product decision, not a refactor."""
+    from anton.core.settings import CoreSettings
+
+    s = CoreSettings(_env_file=None)
+    assert (s.max_tool_rounds, s.max_continuations, s.max_turn_tokens) == (250, 10, 25_000_000)

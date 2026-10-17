@@ -300,3 +300,31 @@ async def test_typing_keep_going_in_the_cli_continues(workspace, monkeypatch):
     _, kwargs = await _run(session)
     assert kwargs["ended_by"] == "completed"
     assert kwargs["limit_continues"] == "1"
+
+
+class _PathOnlyElicitor(_ScriptedElicitor):
+    supported_kinds = ("path",)
+
+
+async def test_a_turn_that_cannot_ask_stops_at_the_limit_whatever_the_message_says(workspace):
+    """An unattended run (no elicitor that takes a choice) whose prompt says
+    "don't stop" must not pass the limit: nobody is there to agree to the
+    spend."""
+    for elicitor in (None, _PathOnlyElicitor(KEEP_GOING)):
+        session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)] + [_text("all done")])
+        session.elicitor = elicitor
+        calls = _structured_calls(session, authorized=True)
+        _, kwargs = await _run(session, "Keep going, don't stop until you are finished")
+        assert kwargs["ended_by"] == "spend_ceiling", elicitor
+        assert kwargs["limit_message_continues"] == "0"
+        assert _authorization_checks(calls) == 0, "no check is spent on a grant that can't happen"
+
+
+async def test_turn_without_an_emitter_ignores_the_message_too(workspace):
+    session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)] + [_text("all done")])
+    session.elicitor = _ScriptedElicitor(KEEP_GOING)
+    _structured_calls(session, authorized=True)
+    with patch("anton.analytics.send_event") as send:
+        await session.turn("Keep going, don't stop until you are finished")
+    assert send.call_args.kwargs["ended_by"] == "spend_ceiling"
+    assert send.call_args.kwargs["limit_message_continues"] == "0"
