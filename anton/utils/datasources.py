@@ -247,6 +247,8 @@ _CODE_LEADING_OPERATOR = re.compile(r"\s*(?:[+,)]|\.\.?|\|\||[=!]=|(?:not\s+)?in
 _QUOTE_OR_LINE_BREAK_PATTERN = re.compile(r"(?<!\\)(\\*)([\"'])|[\r\n]")
 _LINE_BREAK_PATTERN = re.compile(r"[\r\n]")
 _WORD_BEFORE_PATTERN = re.compile(r"[A-Za-z0-9]+$")
+# Lowercase Python string prefixes; `b'`, `f'` and `rb'` open a literal, not prose.
+_STRING_PREFIXES = frozenset({"b", "r", "u", "f", "rb", "br", "fr", "rf"})
 # Unquoted values can be source code the model reads and may write back: after a
 # key, a lowercase-led dotted path, a call, an all-lowercase value, a PascalCase
 # type or an UPPER_SNAKE constant is code. PascalCase words need three letters and
@@ -500,13 +502,14 @@ class _OpenLiterals:
 def _is_apostrophe(text: str, found: re.Match[str]) -> bool:
     """Return whether a matched `'` is prose, as in `it's`, `90's` or `users'`, and so opens no literal.
 
-    A word right before it of three or more characters, or a letter right
-    after it, marks prose; one or two letters before is a string prefix.
+    A lowercase string prefix right before it (`b'`, `f'`, `rb'`) opens a
+    literal. Otherwise a word right before it of three or more characters,
+    or a letter right after it, marks prose.
     """
     if found.group(2) != "'" or found.group(1):
         return False
     word = _WORD_BEFORE_PATTERN.search(text, max(0, found.start() - 3), found.start())
-    if word is None:
+    if word is None or word.group() in _STRING_PREFIXES:
         return False
     return len(word.group()) >= 3 or (found.end() < len(text) and text[found.end()].isalpha())
 
