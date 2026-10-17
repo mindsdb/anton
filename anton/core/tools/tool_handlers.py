@@ -27,6 +27,28 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+def preliminary_cell(
+    *,
+    code: str,
+    description: str,
+    estimated_time: str,
+    estimated_seconds: int,
+) -> Cell:
+    """The cell pre-execute observers see: the code and its intent, no output yet.
+
+    Both exec paths (`handle_scratchpad` and `ChatSession`'s inline streaming
+    exec) build it here, so observers get the same shape from either one.
+    """
+    return Cell(
+        code=code,
+        stdout="",
+        stderr="",
+        error=None,
+        description=description,
+        estimated_time=estimated_time or str(estimated_seconds),
+    )
+
+
 async def _fire_pre_execute(session: "ChatSession", cell: Cell) -> None:
     """Notify pre-execute observers (e.g. cerebellum) before a cell runs.
 
@@ -1030,13 +1052,11 @@ async def handle_scratchpad(
         # never sees these — observation is an orchestration concern,
         # so it lives at the dispatcher layer where the data is most
         # natural and where local/remote runtimes stay interchangeable.
-        prelim_cell = Cell(
+        prelim_cell = preliminary_cell(
             code=code,
-            stdout="",
-            stderr="",
-            error=None,
             description=description,
-            estimated_time=estimated_time or str(estimated_seconds),
+            estimated_time=estimated_time,
+            estimated_seconds=estimated_seconds,
         )
         await _fire_pre_execute(session, prelim_cell)
 

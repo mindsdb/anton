@@ -110,10 +110,13 @@ from anton.core.utils.scratchpad import (
     format_cell_result,
     observe_scratchpad_cell,
 )
-# Artifact-edit tracking + lint: shared with handle_scratchpad's
-# own exec branch (tool_handlers.py) rather than duplicated here, since this
-# inline streaming exec bypasses that handler entirely.
+# Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
+# handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
+# here, since this inline streaming exec bypasses that handler entirely.
 from anton.core.tools.tool_handlers import (
+    _fire_post_execute,
+    _fire_pre_execute,
+    preliminary_cell,
     resolve_artifact_store,
     snapshot_existing_artifact_mtimes,
     track_edits_since,
@@ -1866,7 +1869,7 @@ class ChatSession:
         # outside a turn is not recorded.
         self._turn_segments: list[_TurnSegment] = []
         self._turn_open = False
-        self._pending_memory_confirmations: list = []
+        self._pending_memory_confirmations: list[Engram] = []
         self._turn_count = (
             sum(1 for m in self._history if is_user_turn(m))
             if config.initial_history
@@ -1949,11 +1952,13 @@ class ChatSession:
         self._artifacts_touched: set[str] = set()
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
-        # call at end-of-turn, and encodes lessons via cortex.encode().
+        # call at end-of-turn, and encodes lessons via cortex.encode(),
+        # or queues them for confirmation when the encoding gate says so.
         # Wired into the dispatcher's observer list below.
         self._cerebellum = Cerebellum(
             cortex=self._cortex,
             llm=self._llm,
+            queue_for_confirmation=self._queue_memory_confirmations,
         )
         # Anterior Cingulate Cortex: turn-level pattern detection.
         # Where the cerebellum looks at one cell and asks "did this
@@ -2005,7 +2010,8 @@ class ChatSession:
         _mode_raw = os.environ.get("ANTON_ACC_MODE", "active").strip().lower()
         self._acc_mode = _mode_raw if _mode_raw in ("off", "passive", "active") else "active"
         # Scratchpad observers — list of objects with on_pre_execute /
-        # on_post_execute. Fired by handle_scratchpad around pad.execute.
+        # on_post_execute. Fired around every scratchpad exec, by
+        # handle_scratchpad and by the inline streaming exec alike.
         # The runtime never sees this list; observation lives at the
         # dispatcher layer to keep local/remote runtimes interchangeable.
         # ACC is intentionally NOT in this list — its emit footprint
@@ -4950,11 +4956,16 @@ class ChatSession:
         Best-effort: if there's no buffered work or no event loop, this
         is a no-op. Exceptions in the background task are swallowed
         because they're already logged inside cerebellum.flush().
+
+        Drops the buffer without a model call when automatic memory passes
+        are off (`_background_memory_active`): the host turned them off, there
+        is no cortex, or memory mode is "off", where `cortex.encode` would
+        discard every lesson the diff call paid for.
         """
         cb = getattr(self, "_cerebellum", None)
         if cb is None:
             return
-        if not getattr(self, "_background_memory", True):
+        if not self._background_memory_active:
             cb.reset()
             return
         if cb.buffered_count == 0:
@@ -5713,6 +5724,15 @@ class ChatSession:
             raise
         finally:
             self._turn_memory = None
+            # A cancelled turn drops the failed cells the cerebellum buffered,
+            # so neither this turn's flush nor the next one learns from a turn
+            # the person backed out of. Same cancel test the books use below.
+            if isinstance(_turn_exc, (GeneratorExit, asyncio.CancelledError)) or (
+                getattr(self, "_cancel_event", None) and self._cancel_event.is_set()
+            ):
+                cerebellum = getattr(self, "_cerebellum", None)
+                if cerebellum is not None:
+                    cerebellum.reset()
             # Closed before the books, with no await in between, so work that
             # outlives the turn (memory consolidation, a late finalizer) can
             # neither keep a host's wait line alive nor latch a deadline.
@@ -6263,6 +6283,19 @@ class ChatSession:
                                     id=tc.id,
                                 )
 
+                                # The scratchpad observers (the cerebellum)
+                                # see this cell on this path too, in the
+                                # order handle_scratchpad fires them.
+                                await _fire_pre_execute(
+                                    self,
+                                    preliminary_cell(
+                                        code=code,
+                                        description=description,
+                                        estimated_time=estimated_time,
+                                        estimated_seconds=estimated_seconds,
+                                    ),
+                                )
+
                                 _sp_t0 = _time.monotonic()
                                 from anton.core.backends.base import Cell
 
@@ -6349,6 +6382,7 @@ class ChatSession:
                                         description=description,
                                         cell=cell,
                                     )
+                                    await _fire_post_execute(self, cell)
                                     # Same post-execute ACC event as the CLI
                                     # path (handle_scratchpad) — this inline
                                     # streaming exec bypasses that handler, so
@@ -7336,4 +7370,12 @@ class ChatSession:
             await self._cortex.encode(auto_encode)
 
         if needs_confirm:
-            self._pending_memory_confirmations.extend(needs_confirm)
+            self._queue_memory_confirmations(needs_confirm)
+
+    def _queue_memory_confirmations(self, engrams: list[Engram]) -> None:
+        """Hold engrams the encoding gate kept back until the person confirms them.
+
+        The CLI shows them before its next prompt and encodes the ones the
+        person keeps. A host that never reads the queue writes none of them.
+        """
+        self._pending_memory_confirmations.extend(engrams)
