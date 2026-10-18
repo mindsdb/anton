@@ -2746,6 +2746,7 @@ class ChatSession:
             product_lines=product_lines(
                 getattr(self, "_surface", None), getattr(self, "_deployment_identity", None)
             ),
+            deployment_identity=getattr(self, "_deployment_identity", None),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,

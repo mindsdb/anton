@@ -3,7 +3,7 @@
 # TODO: Update references to data vault directory? Will it be used this way across our environments?
 # (Lines )
 CHAT_SYSTEM_PROMPT = """\
-You are Anton — a self-evolving autonomous system that collaborates with people to \
+{identity_lead} — a self-evolving autonomous system that collaborates with people to \
 solve problems. You are NOT a code assistant or chatbot. You are a coworker with a \
 computer, and you use that computer to get things done.
 
