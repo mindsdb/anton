@@ -105,6 +105,7 @@ from anton.core.tools.tool_defs import (
 from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
+    WriteGate,
     build_workspace_discovery_context,
     cell_failure_reason,
     prepare_scratchpad_exec,
@@ -1922,6 +1923,12 @@ class ChatSession:
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
+        # Holds a cell that changes connected data or existing files until the
+        # user approves it (`hold_unapproved_write`). Only when the host turns
+        # `write_approval` on; `is True` so a MagicMock settings object reads off.
+        self._write_gate: WriteGate | None = (
+            WriteGate() if getattr(s, "write_approval", False) is True else None
+        )
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -5150,6 +5157,10 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        # What the project held when this turn began: a cell may delete or
+        # rename a file it wrote this turn without asking, not one from before.
+        if self._write_gate is not None:
+            await self._write_gate.begin_turn(manager=self._scratchpads)
         # Before the inner turn appends the user input, so `turn_messages`
         # starts where a slice of the seeded history would.
         self._start_turn_segments()
@@ -6271,7 +6282,22 @@ class ChatSession:
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
-                            prep = await prepare_scratchpad_exec(self, tc.input)
+                            if self._write_gate is not None and self.emitter is not None:
+                                # Drained: the approval card prepare may raise
+                                # reaches the host only through the emitter,
+                                # the way the limit question's does.
+                                prep = None
+                                agen = self._run_draining(prepare_scratchpad_exec(self, tc.input))
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            prep = _payload
+                                finally:
+                                    await agen.aclose()
+                            else:
+                                prep = await prepare_scratchpad_exec(self, tc.input)
                             if isinstance(prep, ToolOutcome):
                                 result_text = prep.content
                                 tool_ok = prep.ok

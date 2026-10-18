@@ -43,6 +43,11 @@ class CoreSettings(BaseSettings):
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
+    # Hold a scratchpad cell that changes connected data, or deletes, renames or
+    # moves a file that existed when the turn began, until the user picks
+    # Approve; anything else refuses the cell. ANTON_WRITE_APPROVAL. Off by
+    # default: the host that needs it turns it on.
+    write_approval: bool = False
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
     # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #

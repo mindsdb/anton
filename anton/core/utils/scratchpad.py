@@ -1,13 +1,236 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
-from typing import TYPE_CHECKING
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
-from anton.core.backends.sandbox import validate_pad_name
+from pydantic import BaseModel, ConfigDict
+
+from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.tools.registry import ToolOutcome
+from anton.core.utils.write_check import (
+    CellWrites,
+    ProjectSnapshot,
+    find_cell_writes,
+    snapshot_project_files,
+)
 
 if TYPE_CHECKING:
+    from anton.core.backends.manager import ScratchpadManager
     from anton.core.session import ChatSession
+
+logger = logging.getLogger(__name__)
+
+# Reasons a scratchpad exec result carries when its cell never ran, so a
+# caller that records executed cells can tell them from a cell that did
+# (`discovery.engine`).
+CELL_NOT_RUN_REASONS = frozenset({"new_scratchpad_challenged", "write_not_approved"})
+
+RefusalCause = Literal["cancelled", "timeout", "limit", "unavailable", "error", "unanswered_earlier"]
+
+_WHY = {
+    "cancelled": "they declined it",
+    "timeout": "no one answered in time",
+    "limit": "this turn has already asked all the questions it may",
+    "unavailable": "there is no way to ask them here",
+    "error": "the approval request failed",
+    "unanswered_earlier": "an earlier approval request in this turn went unanswered",
+}
+
+
+@dataclass
+class WriteGate:
+    """Per-session state for holding cells that change data or existing files.
+
+    Present on a session only when the host turns the setting on. `begin_turn`
+    records what the project and shared folders held when the turn began.
+    """
+
+    snapshots: tuple[ProjectSnapshot, ...] = ()
+    connected: bool = False
+    # After one card goes unanswered, later flagged cells in the same turn are
+    # refused without a new card, so an unattended turn doesn't wait out the
+    # timeout once per cell.
+    unanswered: bool = False
+
+    async def begin_turn(self, *, manager: ScratchpadManager) -> None:
+        self.unanswered = False
+        try:
+            self.connected = manager.has_connections() or any(
+                key.startswith("DS_") for key in os.environ
+            )
+        except Exception:
+            # Can't tell: read every SQL write as one to connected data.
+            logger.warning("write approval: could not list connections", exc_info=True)
+            self.connected = True
+        taken_at = time.time()
+        roots: list[tuple[Literal["project", "shared"], Path]] = []
+        if manager.workspace_path is not None:
+            roots.append(("project", manager.workspace_path))
+        policy = cell_sandbox_of(manager)
+        if policy is not None and policy.shared_dir is not None:
+            roots.append(("shared", policy.shared_dir))
+        self.snapshots = tuple([
+            await asyncio.to_thread(
+                snapshot_project_files, root=root, label=label, taken_at=taken_at
+            )
+            for label, root in roots
+        ])
+
+
+class WriteApprovalDecision(BaseModel):
+    """One logged decision: what a held cell would change and what came of it.
+    Never the code or the statement itself."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kinds: tuple[str, ...]
+    count: int
+    status: RefusalCause | Literal["approved", "not_held"]
+
+
+def _fence(text: str) -> str:
+    """`text` in a code fence longer than any run of backticks inside it, so
+    the card shows it as written."""
+    ticks = 3
+    while "`" * ticks in text:
+        ticks += 1
+    return "`" * ticks + "\n" + text + "\n" + "`" * ticks
+
+
+def _describe_files(writes: CellWrites) -> list[str]:
+    out = []
+    for change in writes.held_files:
+        verb = change.action
+        if change.whole_project:
+            out.append(f"{verb} the whole project folder")
+        elif change.paths:
+            shown = ", ".join(change.paths[:5]) + (f" and {len(change.paths) - 5} more" if len(change.paths) > 5 else "")
+            out.append(f"{verb} {shown}")
+        else:
+            out.append(f"{verb} a file it picks when it runs ({change.call})")
+    return out
+
+
+def _summary(writes: CellWrites) -> str:
+    parts = []
+    if writes.sql:
+        parts.append("change data in a connected source")
+    parts += _describe_files(writes)
+    if writes.unchecked:
+        parts.append("run code the check couldn't read")
+    return "; ".join(parts)
+
+
+def _card_prompt(writes: CellWrites) -> str:
+    lines = ["**Approve this change?**", ""]
+    if writes.sql:
+        lines.append("This step would change data in a connected source:")
+        lines.append("")
+        for write in writes.sql[:3]:
+            text = write.statement + (f"\nwith values {write.values}" if write.values else "")
+            lines += [_fence(text), ""]
+        if len(writes.sql) > 3:
+            lines += [f"and {len(writes.sql) - 3} more.", ""]
+    for line in _describe_files(writes):
+        lines += [f"This step would {line}.", ""]
+    if writes.unchecked:
+        lines += ["This step can't be checked before it runs.", ""]
+    lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
+    return "\n".join(lines)
+
+
+def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
+    # ok=True on purpose: a refusal is the user's decision, not a tool
+    # failure, so it must not feed the error streak, whose nudge tells the
+    # model to try another library or source.
+    return ToolOutcome(
+        content=(
+            f"Not run: this step would {_summary(writes)}. That needs the user's approval, "
+            f"and {_WHY[cause]}. Nothing in this cell ran. The user didn't approve this "
+            "change, so it must not be made another way: don't rewrite the cell, build the "
+            "statement or path at run time, or use another tool for it. Tell the user what "
+            "the step would change and that it needs their approval."
+        ),
+        ok=True,
+        reason="write_not_approved",
+    )
+
+
+async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCause | None:
+    """Ask Approve or Cancel. None when the user picks Approve, else why not."""
+    from anton.core.interaction.elicit import AskOption, AskRequest, elicit
+
+    request = AskRequest(
+        prompt=_card_prompt(writes),
+        options=(
+            AskOption(value="approve", label="Approve", detail="Run this step once", style="destructive"),
+            AskOption(value="cancel", label="Cancel", detail="Leave the data and files as they are"),
+        ),
+        # No typed answer and no default: only a picked Approve runs the cell.
+        allow_custom=False,
+        timeout_s=getattr(session.elicitor, "timeout_s", None),
+    )
+    try:
+        answer = await elicit(session, f"write:{uuid.uuid4().hex}", request)
+    except Exception:
+        logger.warning("write approval: the question failed", exc_info=True)
+        return "error"
+    if answer.status == "answered" and answer.values == ("approve",):
+        return None
+    if answer.status in ("answered", "cancelled"):
+        return "cancelled"
+    if answer.status in ("timeout", "limit", "unavailable"):
+        return answer.status
+    return "error"
+
+
+def _log_decision(writes: CellWrites, status) -> None:
+    decision = WriteApprovalDecision(
+        kinds=writes.kinds(), count=len(writes.sql) + len(writes.files), status=status,
+    )
+    # WARNING: hosts log at WARNING by default, and this line is the record of
+    # a held write.
+    logger.warning("write approval: %s", decision.model_dump_json())
+
+
+async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> ToolOutcome | None:
+    """Hold a cell that changes connected data or existing files until the user
+    approves it. None when the cell may run; otherwise the refusal to return
+    in its place, before any of it runs.
+
+    Only sessions with a `WriteGate` (the `write_approval` setting) check
+    anything. A check that fails asks too, since it can't clear the cell.
+    """
+    gate = getattr(session, "_write_gate", None)
+    if not isinstance(gate, WriteGate):
+        return None
+    earlier = tuple(cell.code for cell in getattr(pad, "cells", ()) or ())
+    try:
+        writes = await asyncio.to_thread(
+            find_cell_writes,
+            code=code, earlier_code=earlier,
+            snapshots=gate.snapshots, connected=gate.connected,
+        )
+    except Exception:
+        logger.warning("write approval: the check failed", exc_info=True)
+        writes = CellWrites(unchecked=True)
+    if not writes.needs_approval():
+        if writes.overwrites:
+            _log_decision(writes, "not_held")
+        return None
+    cause = "unanswered_earlier" if gate.unanswered else await _ask_approval(session, writes)
+    _log_decision(writes, cause or "approved")
+    if cause is None:
+        return None
+    if cause == "timeout":
+        gate.unanswered = True
+    return _refusal(writes, cause)
 
 
 def _acc_observe(session, kind: str, detail: dict, *, severity: int = 1) -> None:
@@ -242,7 +465,8 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
 
     Returns (pad, code, description, estimated_time, estimated_seconds) or
     a ToolOutcome whose content is the message when the call should not run
-    (empty code, a single-scratchpad challenge, or a failed package install).
+    (empty code, a single-scratchpad challenge, a change the user didn't
+    approve, or a failed package install).
     The outcome carries the explicit failure verdict, so the error streak no
     longer depends on the message's wording (ENG-1276).
 
@@ -348,6 +572,11 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
             pass
 
     pad = await session._scratchpads.get_or_create(name)
+
+    # Before the installs, so a refused cell installs nothing either.
+    held = await hold_unapproved_write(session, pad=pad, code=code)
+    if held is not None:
+        return held
 
     # Install explicitly declared packages before running the cell
     packages = tc_input.get("packages", [])

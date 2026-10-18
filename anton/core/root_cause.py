@@ -149,6 +149,9 @@ _SENTINEL_REASONS = {
     # agent acts on by reusing the pad it already has (the outcome is even
     # `ok=True`), so it is the agent's own argument choice, never a wall.
     "new_scratchpad_challenged": (TIER_SELF, "invalid_argument"),
+    # A cell held for the user's approval and not approved. The user's call,
+    # never an environment wall; the model is told to report it, not retry.
+    "write_not_approved": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),
