@@ -626,7 +626,7 @@ async def test_filtered_handback_in_the_tool_loop_sends_anton_s_own_report(works
     assert shown == (
         f"{_CEILING_SENTENCE}\n\n"
         "The model provider's content filter stopped my summary of this request. "
-        "These are the steps this request ran:\n\n"
+        "This is what I did before I stopped:\n\n"
         "- Query page 1\n- Query page 2\n- Query page 3 (failed)\n- Query page 4\n"
         "- Query page 5\n- Query page 6\n- Query page 7\n- Query page 8\n\n"
         'Reply "keep going" to continue from where I stopped.'

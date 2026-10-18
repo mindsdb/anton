@@ -878,8 +878,12 @@ def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
     shown = steps[-_HANDBACK_REPORT_MAX_STEPS:]
     stopped = "The model provider's content filter stopped my summary of this request."
     if shown:
-        latest = "" if len(shown) == len(steps) else "latest "
-        paragraphs.append(f"{stopped} These are the {latest}steps this request ran:")
+        # No unit here: the limit sentence counts rounds, and a round can run
+        # several calls, so "steps" would list more of them than the limit.
+        if len(shown) == len(steps):
+            paragraphs.append(f"{stopped} This is what I did before I stopped:")
+        else:
+            paragraphs.append(f"{stopped} These are the last things I did before I stopped:")
         paragraphs.append("\n".join(
             f"- {step.description}" + (" (failed)" if step.errored else "") for step in shown
         ))

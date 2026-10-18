@@ -359,7 +359,7 @@ async def test_handback_filtered_twice_sends_anton_s_own_report(workspace, base)
     shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert shown == (
         "The model provider's content filter stopped my summary of this request. "
-        "These are the steps this request ran:\n\n"
+        "This is what I did before I stopped:\n\n"
         "- Sum the first 20 Fibonacci numbers\n\n"
         'Reply "keep going" to continue from where I stopped.'
     )
@@ -402,7 +402,7 @@ async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspac
     assert shown == (
         "This task reached its limit of 2 steps per request (Max steps per task, in your settings)."
         "\n\nThe model provider's content filter stopped my summary of this request. "
-        "These are the steps this request ran:\n\n"
+        "This is what I did before I stopped:\n\n"
         "- Load the sales table\n"
         "- Join the regions (failed)\n"
         "- Sum revenue by region\n"
@@ -422,7 +422,7 @@ async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspac
 def test_report_lists_only_the_latest_steps():
     steps = [_TurnStep(description=f"Step {n}", errored=False) for n in range(1, 13)]
     report = _handback_report(reached=None, steps=steps)
-    assert "These are the latest steps this request ran:" in report
+    assert "These are the last things I did before I stopped:" in report
     assert "- Step 1\n" not in report and "- Step 2\n" not in report
     assert "- Step 3\n" in report and "- Step 12\n" in report
 
