@@ -870,7 +870,8 @@ def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
     Opens with the limit that stopped the turn when one did (`reached`, from
     `ChatSession._limit_reached`), lists the steps the turn ran and which ones
     failed, and ends the way `_limit_handback_clause` asks the model to end. It
-    quotes no tool output, so it states no figure the steps did not return.
+    quotes no tool output; each step line is the model's own description of
+    the step, written before it ran.
     """
     paragraphs: list[str] = []
     if reached:

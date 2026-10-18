@@ -443,7 +443,7 @@ async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspac
         "- Save the chart\n\n"
         'Reply "keep going" to continue from where I stopped.'
     )
-    # It states no figure, not even one a step returned.
+    # It quotes no tool output, so the figure a step returned stays out.
     assert "48213" not in shown
     assert session.history[-1] == {"role": "assistant", "content": shown}
     assert _REFUSAL not in str(session.history)
