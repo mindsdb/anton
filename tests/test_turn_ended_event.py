@@ -30,11 +30,13 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamTurnEnded,
+    ToolCall,
 )
 from anton.core.session import (
     ChatSession,
     ChatSessionConfig,
     _handback_report,
+    _step_description,
     _TurnStep,
     _VerifierVerdict,
 )
@@ -458,6 +460,24 @@ def test_report_lists_only_the_latest_steps():
     assert "These are the last things I did before I stopped:" in report
     assert "- Step 1\n" not in report and "- Step 2\n" not in report
     assert "- Step 3\n" in report and "- Step 12\n" in report
+
+
+@pytest.mark.parametrize(
+    "tool_input,expected",
+    [
+        ({"action": "exec", "one_line_description": "Load the\n  sales table"}, "Load the sales table"),
+        ({"action": "view", "name": "main"}, "scratchpad view"),
+        ({"action": "install", "one_line_description": "  "}, "scratchpad install"),
+    ],
+)
+def test_step_without_a_description_names_its_action(tool_input, expected):
+    call = ToolCall(id="tc_1", name="scratchpad", input=tool_input)
+    assert _step_description(call) == expected
+
+
+def test_step_of_a_tool_without_an_action_names_the_tool():
+    call = ToolCall(id="tc_1", name="connect_new_datasource", input={"engine": "postgres"})
+    assert _step_description(call) == "connect_new_datasource"
 
 
 async def test_filtered_main_reply_names_the_filter(workspace):

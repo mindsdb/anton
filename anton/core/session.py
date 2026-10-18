@@ -775,9 +775,15 @@ class _TurnStep:
 
 
 def _step_description(call: ToolCall) -> str:
-    """The step's own one-line description, else the tool's name, on one line."""
-    described = str(call.input.get("one_line_description") or "")
-    return " ".join(described.split()) or call.name
+    """The step's own one-line description, else the tool's name and action, on one line.
+
+    Only a scratchpad `exec` carries a description; the action tells a
+    scratchpad `view` or `install` apart from the bare tool name.
+    """
+    described = " ".join(str(call.input.get("one_line_description") or "").split())
+    if described:
+        return described
+    return " ".join(f"{call.name} {call.input.get('action') or ''}".split())
 
 
 # Process-wide latches for hosts that rebuild a session per message. Keyed on
