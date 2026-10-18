@@ -251,10 +251,15 @@ async def test_the_limit_sentence_names_no_setting(workspace, stopped, sentence)
     elicitor = _ScriptedElicitor(STOP_HERE)
     session.elicitor = elicitor
     await _run(session)
-    text = _history_text(session)
-    assert f'word for word: "{sentence}"' in text
+    handbacks = [
+        m["content"]
+        for m in session._history
+        if isinstance(m.get("content"), str) and f'word for word: "{sentence}"' in m["content"]
+    ]
+    assert len(handbacks) == 1
+    assert "settings" not in handbacks[0]
     assert elicitor.requests[0].prompt.startswith(f"{sentence} ")
-    assert "settings" not in text and "settings" not in elicitor.requests[0].prompt
+    assert "settings" not in elicitor.requests[0].prompt
 
 
 def test_a_yes_needs_a_quote_from_the_message():
