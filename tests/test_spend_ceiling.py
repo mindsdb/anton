@@ -567,9 +567,10 @@ async def _empty_stream():
 _REFUSAL = "I'm sorry, but I cannot assist with that request."
 
 
-def _described_call(i: int) -> LLMResponse:
+def _described_call(i: int, description: str) -> LLMResponse:
+    """A tool call carrying the one-line description the report lists it by."""
     call = _tool_call(i)
-    call.tool_calls[0].input["one_line_description"] = f"Query page {i}"
+    call.tool_calls[0].input["one_line_description"] = description
     return call
 
 
@@ -614,7 +615,9 @@ async def test_filtered_handback_in_the_tool_loop_sends_anton_s_own_report(works
     """Both hand-back tries filtered: the user still reads the limit and the steps."""
     from anton.core.tools.registry import ToolOutcome
 
-    session = _session(workspace, responses=[_described_call(i) for i in range(1, 40)])
+    session = _session(
+        workspace, responses=[_described_call(i, f"Query page {i}") for i in range(1, 40)]
+    )
 
     async def _dispatch(_session, name, tc_input, **_kw):
         failed = tc_input["one_line_description"] == "Query page 3"
@@ -645,7 +648,7 @@ async def test_filtered_handback_at_the_continuation_gate_sends_anton_s_own_repo
     empty = LLMResponse(content="", tool_calls=[], usage=Usage(input_tokens=10, output_tokens=5),
                         stop_reason="end_turn")
     session = _session(workspace, per_call=300_000,
-                       responses=[_described_call(1), empty, empty, empty])
+                       responses=[_described_call(1, "Query page 1"), empty, empty, empty])
     session._llm.generate_object_code = AsyncMock(
         return_value=_VerifierVerdict(status="INCOMPLETE", reason="not done"))
     handbacks = _filter_every_handback(session)

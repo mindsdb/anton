@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.conftest import make_mock_llm
+from tests.test_spend_ceiling import _REFUSAL, _described_call
 from tests.test_spend_ceiling import _session as _ceiling_session
 from tests.test_spend_ceiling import _text as _ceiling_text
 from tests.test_spend_ceiling import _tool_call as _ceiling_tool_call
@@ -306,9 +307,6 @@ async def test_escape_while_a_handback_is_held_cancels_the_turn_as_the_cli_sees_
     assert send.call_args.kwargs["ended_by"] == "cancelled"
 
 
-_REFUSAL = "I'm sorry, but I cannot assist with that request."
-
-
 def _filtered_stream():
     return _Iter([
         StreamTextDelta(text=_REFUSAL),
@@ -326,13 +324,6 @@ def _unanswered_handback(workspace, *handbacks, base=_handback_verifier_failure,
     ]
     mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
     return _plain(workspace, mock_llm)
-
-
-def _described_call(i: int, description: str) -> LLMResponse:
-    """A tool call carrying the one-line description the report lists it by."""
-    call = _tool_call(i)
-    call.tool_calls[0].input["one_line_description"] = description
-    return call
 
 
 def _handback_calls(session) -> int:
