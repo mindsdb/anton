@@ -4409,23 +4409,21 @@ class ChatSession:
         _record_grace(self._turn_cost, "ceiling")
 
     def _limit_reached(self, limit: str) -> str:
-        """Names the limit that stopped the turn, and where it is set.
+        """Names the limit that stopped the turn.
 
         The user cannot act on "this took a lot of work": they need to know a
-        per-request limit fired, so that a reply carries on and a setting can
-        raise it. Reports the limit in force now, which a "Keep going" may
-        already have raised."""
+        per-request limit fired, so that a reply carries on. Reports the limit
+        in force now, which a "Keep going" may already have raised.
+
+        It names no setting that raises the limit. Where an operator sets the
+        limits for a whole deployment, or an org admin sets them, the user
+        can't change them, and nothing tells the session which case it is in.
+        """
         if limit == "spend_ceiling":
             ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
-            return (
-                f"This task reached its limit of {ceiling:,} tokens per request "
-                "(Max tokens per task, in your settings)"
-            )
+            return f"This task reached its limit of {ceiling:,} tokens per request"
         cap = self._max_tool_rounds + self._round_cap_continued_rounds
-        return (
-            f"This task reached its limit of {cap} steps per request "
-            "(Max steps per task, in your settings)"
-        )
+        return f"This task reached its limit of {cap} steps per request"
 
     def _grant_limit(self, limit: str) -> None:
         """Raise `limit` by `_LIMIT_CONTINUE_MULTIPLIER` times its configured

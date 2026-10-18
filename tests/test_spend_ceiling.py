@@ -605,10 +605,7 @@ async def _drain_shown(session) -> tuple[str, list, str]:
     return shown, events, send.call_args.kwargs["ended_by"]
 
 
-_CEILING_SENTENCE = (
-    "This task reached its limit of 1,000,000 tokens per request "
-    "(Max tokens per task, in your settings)."
-)
+_CEILING_SENTENCE = "This task reached its limit of 1,000,000 tokens per request."
 
 
 async def test_filtered_handback_in_the_tool_loop_sends_anton_s_own_report(workspace):

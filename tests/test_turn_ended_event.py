@@ -426,7 +426,7 @@ async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspac
     events, booked = await _drain(session)
     shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
     assert shown == (
-        "This task reached its limit of 2 steps per request (Max steps per task, in your settings)."
+        "This task reached its limit of 2 steps per request."
         "\n\nThe model provider's content filter stopped my summary of this request. "
         "This is what I did before I stopped:\n\n"
         "- Load the sales table\n"
