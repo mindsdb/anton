@@ -33,6 +33,7 @@ import os
 import posixpath
 import re
 import shlex
+import warnings
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Literal
@@ -1309,6 +1310,18 @@ def _record_overwrite(patterns, snapshots, out, cell, call) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────
 
+def _parse(code: str) -> ast.Module:
+    """The cell's tree, from the same healed text the runner compiles.
+
+    Quiet: the agent's own invalid escape sequences would otherwise print a
+    SyntaxWarning in the host's log for every check; the runner reports them
+    where they belong, in the cell's output.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(heal_surrogate_source(code))
+
+
 def find_cell_writes(
     *,
     code: str,
@@ -1324,13 +1337,13 @@ def find_cell_writes(
     refuses it before any of it runs.
     """
     try:
-        tree = ast.parse(heal_surrogate_source(code))
+        tree = _parse(code)
     except (SyntaxError, ValueError):
         return CellWrites()
     cells: list[_Cell] = []
     for text in earlier_code:
         try:
-            cells.append(_Cell(ast.parse(heal_surrogate_source(text)), text, len(cells)))
+            cells.append(_Cell(_parse(text), text, len(cells)))
         except (SyntaxError, ValueError):
             continue
     cells.append(_Cell(tree, code, len(cells)))
