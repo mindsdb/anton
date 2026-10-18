@@ -371,6 +371,39 @@ async def test_handback_filtered_twice_sends_anton_s_own_report(workspace, base)
     assert events[-1] == StreamTurnEnded(ended_by="content_filter")
 
 
+async def test_report_lists_only_this_turn_s_steps(workspace):
+    # A CLI session runs many turns on one ChatSession, so the step list must start empty each turn.
+    mock_llm = make_mock_llm()
+    plans = [
+        _Iter([StreamComplete(response=_described_call(1, "Old step"))]),
+        _Iter([StreamComplete(response=_text("done"))]),
+        _Iter([StreamComplete(response=_described_call(2, "New step"))]),
+        _Iter([StreamComplete(response=_text(""))]),
+        _filtered_stream(),
+        _filtered_stream(),
+    ]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    mock_llm.generate_object_code = AsyncMock(
+        return_value=_VerifierVerdict(status="COMPLETE", reason="ok")
+    )
+    session = _plain(workspace, mock_llm)
+    _events, first_booked = await _drain(session)
+    assert first_booked == "completed"
+    # The second turn's check fails, and both tries at its hand-back are filtered.
+    mock_llm.generate_object_code = AsyncMock(side_effect=RuntimeError("provider hiccup"))
+    events, booked = await _drain(session)
+    shown = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert "- Old step" not in shown
+    assert shown == (
+        "The model provider's content filter stopped my summary of this request. "
+        "This is what I did before I stopped:\n\n"
+        "- New step\n\n"
+        'Reply "keep going" to continue from where I stopped.'
+    )
+    assert booked == "content_filter"
+    assert not plans
+
+
 async def test_round_cap_filtered_twice_reports_the_limit_and_the_steps(workspace):
     descriptions = iter([
         "Load the sales table", "Join the regions", "Sum revenue by region",
