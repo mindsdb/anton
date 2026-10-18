@@ -25,13 +25,13 @@ from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
 from anton.core.llm import jev as _jev
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
-from anton.core.llm.identity import product_lines, serving_model_lines
+from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
 from anton.core.llm.liveness import ModelCallTracker, arm_turn_tracker, disarm_turn_tracker
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
-from anton.core.memory.base import Engram
+from anton.core.memory.base import Engram, LearnedMemoryScope
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
@@ -1626,6 +1626,10 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # Trusted deployment facts supplied by the host. Omitted by desktop, hosted
+    # web and CLI callers, whose identity and memory prompts stay unchanged.
+    deployment_identity: DeploymentIdentity | None = None
+    learned_memory_scope: LearnedMemoryScope | None = None
     # Whether this host renders a streaming tool's live tail — the last lines
     # of the file a tool is writing, relayed as the `tool_peek` progress phase
     # (`ToolRegistry.dispatch_tool`). Only the CLI has a footer for it today;
@@ -1886,6 +1890,16 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self._deployment_identity = (
+            DeploymentIdentity.model_validate(config.deployment_identity)
+            if config.deployment_identity is not None else None
+        )
+        if config.learned_memory_scope not in (None, "personal", "shared", "off", "unavailable"):
+            raise ValueError("unrecognized learned_memory_scope")
+        self._learned_memory_scope = (
+            config.learned_memory_scope or "unavailable"
+            if self._deployment_identity is not None else None
+        )
         self.live_tool_peek = config.live_tool_peek
         self.tool_messages = config.tool_messages
         self._user_id = _validated_account_id(config.user_id)
@@ -2659,15 +2673,26 @@ class ChatSession:
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
+        learned_memory_scope = getattr(self, "_learned_memory_scope", None)
         if self._cortex is not None:
             # Once per turn: a retry must not repeat the rule filter model calls.
             turn_memory = self._turn_memory
             if turn_memory is not None and user_message in turn_memory:
                 memory_section = turn_memory[user_message]
             else:
-                memory_section = await self._cortex.build_memory_context(user_message)
+                if learned_memory_scope is None:
+                    memory_section = await self._cortex.build_memory_context(user_message)
+                else:
+                    memory_section = await self._cortex.build_memory_context(
+                        user_message, learned_memory_scope=learned_memory_scope
+                    )
                 if turn_memory is not None:
                     turn_memory[user_message] = memory_section
+        elif learned_memory_scope is not None:
+            from anton.core.memory.cortex import learned_memory_notice
+
+            scope = "off" if learned_memory_scope == "off" else "unavailable"
+            memory_section = "\n\n" + learned_memory_notice(scope)
 
         sa_section = ""
         if self._self_awareness is not None and self._cortex is None:
@@ -2718,7 +2743,9 @@ class ChatSession:
             runtime_identity_lines=identity_lines,
             # ENG-2423. Cache-stable like the identity lines above: the surface
             # is fixed for the life of the session.
-            product_lines=product_lines(getattr(self, "_surface", None)),
+            product_lines=product_lines(
+                getattr(self, "_surface", None), getattr(self, "_deployment_identity", None)
+            ),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -2880,7 +2907,13 @@ class ChatSession:
 
         # Inject scratchpad wisdom from memory (procedural priming)
         if self._cortex is not None:
-            wisdom = self._cortex.get_scratchpad_context()
+            learned_memory_scope = getattr(self, "_learned_memory_scope", None)
+            if learned_memory_scope is None:
+                wisdom = self._cortex.get_scratchpad_context()
+            else:
+                wisdom = self._cortex.get_scratchpad_context(
+                    learned_memory_scope=learned_memory_scope
+                )
             if wisdom:
                 scratchpad_tool.description += (
                     f"\n\nLessons from past sessions:\n{wisdom}"

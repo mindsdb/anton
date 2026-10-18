@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from anton.core.memory.base import Engram
+from anton.core.memory.base import Engram, MemoryPresence
 
 def _entry_text(text: str) -> str:
     """Make `text` safe to store as one entry line, changing nothing else.
@@ -132,6 +132,42 @@ class Hippocampus:
         self._profile_path = base_dir / "profile.md"
         self._rules_path = base_dir / "rules.md"
         self._lessons_path = base_dir / "lessons.md"
+
+    def memory_presence(self) -> MemoryPresence:
+        """Inspect saved content before retrieval filters, without hiding read errors.
+
+        Headings and blank lines alone are empty. Any other saved text counts
+        conservatively as present, including entries the normal parsers omit.
+        Unlike recall methods, a failed read never answers empty. Topic-tagged
+        lessons live in lessons.md; legacy topic files also prevent an empty
+        claim even though recall_topic no longer reads them.
+        """
+        present = False
+        try:
+            paths = [self._profile_path, self._rules_path, self._lessons_path]
+            topics = self._dir / "topics"
+            try:
+                paths.extend(
+                    path for path in topics.iterdir() if path.suffix == ".md"
+                )
+            except FileNotFoundError:
+                if topics.is_symlink():
+                    return "unavailable"
+            for path in paths:
+                try:
+                    content = path.read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    # A broken link is not an empty store whose absence we know.
+                    if path.is_symlink():
+                        return "unavailable"
+                    continue
+                present |= any(
+                    line.strip() and not line.lstrip().startswith("#")
+                    for line in content.splitlines()
+                )
+        except (OSError, UnicodeDecodeError):
+            return "unavailable"
+        return "present" if present else "empty"
 
     def clear(self) -> None:
         for path in (self._profile_path, self._rules_path, self._lessons_path):
