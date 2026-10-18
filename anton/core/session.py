@@ -761,6 +761,25 @@ class _TurnSegment:
         return len(self.messages) if self.end is None else self.end
 
 
+@dataclass(frozen=True)
+class _TurnStep:
+    """One tool call a turn ran, as `_handback_report` lists it.
+
+    `errored` is the call's final verdict: its handler said it failed, or it
+    raised. It is kept here because history can't answer that later: a failed
+    call's tool_result carries no error flag.
+    """
+
+    description: str
+    errored: bool
+
+
+def _step_description(call: ToolCall) -> str:
+    """The step's own one-line description, else the tool's name, on one line."""
+    described = str(call.input.get("one_line_description") or "")
+    return " ".join(described.split()) or call.name
+
+
 # Process-wide latches for hosts that rebuild a session per message. Keyed on
 # the coding endpoint, model, and credential: a denial belongs to the account,
 # so a new api key gets a fresh latch. Only a digest of the key is held, and the
@@ -838,6 +857,37 @@ def _limit_handback_clause(reached: str) -> str:
         "End it by telling the user that replying \"keep going\" continues "
         "from where you stopped. "
     )
+
+
+# How many of the turn's latest steps `_handback_report` lists, so a turn that
+# ran up to the step limit still gets a short report.
+_HANDBACK_REPORT_MAX_STEPS = 10
+
+
+def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
+    """The hand-back anton writes itself when the content filter stopped every try at it.
+
+    Opens with the limit that stopped the turn when one did (`reached`, from
+    `ChatSession._limit_reached`), lists the steps the turn ran and which ones
+    failed, and ends the way `_limit_handback_clause` asks the model to end. It
+    quotes no tool output, so it states no figure the steps did not return.
+    """
+    paragraphs: list[str] = []
+    if reached:
+        paragraphs.append(f"{reached}.")
+    shown = steps[-_HANDBACK_REPORT_MAX_STEPS:]
+    stopped = "The model provider's content filter stopped my summary of this request."
+    if shown:
+        latest = "" if len(shown) == len(steps) else "latest "
+        paragraphs.append(f"{stopped} These are the {latest}steps this request ran:")
+        paragraphs.append("\n".join(
+            f"- {step.description}" + (" (failed)" if step.errored else "") for step in shown
+        ))
+    else:
+        paragraphs.append(stopped)
+    paragraphs.append('Reply "keep going" to continue from where I stopped.')
+    return "\n\n".join(paragraphs)
+
 
 # Appended to the verifier system prompt. Shortens the preamble on narrating
 # models but is not sufficient alone (0/3 at 256 with it), so it pairs with the
@@ -1760,6 +1810,10 @@ class ChatSession:
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
+        # writes when the content filter stops every hand-back. Reset per turn in
+        # turn_stream.
+        self._turn_steps: list[_TurnStep] = []
         # Whether this turn's own message told the agent to keep going (None
         # until a limit first asks), and the limits that message has already
         # carried past once.
@@ -4589,7 +4643,13 @@ class ChatSession:
             logger.debug("completion-verifier jev bookkeeping failed", exc_info=True)
 
     async def _stream_handback_diagnosis(
-        self, *, system: str, label: str, answered: bool, cancels_continuation: bool = False
+        self,
+        *,
+        system: str,
+        label: str,
+        answered: bool,
+        cancels_continuation: bool = False,
+        limit: Literal["round_cap", "spend_ceiling"] | None = None,
     ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -4612,7 +4672,14 @@ class ChatSession:
 
         `answered` says the reply before the diagnosis has text; the tool-loop
         stops have none. A diagnosis the provider's content filter stops is
-        dropped; with no answer to end on, it is tried once more.
+        dropped; with no answer to end on, it is tried once more. When that try
+        is filtered too, anton streams and saves the report `_handback_report`
+        builds instead of calling the model a third time, so the user still
+        reads where the turn stopped. The filtered calls already marked the
+        turn, so it still ends `content_filter`.
+
+        `limit` names the limit that stopped the turn, if one did; the report
+        opens with `_limit_reached`'s sentence for it.
         """
         log = logging.getLogger(__name__)
         # Marks this diagnosis as an explanation, not the replacement answer a
@@ -4665,7 +4732,16 @@ class ChatSession:
             if diagnosis_response is not None and not filtered
             else ""
         )
-        if filtered:
+        if filtered and not answered:
+            # Dropping this one too would end the turn with no text at all.
+            log.warning("%s diagnosis filtered on every try — sent anton's own report", label)
+            report = _handback_report(
+                reached=self._limit_reached(limit) if limit else None,
+                steps=self._turn_steps,
+            )
+            yield StreamTextDelta(text=report)
+            self._append_history({"role": "assistant", "content": report})
+        elif filtered:
             self._drop_handback_note()
         elif text:
             self._append_history({"role": "assistant", "content": text})
@@ -5227,6 +5303,7 @@ class ChatSession:
         self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
         self._turn_memory = {}
@@ -6117,7 +6194,7 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds", answered=False,
-                        cancels_continuation=continuation > 0,
+                        cancels_continuation=continuation > 0, limit="round_cap",
                     ):
                         yield event
                     break
@@ -6175,7 +6252,7 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="spend-ceiling", answered=False,
-                            cancels_continuation=continuation > 0,
+                            cancels_continuation=continuation > 0, limit="spend_ceiling",
                         ):
                             yield event
                         break
@@ -6613,6 +6690,11 @@ class ChatSession:
                         ) * 1000.0,
                         error_type=_tool_error_type,
                         reason=tool_reason,
+                    )
+                    # Every executed call passes here once with its final
+                    # verdict, so the hand-back report lists each step once.
+                    self._turn_steps.append(
+                        _TurnStep(description=_step_description(tc), errored=tool_ok is False)
                     )
 
                     if isinstance(result_text, list):
@@ -7293,7 +7375,7 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
-                        cancels_continuation=continuation > 0,
+                        cancels_continuation=continuation > 0, limit="spend_ceiling",
                     ):
                         yield event
                     break
