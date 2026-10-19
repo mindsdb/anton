@@ -169,6 +169,23 @@ TOOL_OUTPUT: dict[str, dict[str, ToolOutput]] = {
         "search_owners": "metadata",  # the portal's users (owner ids, names)
         "get_conversation_channel_metadata": "metadata",  # inbox channel config
     },
+    "notion": {
+        # RECORDS
+        "notion-search": "records",  # matching pages with content snippets
+        "notion-fetch": "records",  # a page's or database's full content
+        "notion-get-comments": "records",  # comments on a page
+        "notion-query-multiple-data-sources": "records",  # database rows
+        "notion-memory-search": "records",  # workspace content matches
+        # METADATA
+        "notion-get-users": "metadata",  # workspace members
+        "notion-get-teams": "metadata",  # teamspaces
+        "notion-get-self": "metadata",  # the connected bot user
+        "notion-list-private-pages": "metadata",  # page titles and ids
+        "notion-list-shared-pages": "metadata",  # page titles and ids
+        "notion-list-favorite-pages": "metadata",  # page titles and ids
+        "notion-list-recent-pages": "metadata",  # page titles and ids
+        "notion-get-file-download-urls": "metadata",  # signed file links
+    },
 }
 
 

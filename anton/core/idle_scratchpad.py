@@ -12,11 +12,13 @@ from __future__ import annotations
 import ast
 from typing import Any, Iterable
 
+from anton.core.llm.prompts import ANTON_NOTE
+
 SCRATCHPAD = "scratchpad"
 IDLE_ROUNDS_BEFORE_WITHHOLD = 2
 
 IDLE_SCRATCHPAD_NOTICE = (
-    "SYSTEM: Your last scratchpad calls did nothing: they only printed fixed messages "
+    f"{ANTON_NOTE} Your last scratchpad calls did nothing: they only printed fixed messages "
     "or ran no code. The scratchpad is not available for this step. Call the tool you "
     "actually need now (a connected service's tools are named <service>__<tool>), "
     "or answer the user."
