@@ -50,6 +50,7 @@ path through the code.
 from __future__ import annotations
 
 import ast
+import copy
 import fnmatch
 import os
 import posixpath
@@ -61,11 +62,12 @@ import threading
 import time
 import warnings
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -672,7 +674,7 @@ def _assignment_at(tokens: Sequence[_Token], i: int) -> bool:
     return _punct(tokens, j, "=")
 
 
-def _update_writes(tokens: Sequence[_Token]) -> bool:
+def _update_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     i = 1
     while _word(tokens, i) in ("LOW_PRIORITY", "IGNORE", "ONLY", "TOP"):
         i += 2 if _word(tokens, i) == "TOP" else 1
@@ -684,7 +686,7 @@ def _update_writes(tokens: Sequence[_Token]) -> bool:
     return any(_word(tokens, k) == "SET" and _assignment_at(tokens, k + 1) for k in range(j, len(tokens)))
 
 
-def _delete_writes(tokens: Sequence[_Token]) -> bool:
+def _delete_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     i = 1
     while _word(tokens, i) in ("LOW_PRIORITY", "QUICK", "IGNORE"):
         i += 1
@@ -695,7 +697,7 @@ def _delete_writes(tokens: Sequence[_Token]) -> bool:
         if j is None:
             return False
         if j == len(tokens):
-            return not _sentence_case(tokens[0])
+            return not (prose and _sentence_case(tokens[0]))
         if tokens[j].kind in ("hole", "group") or _punct(tokens, j, ","):
             return True
         if _word(tokens, j) in _DELETE_FOLLOWERS:
@@ -707,7 +709,7 @@ def _delete_writes(tokens: Sequence[_Token]) -> bool:
     # DELETE t, DELETE t WHERE ..., or MySQL's DELETE a, b FROM a JOIN b ...
     # A sentence takes this shape too, as in "Delete orders where the
     # quantity is zero", and JavaScript's `delete params.page` the bare one.
-    if _sentence_case(tokens[0]):
+    if prose and _sentence_case(tokens[0]):
         return False
     j = _table_end(tokens, i)
     while j is not None and _punct(tokens, j, ","):
@@ -715,11 +717,11 @@ def _delete_writes(tokens: Sequence[_Token]) -> bool:
     if j is None:
         return False
     if j == len(tokens):
-        return tokens[0].raw.isupper()
+        return not prose or tokens[0].raw.isupper()
     return _word(tokens, j) in ("FROM", "WHERE", "OUTPUT") or tokens[j].kind == "hole"
 
 
-def _insert_writes(tokens: Sequence[_Token]) -> bool:
+def _insert_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """INSERT, and REPLACE and UPSERT, which take the same shape."""
     i = 3 if _word(tokens, 1) == "OR" else 1  # SQLite's INSERT OR REPLACE
     while _word(tokens, i) in _INSERT_MODIFIERS:
@@ -733,8 +735,8 @@ def _insert_writes(tokens: Sequence[_Token]) -> bool:
     if _word(tokens, i) == "TABLE":
         i += 1
     j = _table_end(tokens, i)
-    # With no INTO, "a" is an article too, as in "Insert a table of totals".
-    if j is None or not into and j == i + 1 and _word(tokens, i) == "A":
+    # With no INTO, "a" is an article too in prose, as in "Insert a table of totals".
+    if j is None or prose and not into and j == i + 1 and _word(tokens, i) == "A":
         return False
     while j < len(tokens):
         if _word(tokens, j) in ("AS", "PARTITION"):
@@ -785,7 +787,7 @@ def _rows_at(tokens: Sequence[_Token], j: int, *, into: bool) -> bool:
     return word in ("SELECT", "OVERRIDING")
 
 
-def _merge_writes(tokens: Sequence[_Token]) -> bool:
+def _merge_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ..., or a placeholder
     for what follows USING or ON."""
     using = next((k for k in range(1, len(tokens)) if _word(tokens, k) == "USING"), None)
@@ -799,14 +801,14 @@ def _merge_writes(tokens: Sequence[_Token]) -> bool:
 
 
 def _sentence_case(token: _Token) -> bool:
-    """`Delete` or `Truncate` as a sentence or heading starts it. A bare
-    `Truncate labels` or `Delete from backlog` reads as a label, while SQL
-    writes TRUNCATE or truncate."""
+    """`Delete` or `Truncate` as a sentence or heading starts it. In prose, a
+    bare `Truncate labels` or `Delete from backlog` reads as a label, while
+    SQL writes TRUNCATE or truncate. A SQL runner takes either as SQL."""
     return token.raw[:1].isupper() and token.raw[1:].islower()
 
 
-def _truncate_writes(tokens: Sequence[_Token]) -> bool:
-    if _word(tokens, 1) != "TABLE" and _sentence_case(tokens[0]):
+def _truncate_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
+    if prose and _word(tokens, 1) != "TABLE" and _sentence_case(tokens[0]):
         return False
     i = 2 if _word(tokens, 1) == "TABLE" else 1
     if _word(tokens, i) == "IF" and _word(tokens, i + 1) == "EXISTS":
@@ -854,9 +856,10 @@ def _option_at(tokens: Sequence[_Token], j: int) -> bool:
     )
 
 
-def _create_writes(tokens: Sequence[_Token]) -> bool:
-    """CREATE <object> <name> ... A sentence-case one such as "Create user
-    accounts for ..." counts only with SQL's own shape after the name."""
+def _create_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
+    """CREATE <object> <name> ... In prose, a sentence-case one such as
+    "Create user accounts for ..." counts only with SQL's own shape after
+    the name."""
     i = 1
     while _word(tokens, i) in _CREATE_MODIFIERS:
         i += 1
@@ -865,15 +868,15 @@ def _create_writes(tokens: Sequence[_Token]) -> bool:
     j = _object_name_end(tokens, i)
     if j is None:
         return False
-    if not _sentence_case(tokens[0]):
+    if not (prose and _sentence_case(tokens[0])):
         return True
     return _option_at(tokens, j) or _word(tokens, j) in _CREATE_FOLLOWERS
 
 
-def _drop_writes(tokens: Sequence[_Token]) -> bool:
-    """DROP and ALTER <object> <name> ... A sentence-case one such as "Drop
-    index funds below 2% weight" counts only with SQL's own shape after the
-    name, or as DROP TABLE <name> alone, as TRUNCATE takes it."""
+def _drop_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
+    """DROP and ALTER <object> <name> ... In prose, a sentence-case one such
+    as "Drop index funds below 2% weight" counts only with SQL's own shape
+    after the name, or as DROP TABLE <name> alone, as TRUNCATE takes it."""
     i = 1
     while _word(tokens, i) in _DROP_MODIFIERS:
         i += 1
@@ -882,7 +885,7 @@ def _drop_writes(tokens: Sequence[_Token]) -> bool:
     j = _object_name_end(tokens, i)
     if j is None:
         return False
-    if not _sentence_case(tokens[0]):
+    if not (prose and _sentence_case(tokens[0])):
         return True
     if _word(tokens, 0) == "ALTER":
         return _option_at(tokens, j) or _word(tokens, j) in _ALTER_ACTIONS
@@ -914,16 +917,16 @@ def _grantee_item(item: Sequence[_Token]) -> bool:
     return len(item) == 3 and _punct(item, 1, "@") and item[0].kind in named and item[2].kind in named
 
 
-def _grant_writes(tokens: Sequence[_Token]) -> bool:
-    """GRANT ... [ON ...] TO ..., and REVOKE ... [ON ...] FROM ... A
-    sentence-case one such as "Grant access to Finance" counts only when it
-    grants a privilege ON something."""
+def _grant_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
+    """GRANT ... [ON ...] TO ..., and REVOKE ... [ON ...] FROM ... In prose,
+    a sentence-case one such as "Grant access to Finance" counts only when
+    it grants a privilege ON something."""
     to = "TO" if _word(tokens, 0) == "GRANT" else "FROM"
     k = next((i for i in range(1, len(tokens)) if _word(tokens, i) == to), None)
     if k is None:
         return False
     on = any(_word(tokens, i) == "ON" for i in range(1, k))
-    if _sentence_case(tokens[0]) and not (on and _word(tokens, 1) in _PRIVILEGE_WORDS):
+    if prose and _sentence_case(tokens[0]) and not (on and _word(tokens, 1) in _PRIVILEGE_WORDS):
         return False
     if not on and not all(_role_item(item) for item in _items(tokens[1:k])):
         return False
@@ -932,7 +935,7 @@ def _grant_writes(tokens: Sequence[_Token]) -> bool:
     return all(_grantee_item(item) for item in _items(tokens[k + 1:stop]))
 
 
-def _with_writes(tokens: Sequence[_Token]) -> bool:
+def _with_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """WITH name AS (...), ... then the main statement: a write when a CTE
     changes data or the main statement does."""
     i = 2 if _word(tokens, 1) == "RECURSIVE" else 1
@@ -955,10 +958,10 @@ def _with_writes(tokens: Sequence[_Token]) -> bool:
         if not _punct(tokens, j, ","):
             break
         i = j + 1
-    return _writes(tokens[j:])
+    return _writes(tokens[j:], prose=prose)
 
 
-def _select_into(tokens: Sequence[_Token]) -> bool:
+def _select_into(tokens: Sequence[_Token], *, prose: bool) -> bool:
     into = next((i for i in range(len(tokens)) if _word(tokens, i) == "INTO"), None)
     if into is None:
         return False
@@ -968,7 +971,9 @@ def _select_into(tokens: Sequence[_Token]) -> bool:
     # A variable (@v, :v) or a T-SQL temp table (#t) holds nothing that lasts.
     if _punct(tokens, into + 1, "@#:") or _word(tokens, into + 1) in _TEMP:
         return False
-    if into + 1 == len(tokens) and not _sentence_case(tokens[0]) or _word(tokens, into + 1) in ("OUTFILE", "DUMPFILE"):
+    if into + 1 == len(tokens) and not (prose and _sentence_case(tokens[0])) or (
+        _word(tokens, into + 1) in ("OUTFILE", "DUMPFILE")
+    ):
         # The table comes after the text ends; MySQL writes a file on the
         # database's server.
         return True
@@ -983,7 +988,7 @@ def _select_into(tokens: Sequence[_Token]) -> bool:
     )
 
 
-def _copy_writes(tokens: Sequence[_Token]) -> bool:
+def _copy_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """COPY [INTO] t FROM a file, STDIN, a program, a stage, a query or a
     placeholder, not prose such as "Copy data from the March export"; into a
     Snowflake stage, from any table."""
@@ -1004,16 +1009,16 @@ def _copy_writes(tokens: Sequence[_Token]) -> bool:
     )
 
 
-def _explain_writes(tokens: Sequence[_Token]) -> bool:
+def _explain_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """EXPLAIN ANALYZE runs the statement it explains."""
     k = next((i for i in range(1, len(tokens)) if _word(tokens, i) in _EXPLAINED), None)
     if k is None:
         return False
     options = {w for t in tokens[1:k] for w in (t.words if t.kind == "group" else (t.text,))}
-    return bool(options & {"ANALYZE", "ANALYSE"}) and _writes(tokens[k:])
+    return bool(options & {"ANALYZE", "ANALYSE"}) and _writes(tokens[k:], prose=prose)
 
 
-def _load_writes(tokens: Sequence[_Token]) -> bool:
+def _load_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     if _word(tokens, 1) not in ("DATA", "XML"):
         return False
     i = 2
@@ -1027,7 +1032,7 @@ def _load_writes(tokens: Sequence[_Token]) -> bool:
     )
 
 
-def _rename_writes(tokens: Sequence[_Token]) -> bool:
+def _rename_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """MySQL's RENAME TABLE a TO b[, c TO d]."""
     if _word(tokens, 1) != "TABLE":
         return False
@@ -1046,7 +1051,7 @@ def _rename_writes(tokens: Sequence[_Token]) -> bool:
         i = k + 1
 
 
-def _comment_writes(tokens: Sequence[_Token]) -> bool:
+def _comment_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """COMMENT ON <object> IS '...'."""
     if _word(tokens, 1) != "ON":
         return False
@@ -1056,22 +1061,22 @@ def _comment_writes(tokens: Sequence[_Token]) -> bool:
     )
 
 
-def _refresh_writes(tokens: Sequence[_Token]) -> bool:
+def _refresh_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     return _word(tokens, 1) == "MATERIALIZED" and _word(tokens, 2) == "VIEW"
 
 
-def _do_writes(tokens: Sequence[_Token]) -> bool:
+def _do_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """A Postgres DO block: its body is a quoted literal the check can't read."""
     i = 3 if _word(tokens, 1) == "LANGUAGE" else 1
     return i < len(tokens) and tokens[i].kind == "text"
 
 
-def _call_writes(tokens: Sequence[_Token]) -> bool:
+def _call_writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     """CALL, EXEC or EXECUTE given a write as a quoted literal, as DuckDB's
     postgres_execute, T-SQL's sp_executesql and Snowflake's EXECUTE
     IMMEDIATE take one. A plain procedure call stays unread."""
     literals = [t.text for t in tokens if t.kind == "text"] + [s for t in tokens for s in t.texts]
-    return any(write_statements(_unquoted(s)) for s in literals)
+    return any(write_statements(_unquoted(s), prose=prose) for s in literals)
 
 
 def _unquoted(literal: str) -> str:
@@ -1081,7 +1086,15 @@ def _unquoted(literal: str) -> str:
     return literal[len(tag):-len(tag)]
 
 
-_RULES: dict[str, Callable[[Sequence[_Token]], bool]] = {
+class _Rule(Protocol):
+    """A verb's rule: whether its statement changes data. With `prose`, the
+    text may be English, so a sentence-case verb needs SQL's own shape after
+    it (`write_statements`)."""
+
+    def __call__(self, tokens: Sequence[_Token], *, prose: bool) -> bool: ...
+
+
+_RULES: dict[str, _Rule] = {
     "UPDATE": _update_writes,
     "DELETE": _delete_writes,
     "INSERT": _insert_writes,
@@ -1109,40 +1122,51 @@ _RULES: dict[str, Callable[[Sequence[_Token]], bool]] = {
 }
 
 
-def _writes(tokens: Sequence[_Token]) -> bool:
+def _writes(tokens: Sequence[_Token], *, prose: bool) -> bool:
     rule = _RULES.get(_word(tokens, 0))
-    return rule is not None and not _ends_a_sentence(tokens) and rule(tokens)
+    return rule is not None and not (prose and _ends_a_sentence(tokens)) and rule(tokens, prose=prose)
 
 
-def _statement_writes(statement: _Statement) -> bool:
-    """Whether a statement changes data. In a script, a line inside it that
-    starts a write counts too: T-SQL runs statements that have no `;` between
-    them. A report's, an email's or an HTML page's lines aren't a script, and
-    a sentence-case line starts a sentence."""
+def _statement_writes(statement: _Statement, *, prose: bool) -> bool:
+    """Whether a statement changes data. A line inside it that starts a write
+    counts too: T-SQL runs statements that have no `;` between them. In
+    prose, only a script's lines count: a report's, an email's or an HTML
+    page's lines aren't a script, and a sentence-case line starts a sentence."""
     tokens = statement.tokens
-    if _writes(tokens):
+    if _writes(tokens, prose=prose):
         return True
-    head = tokens[0]
-    # A `#` that doesn't start its line is a MySQL comment too.
-    script = _punct(tokens, 0, "#") or head.kind == "word" and not _sentence_case(head) and (
-        head.text in _RULES or head.text in _SCRIPT_WORDS
-    )
-    if not script:
-        return False
+    if prose:
+        head = tokens[0]
+        # A `#` that doesn't start its line is a MySQL comment too.
+        script = _punct(tokens, 0, "#") or head.kind == "word" and not _sentence_case(head) and (
+            head.text in _RULES or head.text in _SCRIPT_WORDS
+        )
+        if not script:
+            return False
     return any(
-        t.line_start and t.kind == "word" and t.text in _RULES and not _sentence_case(t) and _writes(tokens[i:])
+        t.line_start and t.kind == "word" and t.text in _RULES and not (prose and _sentence_case(t))
+        and _writes(tokens[i:], prose=prose)
         for i, t in enumerate(tokens) if i
     )
 
 
-def write_statements(text: str) -> tuple[str, ...]:
+def write_statements(text: str, *, prose: bool = True) -> tuple[str, ...]:
     """Each statement in `text` that changes data, as written. A line that
     starts with `#` is read as code, as Postgres reads it, and then as a
-    comment, as MySQL reads it: a write in either reading counts."""
-    found = tuple(text[s.start:s.end] for s in _statements(text) if _statement_writes(s))
+    comment, as MySQL reads it: a write in either reading counts.
+
+    With `prose`, for text that may go somewhere other than a SQL runner, the
+    text may be English: a sentence-case verb such as "Delete orders where
+    the quantity is zero" needs SQL's own shape after it, and text that ends
+    as a sentence does, with a period, is no statement. Without it, for text
+    a SQL runner gets, a statement that parses as a write counts whatever
+    its case or closing period."""
+    found = tuple(text[s.start:s.end] for s in _statements(text) if _statement_writes(s, prose=prose))
     if found or not _HASH_LINE.search(text):
         return found
-    return tuple(text[s.start:s.end] for s in _statements(text, hash_comments=True) if _statement_writes(s))
+    return tuple(
+        text[s.start:s.end] for s in _statements(text, hash_comments=True) if _statement_writes(s, prose=prose)
+    )
 
 
 def _quoted_statements(text: str) -> tuple[str, ...]:
@@ -1159,17 +1183,19 @@ def _quoted_statements(text: str) -> tuple[str, ...]:
     return tuple(s for s in out if s)
 
 
-# An ATTACH statement, not the English word: ATTACH or attach (a sentence's
-# "Attach" is prose), a space and its optional keywords, then what it
-# attaches. That is a quoted literal or a placeholder followed by AS,
-# options, `;` or the end; the start of a literal the code finishes when it
-# runs; or the end of the literal.
-_ATTACH = re.compile(
-    r"""(?:^|[;'"(])\s*(?:ATTACH|attach)\s+(?i:OR\s+REPLACE\s+)?(?i:DATABASE\s+)?(?i:IF\s+NOT\s+EXISTS\s+)?"""
+# An ATTACH statement, not the English word: ATTACH or attach (in prose, a
+# sentence's "Attach" is English), a space and its optional keywords, then
+# what it attaches. That is a quoted literal or a placeholder followed by
+# AS, options, `;` or the end; the start of a literal the code finishes when
+# it runs; or the end of the literal.
+_ATTACH_TAIL = (
+    r"""\s+(?i:OR\s+REPLACE\s+)?(?i:DATABASE\s+)?(?i:IF\s+NOT\s+EXISTS\s+)?"""
     r"""(?:(?:(?P<quoted>'(?:[^']|'')*'|"(?:[^"]|"")*")|\{[^{}]*\}|%s|%\(\w+\)s|\$\w+|:\w+|\?)"""
-    r"""(?=\s*(?:(?i:AS)\b|\(|;|\)|\Z))|['"][^'"]*\Z|\Z)""",
-    re.M,
+    r"""(?=\s*(?:(?i:AS)\b|\(|;|\)|\Z))|['"][^'"]*\Z|\Z)"""
 )
+_ATTACH = re.compile(r"""(?:^|[;'"(])\s*(?:ATTACH|attach)""" + _ATTACH_TAIL, re.M)
+# The same, in any case, for text a SQL runner gets.
+_ATTACH_ANY_CASE = re.compile(r"""(?:^|[;'"(])\s*(?i:ATTACH)""" + _ATTACH_TAIL, re.M)
 # An ATTACH's options: (TYPE postgres, ...) or TYPE postgres.
 _ATTACH_TYPE = re.compile(r"""\bTYPE\b\s*=?\s*['"]?(\w+)""", re.I)
 # A scheme such as `postgres:` or `md:` before what an ATTACH names, but not
@@ -1177,11 +1203,12 @@ _ATTACH_TYPE = re.compile(r"""\bTYPE\b\s*=?\s*['"]?(\w+)""", re.I)
 _SCHEME = re.compile(r"(?![A-Za-z]:[\\/])[A-Za-z][\w+.-]*:")
 
 
-def _attaches_elsewhere(text: str) -> bool:
+def _attaches_elsewhere(text: str, *, prose: bool = True) -> bool:
     """Whether `text` holds an ATTACH of a database outside the process. An
     in-memory database, a local file, or a SQLite one, named in full, is in
-    it, as `duckdb.connect` on one is."""
-    for m in _ATTACH.finditer(text):
+    it, as `duckdb.connect` on one is. With `prose`, as `write_statements`
+    takes it, a sentence-case "Attach" is English."""
+    for m in (_ATTACH if prose else _ATTACH_ANY_CASE).finditer(text):
         quoted = m.group("quoted")
         if quoted is None:
             return True  # what it attaches is picked when the code runs
@@ -1202,6 +1229,8 @@ _EXECUTE = frozenset({
     "execute", "executemany", "executescript", "exec_driver_sql", "sql", "query",
 })
 _READ_SQL = frozenset({"read_sql", "read_sql_query"})
+# The keywords that pass an execute's or read_sql's statement, beside the first argument.
+_STATEMENT_KEYWORDS = frozenset({"query", "sql", "statement", "operation", "sql_script"})
 _HARMLESS_CALLS = frozenset({"print", "pprint", "display", "len", "input"})
 _HARMLESS_METHODS = frozenset({
     "write", "write_text", "writelines", "debug", "info", "warning", "warn",
@@ -1210,10 +1239,9 @@ _HARMLESS_METHODS = frozenset({
     "writerow", "writerows",
 })
 _LOGGER_NAMES = frozenset({"logger", "log", "logging", "_log", "_logger"})
-_SQL_WRAPPERS = frozenset({
-    "text", "sqlalchemy.text", "SQL", "sql.SQL", "psycopg2.sql.SQL", "psycopg.sql.SQL",
-    "dedent", "textwrap.dedent", "str",
-})
+# Calls that make a statement object of their text: what they wrap is SQL.
+_SQL_OBJECTS = frozenset({"text", "sqlalchemy.text", "SQL", "sql.SQL", "psycopg2.sql.SQL", "psycopg.sql.SQL"})
+_SQL_WRAPPERS = _SQL_OBJECTS | {"dedent", "textwrap.dedent", "str"}
 # Calls whose result carries their argument on: a statement inside one goes
 # wherever the result goes.
 _PASS_THROUGH = frozenset({
@@ -1407,15 +1435,18 @@ class _Cell:
         self.parents: dict[ast.AST, ast.AST] = {}
         # Every name the cell imports, by the name it binds; the functions and
         # classes it defines, by name; every call, in walk order; the calls
-        # to a name or method that pass a name, by the name passed; and
-        # whether a string in it attaches a database outside the process
-        # (`_attaches_elsewhere`).
+        # to a name or method that pass a name, by the name passed; whether a
+        # string in it attaches a database outside the process
+        # (`_attaches_elsewhere`); and the strings that do so only when a SQL
+        # runner gets them, such as `Attach 'postgres:...' AS pg`, which
+        # `_Reader` follows.
         self.imports: dict[str, str] = {}
         self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
         self.classes: dict[str, ast.ClassDef] = {}
         self.calls: list[ast.Call] = []
         self.passed: dict[str, list[ast.Call]] = {}
         self.attaches = False
+        self.run_attaches: list[ast.Constant] = []
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
@@ -1439,8 +1470,11 @@ class _Cell:
                     for arg in (*node.args, *(k.value for k in node.keywords)):
                         if isinstance(arg, ast.Name):
                             self.passed.setdefault(arg.id, []).append(node)
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _attaches_elsewhere(node.value):
-                self.attaches = True
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if _attaches_elsewhere(node.value):
+                    self.attaches = True
+                elif _attaches_elsewhere(node.value, prose=False):
+                    self.run_attaches.append(node)
         self.bindings: dict[str, list[_Binding]] = {}
         self.loads: dict[str, list[ast.Name]] = {}
         # `name += ...` and `name.append(...)`: what builds a name's text or list up.
@@ -1702,7 +1736,11 @@ class _Reader:
                 elif isinstance(item, ast.Assign):
                     self.method_names.update(t.id for t in item.targets if isinstance(t, ast.Name))
         self.attaches = any(cell.attaches for cell in cells)
-        self._held: dict[tuple[int, str, tuple[tuple[int, str, int], ...]], tuple[str, ...]] = {}
+        self._held: dict[tuple[int, str, bool, tuple[tuple[int, str, int], ...]], tuple[str, ...]] = {}
+        # What `_name_statements` found at each read of a name, by the read's
+        # id, `prose`, the function read and `call_key`: a value appended to
+        # a list asks it of every read of the list.
+        self.named: dict[tuple[int, bool, int, tuple[tuple[int, str, int], ...]], tuple[str, ...]] = {}
         # The code behind each numbered placeholder, None for a part with no
         # code to show, and each node's number by its id.
         self._holes: list[ast.AST | None] = []
@@ -1736,6 +1774,13 @@ class _Reader:
                 )
                 if named and self.dotted(func) in _CHDIR_FUNCS:
                     self.cwds = self.changed_into(self.cwds, _target_arg(node, keywords=("path",)), cell=cell)
+        # A sentence-case `Attach '...' AS pg` attaches where a SQL runner,
+        # on any handle, gets it. Read last: the read needs the rest.
+        if not self.attaches:
+            self.attaches = any(
+                _reaches_a_runner(node, self, any_handle=True) is _Reach.RUNNER
+                for cell in cells for node in cell.run_attaches
+            )
 
     def cell_of(self, node: ast.AST) -> _Cell:
         return self._cells_by_node.get(node, self.current)
@@ -1767,15 +1812,21 @@ class _Reader:
 
         return _NUMBERED_HOLE.sub(code, text)
 
-    def statements_held(self, name: str, binding: _Binding) -> tuple[str, ...]:
+    def statements_held(self, name: str, binding: _Binding, *, prose: bool) -> tuple[str, ...]:
         """Every statement of each text `binding` gives `name` that holds a
-        write, read once per check and set of call arguments."""
-        passed = tuple(sorted((k[0], k[1], id(a.node) if a else 0) for k, a in self.param_args.items()))
-        key = (id(binding), name, passed)
+        write, read as `write_statements` reads it with `prose`, once per
+        check and set of call arguments."""
+        key = (id(binding), name, prose, self.call_key())
         if key not in self._held:
             texts = _held_texts(name, binding, self, depth=0)
-            self._held[key] = tuple(s for t in texts if write_statements(t) for s in _quoted_statements(t))
+            self._held[key] = tuple(
+                s for t in texts if write_statements(t, prose=prose) for s in _quoted_statements(t)
+            )
         return self._held[key]
+
+    def call_key(self) -> tuple[tuple[int, str, int], ...]:
+        """What the call being read passes for each parameter, as a cache key."""
+        return tuple(sorted((k[0], k[1], id(a.node) if a else 0) for k, a in self.param_args.items()))
 
     def changed_into(
         self, cwds: list[str] | _Unknown, target: ast.AST | None, *, cell: _Cell,
@@ -2837,16 +2888,23 @@ def _list_items(name: str, binding: _Binding) -> list[ast.AST | None] | None:
     return items
 
 
-def _name_statements(use: ast.Name, reader: _Reader, *, root: ast.AST | None = None) -> tuple[str, ...]:
-    """The statements of each text with a write a name holds where this cell
-    reads it, when an earlier cell bound it or this cell builds it up with
-    `+=` or `.append`.
+def _name_statements(
+    use: ast.Name, reader: _Reader, *, prose: bool, root: ast.AST | None = None,
+) -> tuple[str, ...]:
+    """The statements of each text with a write, read as `write_statements`
+    reads it with `prose`, a name holds where this cell reads it, when an
+    earlier cell bound it or this cell builds it up with `+=` or `.append`.
     The literal pass reads every other binding where it is written.
 
     With `root`, an earlier cell's function read for a call: a binding outside
     it counts unless the checked cells made it, since their literal pass
     already follows their values into the functions they call.
+
+    Read once per check, read, `root` and set of call arguments.
     """
+    key = (id(use), prose, id(root), reader.call_key())
+    if key in reader.named:
+        return reader.named[key]
     cell = reader.cell_of(use)
     found: list[str] = []
     for b in reader.bindings_of(use.id, node=use):
@@ -2855,8 +2913,9 @@ def _name_statements(use: ast.Name, reader: _Reader, *, root: ast.AST | None = N
             continue
         if root is not None and (b.cell.index >= reader.current.index or own and _inside(b.value, root, cell)):
             continue
-        found += reader.statements_held(use.id, b)
-    return tuple(dict.fromkeys(found))
+        found += reader.statements_held(use.id, b, prose=prose)
+    reader.named[key] = tuple(dict.fromkeys(found))
+    return reader.named[key]
 
 
 def _held_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) -> list[str]:
@@ -2919,6 +2978,34 @@ def _executes_on_local(call: ast.Call, reader: _Reader) -> bool:
     if isinstance(func, ast.Name) and func.id in reader.functions:
         return reader.runs_locally(reader.functions[func.id])
     return False
+
+
+def _runs_sql(call: ast.Call, reader: _Reader) -> bool:
+    """Whether `call` runs the statement it is given: an execute, read_sql,
+    .sql() or .query() call."""
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr in _EXECUTE or func.attr in _READ_SQL
+    return reader.dotted(func) in ("pandas.read_sql", "pandas.read_sql_query")
+
+
+def _is_statement(arg: ast.AST, call: ast.Call) -> bool:
+    """Whether `arg`, one of `call`'s arguments or a keyword it passes, is
+    the statement it runs, not a parameter or a connection."""
+    if isinstance(arg, ast.keyword):
+        return arg.arg in _STATEMENT_KEYWORDS
+    return bool(call.args) and arg is call.args[0]
+
+
+def _parameter_uses(call: ast.Call, value: ast.AST, reader: _Reader) -> list[ast.AST]:
+    """Where a function the pad defines, called by name, reads the
+    parameter `call` passes `value` for; empty for any other call."""
+    if not (isinstance(call.func, ast.Name) and call.func.id in reader.functions):
+        return []
+    func = reader.functions[call.func.id]
+    passed = _call_arguments(func, call, call_cell=reader.cell_of(call), func_cell=reader.cell_of(func))
+    params = [name for name, arg in passed.items() if arg is not None and arg.node is value]
+    return [use for name in params for use in _loads_in(func.body, name)]
 
 
 def _name_uses(names: set[str], *, at: ast.AST, reader: _Reader) -> list[ast.AST]:
@@ -3040,38 +3127,60 @@ def _own_calls(func: Function, cell: _Cell, reader: _Reader) -> list[ast.Call] |
     return calls
 
 
-def _reaches_a_runner(
-    node: ast.AST, reader: _Reader, *, depth: int = 0, followed: set[int] | None = None,
-) -> bool:
-    """Whether a statement's value can reach code that runs it.
+class _Reach(IntEnum):
+    """Where a statement's value can go, ordered so that the furthest of a
+    value's uses is the largest."""
 
-    False only when every use is visibly harmless: a bare expression (a
+    # Only uses the check sees are harmless.
+    NOWHERE = 0
+    # A use the check can't follow, such as a report, a template or a
+    # function it doesn't know: the text may be English there.
+    ELSEWHERE = 1
+    # A call that runs it as SQL.
+    RUNNER = 2
+
+
+def _reaches_a_runner(
+    node: ast.AST, reader: _Reader, *, depth: int = 0, followed: set[int] | None = None, any_handle: bool = False,
+) -> _Reach:
+    """Where a statement's value can go: the furthest of its uses.
+
+    NOWHERE only when every use is visibly harmless: a bare expression (a
     docstring), a print, log or file write, a comparison or condition, a
     list nothing runs, a name nothing reads, or an execute on a local
-    handle. Anything else counts, because the check can't follow it.
+    handle. RUNNER when a use is the statement an execute, read_sql, .sql()
+    or .query() call runs (`_runs_sql`), what text() or sql.SQL() wraps,
+    or a parameter a pad function runs so. ELSEWHERE for anything else,
+    because the check can't follow it. With `any_handle`, an execute on a
+    local handle is a runner too.
     """
     if depth > _FLOW_DEPTH:
-        return True
+        return _Reach.ELSEWHERE
     followed = set() if followed is None else followed
     cell = reader.cell_of(node)
     parent = cell.parents.get(node)
 
-    def on(target: ast.AST) -> bool:
-        return _reaches_a_runner(target, reader, depth=depth + 1, followed=followed)
+    def on(target: ast.AST) -> _Reach:
+        return _reaches_a_runner(target, reader, depth=depth + 1, followed=followed, any_handle=any_handle)
 
-    def via(uses: Sequence[ast.AST]) -> bool:
+    def via(uses: Sequence[ast.AST]) -> _Reach:
         fresh = [u for u in uses if id(u) not in followed]
         followed.update(id(u) for u in fresh)
-        return any(on(u) for u in fresh)
+        furthest = _Reach.NOWHERE
+        for u in fresh:
+            furthest = max(furthest, on(u))
+            if furthest is _Reach.RUNNER:
+                break
+        return furthest
 
-    def via_names(names: set[str], *, at: ast.AST) -> bool:
+    def via_names(names: set[str], *, at: ast.AST) -> _Reach:
         uses = _name_uses(names, at=at, reader=reader)
         checked = cell.index >= reader.current.index
         if checked and any(cell.builds_up(n, scope=cell.scope_of(at)) for n in names):
             # The name pass reports this cell's reads of a built-up name with
             # its whole text, so a part isn't reported again on its own.
             uses = [u for u in uses if not (
-                reader.cell_of(u) is cell and isinstance(u, ast.Name) and _name_statements(u, reader)
+                reader.cell_of(u) is cell and isinstance(u, ast.Name) and _name_statements(u, reader, prose=False)
             )]
         given = {id(b) for n in names for b in reader.bindings_of(n, node=at)} if cell.scope_of(at) is None else set()
         if given:
@@ -3082,23 +3191,36 @@ def _reaches_a_runner(
             )]
         return via(uses)
 
-    def into(func: ast.AST, call: ast.Call) -> bool:
+    def wrapped(name: str, call: ast.Call) -> _Reach:
+        """Where what a wrapper such as str() or text() returns goes: for a
+        statement object, a runner wherever it goes."""
+        reach = on(call)
+        return _Reach.RUNNER if reach and name in _SQL_OBJECTS else reach
+
+    def into(func: ast.AST, call: ast.Call) -> _Reach:
         """Where the items `call` hands `func` go: into a lambda's first
-        parameter, and for filter() into what `call` returns; through str()
-        or a str method into what `call` returns; anywhere for any other."""
+        parameter, and for filter() into what `call` returns; through str(),
+        text() or a str method into what `call` returns; into a runner for
+        an execute; anywhere for any other."""
         if isinstance(func, ast.Lambda):
             params = [*func.args.posonlyargs, *func.args.args]
-            return bool(params) and via(_loads_in([func.body], params[0].arg)) or (
-                reader.dotted(call.func) == "filter" and on(call)
-            )
-        if reader.dotted(func) in _SQL_WRAPPERS or reader.dotted(func) in _PASS_THROUGH or (
-            isinstance(func, ast.Attribute) and reader.dotted(func.value) == "str" and func.attr in _STR_METHODS
-        ):
+            reach = via(_loads_in([func.body], params[0].arg)) if params else _Reach.NOWHERE
+            if reader.dotted(call.func) == "filter":
+                reach = max(reach, on(call))
+            return reach
+        name = reader.dotted(func)
+        if name in _SQL_WRAPPERS or name in _PASS_THROUGH:
+            return wrapped(name, call)
+        if isinstance(func, ast.Attribute) and reader.dotted(func.value) == "str" and func.attr in _STR_METHODS:
             return on(call)
-        return True
+        if isinstance(func, ast.Attribute) and (func.attr in _EXECUTE or func.attr in _READ_SQL) and (
+            any_handle or not reader.is_local_handle(func.value)
+        ):
+            return _Reach.RUNNER
+        return _Reach.ELSEWHERE
 
     if parent is None or isinstance(parent, ast.Expr):
-        return False
+        return _Reach.NOWHERE
     if isinstance(parent, ast.Return) or isinstance(parent, ast.Lambda) and node is parent.body:
         # A function's return value: it goes where the call being read sends
         # it; for a lambda map() or apply() calls, into what that returns;
@@ -3109,22 +3231,24 @@ def _reaches_a_runner(
         if call is not None:
             return on(call)
         calls = _own_calls(func, cell, reader)
-        return True if calls is None else via(calls)
+        return _Reach.ELSEWHERE if calls is None else via(calls)
     if isinstance(parent, (ast.JoinedStr, ast.FormattedValue, ast.BinOp, ast.BoolOp, ast.Starred,
                            ast.List, ast.Tuple, ast.Set, ast.Dict,
                            ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
         return on(parent)
     if isinstance(parent, ast.IfExp):
-        return node is not parent.test and on(parent)
+        return on(parent) if node is not parent.test else _Reach.NOWHERE
     if isinstance(parent, ast.Subscript):
         # Storing into an entry of it reads nothing out of it.
-        return node is parent.value and not isinstance(parent.ctx, (ast.Store, ast.Del)) and on(parent)
+        if node is parent.value and not isinstance(parent.ctx, (ast.Store, ast.Del)):
+            return on(parent)
+        return _Reach.NOWHERE
     if isinstance(parent, ast.comprehension):
         if node is not parent.iter:
-            return False
+            return _Reach.NOWHERE
         names = _target_names(parent.target)
         if names is None:
-            return True
+            return _Reach.ELSEWHERE
         comp = cell.parents[parent]
         body = [comp.key, comp.value] if isinstance(comp, ast.DictComp) else [comp.elt]
         body += [g.iter for g in comp.generators[comp.generators.index(parent) + 1:]]
@@ -3132,46 +3256,52 @@ def _reaches_a_runner(
     if isinstance(parent, (ast.For, ast.AsyncFor)):
         names = _target_names(parent.target) if node is parent.iter else None
         if names is None:
-            return True
+            return _Reach.ELSEWHERE
         return via([u for n in names for u in _loads_in(parent.body, n)])
     if isinstance(parent, ast.Attribute):
         if parent.attr in _ADDERS or isinstance(parent.ctx, (ast.Store, ast.Del)):
             # Adding to a list, or setting an attribute: the value's own uses
             # carry what it holds.
-            return False
+            return _Reach.NOWHERE
         call = cell.parents.get(parent)
         called = isinstance(call, ast.Call) and call.func is parent
         if parent.attr in _MAPPER_METHODS and called:
-            return not call.args or into(call.args[0], call)
+            return into(call.args[0], call) if call.args else _Reach.ELSEWHERE
         if parent.attr in _STR_METHODS or parent.attr == "join" or parent.attr in _CARRIERS:
             return on(call if called else parent)
         if called:
-            return True  # any other method may run it
+            return _Reach.ELSEWHERE  # any other method may run it
         return on(parent)  # a field, such as a row's `r.days`, carries what it holds on
+    value = node
     if isinstance(parent, ast.keyword):
         node, parent = parent, cell.parents.get(parent)
     if isinstance(parent, ast.Call):
         if parent.func is node:
-            return True
+            return _Reach.ELSEWHERE
         name = reader.dotted(parent.func)
         if name in _SQL_WRAPPERS or name in _PASS_THROUGH:
-            return on(parent)
+            return wrapped(name, parent)
         if name in ("map", "filter") and len(parent.args) > 1 and node is not parent.args[0]:
             return into(parent.args[0], parent)
         func = parent.func
         if isinstance(func, ast.Attribute) and func.attr == "join":
             joined = _sql_text(parent, reader) if reader.cell_of(parent).index >= reader.current.index else None
-            if joined is not None and write_statements(joined):
+            if joined is not None and write_statements(joined, prose=False):
                 # The literal pass reports this join whole, as its own statement.
-                return False
+                return _Reach.NOWHERE
             return on(parent)
         if isinstance(func, ast.Attribute) and func.attr == "format":
             return on(parent)
         if isinstance(func, ast.Attribute) and func.attr in _ADDERS:
             if not isinstance(func.value, ast.Name):
-                return True
+                return _Reach.ELSEWHERE
             return via_names({func.value.id}, at=parent)
-        return not (_is_harmless_call(parent, reader) or _executes_on_local(parent, reader))
+        if _is_harmless_call(parent, reader) or not any_handle and _executes_on_local(parent, reader):
+            return _Reach.NOWHERE
+        if _runs_sql(parent, reader):
+            return _Reach.RUNNER if _is_statement(node, parent) else _Reach.ELSEWHERE
+        # A pad function may run the parameter it gets; any other call may too.
+        return max(_Reach.ELSEWHERE, via(_parameter_uses(parent, value, reader)))
     if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign)):
         targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
         # Into a name, or an entry or attribute of one such as df['sql'] when
@@ -3180,12 +3310,12 @@ def _reaches_a_runner(
         for t in targets:
             stored = _stored_name(t)
             if stored is None or not isinstance(t, ast.Name) and not _built_here(stored, at=t, reader=reader):
-                return True
+                return _Reach.ELSEWHERE
             names.add(stored)
         return via_names(names, at=parent)
     if isinstance(parent, (ast.Compare, ast.UnaryOp, ast.If, ast.While, ast.Assert)):
-        return False
-    return True
+        return _Reach.NOWHERE
+    return _Reach.ELSEWHERE
 
 
 # The keywords that pass a statement's parameters: psycopg2's vars, psycopg's
@@ -3206,8 +3336,16 @@ def _values_text(call: ast.Call, *, reader: _Reader) -> str:
                 and not reader.growth(given.id, found[0])):
             given = found[0].value
     if isinstance(given, (ast.Tuple, ast.List, ast.Dict)):
+        # Scrub each string as the cell holds it, before unparse escapes its
+        # line breaks: "access_token=\n<value>" only reads as a key and its
+        # value with the real line break in place. A value is plain text, not
+        # SQL, so it takes the line-aware scrubber.
+        shown = copy.deepcopy(given)
+        for node in ast.walk(shown):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                node.value = _scrub_lines(node.value)
         try:
-            return ast.unparse(given)
+            return ast.unparse(shown)
         except Exception:
             return ""
     return "" if given is None else reader.hole(given)
@@ -3238,12 +3376,69 @@ def _card_lines(text: str) -> str:
 
 # A line break and the spaces and tabs around it.
 _BREAK_RUN = re.compile(r"([ \t]*(?:\r\n|\r|\n)[ \t]*)")
+# The white space between two words of code.
+_SPACE_RUN = re.compile(r"(\s+)")
 # Each key whose value `scrub_output` reads only on the key's own line (an
 # access, refresh or id token, a client secret) holds one of these words.
 _TOKEN_KEY_WORD = re.compile("token|secret", re.I)
 
 
 def _scrub(text: str) -> str:
+    """A statement or its values as the card quotes them, each secret in it
+    redacted and the rest as written.
+
+    `scrub_output` runs a token key's value on through spaces, so on a whole
+    statement it takes what follows the value with it, a WHERE included.
+    Here each quoted literal, quoted name and comment is scrubbed on its own,
+    after the text since the piece before it, so a key there, as in
+    `access_token = '...'` or `{'access_token': '...'}`, still names its
+    value, and keeps the quote or `*/` that ends it. The code between them is
+    scrubbed one stretch with no space at a time, so a word that is a secret
+    is redacted and every other word stays.
+    """
+    if _scrub_lines(text) == text:
+        return text
+    out: list[str] = []
+    position = context_from = 0
+    for m in _TOKEN.finditer(text):
+        if m.lastgroup not in ("text", "name", "comment"):
+            continue
+        out.append(_scrub_code(text[position:m.start()]))
+        scrubbed = _scrub_after(text[context_from:m.start()], m.group())
+        closer = _closer(m)
+        out.append(scrubbed if scrubbed.endswith(closer) else scrubbed + closer)
+        context_from, position = m.start(), m.end()
+    out.append(_scrub_code(text[position:]))
+    return "".join(out)
+
+
+def _closer(m: re.Match[str]) -> str:
+    """What ends the quoted literal, quoted name or comment `_TOKEN` matched."""
+    if m.lastgroup == "comment":
+        return "*/" if m.group().startswith("/*") else ""
+    if m.lastgroup == "text" and m.group("tag") is not None:
+        return f"${m.group('tag')}$"
+    return m.group()[-1]
+
+
+def _scrub_after(context: str, piece: str) -> str:
+    """`piece` scrubbed after `context`, the text before it, so a token key
+    there names a value in it. A redaction that starts in `context` and
+    runs on into `piece` takes `piece` whole."""
+    head = _scrub_lines(context)
+    whole = _scrub_lines(context + piece)
+    return whole[len(head):] if whole.startswith(head) else "[REDACTED_TOKEN]"
+
+
+def _scrub_code(code: str) -> str:
+    """Code outside quotes and comments, each stretch with no space in it
+    scrubbed on its own."""
+    return "".join(
+        part if not part or part.isspace() else scrub_output(part) for part in _SPACE_RUN.split(code)
+    )
+
+
+def _scrub_lines(text: str) -> str:
     """`text` scrubbed, a token value on the line after its key included.
     `scrub_output` reads a key and its value across spaces and tabs only, so
     a second pass reads each line break, with the spaces around it, as a tab
@@ -3302,19 +3497,27 @@ def _sql_findings(
         parts: list[ast.AST] = []
         text = _sql_text(node, reader, parts=parts)
         read.update(id(p) for p in parts)
-        if text is None:
+        if text is None or not write_statements(text, prose=False):
             continue
         # A string that holds a write is held whole: the card quotes every
-        # statement in it, since one Approve runs them all.
-        if write_statements(text) and _reaches_a_runner(node, reader):
+        # statement in it, since one Approve runs them all. Where it goes
+        # decides how it reads: a SQL runner runs it whatever its case, and
+        # anywhere else it may be English (`write_statements`).
+        reach = _reaches_a_runner(node, reader)
+        if reach is _Reach.RUNNER or reach is _Reach.ELSEWHERE and write_statements(text):
             add(_quoted_statements(text), node)
     # A name an earlier cell bound to a statement, or one this cell builds up.
     for uses in cell.loads.values():
         for use in uses:
             if id(use) in read or root is not None and not _inside(use, root, cell):
                 continue
-            statements = _name_statements(use, reader, root=root)
-            if statements and _reaches_a_runner(use, reader):
+            statements = _name_statements(use, reader, prose=False, root=root)
+            if not statements:
+                continue
+            reach = _reaches_a_runner(use, reader)
+            if reach is _Reach.ELSEWHERE:
+                statements = _name_statements(use, reader, prose=True, root=root)
+            if reach is not _Reach.NOWHERE and statements:
                 add(statements, use)
     # DataFrame.to_sql into a database that isn't in-process.
     for node in ast.walk(top):

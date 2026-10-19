@@ -569,6 +569,80 @@ def test_attaching_a_database_in_the_process_keeps_the_handle_local(attach, held
     assert _held(built + "con.execute('DELETE FROM x.t')", snap), "a target picked at run time counts"
 
 
+# ── Where a string goes decides how it reads ──────────────────────────────
+#
+# A SQL runner runs a statement whatever its case or closing period. A
+# report, a template or a function the check can't follow may get English,
+# so only there does sentence case or a period make a string prose.
+
+@pytest.mark.parametrize("sql", [
+    "delete suppliers",
+    "Delete suppliers where id = 7",
+    "Drop view v",
+    "Drop index i",
+    "Drop database d",
+    "(SELECT 1)\nDELETE FROM suppliers",
+    "Delete from suppliers",
+    "Truncate suppliers",
+    "Update suppliers set lead_time_days = 21 where id = 'S005'.",
+])
+def test_a_runner_runs_a_statement_whatever_its_case(sql, snap):
+    """SQL Server and Oracle run `delete suppliers`; each of these runs as written."""
+    assert write_statements(sql) == (), "as prose, it reads as English"
+    assert write_statements(sql, prose=False)
+    assert _held(PG + f"cur.execute({sql!r})", snap)
+
+
+@pytest.mark.parametrize("code, earlier", [
+    (PG + "q = 'Delete from suppliers'\ncur.execute(q)", ()),
+    ("cur.execute(q)", (PG + "q = 'Truncate suppliers'\nprint(q)",)),
+    (PG + "from sqlalchemy import text\nwith engine.begin() as c:\n    c.execute(text('Drop view v'))", ()),
+    (PG + "import pandas as pd\npd.read_sql('Delete suppliers where id = 7', engine)", ()),
+    (PG + "cur.execute(query='Delete from suppliers')", ()),
+    (PG + "list(map(cur.execute, ['Delete from a', 'Truncate b']))", ()),
+    (PG + "for s in ['Delete from a', 'Truncate b']:\n    cur.execute(s)", ()),
+    (PG + "q = 'Delete from suppliers'\ndoc.add_paragraph(q)\nif ready:\n    cur.execute(q)", ()),
+    (PG + "def run(q):\n    cur.execute(q)\nrun('Delete from suppliers')", ()),
+    ("run('Delete from suppliers')", (PG + "def run(q):\n    cur.execute(q)\n",)),
+], ids=["name", "earlier-cell-name", "sqlalchemy-text", "read_sql", "query-keyword", "map-execute",
+        "loop-execute", "report-then-execute", "pad-helper", "earlier-helper"])
+def test_a_sentence_case_statement_a_runner_gets_is_held(code, earlier, snap):
+    """A use that runs the string decides, even after one that only shows it."""
+    assert _held(code, snap, earlier=earlier)
+
+
+def test_a_sentence_case_attach_a_runner_gets_reaches_outside_the_process(snap):
+    duck = "import duckdb\ncon = duckdb.connect()\n"
+    attach = "\"Attach 'postgres:dbname=x host=y' AS pg\""
+    assert _held(duck + f"con.execute({attach})\ncon.execute('DELETE FROM pg.suppliers')", snap)
+    assert _held(duck + f"q = {attach}\ncon.execute(q)\ncon.execute('DELETE FROM pg.suppliers')", snap)
+    assert not _held(duck + f"pdf.cell(0, 6, {attach})\ncon.execute('DELETE FROM t')", snap), (
+        "the same words in a report keep the handle local"
+    )
+    assert not _held(duck + "con.execute(\"Attach ':memory:' AS m\")\ncon.execute('DELETE FROM m.t')", snap)
+
+
+@pytest.mark.parametrize("code", [
+    PG + "story.append(Paragraph('Merge the two supplier lists using the supplier ID.', style))",
+    PG + "doc.add_paragraph('Insert the table of lead times below the summary.')",
+    PG + "story.append(Paragraph('Delete orders where the quantity is zero.', style))",
+    PG + "story.append(Paragraph('Truncate labels', style))",
+    PG + "pdf.cell(0, 6, 'Truncate labels')",
+    PG + "q = 'Delete orders where the quantity is zero.'\nstory.append(Paragraph(q, style))",
+    PG + f"from weasyprint import HTML\nHTML(string='{PAGE}').write_pdf('r.pdf')",
+    PG + "import markdown\nmd = '## Next steps\\n\\nDelete orders where the quantity is zero.'\n"
+         "open('r.html', 'w').write(markdown.markdown(md))",
+    PG + "from email.message import EmailMessage\nm = EmailMessage()\n"
+         "m.set_content('Hi Dana,\\nDelete rows where qty is 0 before Friday.\\nThanks')",
+    PG + "cur.execute('SELECT * FROM notes WHERE body = %s', ('Delete orders where the quantity is zero.',))",
+], ids=["merge-paragraph", "insert-add-paragraph", "delete-paragraph", "truncate-paragraph", "truncate-cell",
+        "named-paragraph", "html-script", "markdown", "email", "execute-parameter"])
+def test_prose_a_report_gets_stays_free_beside_a_connection(code, snap):
+    """Sentence case and a closing period still read as English where the
+    string goes to a report, a page, an email or an execute's parameters."""
+    assert not _held(code, snap)
+
+
 def test_a_statement_name_bound_again_shows_only_what_runs(snap):
     code = PG + "q = 'SELECT * FROM orders'\nq += \" WHERE id = 'A1'\"\ncur.execute(q)\nq = 'DELETE FROM orders'\ncur.execute(q)"
     assert set(_statements(code, snap)) == {"DELETE FROM orders"}
@@ -596,6 +670,27 @@ def test_a_concatenation_is_read_once(snap, monkeypatch):
     code = "html = " + " + ".join(f"'<td>{i}</td>'" for i in range(terms)) + "\nprint(html)"
     assert not _held(code, snap)
     assert calls < 2 * terms
+
+
+@pytest.mark.parametrize("item", ["UPDATE t SET a = {i} WHERE id = {i}", "Delete orders where the quantity is {i}."])
+def test_each_read_of_a_list_is_read_once(item, snap, monkeypatch):
+    """Each value appended to a list asks what every read of the list holds,
+    so each read is answered once per check, not once per value."""
+    from anton.core.utils import write_check
+
+    calls = 0
+    bindings = write_check._Reader.bindings_of
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return bindings(*args, **kwargs)
+
+    monkeypatch.setattr(write_check._Reader, "bindings_of", counting)
+    items = 300
+    code = "recs = []\n" + "".join(f"recs.append({item.format(i=i)!r})\n" for i in range(items))
+    assert not _held(code + "for r in recs:\n    print(r)\n", snap)
+    assert calls < 10 * items
 
 
 def test_an_earlier_cell_is_parsed_once_across_checks(snap, monkeypatch):
@@ -1365,6 +1460,37 @@ def test_a_token_value_after_a_line_break_is_scrubbed(snap):
     for key in ("access_token=\\n", "refresh_token\\n", "access_token\\n=\\n", "client_secret:\\n\\t"):
         card = _card(PG + f"cur.execute(\"UPDATE cfg SET v = '{key}{token}' WHERE id = 1\")", snap)
         assert token not in card and "[REDACTED_TOKEN]" in card, key
+
+
+@pytest.mark.parametrize("sql, shown", [
+    ("UPDATE cfg SET v = 'access_token=\\n{t}' WHERE id = 1", "UPDATE cfg SET v = 'access_token=\n[REDACTED_TOKEN]' WHERE id = 1"),
+    ("UPDATE cfg SET v = 'access_token={t}' WHERE id = 1", "UPDATE cfg SET v = 'access_token=[REDACTED_TOKEN]' WHERE id = 1"),
+    ("UPDATE cfg SET access_token = '{t}' WHERE id = 1", "UPDATE cfg SET access_token = '[REDACTED_TOKEN]' WHERE id = 1"),
+    ("UPDATE cfg SET v = $$access_token=\\n{t}$$ WHERE id = 1",
+     "UPDATE cfg SET v = $$access_token=\n[REDACTED_TOKEN]$$ WHERE id = 1"),
+    ("UPDATE cfg SET v = 1 /* access_token={t} */ WHERE id = 1",
+     "UPDATE cfg SET v = 1 /* access_token=[REDACTED_TOKEN]*/ WHERE id = 1"),
+], ids=["next-line", "same-line", "key-before-the-literal", "dollar-quoted", "comment"])
+def test_a_scrubbed_token_leaves_the_where_on_the_card(sql, shown, snap):
+    """The scrubber hides only the token: the WHERE after it, which says
+    which rows change, stays on the card."""
+    token = "abcdefghijklmnopqrstuvwxyz0123456789"
+    card = _card(PG + f"cur.execute(\"{sql.format(t=token)}\")", snap)
+    assert token not in card
+    assert _fenced(card) == [shown]
+
+
+@pytest.mark.parametrize("values", [
+    "('access_token=\\n{t}', 1)",
+    "{{'v': 'refresh_token\\n{t}', 'id': 1}}",
+], ids=["tuple", "dict"])
+def test_a_token_in_the_values_is_scrubbed_on_the_card(values, snap):
+    """The values line is unparsed code, where a line break shows as an
+    escape; the token is scrubbed in the value itself, before that."""
+    token = "abcdefghijklmnopqrstuvwxyz0123456789"
+    code = PG + f"cur.execute('UPDATE cfg SET v = %(v)s WHERE id = %(id)s', {values.format(t=token)})"
+    card = _card(code, snap)
+    assert token not in card and "WHERE id" in card
 
 
 def test_a_name_that_does_not_show_as_itself_is_escaped(tmp_path, monkeypatch):
