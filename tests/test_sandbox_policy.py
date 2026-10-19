@@ -158,6 +158,212 @@ def test_the_user_name_is_required(tmp_path):
         CellSandbox(**_fields(tmp_path, user_name=""))
 
 
+# ── Resolving each path once ─────────────────────────────────────────────────
+
+
+def _resolver_tree(tmp_path: Path) -> list[str]:
+    """Paths through links in the middle and at the end, a relative link, a
+    loop, a missing folder and a file used as a folder."""
+    (tmp_path / "a" / "b" / "c").mkdir(parents=True)
+    (tmp_path / "a" / "file.txt").write_text("x")
+    (tmp_path / "d").mkdir()
+    (tmp_path / "mid").symlink_to(tmp_path / "a", target_is_directory=True)
+    (tmp_path / "end").symlink_to(tmp_path / "a" / "b", target_is_directory=True)
+    (tmp_path / "d" / "relative").symlink_to("../a/b", target_is_directory=True)
+    (tmp_path / "d" / "chain").symlink_to(tmp_path / "mid" / "b", target_is_directory=True)
+    (tmp_path / "loop1").symlink_to(tmp_path / "loop2")
+    (tmp_path / "loop2").symlink_to(tmp_path / "loop1")
+    (tmp_path / "dangling").symlink_to(tmp_path / "gone")
+    return [
+        "/",
+        "//",
+        "/etc",
+        "/tmp",
+        str(tmp_path),
+        str(tmp_path / "a" / "b" / "c"),
+        str(tmp_path / "mid"),
+        str(tmp_path / "mid" / "b" / "c"),
+        str(tmp_path / "end"),
+        str(tmp_path / "end" / "c" / "missing"),
+        str(tmp_path / "d" / "relative" / "c"),
+        str(tmp_path / "d" / "chain" / "c"),
+        str(tmp_path / "loop1"),
+        str(tmp_path / "loop1" / "x"),
+        str(tmp_path / "dangling" / "x"),
+        str(tmp_path / "missing" / "deeper"),
+        str(tmp_path / "a" / "file.txt" / "inner"),
+        f"{tmp_path}/a//b",
+        f"{tmp_path}/a/./b",
+        f"{tmp_path}/mid/../a/b",
+        f"/{tmp_path}",
+        "relative/path",
+    ]
+
+
+def test_the_resolver_resolves_every_path_as_realpath_does(tmp_path):
+    paths = _resolver_tree(tmp_path)
+    shared = sandbox._PathResolver()
+    for path in paths:
+        assert shared(path) == os.path.realpath(path), path
+        assert sandbox._PathResolver()(path) == os.path.realpath(path), path
+    # A second ask returns what the first did, in any order.
+    for path in reversed(paths):
+        assert shared(Path(path)) == os.path.realpath(path), path
+
+
+_PREFIX_CASES = ["", "/", "//", "/a", "/a/", "/ab", "/a/b", "/a/b/", "/a/bc", "//a", "//a/b", "/b"]
+
+
+def test_the_index_answers_as_the_pairwise_check_does():
+    for path in _PREFIX_CASES:
+        holders = sandbox._holders(path)
+        for root in _PREFIX_CASES:
+            assert (root in holders) == sandbox._same_or_inside(path, root), (path, root)
+    ordered = sorted(_PREFIX_CASES)
+    for root in _PREFIX_CASES:
+        found = sandbox._first_at_or_below(ordered, root)
+        assert (found is not None) == any(sandbox._same_or_inside(p, root) for p in ordered), root
+        assert found is None or sandbox._same_or_inside(found, root), (root, found)
+
+
+def _people(tmp_path: Path, count: int) -> tuple[Path, tuple[Path, ...], tuple[Path, ...]]:
+    """A cowork-home whose shared root holds ``count`` people, as the host passes them."""
+    shared_root = tmp_path / "cowork-home" / "shared-root"
+    people = [shared_root / f"person-{i:02d}" for i in range(count)]
+    for person in people:
+        (person / "sandbox").mkdir(parents=True, exist_ok=True)
+    forbidden = (tmp_path / "cowork-home", shared_root, *people)
+    return people[0], forbidden, tuple(people[1:])
+
+
+def _person_fields(tmp_path: Path, count: int) -> dict:
+    own, forbidden, others = _people(tmp_path, count)
+    return _fields(
+        tmp_path,
+        project_dir=own / "project",
+        home_dir=own / "sandbox" / "home",
+        tmp_dir=own / "sandbox" / "tmp",
+        forbidden_roots=forbidden,
+        other_partitions=others,
+    )
+
+
+def test_each_more_person_costs_at_most_two_lstats_and_no_realpath_call(tmp_path, monkeypatch):
+    # realpath lstats every folder of a path on each call, so counting lstat
+    # catches a realpath call wherever it comes from. The pairwise check made
+    # about 180 lstats per person.
+    real_lstat, real_realpath = os.lstat, os.path.realpath
+    lstats: list[str] = []
+    realpaths: list[str] = []
+
+    def counting_lstat(path, *args, **kwargs):
+        lstats.append(str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    def counting_realpath(path, *args, **kwargs):
+        realpaths.append(str(path))
+        return real_realpath(path, *args, **kwargs)
+
+    counts = {}
+    for count in (1, 53):
+        fields = _person_fields(tmp_path / str(count), count)
+        policy = CellSandbox(**fields)
+        monkeypatch.setattr(sandbox.os, "lstat", counting_lstat)
+        monkeypatch.setattr(sandbox.os.path, "realpath", counting_realpath)
+        lstats.clear()
+        realpaths.clear()
+        CellSandbox(**fields)
+        built = (len(lstats), len(realpaths))
+        lstats.clear()
+        realpaths.clear()
+        policy.launch(["/venv/bin/python"], env={}).close()
+        counts[count] = (built, (len(lstats), len(realpaths)))
+        monkeypatch.undo()
+    for (more_lstats, more_realpaths), (base_lstats, base_realpaths) in zip(counts[53], counts[1]):
+        assert more_lstats - base_lstats <= 2 * 52
+        assert more_realpaths == base_realpaths
+
+
+def test_a_grant_that_reaches_another_persons_folder_through_a_link_is_refused(tmp_path):
+    own, forbidden, others = _people(tmp_path, 2)
+    alice = others[0]
+    own_fields = dict(project_dir=own / "project", home_dir=own / "sandbox" / "home", tmp_dir=own / "sandbox" / "tmp")
+    # A link to alice's folder, as a read-only grant and as the project.
+    to_alice = tmp_path / "to-alice"
+    to_alice.symlink_to(alice, target_is_directory=True)
+    with pytest.raises(pydantic.ValidationError, match="equals or contains"):
+        CellSandbox(**_fields(tmp_path, **own_fields, forbidden_roots=forbidden, other_partitions=others,
+                              read_only_dirs=(to_alice,)))
+    with pytest.raises(pydantic.ValidationError, match="another person's partition|equals or contains"):
+        CellSandbox(**_fields(tmp_path, **{**own_fields, "project_dir": to_alice / "projects" / "p"},
+                              forbidden_roots=forbidden, other_partitions=others))
+    # A partition the host names through a linked entry, and a shared root
+    # reached through a linked folder above it.
+    elsewhere = tmp_path / "elsewhere" / "alice"
+    elsewhere.mkdir(parents=True)
+    linked_alice = own.parent / "linked-alice"
+    linked_alice.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(pydantic.ValidationError, match="another person's partition|equals or contains"):
+        CellSandbox(**_fields(tmp_path, **{**own_fields, "project_dir": elsewhere / "projects" / "p"},
+                              other_partitions=(linked_alice,)))
+    root_link = tmp_path / "root-link"
+    root_link.symlink_to(own.parent, target_is_directory=True)
+    with pytest.raises(pydantic.ValidationError, match="another person's partition|equals or contains"):
+        CellSandbox(**_fields(tmp_path, **{**own_fields, "tmp_dir": alice / "sandbox" / "tmp"},
+                              other_partitions=(root_link / alice.name,)))
+
+
+def test_a_dotdot_path_into_another_persons_folder_is_refused(tmp_path):
+    own, forbidden, others = _people(tmp_path, 2)
+    sneaky = Path(f"{own}/../{others[0].name}")
+    with pytest.raises(pydantic.ValidationError, match="absolute, normalized"):
+        CellSandbox(**_person_fields(tmp_path, 2) | {"read_only_dirs": (sneaky,)})
+    with pytest.raises(pydantic.ValidationError, match="absolute, normalized"):
+        CellSandbox(**_person_fields(tmp_path / "again", 2) | {"other_partitions": (sneaky,)})
+
+
+def _first_overlap(grant: Path | str, roots) -> str | None:
+    """The root the pairwise loop names: the first, in order, that ``grant`` equals or contains."""
+    return next((str(root) for root in roots if sandbox._overlaps(grant, root)), None)
+
+
+def test_each_refusal_names_the_root_the_pairwise_loop_named(tmp_path, monkeypatch):
+    fields = _person_fields(tmp_path, 5)
+    policy = CellSandbox(**fields)
+    roots = policy._denied_roots()
+    cowork_home = tmp_path / "cowork-home"
+    link = tmp_path / "to-cowork-home"
+    link.symlink_to(cowork_home, target_is_directory=True)
+    for grant in (cowork_home, cowork_home / "shared-root", link, tmp_path):
+        expected = _first_overlap(grant, roots)
+        assert expected is not None, grant
+        with pytest.raises(pydantic.ValidationError) as refused:
+            CellSandbox(**fields | {"read_only_dirs": (grant,)})
+        assert f"grant {grant} equals or contains {expected}" in str(refused.value), grant
+    # Roots listed out of sorted order: the first listed is named, as before.
+    late, early = cowork_home / "z-listed-first", cowork_home / "a-listed-second"
+    with pytest.raises(pydantic.ValidationError) as refused:
+        CellSandbox(**_fields(tmp_path, forbidden_roots=(late, early), read_only_dirs=(cowork_home,)))
+    assert f"grant {cowork_home} equals or contains {late}" in str(refused.value)
+    # A writable grant in two partitions at once names the first listed, in
+    # either order.
+    _, _, others = _people(tmp_path / "nested", 3)
+    outer, inner = others[0], others[0] / "inner"
+    for listed in ((inner, outer), (outer, inner)):
+        with pytest.raises(pydantic.ValidationError) as refused:
+            CellSandbox(**_fields(tmp_path, project_dir=inner / "p", other_partitions=listed))
+        assert f"sits in another person's partition {listed[0]}" in str(refused.value)
+
+    for folder in (str(cowork_home), str(link), str(tmp_path / "unrelated")):
+        monkeypatch.setattr(sandbox, "_interpreter_dirs", lambda folder=folder: [folder])
+        expected = _first_overlap(folder, roots)
+        if expected is None:
+            policy.launch(["/venv/bin/python"], env={}).close()
+            continue
+        with pytest.raises(SandboxUnavailable, match=f"the interpreter folder {folder} contains {expected}$"):
+            policy.launch(["/venv/bin/python"], env={})
+
+
 # ── The environment ──────────────────────────────────────────────────────────
 
 _SERVER_ENV = {
