@@ -275,6 +275,78 @@ def test_entries_execve_would_reject_are_dropped_and_logged(policy, caplog):
     assert "a\0b" not in caplog.text
 
 
+# A mirror's password, a token in a username, a token in a query string and a
+# proxy's password, none of which agent code may get.
+_PIP_WITH_CREDENTIALS = {
+    "PIP_INDEX_URL": "https://mirror-user:pw-secret@mirror.internal:8443/pypi/simple",
+    "PIP_EXTRA_INDEX_URL": "https://tok-secret@extra.internal/simple  https://pypi.org/simple",
+    "PIP_FIND_LINKS": "https://links.internal/wheels/?token=q-secret",
+    "PIP_PROXY": "http://proxy-user:px-secret@proxy.internal:3128",
+    "PIP_TRUSTED_HOST": "mirror.internal",
+}
+
+
+@pytest.fixture
+def fresh_pip_log(monkeypatch) -> None:
+    monkeypatch.setattr(sandbox, "_LOGGED_PIP_CREDENTIALS", set())
+
+
+def _sandbox_warnings(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == sandbox.__name__ and r.levelno == logging.WARNING]
+
+
+@pytest.mark.parametrize("from_dotenv", [False, True], ids=["server", "dotenv"])
+def test_pip_urls_reach_agent_code_without_userinfo_or_query(policy, from_dotenv, fresh_pip_log):
+    overlay_keys = _PIP_WITH_CREDENTIALS if from_dotenv else ()
+    env = policy.child_env(_PIP_WITH_CREDENTIALS, overlay_keys=overlay_keys)
+    assert {key: env[key] for key in _PIP_WITH_CREDENTIALS} == {
+        "PIP_INDEX_URL": "https://mirror.internal:8443/pypi/simple",
+        "PIP_EXTRA_INDEX_URL": "https://extra.internal/simple https://pypi.org/simple",
+        "PIP_FIND_LINKS": "https://links.internal/wheels/",
+        "PIP_PROXY": "http://proxy.internal:3128",
+        "PIP_TRUSTED_HOST": "mirror.internal",
+    }
+    assert not any("secret" in value for value in env.values())
+
+
+def test_pip_settings_without_credentials_pass_exactly_as_set(policy, caplog, fresh_pip_log):
+    plain = {
+        "PIP_INDEX_URL": "https://pypi.internal/simple",
+        "PIP_EXTRA_INDEX_URL": "https://a.internal/simple\n  https://b.internal:8080/simple/",
+        "PIP_FIND_LINKS": "/wheels https://links.internal/wheels/pkg-1.0.tar.gz#sha256=abc",
+        "PIP_CERT": "/etc/ssl/ca.pem",
+        "PIP_NO_INPUT": "1",
+    }
+    with caplog.at_level(logging.WARNING, logger=sandbox.__name__):
+        env = policy.child_env(plain)
+    assert {key: env[key] for key in plain} == plain
+    assert _sandbox_warnings(caplog) == []
+
+
+def test_each_pip_variable_that_loses_credentials_is_logged_once_without_them(policy, caplog, fresh_pip_log):
+    # The environment is built on every spawn.
+    with caplog.at_level(logging.WARNING, logger=sandbox.__name__):
+        policy.child_env(_PIP_WITH_CREDENTIALS)
+        policy.child_env(_PIP_WITH_CREDENTIALS)
+    records = _sandbox_warnings(caplog)
+    assert sorted(record.args[0] for record in records) == [
+        "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_INDEX_URL", "PIP_PROXY",
+    ]
+    assert not any("secret" in record.getMessage() for record in records)
+
+
+def test_a_pip_variable_with_a_url_that_cannot_be_parsed_is_dropped(policy, caplog, fresh_pip_log):
+    with caplog.at_level(logging.WARNING, logger=sandbox.__name__):
+        env = policy.child_env(
+            {"PIP_INDEX_URL": "https://mirror-user:pw-secret@[::1/simple", "PIP_NO_INPUT": "1"}
+        )
+    assert "PIP_INDEX_URL" not in env
+    assert env["PIP_NO_INPUT"] == "1"
+    assert [record.getMessage() for record in _sandbox_warnings(caplog)] == [
+        "sandbox: dropped PIP_INDEX_URL, which holds a URL that cannot be parsed",
+    ]
+
+
 # ── The rules ────────────────────────────────────────────────────────────────
 
 

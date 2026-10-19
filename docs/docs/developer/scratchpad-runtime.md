@@ -190,6 +190,13 @@ server sets keeps the allowlist's verdict, so naming it in the `.env` never
 passes the server's value. An entry `execve` would reject (an empty key, a
 key with `=` or NUL, a value with NUL) is dropped and logged, and if one
 still reaches the launcher it refuses instead of failing after the lock.
+Every URL in a `PIP_*` value (an index, a links page, a proxy) loses its
+userinfo and query string and keeps its scheme, host, port and path, so a
+mirror's password or token never reaches agent code. The health check and
+installs get the same URLs as the cell: they run the venv's own Python,
+which a cell can rewrite. So an index or proxy that needs credentials can't
+be used under a policy. A `PIP_*` value with a URL that can't be parsed is
+dropped. Each variable that loses credentials is logged once per process.
 
 Every refusal is one line starting with `anton-sandbox: refused:`, written to
 the refusal pipe and to stderr before any target code runs, with exit code

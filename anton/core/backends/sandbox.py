@@ -26,6 +26,7 @@ import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -106,6 +107,9 @@ _ENV_PREFIXES = ("ANTON_OPENAI_", "ANTON_ANTHROPIC_", "ANTON_SCRATCHPAD_", "DS_"
 # These never pass, whatever else names them.
 _ENV_NEVER_NAMES = frozenset({"DATABASE_URI", "MINDS_API_KEY", "ANTON_MINDS_API_KEY", "ANTON_UV_PATH"})
 _ENV_NEVER_PREFIXES = ("COWORK_", "LD_")
+# Each PIP_* variable already logged for lost credentials. The environment is
+# built on every spawn, so each variable is logged once per process.
+_LOGGED_PIP_CREDENTIALS: set[str] = set()
 # A workspace .env key passes unless it could repoint the interpreter, the
 # loader, the per-person folders or the certificate trust.
 _OVERLAY_DENIED_NAMES = frozenset({
@@ -236,6 +240,53 @@ def _env_key_allowed(key: str, overlay_keys: frozenset[str]) -> bool:
     return key in _ENV_NAMES or key.startswith(_ENV_PREFIXES)
 
 
+def _url_without_credentials(word: str) -> str:
+    """``word`` without its userinfo and query when it is a URL, else ``word`` unchanged.
+
+    Scheme, host, port, path and fragment stay. Raises ValueError for a URL
+    ``urlsplit`` cannot parse.
+    """
+    parts = urlsplit(word)
+    if not parts.scheme or not parts.netloc:
+        return word
+    if "@" not in parts.netloc and not parts.query:
+        return word
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, host, parts.path, "", parts.fragment))
+
+
+def _pip_value_for_agent_code(key: str, value: str) -> str | None:
+    """A PIP_* value with no password or token in any URL, or None to drop the variable.
+
+    A setting that names an index, a links page or a proxy can carry a
+    password in a URL's userinfo or a token in its query string. Installs and
+    the health check run the venv's own Python, which a cell can rewrite or
+    extend with a .pth file, so no spawn under a policy gets either part, and
+    an index or proxy that needs them can't be used there. pip splits a list
+    setting such as PIP_EXTRA_INDEX_URL on whitespace, so each word is judged
+    alone; a value with nothing to remove comes back as it was. A URL
+    ``urlsplit`` rejects could hide either part, so its variable is dropped.
+    """
+    words = value.split()
+    try:
+        kept = [_url_without_credentials(word) for word in words]
+    except ValueError:
+        stripped = None
+    else:
+        stripped = value if kept == words else " ".join(kept)
+    if stripped != value and key not in _LOGGED_PIP_CREDENTIALS:
+        _LOGGED_PIP_CREDENTIALS.add(key)
+        if stripped is None:
+            logger.warning("sandbox: dropped %s, which holds a URL that cannot be parsed", key)
+        else:
+            logger.warning(
+                "sandbox: removed the credentials from the URLs in %s; an index or proxy "
+                "that needs them can't be used under the sandbox",
+                key,
+            )
+    return stripped
+
+
 class CellSandbox(BaseModel):
     """The folders one session's agent code may reach.
 
@@ -330,7 +381,8 @@ class CellSandbox(BaseModel):
         or the certificate trust, even where the allowlist names it. An entry
         execve would reject (an empty key, a key with ``=`` or NUL, a value
         with NUL) is dropped and logged, so it cannot fail every spawn after
-        the lock.
+        the lock. Every URL in a ``PIP_*`` value loses its userinfo and query
+        (``_pip_value_for_agent_code``).
         """
         overlay = frozenset(overlay_keys)
         child: dict[str, str] = {}
@@ -340,6 +392,11 @@ class CellSandbox(BaseModel):
             if not key or "=" in key or "\0" in key or "\0" in value:
                 logger.warning("sandbox: dropped the environment entry %r, which execve refuses", key)
                 continue
+            if key.startswith("PIP_"):
+                stripped = _pip_value_for_agent_code(key, value)
+                if stripped is None:
+                    continue
+                value = stripped
             child[key] = value
         child.update(self._fixed_env())
         return child

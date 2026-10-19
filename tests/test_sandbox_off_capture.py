@@ -25,8 +25,9 @@ from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.settings import CoreSettings
 from anton.core.tools.generate_artifact import verifiers
 
-# The parent's environment for every test here: server secrets, an inherited
-# DS_* and a loader variable, all of which reach every child today.
+# The parent's environment for every test here: server secrets, a package
+# mirror's password, an inherited DS_* and a loader variable, all of which
+# reach every child today.
 _PARENT_ENV = {
     "PATH": "/usr/bin:/bin",
     "HOME": "/home/anton",
@@ -34,6 +35,7 @@ _PARENT_ENV = {
     "DATABASE_URI": "postgresql://cowork:pw-secret@postgres/cowork",
     "MINDS_API_KEY": "minds-secret",
     "ANTON_OPENAI_API_KEY": "anton-openai-key",
+    "PIP_INDEX_URL": "https://mirror-user:pip-secret@mirror.internal/simple",
     "DS_OLD__PASSWORD": "server-ds-secret",
     "LD_PRELOAD": "/opt/preload.so",
 }

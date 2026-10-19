@@ -38,6 +38,17 @@ _SECRETS = {
     "MINDS_API_KEY": "minds-secret",
     "ANTON_MINDS_API_KEY": "anton-minds-secret",
 }
+# A mirror's password and token pass the allowlist but no spawn under a policy
+# gets them: installs and the health check run the venv's Python, which a
+# cell can rewrite.
+_PIP_SERVER_ENV = {
+    "PIP_INDEX_URL": "https://mirror-user:pip-secret@mirror.internal:8443/pypi/simple",
+    "PIP_EXTRA_INDEX_URL": "https://extra.internal/simple?token=pip-token-secret",
+}
+_PIP_AGENT_ENV = {
+    "PIP_INDEX_URL": "https://mirror.internal:8443/pypi/simple",
+    "PIP_EXTRA_INDEX_URL": "https://extra.internal/simple",
+}
 
 
 @pytest.fixture
@@ -46,6 +57,7 @@ def server_env(monkeypatch) -> None:
         monkeypatch.delenv(key)
     for key, value in {
         **_SECRETS,
+        **_PIP_SERVER_ENV,
         "PATH": "/usr/bin:/bin",
         "HOME": "/home/anton",
         "LD_PRELOAD": "/opt/preload.so",
@@ -95,7 +107,7 @@ def _assert_no_server_secret(payload: dict, args: tuple, policy: CellSandbox) ->
     for key in (*_SECRETS, "LD_PRELOAD", "ANTON_UV_PATH"):
         assert key not in env, key
     text = " ".join(args) + json.dumps(env)
-    for secret in ("tok-secret", "db-secret", "minds-secret"):
+    for secret in ("tok-secret", "db-secret", "minds-secret", "pip-secret", "pip-token-secret"):
         assert secret not in text
     assert env["HOME"] == str(policy.home_dir)
     assert env["TMPDIR"] == str(policy.tmp_dir)
@@ -191,6 +203,7 @@ async def test_the_cell_runs_the_installed_boot_script_through_the_launcher(
     assert env["ANTON_LANGFUSE_HEADERS"] == "1"
     assert "/evil" not in env["PYTHONPATH"]
     assert env["ANTON_SCRATCHPAD_WORKSPACE_PATH"] == str(project.resolve())
+    assert {key: env[key] for key in _PIP_AGENT_ENV} == _PIP_AGENT_ENV
     with pytest.raises(OSError):
         os.fstat(kwargs["pass_fds"][0])
 
@@ -255,6 +268,7 @@ def test_the_venv_health_check_runs_through_the_launcher(project, policy, monkey
     _assert_no_server_secret(seen["payload"], tuple(seen["args"]), policy)
     assert "DS_SERVER__PASSWORD" not in seen["payload"]["env"]
     assert seen["payload"]["env"]["DS_PG_MAIN__PASSWORD"] == "pad-ds"
+    assert {key: seen["payload"]["env"][key] for key in _PIP_AGENT_ENV} == _PIP_AGENT_ENV
 
 
 def test_a_health_check_whose_target_fakes_a_refusal_rebuilds_the_venv(project, policy, monkeypatch):
@@ -296,6 +310,8 @@ async def test_installs_run_pip_through_the_launcher_and_never_uv(project, polic
     _assert_no_server_secret(seen["payload"], args, policy)
     assert seen["payload"]["env"]["PIP_CACHE_DIR"] == str(policy.home_dir / ".cache" / "pip")
     assert not any(key.startswith("DS_") for key in seen["payload"]["env"])
+    # pip in the venv is the cell's to rewrite, so the install gets the cell's URLs.
+    assert {key: seen["payload"]["env"][key] for key in _PIP_AGENT_ENV} == _PIP_AGENT_ENV
 
 
 def test_venvs_are_built_with_the_standard_library_under_the_sandbox(project, policy, monkeypatch):
@@ -358,6 +374,7 @@ async def test_both_verifier_checks_run_through_the_launcher(tmp_path, project, 
         _assert_no_server_secret(payload, args, policy)
     assert import_payload["env"]["DS_PG_MAIN__PASSWORD"] == "artifact-ds"
     assert "DS_SERVER__PASSWORD" not in import_payload["env"]
+    assert {key: import_payload["env"][key] for key in _PIP_AGENT_ENV} == _PIP_AGENT_ENV
     assert "anton_state_pp" not in import_payload["env"].get("PYTHONPATH", "")
     assert not any(k.startswith("DS_") for k in compile_payload["env"])
 
