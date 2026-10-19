@@ -52,7 +52,9 @@ import re
 import shlex
 import string
 import textwrap
+import threading
 import warnings
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1071,7 +1073,9 @@ Function = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 
 
 class _Cell:
-    """One parsed cell: its tree, parents, bindings and source lines."""
+    """One parsed cell: its tree, parents, bindings and source lines, and
+    what `_Reader` gathers from every cell. Nothing changes it once built, so
+    one earlier cell serves every check that reads it (`_EarlierCells`)."""
 
     def __init__(self, tree: ast.Module, code: str, index: int, *, host_line: int | None = None) -> None:
         self.tree = tree
@@ -1081,9 +1085,32 @@ class _Cell:
         self.host_line = host_line
         self.lines = code.splitlines()
         self.parents: dict[ast.AST, ast.AST] = {}
+        # Every name the cell imports, by the name it binds; the functions it
+        # defines, by name; every call, in walk order; and whether a string
+        # in it attaches a database (`_ATTACH`).
+        self.imports: dict[str, str] = {}
+        self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        self.calls: list[ast.Call] = []
+        self.attaches = False
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.asname:
+                        self.imports[a.asname] = a.name
+                    else:
+                        top = a.name.split(".")[0]
+                        self.imports[top] = top
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for a in node.names:
+                    self.imports[a.asname or a.name] = f"{node.module}.{a.name}"
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.functions[node.name] = node
+            elif isinstance(node, ast.Call):
+                self.calls.append(node)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _ATTACH.search(node.value):
+                self.attaches = True
         self.bindings: dict[str, list[_Binding]] = {}
         self.loads: dict[str, list[ast.Name]] = {}
         # `name += ...` and `name.append(...)`: what builds a name's text or list up.
@@ -1124,6 +1151,12 @@ class _Cell:
                     self.grows.setdefault(node.func.value.id, []).append(
                         _Growth(site=node, value=node.args[-1], how="add"),
                     )
+        # The names each lambda the cell binds is bound to, by the lambda's id.
+        self.lambda_names: dict[int, list[str]] = {}
+        for name, found in self.bindings.items():
+            for b in found:
+                if b.how == "value" and isinstance(b.value, ast.Lambda):
+                    self.lambda_names.setdefault(id(b.value), []).append(name)
 
     def _bind(self, target: ast.AST, value: ast.AST, *, at: ast.AST, how: Literal["value", "element", "context"]) -> None:
         if self._dead(at):
@@ -1220,36 +1253,19 @@ class _Reader:
     def __init__(self, cells: list[_Cell], *, current: _Cell) -> None:
         self.cells = cells
         self.current = current
-        self._cells_by_node: dict[ast.AST, _Cell] = {
-            node: cell for cell in cells for node in ast.walk(cell.tree)
-        }
+        self._cells_by_node: dict[ast.AST, _Cell] = {}
         self.imports: dict[str, str] = {}
         self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
         # The names each lambda is bound to, by the lambda's id.
         self.lambda_names: dict[int, list[str]] = {}
         for cell in cells:
-            for node in ast.walk(cell.tree):
-                if isinstance(node, ast.Import):
-                    for a in node.names:
-                        if a.asname:
-                            self.imports[a.asname] = a.name
-                        else:
-                            top = a.name.split(".")[0]
-                            self.imports[top] = top
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    for a in node.names:
-                        self.imports[a.asname or a.name] = f"{node.module}.{a.name}"
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    self.functions[node.name] = node
-            for name, found in cell.bindings.items():
-                for b in found:
-                    if b.how == "value" and isinstance(b.value, ast.Lambda):
-                        self.lambda_names.setdefault(id(b.value), []).append(name)
+            self._cells_by_node[cell.tree] = cell
+            self._cells_by_node.update(dict.fromkeys(cell.parents, cell))
+            self.imports.update(cell.imports)
+            self.functions.update(cell.functions)
+            self.lambda_names.update(cell.lambda_names)
         self.function_names = {*self.functions, *(n for names in self.lambda_names.values() for n in names)}
-        self.attaches = any(
-            isinstance(n, ast.Constant) and isinstance(n.value, str) and _ATTACH.search(n.value)
-            for cell in cells for n in ast.walk(cell.tree)
-        )
+        self.attaches = any(cell.attaches for cell in cells)
         self._held: dict[tuple[int, str, tuple[tuple[int, str, int], ...]], tuple[str, ...]] = {}
         # The code behind each numbered placeholder, None for a part with no
         # code to show, and each node's number by its id.
@@ -1257,8 +1273,8 @@ class _Reader:
         self._hole_numbers: dict[int, int] = {}
         # Pad functions this cell calls: their bodies run now.
         self.called = {
-            n.func.id for cell in cells[current.index:] for n in ast.walk(cell.tree)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in self.functions
+            n.func.id for cell in cells[current.index:] for n in cell.calls
+            if isinstance(n.func, ast.Name) and n.func.id in self.functions
         }
         # While the check reads an earlier cell's function for one call: what
         # that call passes for each parameter, by (function id, name), None
@@ -1269,9 +1285,16 @@ class _Reader:
         # absolute, the project itself first; unknown once a cell changes into
         # one the check can't place.
         self.cwds: list[str] | _Unknown = ["."]
+        # A call `dotted` reads as a chdir ends in `.chdir` or uses a name
+        # bound to one: only those are read through it.
+        chdir_names = {name for name, full in self.imports.items() if full in _CHDIR_FUNCS}
         for cell in cells:
-            for node in ast.walk(cell.tree):
-                if isinstance(node, ast.Call) and self.dotted(node.func) in _CHDIR_FUNCS:
+            for node in cell.calls:
+                func = node.func
+                named = func.attr == "chdir" if isinstance(func, ast.Attribute) else (
+                    isinstance(func, ast.Name) and func.id in chdir_names
+                )
+                if named and self.dotted(func) in _CHDIR_FUNCS:
                     self.cwds = self.changed_into(self.cwds, _target_arg(node, keywords=("path",)), cell=cell)
 
     def cell_of(self, node: ast.AST) -> _Cell:
@@ -1431,8 +1454,8 @@ class _Reader:
         home = self.cell_of(func)
         out: list[_Arg | None] = []
         for cell in self.cells:
-            for node in ast.walk(cell.tree):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names:
+            for node in cell.calls:
+                if isinstance(node.func, ast.Name) and node.func.id in names:
                     out.append(_call_arguments(func, node, call_cell=cell, func_cell=home).get(param))
         return out
 
@@ -2101,6 +2124,10 @@ def _is_harmless_call(call: ast.Call, reader: _Reader) -> bool:
     if isinstance(func, ast.Attribute):
         if func.attr in _HARMLESS_METHODS:
             return True
+        # A logger-named root is logging, unless the method runs SQL: a cursor
+        # someone named `log` still runs `log.execute(...)`.
+        if func.attr in _EXECUTE or func.attr in _READ_SQL:
+            return False
         root = func.value
         while isinstance(root, ast.Attribute):
             root = root.value
@@ -3044,6 +3071,55 @@ def _parse(code: str) -> ast.Module:
         return _read_lookups_plainly(ast.parse(heal_surrogate_source(code)))
 
 
+def _read_cell(*, code: str, index: int) -> _Cell | None:
+    """`code` read as the cell at `index` among the parsed cells; None when it doesn't parse."""
+    try:
+        return _Cell(_parse(code), code, index)
+    except (SyntaxError, ValueError):
+        return None
+
+
+class _EarlierCells:
+    """Earlier cells, each parsed once per process instead of once per check.
+
+    Every check reads all of the conversation's earlier cells, hundreds in a
+    long one, and they don't change from one check to the next. A cell is
+    keyed by its code and its place among the parsed cells, since what it
+    records holds both. Once the cached code passes `budget` characters, the
+    cells read least recently go first. Checks run in worker threads, so a
+    lock guards the table.
+    """
+
+    def __init__(self, *, budget: int) -> None:
+        self._budget = budget
+        self._size = 0
+        self._cells: OrderedDict[tuple[str, int], _Cell | None] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, *, code: str, index: int) -> _Cell | None:
+        key = (code, index)
+        with self._lock:
+            if key in self._cells:
+                self._cells.move_to_end(key)
+                return self._cells[key]
+        cell = _read_cell(code=code, index=index)
+        if len(code) > self._budget:
+            return cell
+        with self._lock:
+            if key not in self._cells:
+                self._cells[key] = cell
+                self._size += len(code)
+            while self._size > self._budget:
+                (old, _), _ = self._cells.popitem(last=False)
+                self._size -= len(old)
+        return cell
+
+
+# A parsed cell takes about 80 bytes per character of its code, so this holds
+# about 80 MB: some 1,400 cells of 700 characters, a long conversation's worth.
+_EARLIER_CELLS = _EarlierCells(budget=1_000_000)
+
+
 def _exec_cells(host: _Cell, *, index: int) -> list[_Cell]:
     """Code `host` passes to exec(), eval() or compile() as a string literal,
     each read as one more cell."""
@@ -3107,10 +3183,9 @@ def find_cell_writes(
         return CellWrites()
     cells: list[_Cell] = []
     for text in earlier_code:
-        try:
-            cells.append(_Cell(_parse(text), text, len(cells)))
-        except (SyntaxError, ValueError):
-            continue
+        earlier = _EARLIER_CELLS.get(code=text, index=len(cells))
+        if earlier is not None:
+            cells.append(earlier)
     current = _Cell(tree, code, len(cells))
     cells.append(current)
     ran = _exec_cells(current, index=len(cells))

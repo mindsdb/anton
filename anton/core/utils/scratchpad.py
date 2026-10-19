@@ -29,15 +29,18 @@ logger = logging.getLogger(__name__)
 
 # Reasons a scratchpad exec result carries when its cell never ran, so a
 # caller that records executed cells can tell them from a cell that did
-# (`discovery.engine`).
+# (`discovery.engine`, `generate_artifact.engine._run_loop` and the turn's
+# hand-back report).
 CELL_NOT_RUN_REASONS = frozenset({"new_scratchpad_challenged", "write_not_approved"})
 
-RefusalCause = Literal["cancelled", "timeout", "limit", "unavailable", "error", "unanswered_earlier"]
+RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
+# What a logged decision says came of a held cell: "stopped" when the turn
+# ended while its card waited, so no refusal went back to the model.
+DecisionStatus = RefusalCause | Literal["approved", "not_held", "stopped"]
 
 _WHY = {
     "cancelled": "they declined it",
     "timeout": "no one answered in time",
-    "limit": "this turn has already asked all the questions it may",
     "unavailable": "there is no way to ask them here",
     "error": "the approval request failed",
     "unanswered_earlier": "an earlier approval request in this turn went unanswered",
@@ -83,7 +86,7 @@ class WriteApprovalDecision(BaseModel):
 
     kinds: tuple[str, ...]
     count: int
-    status: RefusalCause | Literal["approved", "not_held"]
+    status: DecisionStatus
 
 
 def _inert(text: str) -> str:
@@ -205,20 +208,24 @@ async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCaus
         timeout_s=getattr(session.elicitor, "timeout_s", None),
     )
     try:
-        answer = await elicit(session, f"write:{uuid.uuid4().hex}", request)
-    except Exception:
-        logger.warning("write approval: the question failed", exc_info=True)
+        # Not counted against the turn's questions: the card is the gate's,
+        # not the model's, so it spends none of the model's own.
+        answer = await elicit(session, f"write:{uuid.uuid4().hex}", request, counted=False)
+    except Exception as exc:
+        # The type only: a traceback's frames would print the card and the
+        # statement under a host that logs local variables.
+        logger.warning("write approval: the question failed (%s)", type(exc).__name__)
         return "error"
     if answer.status == "answered" and answer.values == ("approve",):
         return None
     if answer.status in ("answered", "cancelled"):
         return "cancelled"
-    if answer.status in ("timeout", "limit", "unavailable"):
+    if answer.status in ("timeout", "unavailable"):
         return answer.status
     return "error"
 
 
-def _log_decision(writes: CellWrites, status) -> None:
+def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:
     decision = WriteApprovalDecision(
         kinds=writes.kinds(), count=len(writes.sql) + len(writes.files), status=status,
     )
@@ -238,21 +245,32 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
-    earlier = tuple(cell.code for cell in getattr(pad, "cells", ()) or ())
+    # The cells compaction folded away come first: the pad's process still
+    # holds what they imported and bound.
+    earlier = (
+        *getattr(pad, "compacted_code", ()),
+        *(cell.code for cell in getattr(pad, "cells", ()) or ()),
+    )
     try:
         writes = await asyncio.to_thread(
             find_cell_writes,
             code=code, earlier_code=earlier, snapshots=gate.snapshots,
         )
-    except Exception:
-        logger.warning("write approval: the check failed", exc_info=True)
+    except Exception as exc:
+        # The type only, as for a failed question.
+        logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         writes = CellWrites(unchecked=True)
     if not writes.needs_approval():
         if writes.overwrites:
-            _log_decision(writes, "not_held")
+            _log_decision(writes=writes, status="not_held")
         return None
-    cause = "unanswered_earlier" if gate.unanswered else await _ask_approval(session, writes)
-    _log_decision(writes, cause or "approved")
+    try:
+        cause = "unanswered_earlier" if gate.unanswered else await _ask_approval(session, writes)
+    except asyncio.CancelledError:
+        # Stop, or the host ending the turn, while the card waited.
+        _log_decision(writes=writes, status="stopped")
+        raise
+    _log_decision(writes=writes, status=cause or "approved")
     if cause is None:
         return None
     if cause == "timeout":

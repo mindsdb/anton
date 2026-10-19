@@ -351,6 +351,14 @@ def test_a_connection_from_an_earlier_cell(snap):
     assert _held("cur.execute('UPDATE t SET a = 1')", snap, earlier=(PG,))
 
 
+@pytest.mark.parametrize("name", ["log", "logger"])
+def test_a_cursor_with_a_logger_name_still_runs_sql(snap, name):
+    """A logger-named root reads as logging, but `execute` on it runs SQL."""
+    code = PG + f"{name} = conn.cursor()\n{name}.execute('UPDATE suppliers SET a = 1 WHERE id = 5')"
+    assert _held(code, snap)
+    assert not _held(PG + f"import logging\n{name} = logging.getLogger()\n{name}.info('UPDATE t SET a = 1')", snap)
+
+
 @pytest.mark.parametrize("code", [
     PG + "cur.execute('SELECT * FROM suppliers')",
     PG + "sql = 'UPDATE suppliers SET a = 1'\nprint(sql)",
@@ -426,6 +434,41 @@ def test_a_concatenation_is_read_once(snap, monkeypatch):
     code = "html = " + " + ".join(f"'<td>{i}</td>'" for i in range(terms)) + "\nprint(html)"
     assert not _held(code, snap)
     assert calls < 2 * terms
+
+
+def test_an_earlier_cell_is_parsed_once_across_checks(snap, monkeypatch):
+    """Every check reads all the earlier cells, but parses each one only the first time."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_EARLIER_CELLS", write_check._EarlierCells(budget=1_000_000))
+    parsed: list[str] = []
+    parse = write_check._parse
+
+    def counting(code: str):
+        parsed.append(code)
+        return parse(code)
+
+    monkeypatch.setattr(write_check, "_parse", counting)
+    earlier = tuple(f"from os import remove as rm{i}" for i in range(50))
+    assert _held("rm0('report.pdf')", snap, earlier=earlier)
+    assert len(parsed) == 51
+    parsed.clear()
+    assert _held("rm7('report.pdf')", snap, earlier=earlier)
+    assert parsed == ["rm7('report.pdf')"], "a later check parses only its own cell"
+
+
+def test_the_earlier_cell_cache_keys_a_cell_by_its_place_and_keeps_to_its_budget():
+    from anton.core.utils.write_check import _EarlierCells
+
+    cache = _EarlierCells(budget=12)
+    first = cache.get(code="a = 1", index=0)
+    assert cache.get(code="a = 1", index=0) is first
+    moved = cache.get(code="a = 1", index=1)
+    assert moved is not first and (first.index, moved.index) == (0, 1)
+    # 15 characters against a budget of 12: the cell read least recently goes.
+    cache.get(code="b = 2", index=2)
+    assert cache.get(code="a = 1", index=0) is not first
+    assert cache.get(code="def (", index=0) is None, "a cell that doesn't parse is skipped"
 
 
 # ── Files ─────────────────────────────────────────────────────────────────

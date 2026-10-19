@@ -1230,6 +1230,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         """
         await self._stop_process()
         self.cells.clear()
+        self.compacted_code = ()
         # Before the discard: under a sandbox policy a refused health check
         # raises here, and the saved namespace must outlive a refusal.
         await self._run_venv_work(self._remove_broken_venv)

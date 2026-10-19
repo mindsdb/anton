@@ -111,6 +111,40 @@ async def test_run_loop_records_scratchpad_execs(tmp_path: Path, monkeypatch):
     ]
 
 
+async def test_run_loop_records_no_cell_that_never_ran(tmp_path: Path, monkeypatch):
+    """A cell the write gate refused is no data-access code that ran."""
+    import anton.core.tools.tool_handlers as tool_handlers
+    from anton.core.tools.registry import ToolOutcome
+
+    refused = ToolOutcome(content="Not run: this step would change data", ok=True, reason="write_not_approved")
+    monkeypatch.setattr(
+        tool_handlers, "handle_scratchpad", AsyncMock(side_effect=[refused, "cell 2 ok: 100 rows"])
+    )
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(
+        _resp([
+            ToolCall(
+                id="1", name="scratchpad",
+                input={"action": "exec", "name": "pad", "code": "cur.execute('DELETE FROM orders')"},
+            ),
+            ToolCall(
+                id="2", name="scratchpad",
+                input={"action": "exec", "name": "pad", "code": "print(df.head())"},
+            ),
+            ToolCall(id="3", name="finish", input={"summary": "done"}),
+        ])
+    )
+    result = await _run_loop(
+        session=session, system="s", kickoff="k",
+        artifact_path=tmp_path, require_files=False,
+        node_label="fetch_data_sample",
+    )
+    assert isinstance(result, dict)
+    assert result["scratchpad_execs"] == [
+        {"name": "pad", "code": "print(df.head())", "output": "cell 2 ok: 100 rows"}
+    ]
+
+
 def _resp_capped(tool_calls, *, output_tokens: int, body: str | None = None):
     """A reply whose output hit the cap — the truncation signal."""
     return LLMResponse(content=body or "", tool_calls=tool_calls,

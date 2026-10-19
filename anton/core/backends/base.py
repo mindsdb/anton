@@ -17,6 +17,10 @@ if TYPE_CHECKING:
     from anton.core.backends.sandbox import CellSandbox
 
 
+# The code of the summary cell `_compact_cells` puts in place of older cells.
+_COMPACTED_CELL_CODE = "# (compacted — see summary above)"
+
+
 @dataclass
 class Cell:
     """A single scratchpad execution unit — code in, outputs out."""
@@ -52,6 +56,11 @@ class ScratchpadRuntime(ABC):
     (local venv, Docker container, etc.). The shared display, compaction,
     and timeout logic lives here so all backends benefit automatically.
     """
+
+    # The code of every cell `_compact_cells` folded into its summary cell, in
+    # the order they ran. The process still holds what those cells imported
+    # and bound, so the write check reads them too (`hold_unapproved_write`).
+    compacted_code: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -289,8 +298,12 @@ class ScratchpadRuntime(ABC):
         summary_text = f"# Compacted {len(to_compact)} earlier cells:\n" + "\n".join(
             summary_lines
         )
+        self.compacted_code = (
+            *self.compacted_code,
+            *(cell.code for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
+        )
         summary_cell = Cell(
-            code="# (compacted — see summary above)",
+            code=_COMPACTED_CELL_CODE,
             stdout=summary_text,
             stderr="",
             error=None,

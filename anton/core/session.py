@@ -105,6 +105,7 @@ from anton.core.tools.tool_defs import (
 from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
+    CELL_NOT_RUN_REASONS,
     WriteGate,
     build_workspace_discovery_context,
     cell_failure_reason,
@@ -768,11 +769,14 @@ class _TurnStep:
 
     `errored` is the call's final verdict: its handler said it failed, or it
     raised. It is kept here because history can't answer that later: a failed
-    call's tool_result carries no error flag.
+    call's tool_result carries no error flag. `not_run` is a scratchpad cell
+    that never ran (`CELL_NOT_RUN_REASONS`), such as a write the user didn't
+    approve: its call succeeded, but it did nothing.
     """
 
     description: str
     errored: bool
+    not_run: bool = False
 
 
 def _step_description(call: ToolCall) -> str:
@@ -875,10 +879,10 @@ def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
     """The hand-back anton writes itself when the content filter stopped every try at it.
 
     Opens with the limit that stopped the turn when one did (`reached`, from
-    `ChatSession._limit_reached`), lists the steps the turn ran and which ones
-    failed, and ends the way `_limit_handback_clause` asks the model to end. It
-    quotes no tool output; each step line is the model's own description of
-    the step, written before it ran.
+    `ChatSession._limit_reached`), lists the steps the turn took, marking the
+    ones that failed or never ran, and ends the way `_limit_handback_clause`
+    asks the model to end. It quotes no tool output; each step line is the
+    model's own description of the step, written before it ran.
     """
     paragraphs: list[str] = []
     if reached:
@@ -893,7 +897,9 @@ def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
         else:
             paragraphs.append(f"{stopped} These are the last things I did before I stopped:")
         paragraphs.append("\n".join(
-            f"- {step.description}" + (" (failed)" if step.errored else "") for step in shown
+            f"- {step.description}"
+            + (" (not run)" if step.not_run else " (failed)" if step.errored else "")
+            for step in shown
         ))
     else:
         paragraphs.append(stopped)
@@ -6426,6 +6432,15 @@ class ChatSession:
                                 result_text = prep.content
                                 tool_ok = prep.ok
                                 tool_reason = prep.reason
+                                # The cell never ran. Its result still closes
+                                # the step the host drew from the call, with
+                                # the reason as its output. Plain text, not a
+                                # cell's JSON, so cowork-server's cell replay
+                                # (extract_scratchpad_cells) never reads it as
+                                # a cell that ran.
+                                yield StreamToolResult(
+                                    name=tc.name, action="exec", content=prep.content, id=tc.id,
+                                )
                             else:
                                 (
                                     pad,
@@ -6766,9 +6781,11 @@ class ChatSession:
                     )
                     # Every executed call passes here once with its final
                     # verdict, so the hand-back report lists each step once.
-                    self._turn_steps.append(
-                        _TurnStep(description=_step_description(tc), errored=tool_ok is False)
-                    )
+                    self._turn_steps.append(_TurnStep(
+                        description=_step_description(tc),
+                        errored=tool_ok is False,
+                        not_run=tool_reason in CELL_NOT_RUN_REASONS,
+                    ))
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text
